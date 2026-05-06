@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, CheckCircle2, Clock3, Plus, RefreshCw, RotateCw, ServerCrash, Trash2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Clock3, Plus, RefreshCw, RotateCw, ServerCrash, Terminal, Trash2 } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { StatCard } from "@/components/stat-card";
 import { apiDelete, apiGet, apiPost } from "@/lib/api";
@@ -42,6 +42,18 @@ type NameServer = {
   ipv6: string | null;
   sortOrder: number;
   active: boolean;
+};
+
+type PanelUpdateStatus = {
+  status: {
+    state: "unknown" | "running" | "succeeded" | "failed";
+    message: string;
+    branch?: string;
+    commit?: string;
+    updatedAt: string | null;
+    logFile?: string;
+  };
+  recentLog: string[];
 };
 
 function formatBytes(value: number) {
@@ -89,6 +101,11 @@ export function DashboardClient() {
   const nameServers = useQuery({
     queryKey: ["nameservers"],
     queryFn: () => apiGet<NameServer[]>("/dns/nameservers")
+  });
+  const panelUpdate = useQuery({
+    queryKey: ["panel-update-status"],
+    queryFn: () => apiGet<PanelUpdateStatus>("/webhooks/panel-update/status"),
+    refetchInterval: (query) => query.state.data?.status.state === "running" ? 5_000 : false
   });
 
   const refreshNameServers = async () => {
@@ -205,6 +222,50 @@ export function DashboardClient() {
           </div>
 
           <div className="space-y-6">
+            <div className="rounded-md border border-panel-line bg-white p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="flex items-center gap-2 text-sm font-semibold">
+                    <Terminal size={16} />
+                    Panel Update
+                  </div>
+                  <div className="mt-1 text-xs text-panel-muted">Git push auto pull, build, migration, and service restart status.</div>
+                </div>
+                <button
+                  className="grid h-9 w-9 place-items-center rounded-md border border-panel-line hover:bg-slate-50"
+                  onClick={() => panelUpdate.refetch()}
+                  type="button"
+                >
+                  <RefreshCw size={15} />
+                </button>
+              </div>
+              <div className="mt-4 rounded-md border border-panel-line p-3 text-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="font-medium capitalize">{panelUpdate.data?.status.state ?? "loading"}</span>
+                  <span
+                    className={[
+                      "rounded-full px-2 py-1 text-xs font-semibold",
+                      panelUpdate.data?.status.state === "running" ? "bg-amber-50 text-amber-700" : "",
+                      panelUpdate.data?.status.state === "succeeded" ? "bg-emerald-50 text-emerald-700" : "",
+                      panelUpdate.data?.status.state === "failed" ? "bg-red-50 text-panel-danger" : "",
+                      !panelUpdate.data || panelUpdate.data.status.state === "unknown" ? "bg-slate-100 text-panel-muted" : ""
+                    ].join(" ")}
+                  >
+                    {panelUpdate.data?.status.updatedAt ? new Date(panelUpdate.data.status.updatedAt).toLocaleTimeString() : "No run yet"}
+                  </span>
+                </div>
+                <div className="mt-2 text-xs text-panel-muted">{panelUpdate.data?.status.message ?? "Checking update status..."}</div>
+                {panelUpdate.data?.status.commit ? <div className="mt-2 font-mono text-xs text-panel-muted">Commit {panelUpdate.data.status.commit}</div> : null}
+              </div>
+              <div className="mt-3 max-h-40 overflow-auto rounded-md bg-slate-950 p-3 font-mono text-xs text-slate-100">
+                {(panelUpdate.data?.recentLog ?? []).slice(-8).map((line, index) => (
+                  <div key={`${index}-${line}`} className="whitespace-pre-wrap break-words">{line}</div>
+                ))}
+                {panelUpdate.data?.recentLog.length === 0 ? <div className="text-slate-400">No update logs yet.</div> : null}
+                {panelUpdate.isError ? <div className="text-red-200">{panelUpdate.error instanceof Error ? panelUpdate.error.message : "Could not load update status"}</div> : null}
+              </div>
+            </div>
+
             <div className="rounded-md border border-panel-line bg-white p-4">
               <div className="text-sm font-semibold">System Resources</div>
               <div className="mt-4 space-y-5">
