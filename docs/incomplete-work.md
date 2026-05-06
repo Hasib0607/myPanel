@@ -1,0 +1,223 @@
+# Incomplete Work Tracker
+
+Last updated: 2026-05-06
+
+This file keeps every known incomplete, deferred, or partially complete task in one place so the next planning pass does not need to hunt through all phase notes.
+
+## Current VPS Deployment Blockers
+
+### VPS Step 10: Domain And SSL Setup
+
+Status: Incomplete
+
+- Point a real panel domain to `129.121.99.82`.
+- Update production `.env`:
+  - `FRONTEND_URL=https://panel.yourdomain.com`
+  - `VPS_IP=129.121.99.82`
+- Update Nginx `server_name` from IP-only access to the real panel domain.
+- Run Certbot for the panel domain.
+- Restart API, worker, frontend, and sysagent services after env/domain change.
+- Confirm HTTPS login works through the final panel domain.
+
+### VPS Step 11: Production Verification
+
+Status: Incomplete
+
+- Verify API health through localhost and public Nginx.
+- Verify sysagent health only through localhost.
+- Verify frontend loads through the panel domain.
+- Verify login/logout with production cookies.
+- Verify CSRF-protected actions from the frontend.
+- Verify dashboard service health.
+- Verify nameserver CRUD on dashboard.
+- Verify GitHub repository list/import using the rotated production token.
+- Verify deploy queue, worker, logs, and dry-run/live status.
+- Verify database migration state on the VPS.
+
+## Cross-Cutting Production Blockers
+
+- Rotate the GitHub token that was pasted into chat history and configure a fresh production token.
+- Apply all pending Prisma migrations on the VPS database.
+- Keep `ALLOW_LIVE_SYSTEM_COMMANDS=false` until sudoers, command policies, and module-by-module live testing are complete.
+- Finalize exact sudoers allowlist for sysagent commands.
+- Validate all sysagent live command paths on Ubuntu 22.04.
+- Configure log rotation for API, workers, frontend, sysagent, Nginx, mail services, and system logs.
+- Confirm backup and restore scripts work against the production PostgreSQL database.
+- Decide whether local PgBouncer is required for development or only production.
+
+## Phase 0: Decisions And Ground Rules
+
+Status: Incomplete
+
+- PgBouncer local policy is unresolved.
+- Dry-run/live operation behavior needs final production policy per module.
+- Production sudoers policy needs exact command review.
+
+## Phase 1: Local Foundation
+
+Status: Incomplete
+
+- Start and verify local PgBouncer, or formally defer PgBouncer to VPS/staging only.
+
+## Phase 3: Core Dashboard
+
+Status: Partially Complete
+
+- Add WebSocket live stats.
+- Replace pending service statuses with real Nginx, BIND9, Postfix, and Dovecot checks after services are installed on VPS.
+
+## Phase 4: Domain Management
+
+Status: Partially Complete
+
+- Add fully live Nginx virtual host generation through sysagent after production command policy is approved.
+- Add domain-level UI/status for generated vhost path, Nginx test result, and reload result.
+
+## Phase 5: DNS Zone Control
+
+Status: Partially Complete
+
+- Run real BIND9 zone writes and `rndc freeze/reload/thaw` on VPS.
+- Validate BIND9 service install, zone path ownership, and named-checkzone output.
+- Add UI status for last DNS apply result.
+- Confirm dashboard nameserver sync with real domains.
+- Add registrar/glue-record guidance UI for custom nameservers.
+
+## Phase 6: SSL Automation
+
+Status: Partially Complete
+
+- Add subdomain SSL support.
+- Wire force-HTTPS Nginx rules into live vhost generation.
+- Verify Certbot issue/renew on production with a real domain.
+- Add renewal cron/systemd timer verification.
+
+## Phase 7: Mail Account Management
+
+Status: Production Mail Deferrals
+
+- Enable live Dovecot mailbox creation.
+- Enable live Postfix virtual map updates.
+- Enable live OpenDKIM key generation and service reloads.
+- Verify SPF, DKIM, DMARC, MX, PTR/rDNS with a real domain.
+- Add production mail service permission and ownership checks.
+
+## Phase 8: Webmail
+
+Status: Production Mail Deferrals
+
+- Add IMAP sync worker using BullMQ.
+- Store full message body content safely.
+- Send mail through Postfix submission.
+- Add Reply, Reply All, Forward, attachments, filters, vacation auto-reply, and bulk actions.
+- Add live Nodemailer/Postfix submission integration.
+- Add message ingestion error handling and retry visibility.
+
+## Phase 9: Firewall And Security
+
+Status: Live-System Deferrals
+
+- Enable live UFW operations only after VPS service account/sudoers validation.
+- Verify SSH hardening controls on the VPS.
+- Add real auth-log parser output on Ubuntu.
+- Verify Fail2Ban install/status/actions.
+- Add production-safe rollback instructions for SSH/firewall changes.
+
+## Phase 10: File Manager
+
+Status: Incomplete Polish
+
+- Add selection and bulk action bar.
+- Add multi-file tabs in the editor.
+- Add explicit discard/reload controls for dirty files.
+- Add line-ending selector.
+- Add rendered Markdown preview.
+- Add inline PDF preview.
+- Add image dimension detection.
+- Add upload progress UI.
+- Add permission preset UI and chmod confirmation.
+- Add overwrite confirmation.
+- Add extract confirmation.
+- Add open containing folder action.
+- Promote path-safety verification script into committed tests.
+- Verify live archive create/extract on Ubuntu with `zip` and `unzip` installed.
+
+## Phase 11: Deployment Engine
+
+Status: Incomplete Live Provider And Production Work
+
+- Add GitHub connection/settings UI for storing or rotating the production token.
+- Verify live GitHub repo listing and branch listing on VPS with the rotated token.
+- Keep GitHub token encrypted at rest and never echo it in logs/UI.
+- Add DB migration panel for deployment database operations.
+- Complete live DB provisioning/rotation/backup UI.
+- Validate live database provisioning through sysagent for PostgreSQL and MySQL.
+- Finalize live process/Nginx execution with sudoers and Ubuntu validation.
+- Add one-click repair actions for common preflight failures.
+- Verify push-to-deploy webhook endpoint with a real GitHub push on VPS.
+- Add deploy-from-commit-SHA flow.
+- Add release retention cleanup for old releases.
+- Verify live deploy for at least one real GitHub project.
+
+## Phase 12: Production VPS Setup
+
+Status: Pending
+
+- Install required packages on Ubuntu 22.04 LTS.
+- Create service users.
+- Configure PostgreSQL, PgBouncer, Redis, Nginx, BIND9, Postfix, Dovecot, SpamAssassin, ClamAV, OpenDKIM, UFW, Fail2Ban, Supervisor, and PM2.
+- Configure sysagent as localhost-only systemd service.
+- Configure API and frontend systemd services.
+- Configure workers as a systemd service.
+- Configure sudoers rules for exact sysagent commands.
+- Configure firewall to expose only required ports.
+- Enable HTTPS for the configured panel domain.
+- Confirm system services survive reboot.
+
+## Phase 13: Hardening
+
+Status: Partially Complete, Still Pending Production Validation
+
+- Enforce secure cookies in production after HTTPS is enabled.
+- Validate CSRF protection behind final domain and HTTPS.
+- Expand audit logs coverage and add audit log UI.
+- Finish destructive confirmation flows across all risky modules.
+- Verify backup and restore with production data.
+- Verify encrypted secret storage for generated DB and mail credentials.
+- Add structured log rotation.
+- Add permission checks around file manager operations.
+- Finalize sysagent command allowlist.
+- Add security headers in Nginx.
+- Add production rate limits for sensitive endpoints.
+
+## Phase 14: Testing
+
+Status: Pending
+
+- Add unit tests for auth, validation, DNS records, path safety, and deployment config.
+- Add integration tests for API, PostgreSQL, and Redis.
+- Add sysagent dry-run tests.
+- Add frontend smoke tests.
+- Add end-to-end tests for login, add domain, edit DNS, create mailbox, and deploy project.
+- Run VPS staging tests with one real domain, one real mailbox, and one real deployment.
+- Load test 2,000 domains, large DNS record lists, and mailbox metadata search.
+- Add migration regression tests for new nameserver/audit/secret tables.
+
+## Phase 15: Release And Operations
+
+Status: Pending
+
+- Create final deployment checklist.
+- Create finalized backup plan.
+- Create disaster recovery notes.
+- Add monitoring for disk usage, mail queue, SSL expiry, failed jobs, Redis health, and PostgreSQL health.
+- Add admin documentation.
+- Tag first release as `v0.1.0`.
+- Start using the panel in dry-run mode.
+- Enable live system actions module by module.
+
+## Recent Local Verification Gaps
+
+- The nameserver migration file exists, but local migration apply failed because the local Prisma/Postgres schema engine errored. Apply on VPS with `npx prisma migrate deploy` once PostgreSQL is running.
+- Frontend production build passes with existing SWC fallback warnings.
+- API lint/test and frontend TypeScript passed after the dashboard nameserver work.

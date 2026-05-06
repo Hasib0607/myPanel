@@ -1,0 +1,448 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_DATABASE_URL")
+}
+
+enum DomainStatus {
+  ACTIVE
+  PENDING
+  SUSPENDED
+}
+
+enum DnsRecordType {
+  A
+  AAAA
+  CNAME
+  MX
+  TXT
+  NS
+  SRV
+  CAA
+}
+
+enum MailFolder {
+  INBOX
+  SENT
+  DRAFTS
+  SPAM
+  TRASH
+}
+
+enum DeploymentFramework {
+  LARAVEL
+  NEXTJS
+  NODEJS
+  PYTHON
+  GO
+  STATIC
+}
+
+enum DeploymentStatus {
+  QUEUED
+  RUNNING
+  STOPPED
+  DEPLOYING
+  BUILDING
+  FAILED
+}
+
+enum DatabaseType {
+  POSTGRESQL
+  MYSQL
+}
+
+enum DeploymentSourceProvider {
+  MANUAL
+  GIT_URL
+  GITHUB
+  FILE_MANAGER
+  UPLOAD
+}
+
+enum DeploymentRuntime {
+  NODE
+  PHP
+  PYTHON
+  GO
+  STATIC
+}
+
+enum DeploymentPackageManager {
+  NPM
+  PNPM
+  YARN
+  COMPOSER
+  PIP
+  UV
+  GO
+  NONE
+}
+
+enum DeploymentProcessManager {
+  PM2
+  SUPERVISOR
+  SYSTEMD
+  STATIC
+  NONE
+}
+
+enum DeploymentHealthStatus {
+  UNKNOWN
+  HEALTHY
+  DEGRADED
+  DOWN
+}
+
+enum DeploymentReleaseStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+  ROLLED_BACK
+}
+
+enum DeploymentStep {
+  QUEUED
+  PREFLIGHT
+  CLONING
+  INSTALLING
+  MIGRATING
+  BUILDING
+  CONFIGURING_PROXY
+  STARTING
+  HEALTH_CHECK
+  SUCCEEDED
+  FAILED
+  ROLLBACK
+}
+
+enum FirewallAction {
+  ALLOW
+  DENY
+  LIMIT
+}
+
+enum FirewallDirection {
+  IN
+  OUT
+}
+
+enum SecretKind {
+  GITHUB_TOKEN
+  DEPLOYMENT_ENV
+  DATABASE_PASSWORD
+  DATABASE_URL
+  MAIL_PASSWORD
+  WEBHOOK_SECRET
+  GENERIC
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  DEPLOY
+  START
+  STOP
+  RESTART
+  ROLLBACK
+  APPLY
+  LOGIN
+  LOGOUT
+}
+
+model Domain {
+  id           String        @id @default(cuid())
+  name         String        @unique
+  status       DomainStatus  @default(PENDING)
+  sslEnabled   Boolean       @default(false) @map("ssl_enabled")
+  sslExpiry    DateTime?     @map("ssl_expiry")
+  forceSsl     Boolean       @default(true) @map("force_ssl")
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @updatedAt @map("updated_at")
+  subdomains   Subdomain[]
+  dnsRecords   DnsRecord[]
+  mailAccounts MailAccount[]
+  deployments  Deployment[]
+
+  @@index([name])
+  @@map("domains")
+}
+
+model Subdomain {
+  id         String  @id @default(cuid())
+  domainId   String  @map("domain_id")
+  name       String
+  target     String
+  sslEnabled Boolean @default(false) @map("ssl_enabled")
+  domain     Domain  @relation(fields: [domainId], references: [id], onDelete: Cascade)
+
+  @@unique([domainId, name])
+  @@map("subdomains")
+}
+
+model DnsRecord {
+  id        String        @id @default(cuid())
+  domainId  String        @map("domain_id")
+  type      DnsRecordType
+  name      String
+  value     String
+  ttl       Int           @default(3600)
+  priority  Int?
+  createdAt DateTime      @default(now()) @map("created_at")
+  updatedAt DateTime      @updatedAt @map("updated_at")
+  domain    Domain        @relation(fields: [domainId], references: [id], onDelete: Cascade)
+
+  @@index([domainId, type])
+  @@map("dns_records")
+}
+
+model NameServer {
+  id        String   @id @default(cuid())
+  hostname  String   @unique
+  ipv4      String?  @map("ipv4")
+  ipv6      String?  @map("ipv6")
+  sortOrder Int      @default(0) @map("sort_order")
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([active, sortOrder])
+  @@map("name_servers")
+}
+
+model MailAccount {
+  id           String      @id @default(cuid())
+  domainId     String      @map("domain_id")
+  username     String
+  passwordHash String      @map("password_hash")
+  quotaMb      Int         @default(1024) @map("quota_mb")
+  enabled      Boolean     @default(true)
+  createdAt    DateTime    @default(now()) @map("created_at")
+  domain       Domain      @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  mails        Mail[]
+  aliases      MailAlias[]
+
+  @@unique([domainId, username])
+  @@map("mail_accounts")
+}
+
+model MailAlias {
+  id        String       @id @default(cuid())
+  accountId String?      @map("account_id")
+  domainId  String       @map("domain_id")
+  source    String
+  target    String
+  account   MailAccount? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+
+  @@index([domainId])
+  @@map("mail_aliases")
+}
+
+model Mail {
+  id          String      @id @default(cuid())
+  accountId   String      @map("account_id")
+  messageId   String      @unique @map("message_id")
+  fromAddress String      @map("from_address")
+  toAddress   String      @map("to_address")
+  subject     String
+  folder      MailFolder  @default(INBOX)
+  isRead      Boolean     @default(false) @map("is_read")
+  isStarred   Boolean     @default(false) @map("is_starred")
+  receivedAt  DateTime    @map("received_at")
+  account     MailAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId, folder])
+  @@index([receivedAt])
+  @@map("mails")
+}
+
+model Deployment {
+  id                    String                    @id @default(cuid())
+  domainId              String?                   @map("domain_id")
+  name                  String
+  slug                  String                    @unique
+  framework             DeploymentFramework
+  runtime               DeploymentRuntime?
+  sourceProvider        DeploymentSourceProvider  @default(MANUAL) @map("source_provider")
+  repoUrl               String?                   @map("repo_url")
+  gitUrl                String?                   @map("git_url")
+  githubOwner           String?                   @map("github_owner")
+  githubRepo            String?                   @map("github_repo")
+  githubRepoId          String?                   @map("github_repo_id")
+  githubVisibility      String?                   @map("github_visibility")
+  branch                String                    @default("main")
+  commitSha             String?                   @map("commit_sha")
+  rootDirectory         String                    @default(".") @map("root_directory")
+  rootPath              String                    @map("root_path")
+  packageManager        DeploymentPackageManager? @map("package_manager")
+  installCommand        String?                   @map("install_command")
+  buildCommand          String?                   @map("build_command")
+  startCommand          String?                   @map("start_command")
+  outputDirectory       String?                   @map("output_directory")
+  publicDirectory       String?                   @map("public_directory")
+  runtimeVersion        String?                   @map("runtime_version")
+  processManager        DeploymentProcessManager? @map("process_manager")
+  status                DeploymentStatus          @default(STOPPED)
+  healthStatus          DeploymentHealthStatus    @default(UNKNOWN) @map("health_status")
+  healthUrl             String?                   @map("health_url")
+  lastHealthCheckAt     DateTime?                 @map("last_health_check_at")
+  lastDeployAt          DateTime?                 @map("last_deploy_at")
+  port                  Int
+  envVars               Json                      @default("{}") @map("env_vars")
+  dbType                DatabaseType?             @map("db_type")
+  dbName                String?                   @map("db_name")
+  dbUser                String?                   @map("db_user")
+  dbPasswordSecretRef   String?                   @map("db_password_secret_ref")
+  dbConnectionSecretRef String?                   @map("db_connection_secret_ref")
+  persistentPaths       Json                      @default("[]") @map("persistent_paths")
+  autoDeployEnabled     Boolean                   @default(false) @map("auto_deploy_enabled")
+  webhookSecretHash     String?                   @map("webhook_secret_hash")
+  createdAt             DateTime                  @default(now()) @map("created_at")
+  updatedAt             DateTime                  @updatedAt @map("updated_at")
+  domain                Domain?                   @relation(fields: [domainId], references: [id], onDelete: SetNull)
+  env                   DeploymentEnvVar[]
+  releases              DeploymentRelease[]
+  logs                  DeploymentLog[]
+
+  @@index([domainId])
+  @@index([status])
+  @@index([sourceProvider])
+  @@index([githubOwner, githubRepo])
+  @@map("deployments")
+}
+
+model DeploymentEnvVar {
+  id           String     @id @default(cuid())
+  deploymentId String     @map("deployment_id")
+  key          String
+  value        String?
+  secretRef    String?    @map("secret_ref")
+  isSecret     Boolean    @default(false) @map("is_secret")
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+  deployment   Deployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+
+  @@unique([deploymentId, key])
+  @@index([key])
+  @@map("deployment_env_vars")
+}
+
+model DeploymentRelease {
+  id              String                  @id @default(cuid())
+  deploymentId    String                  @map("deployment_id")
+  status          DeploymentReleaseStatus @default(QUEUED)
+  commitSha       String?                 @map("commit_sha")
+  commitMessage   String?                 @map("commit_message")
+  commitAuthor    String?                 @map("commit_author")
+  sourcePath      String?                 @map("source_path")
+  artifactPath    String?                 @map("artifact_path")
+  envSnapshot     Json                    @default("{}") @map("env_snapshot")
+  processConfig   Json                    @default("{}") @map("process_config")
+  nginxConfigPath String?                 @map("nginx_config_path")
+  startedAt       DateTime?               @map("started_at")
+  finishedAt      DateTime?               @map("finished_at")
+  durationMs      Int?                    @map("duration_ms")
+  createdAt       DateTime                @default(now()) @map("created_at")
+  deployment      Deployment              @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+  logs            DeploymentLog[]
+
+  @@index([deploymentId, createdAt])
+  @@index([status])
+  @@map("deployment_releases")
+}
+
+model DeploymentLog {
+  id           String             @id @default(cuid())
+  deploymentId String             @map("deployment_id")
+  releaseId    String?            @map("release_id")
+  step         DeploymentStep
+  level        String             @default("info")
+  message      String
+  stdout       String?
+  stderr       String?
+  metadata     Json               @default("{}")
+  createdAt    DateTime           @default(now()) @map("created_at")
+  deployment   Deployment         @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+  release      DeploymentRelease? @relation(fields: [releaseId], references: [id], onDelete: SetNull)
+
+  @@index([deploymentId, createdAt])
+  @@index([releaseId, step])
+  @@map("deployment_logs")
+}
+
+model GitHubConnection {
+  id             String    @id @default("superadmin")
+  username       String?
+  tokenSecretRef String?   @map("token_secret_ref")
+  installationId String?   @map("installation_id")
+  scopes         String[]  @default([])
+  connectedAt    DateTime? @map("connected_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  @@map("github_connections")
+}
+
+model Secret {
+  id             String     @id @default(cuid())
+  ref            String     @unique
+  kind           SecretKind @default(GENERIC)
+  label          String?
+  encryptedValue String     @map("encrypted_value")
+  metadata       Json       @default("{}")
+  createdAt      DateTime   @default(now()) @map("created_at")
+  updatedAt      DateTime   @updatedAt @map("updated_at")
+
+  @@index([kind])
+  @@map("secrets")
+}
+
+model AuditLog {
+  id          String      @id @default(cuid())
+  actor       String      @default("superadmin")
+  action      AuditAction
+  resource    String
+  resourceId  String?     @map("resource_id")
+  description String?
+  metadata    Json        @default("{}")
+  ipAddress   String?     @map("ip_address")
+  userAgent   String?     @map("user_agent")
+  createdAt   DateTime    @default(now()) @map("created_at")
+
+  @@index([resource, createdAt])
+  @@index([action, createdAt])
+  @@map("audit_logs")
+}
+
+model FirewallRule {
+  id        String            @id @default(cuid())
+  port      Int
+  protocol  String            @default("tcp")
+  direction FirewallDirection @default(IN)
+  action    FirewallAction
+  sourceIp  String?           @map("source_ip")
+  note      String?
+  createdAt DateTime          @default(now()) @map("created_at")
+
+  @@index([port, protocol])
+  @@map("firewall_rules")
+}
+
+model SuperadminSecurity {
+  id                  String    @id @default("superadmin")
+  totpEnabled         Boolean   @default(false) @map("totp_enabled")
+  totpSecretEncrypted String?   @map("totp_secret_encrypted")
+  recoveryCodesHash   String[]  @default([]) @map("recovery_codes_hash")
+  lastTotpAt          DateTime? @map("last_totp_at")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  @@map("superadmin_security")
+}

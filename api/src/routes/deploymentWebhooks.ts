@@ -1,0 +1,180 @@
+import crypto from "node:crypto";
+import { Prisma } from "@prisma/client";
+import type { FastifyPluginAsync } from "fastify";
+import { z } from "zod";
+import { deployQueue } from "../jobs/queues.js";
+import { audit } from "../lib/audit.js";
+import { prisma } from "../lib/prisma.js";
+import { getSecret } from "../lib/secrets.js";
+
+type ParsedJsonWithRaw = {
+  payload: unknown;
+  rawBody: Buffer;
+};
+
+function webhookSecretRef(deploymentSlug: string) {
+  return `deployment:${deploymentSlug}:webhook`;
+}
+
+function timingSafeEqualText(left: string, right: string) {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function githubSignature(secret: string, rawBody: Buffer) {
+  return `sha256=${crypto.createHmac("sha256", secret).update(rawBody).digest("hex")}`;
+}
+
+function sha256(value: string) {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+async function addWebhookLog(deploymentId: string, message: string, metadata: Prisma.InputJsonObject = {}) {
+  return prisma.deploymentLog.create({
+    data: {
+      deploymentId,
+      step: "QUEUED",
+      message,
+      metadata
+    }
+  });
+}
+
+async function enqueueDeploy(deploymentId: string, releaseId: string) {
+  try {
+    const job = await Promise.race([
+      deployQueue.add("deploy", { deploymentId, releaseId, trigger: "github_push" }),
+      new Promise<never>((_resolve, reject) => {
+        setTimeout(() => reject(new Error("Deploy queue timed out")), 2000);
+      })
+    ]);
+    return { queued: true, jobId: job.id };
+  } catch (error) {
+    await addWebhookLog(deploymentId, "GitHub push received but deploy queue is unavailable", {
+      dryRun: true,
+      error: error instanceof Error ? error.message : "queue unavailable"
+    });
+    return { queued: false, dryRun: true, reason: "Deploy queue unavailable" };
+  }
+}
+
+const githubPushSchema = z.object({
+  ref: z.string(),
+  after: z.string().nullable().optional(),
+  repository: z.object({
+    full_name: z.string(),
+    name: z.string(),
+    owner: z.object({
+      name: z.string().optional(),
+      login: z.string().optional()
+    }).passthrough()
+  }).passthrough(),
+  head_commit: z.object({
+    id: z.string().optional(),
+    message: z.string().optional(),
+    author: z.object({ name: z.string().optional() }).optional()
+  }).nullable().optional()
+}).passthrough();
+
+export const deploymentWebhookRoutes: FastifyPluginAsync = async (app) => {
+  app.removeContentTypeParser("application/json");
+  app.addContentTypeParser("application/json", { parseAs: "buffer" }, (_request, body, done) => {
+    try {
+      const rawBody = Buffer.isBuffer(body) ? body : Buffer.from(body);
+      const payload = rawBody.length > 0 ? JSON.parse(rawBody.toString("utf8")) : {};
+      done(null, { payload, rawBody } satisfies ParsedJsonWithRaw);
+    } catch (error) {
+      done(error as Error);
+    }
+  });
+
+  app.post("/github", async (request, reply) => {
+    const event = request.headers["x-github-event"];
+    if (event !== "push") {
+      return { accepted: false, ignored: true, reason: "Only GitHub push events trigger deploys" };
+    }
+
+    const signature = request.headers["x-hub-signature-256"];
+    if (typeof signature !== "string") {
+      return reply.code(401).send({ error: "Missing GitHub signature" });
+    }
+
+    const body = request.body as ParsedJsonWithRaw;
+    const payload = githubPushSchema.parse(body.payload);
+    const [owner, repo] = payload.repository.full_name.split("/");
+    const branch = payload.ref.replace(/^refs\/heads\//, "");
+
+    const deployments = await prisma.deployment.findMany({
+      where: {
+        autoDeployEnabled: true,
+        sourceProvider: "GITHUB",
+        githubOwner: { equals: owner, mode: "insensitive" },
+        githubRepo: { equals: repo, mode: "insensitive" },
+        branch
+      }
+    });
+
+    const results = [];
+    for (const deployment of deployments) {
+      const secret = await getSecret(webhookSecretRef(deployment.slug));
+      if (!secret || !deployment.webhookSecretHash) {
+        results.push({ deployment: deployment.slug, queued: false, ignored: true, reason: "Webhook secret is not configured" });
+        continue;
+      }
+      if (!timingSafeEqualText(sha256(secret), deployment.webhookSecretHash)) {
+        await addWebhookLog(deployment.id, "Rejected GitHub push webhook because stored secret hash does not match metadata", { branch, repo: payload.repository.full_name });
+        results.push({ deployment: deployment.slug, queued: false, rejected: true, reason: "Webhook secret metadata mismatch" });
+        continue;
+      }
+
+      const expectedSignature = githubSignature(secret, body.rawBody);
+      if (!timingSafeEqualText(signature, expectedSignature)) {
+        await addWebhookLog(deployment.id, "Rejected GitHub push webhook with invalid signature", { branch, repo: payload.repository.full_name });
+        results.push({ deployment: deployment.slug, queued: false, rejected: true, reason: "Invalid signature" });
+        continue;
+      }
+
+      const release = await prisma.deploymentRelease.create({
+        data: {
+          deploymentId: deployment.id,
+          status: "QUEUED",
+          commitSha: payload.after ?? payload.head_commit?.id ?? deployment.commitSha,
+          commitMessage: payload.head_commit?.message ?? null,
+          commitAuthor: payload.head_commit?.author?.name ?? "GitHub",
+          sourcePath: deployment.rootPath,
+          envSnapshot: deployment.envVars === null ? {} : deployment.envVars as Prisma.InputJsonValue,
+          processConfig: { port: deployment.port, processManager: deployment.processManager, startCommand: deployment.startCommand }
+        }
+      });
+      await prisma.deployment.update({
+        where: { id: deployment.id },
+        data: {
+          status: "QUEUED",
+          commitSha: payload.after ?? deployment.commitSha
+        }
+      });
+      await addWebhookLog(deployment.id, `GitHub push queued auto deploy for ${payload.repository.full_name}@${branch}`, {
+        releaseId: release.id,
+        commitSha: payload.after ?? null
+      });
+      const queue = await enqueueDeploy(deployment.id, release.id);
+      await audit(request, {
+        action: "DEPLOY",
+        resource: "deployment",
+        resourceId: deployment.id,
+        description: `GitHub push auto deploy queued for ${deployment.slug}`,
+        metadata: { releaseId: release.id, repository: payload.repository.full_name, branch }
+      });
+      results.push({ deployment: deployment.slug, releaseId: release.id, queue });
+    }
+
+    return reply.code(202).send({
+      accepted: true,
+      repository: payload.repository.full_name,
+      branch,
+      matched: deployments.length,
+      results
+    });
+  });
+};

@@ -1,0 +1,61 @@
+# Dependencies
+node_modules/
+api/node_modules/
+frontend/node_modules/
+
+# Build output
+dist/
+api/dist/
+frontend/.next/
+frontend/out/
+.next/
+out/
+*.tsbuildinfo
+
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+.local-superadmin-credentials.txt
+.local-db-secrets.json
+
+# Local runtime data
+.local-www/
+.tmp/
+uploads/
+logs/
+*.log
+dump.rdb
+
+# Python
+.venv/
+sysagent/.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Prisma / database artifacts
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Backups and generated archives
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.bak
+.docx_extract/
+
+# OS and editor files
+.DS_Store
+._*
+.vscode/
+.idea/
+
+# Coverage and test output
+coverage/
+.nyc_output/
+playwright-report/
+test-results/

@@ -1,0 +1,16 @@
+{
+  "name": "vps-panel",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "api",
+    "frontend"
+  ],
+  "scripts": {
+    "dev:api": "npm --workspace api run dev",
+    "dev:frontend": "npm --workspace frontend run dev",
+    "build:api": "npm --workspace api run build",
+    "build:frontend": "npm --workspace frontend run build",
+    "lint": "npm --workspace api run lint && npm --workspace frontend run lint"
+  }
+}

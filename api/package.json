@@ -1,0 +1,47 @@
+{
+  "name": "@vps-panel/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "dev:workers": "tsx watch src/workers.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "start:workers": "node dist/workers.js",
+    "lint": "tsc --noEmit",
+    "test": "npm run build && NODE_ENV=test node --test dist/lib/*.test.js",
+    "verify:phase11": "tsx src/scripts/verifyPhase11.ts",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:seed": "tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/cors": "^11.2.0",
+    "@fastify/jwt": "^10.0.0",
+    "@fastify/rate-limit": "^10.3.0",
+    "@fastify/sensible": "^6.0.4",
+    "@prisma/client": "^5.22.0",
+    "bcrypt": "^6.0.0",
+    "bullmq": "^5.21.2",
+    "fastify": "^5.8.5",
+    "ioredis": "^5.4.1",
+    "otplib": "^13.4.0",
+    "qrcode": "^1.5.4",
+    "dotenv": "^16.4.7",
+    "winston": "^3.17.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^5.0.2",
+    "@types/node": "^20.17.6",
+    "@types/qrcode": "^1.5.5",
+    "prisma": "^5.22.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  }
+}
