@@ -33,6 +33,7 @@ Status: Incomplete
 - Verify GitHub repository list/import using the rotated production token.
 - Verify deploy queue, worker, logs, and dry-run/live status.
 - Verify database migration state on the VPS.
+- Verify panel self-update webhook pulls/builds/restarts after a GitHub push.
 
 ## Cross-Cutting Production Blockers
 
@@ -155,6 +156,7 @@ Status: Incomplete Live Provider And Production Work
 - Finalize live process/Nginx execution with sudoers and Ubuntu validation.
 - Add one-click repair actions for common preflight failures.
 - Verify push-to-deploy webhook endpoint with a real GitHub push on VPS.
+- Verify panel self-update webhook with the real panel repository on VPS.
 - Add deploy-from-commit-SHA flow.
 - Add release retention cleanup for old releases.
 - Verify live deploy for at least one real GitHub project.

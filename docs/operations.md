@@ -21,3 +21,72 @@ DATABASE_URL="$DATABASE_URL" ./scripts/backup/restore-panel-db.sh /var/backups/v
 ## Live System Actions
 
 Keep `ALLOW_LIVE_SYSTEM_COMMANDS=false` until sudoers rules and sysagent command policies are reviewed on a disposable VPS. Enable live actions module by module: Nginx, DNS, mail, database, deployments.
+
+## Panel Self-Update Webhook
+
+Use this only for the panel repository itself. Project deployments use the per-project GitHub webhook in Deployment Settings.
+
+1. Generate a strong webhook secret on the VPS:
+
+```bash
+openssl rand -hex 32
+```
+
+2. Add these values to `/opt/vps-panel/.env`:
+
+```bash
+PANEL_UPDATE_WEBHOOK_SECRET=replace_with_generated_secret
+PANEL_UPDATE_REPO_FULL_NAME=your-github-owner/your-panel-repo
+PANEL_UPDATE_BRANCH=main
+PANEL_UPDATE_WORKDIR=/opt/vps-panel
+PANEL_UPDATE_SCRIPT=/opt/vps-panel/scripts/deploy/update-panel.sh
+```
+
+3. Allow the `panel` user to restart only the panel services:
+
+```bash
+sudo visudo -f /etc/sudoers.d/vps-panel-update
+```
+
+Add:
+
+```sudoers
+panel ALL=(root) NOPASSWD: /bin/systemctl restart vps-panel-api, /bin/systemctl restart vps-panel-workers, /bin/systemctl restart vps-panel-frontend
+```
+
+If `systemctl` is located somewhere else, use `which systemctl` and update the path.
+
+4. Restart the API once after changing `.env`:
+
+```bash
+sudo systemctl restart vps-panel-api
+```
+
+5. Add a GitHub webhook to the panel repository:
+
+- Payload URL: `http://129.121.99.82:2083/api/v1/webhooks/panel-update`
+- Content type: `application/json`
+- Secret: the value from `PANEL_UPDATE_WEBHOOK_SECRET`
+- Event: `push`
+
+When the configured branch receives a push, the VPS runs `scripts/deploy/update-panel.sh`. The script refuses to update if the server worktree has local changes and uses `git pull --ff-only` to avoid rewriting history.
+
+Update logs:
+
+```bash
+tail -f /var/log/vps-panel/self-update.log
+```
+
+Update status from an authenticated panel browser/API session:
+
+```text
+GET /api/v1/webhooks/panel-update/status
+```
+
+The update script writes `/var/log/vps-panel/self-update-status.json` with one of:
+
+- `running`
+- `succeeded`
+- `failed`
+
+The script also verifies each restarted service with `systemctl is-active` and checks `http://127.0.0.1:4000/health` when `curl` is installed.
