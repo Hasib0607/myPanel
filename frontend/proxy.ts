@@ -11,9 +11,9 @@ const protectedRoutes = [
   "/security"
 ];
 
-const loginPort = process.env.PANEL_LOGIN_PORT ?? process.env.NEXT_PUBLIC_PANEL_LOGIN_PORT ?? "";
-
 function requestPort(request: NextRequest) {
+  const forwardedPort = request.headers.get("x-forwarded-port");
+  if (forwardedPort) return forwardedPort;
   if (request.nextUrl.port) return request.nextUrl.port;
   const host = request.headers.get("host") ?? "";
   const match = host.match(/:(\d+)$/);
@@ -22,6 +22,7 @@ function requestPort(request: NextRequest) {
 }
 
 function loginPortAllowed(request: NextRequest) {
+  const loginPort = request.headers.get("x-panel-login-port") ?? process.env.PANEL_LOGIN_PORT ?? process.env.NEXT_PUBLIC_PANEL_LOGIN_PORT ?? "";
   return !loginPort || requestPort(request) === loginPort;
 }
 
