@@ -30,7 +30,7 @@ export function proxy(request: NextRequest) {
   const isProtected = protectedRoutes.some((route) => pathname === route || pathname.startsWith(`${route}/`));
   const hasSession = request.cookies.has("panel_session");
 
-  if ((pathname === "/login" || (isProtected && !hasSession)) && !loginPortAllowed(request)) {
+  if ((pathname === "/login" || isProtected) && !loginPortAllowed(request)) {
     return new NextResponse("Not found", { status: 404 });
   }
 
