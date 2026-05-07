@@ -18,12 +18,14 @@ const envSchema = z.object({
   PANEL_UPDATE_STATUS_FILE: z.string().default("/var/log/vps-panel/self-update-status.json"),
   PANEL_UPDATE_LOG_FILE: z.string().default("/var/log/vps-panel/self-update.log"),
   PANEL_UPDATE_PID_FILE: z.string().default("/tmp/vps-panel-self-update.pid"),
+  PANEL_UPDATE_API_SERVICE: z.string().default("vps-panel-api"),
   PANEL_UPDATE_STALE_AFTER_SECONDS: z.coerce.number().default(1200),
   FRONTEND_URL: z.string().url().default("http://localhost:3000"),
   DATABASE_URL: z.string().min(1),
   REDIS_URL: z.string().min(1).default("redis://localhost:6379"),
   SYSAGENT_URL: z.string().url().default("http://127.0.0.1:5000"),
   VPS_IP: z.string().default("127.0.0.1"),
+  REQUIRE_DOMAIN_NAMESERVER_MATCH: z.coerce.boolean().default(true),
   FILE_MANAGER_ROOT: z.string().default("/var/www")
 });
 

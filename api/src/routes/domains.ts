@@ -1,3 +1,4 @@
+import dns from "node:dns/promises";
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
@@ -47,6 +48,38 @@ type ActiveNameServer = {
   ipv4: string | null;
   ipv6: string | null;
 };
+
+function normalizeNameServer(value: string) {
+  return value.trim().toLowerCase().replace(/\.$/, "");
+}
+
+function nameserverMismatchMessage(domain: string, expected: string[], actual: string[]) {
+  const expectedText = expected.length > 0 ? expected.join(", ") : "no active nameservers configured";
+  const actualText = actual.length > 0 ? actual.join(", ") : "no public nameservers found";
+  return `Before adding ${domain}, change its nameservers to this hosting nameserver: ${expectedText}. Current nameservers: ${actualText}.`;
+}
+
+async function assertDomainUsesHostingNameServers(domain: string, nameServers: ActiveNameServer[]) {
+  if (!env.REQUIRE_DOMAIN_NAMESERVER_MATCH) return;
+
+  const expected = nameServers.map((nameServer) => normalizeNameServer(nameServer.hostname)).filter(Boolean);
+  if (expected.length === 0) {
+    throw Object.assign(new Error("Add at least one active hosting nameserver before adding domains."), { statusCode: 400 });
+  }
+
+  let actual: string[];
+  try {
+    actual = (await dns.resolveNs(domain)).map((nameServer) => normalizeNameServer(nameServer)).sort();
+  } catch {
+    throw Object.assign(new Error(nameserverMismatchMessage(domain, expected, [])), { statusCode: 400 });
+  }
+
+  const actualSet = new Set(actual);
+  const allExpectedPresent = expected.every((nameServer) => actualSet.has(nameServer));
+  if (!allExpectedPresent) {
+    throw Object.assign(new Error(nameserverMismatchMessage(domain, expected, actual)), { statusCode: 400 });
+  }
+}
 
 export function defaultRecords(domainId: string, domain: string, nameServers: ActiveNameServer[] = []) {
   const records: Prisma.DnsRecordCreateManyInput[] = [
@@ -132,13 +165,15 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
     const body = parseCreateDomain(request.body);
     let domain;
     try {
+      const nameServers = await prisma.nameServer.findMany({
+        where: { active: true },
+        orderBy: [{ sortOrder: "asc" }, { hostname: "asc" }],
+        select: { hostname: true, ipv4: true, ipv6: true }
+      });
+      await assertDomainUsesHostingNameServers(body.name, nameServers);
+
       domain = await prisma.$transaction(async (tx) => {
         const created = await tx.domain.create({ data: { name: body.name, forceSsl: body.forceSsl } });
-        const nameServers = await tx.nameServer.findMany({
-          where: { active: true },
-          orderBy: [{ sortOrder: "asc" }, { hostname: "asc" }],
-          select: { hostname: true, ipv4: true, ipv6: true }
-        });
         await tx.dnsRecord.createMany({ data: defaultRecords(created.id, created.name, nameServers), skipDuplicates: true });
         return tx.domain.findUniqueOrThrow({ where: { id: created.id }, include: domainInclude() });
       });
