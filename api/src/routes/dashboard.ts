@@ -5,6 +5,37 @@ import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
 import { sysagent } from "../lib/sysagent.js";
 
+const manageableServices: Record<string, { key: "nginx" | "bind9" | "postfix" | "dovecot"; fallbackPackages: string[] }> = {
+  Nginx: { key: "nginx", fallbackPackages: ["nginx"] },
+  BIND9: { key: "bind9", fallbackPackages: ["bind9", "bind9utils", "bind9-doc"] },
+  Postfix: { key: "postfix", fallbackPackages: ["postfix"] },
+  Dovecot: { key: "dovecot", fallbackPackages: ["dovecot-core", "dovecot-imapd", "dovecot-lmtpd"] }
+};
+
+type DashboardService = {
+  key?: string;
+  name: string;
+  port: number;
+  status: "healthy" | "down" | "pending";
+  detail: string;
+  installed?: boolean;
+  manageable?: boolean;
+  availableActions?: string[];
+};
+
+function normalizeService(service: DashboardService): DashboardService {
+  const manageable = manageableServices[service.name];
+  if (!manageable) return service;
+  const installed = service.installed ?? !/not active|not found|unavailable|inactive/i.test(service.detail);
+  return {
+    ...service,
+    key: service.key ?? manageable.key,
+    installed,
+    manageable: service.manageable ?? true,
+    availableActions: service.availableActions ?? (installed ? ["start", "stop", "restart", "enable", "disable"] : ["install"])
+  };
+}
+
 export const dashboardRoutes: FastifyPluginAsync = async (app) => {
   app.get("/", { preHandler: app.requireAuth }, async () => {
     const [domains, activeDomains, suspendedDomains, dnsRecords, nameServers, mailboxes, deployments, deploymentStatus, firewallRules] = await Promise.all([
@@ -21,14 +52,14 @@ export const dashboardRoutes: FastifyPluginAsync = async (app) => {
 
     let systemStats = null;
     let sysagentHealthy = false;
-    let productionServices: Array<{ name: string; port: number; status: "healthy" | "down" | "pending"; detail: string }> = [];
+    let productionServices: DashboardService[] = [];
     try {
       const [stats, serviceStatus] = await Promise.all([
         sysagent.stats(),
         sysagent.services().catch(() => ({ items: [] }))
       ]);
       systemStats = stats;
-      productionServices = serviceStatus.items;
+      productionServices = serviceStatus.items.map(normalizeService);
       sysagentHealthy = true;
     } catch {
       systemStats = { unavailable: true };
@@ -53,10 +84,10 @@ export const dashboardRoutes: FastifyPluginAsync = async (app) => {
     services.push(
       { name: "System Agent", port: 5000, status: sysagentHealthy ? "healthy" : "down", detail: sysagentHealthy ? "localhost API reachable" : "sysagent unavailable" },
       ...(productionServices.length > 0 ? productionServices : [
-        { name: "Nginx", port: 80, status: "down" as const, detail: "sysagent service check unavailable" },
-        { name: "BIND9", port: 53, status: "down" as const, detail: "sysagent service check unavailable" },
-        { name: "Postfix", port: 25, status: "down" as const, detail: "sysagent service check unavailable" },
-        { name: "Dovecot", port: 993, status: "down" as const, detail: "sysagent service check unavailable" }
+        normalizeService({ name: "Nginx", port: 80, status: "down" as const, detail: "sysagent service check unavailable", installed: false }),
+        normalizeService({ name: "BIND9", port: 53, status: "down" as const, detail: "sysagent service check unavailable", installed: false }),
+        normalizeService({ name: "Postfix", port: 25, status: "down" as const, detail: "sysagent service check unavailable", installed: false }),
+        normalizeService({ name: "Dovecot", port: 993, status: "down" as const, detail: "sysagent service check unavailable", installed: false })
       ])
     );
 
