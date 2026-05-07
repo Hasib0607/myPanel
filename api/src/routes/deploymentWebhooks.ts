@@ -121,6 +121,17 @@ function spawnPanelUpdate() {
     }
   });
   child.unref();
+  return child.pid;
+}
+
+async function writePanelUpdateStatus(status: PanelUpdateStatus) {
+  await fsPromises.mkdir(path.dirname(env.PANEL_UPDATE_STATUS_FILE), { recursive: true });
+  await fsPromises.writeFile(env.PANEL_UPDATE_STATUS_FILE, `${JSON.stringify({
+    branch: env.PANEL_UPDATE_BRANCH,
+    logFile: env.PANEL_UPDATE_LOG_FILE,
+    updatedAt: new Date().toISOString(),
+    ...status
+  })}\n`);
 }
 
 function gitCommitSubject(commit: string | undefined) {
@@ -250,6 +261,14 @@ export const deploymentWebhookRoutes: FastifyPluginAsync = async (app) => {
     if (!status.commitSubject && typeof status.commit === "string") {
       status.commitSubject = await gitCommitSubject(status.commit);
     }
+    if ((status.state === "running" || status.state === "queued") && status.updatedAt) {
+      const ageMs = Date.now() - new Date(status.updatedAt).getTime();
+      if (Number.isFinite(ageMs) && ageMs > 20 * 60 * 1000) {
+        status.state = "failed";
+        status.message = `panel update looks stale after ${Math.round(ageMs / 60000)} minutes; check ${logFile}`;
+        status.stale = true;
+      }
+    }
     const recentLog = await fsPromises.readFile(logFile, "utf8")
       .then((content) => content.split(/\r?\n/).filter(Boolean).slice(-80))
       .catch(() => []);
@@ -292,9 +311,33 @@ export const deploymentWebhookRoutes: FastifyPluginAsync = async (app) => {
     }
 
     try {
-      spawnPanelUpdate();
+      await writePanelUpdateStatus({
+        state: "queued",
+        message: "GitHub push received; starting panel update",
+        branch,
+        commit: payload.after?.slice(0, 7) ?? payload.head_commit?.id?.slice(0, 7) ?? "",
+        commitSubject: payload.head_commit?.message?.split(/\r?\n/)[0] ?? ""
+      });
+      const pid = spawnPanelUpdate();
+      if (pid) {
+        await writePanelUpdateStatus({
+          state: "running",
+          message: `panel update process started with pid ${pid}`,
+          branch,
+          commit: payload.after?.slice(0, 7) ?? payload.head_commit?.id?.slice(0, 7) ?? "",
+          commitSubject: payload.head_commit?.message?.split(/\r?\n/)[0] ?? "",
+          pid
+        });
+      }
     } catch (error) {
       request.log.error({ error }, "could not start panel update script");
+      await writePanelUpdateStatus({
+        state: "failed",
+        message: error instanceof Error ? error.message : "Could not start panel update",
+        branch,
+        commit: payload.after?.slice(0, 7) ?? payload.head_commit?.id?.slice(0, 7) ?? "",
+        commitSubject: payload.head_commit?.message?.split(/\r?\n/)[0] ?? ""
+      }).catch(() => undefined);
       return reply.code(500).send({ error: error instanceof Error ? error.message : "Could not start panel update" });
     }
 

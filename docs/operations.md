@@ -55,7 +55,7 @@ sudo visudo -f /etc/sudoers.d/vps-panel-update
 Add:
 
 ```sudoers
-panel ALL=(root) NOPASSWD: /bin/systemctl restart --no-block vps-panel-api, /bin/systemctl restart --no-block vps-panel-workers, /bin/systemctl restart --no-block vps-panel-frontend, /bin/systemctl is-active vps-panel-api, /bin/systemctl is-active vps-panel-workers, /bin/systemctl is-active vps-panel-frontend
+panel ALL=(root) NOPASSWD: /bin/systemctl --no-block restart vps-panel-api, /bin/systemctl --no-block restart vps-panel-workers, /bin/systemctl --no-block restart vps-panel-frontend, /bin/systemctl is-active vps-panel-api, /bin/systemctl is-active vps-panel-workers, /bin/systemctl is-active vps-panel-frontend, /bin/systemctl status vps-panel-api, /bin/systemctl status vps-panel-workers, /bin/systemctl status vps-panel-frontend
 ```
 
 If `systemctl` is located somewhere else, use `which systemctl` and update the path.
@@ -93,7 +93,7 @@ The update script writes `/var/log/vps-panel/self-update-status.json` with one o
 - `succeeded`
 - `failed`
 
-The script restarts services with `systemctl restart --no-block`, verifies each service with `systemctl is-active`, and checks `http://127.0.0.1:4000/health` when `curl` is installed. The API service restarts last so the status endpoint stays reachable for as long as possible.
+The script restarts services with `systemctl --no-block restart`, verifies each service with `systemctl is-active`, and checks `http://127.0.0.1:4000/health` when `curl` is installed. The API service restarts last so the status endpoint stays reachable for as long as possible.
 
 If you want the VPS to discard local tracked edits and always follow GitHub, set:
 

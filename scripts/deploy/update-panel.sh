@@ -6,6 +6,7 @@ BRANCH="${PANEL_UPDATE_BRANCH:-main}"
 LOG_FILE="${PANEL_UPDATE_LOG_FILE:-/var/log/vps-panel/self-update.log}"
 STATUS_FILE="${PANEL_UPDATE_STATUS_FILE:-/var/log/vps-panel/self-update-status.json}"
 LOCK_FILE="${PANEL_UPDATE_LOCK_FILE:-/tmp/vps-panel-self-update.lock}"
+PID_FILE="${PANEL_UPDATE_PID_FILE:-/tmp/vps-panel-self-update.pid}"
 NPM_BIN="${NPM_BIN:-npm}"
 SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
 SUDO_BIN="${SUDO_BIN:-sudo}"
@@ -61,10 +62,12 @@ on_error() {
   local exit_code=$?
   write_status "failed" "panel self-update failed with exit code $exit_code" "$(current_commit)" "$(current_commit_subject)"
   log "panel self-update failed with exit code $exit_code"
+  rm -f "$PID_FILE"
   exit "$exit_code"
 }
 
 trap on_error ERR
+trap 'rm -f "$PID_FILE"' EXIT
 
 run() {
   log "+ $*"
@@ -84,7 +87,7 @@ run_systemctl() {
   local action="$1"
   local service="$2"
   if [[ "$action" == "restart" && "$SYSTEMCTL_NO_BLOCK" == "true" ]]; then
-    run_timeout "$SUDO_BIN" -n "$SYSTEMCTL_BIN" "$action" --no-block "$service"
+    run_timeout "$SUDO_BIN" -n "$SYSTEMCTL_BIN" --no-block "$action" "$service"
   else
     run_timeout "$SUDO_BIN" -n "$SYSTEMCTL_BIN" "$action" "$service"
   fi
@@ -108,6 +111,7 @@ wait_service_active() {
 }
 
 cd "$APP_DIR"
+printf '%s\n' "$$" > "$PID_FILE"
 
 log "starting panel self-update in $APP_DIR on branch $BRANCH"
 write_status "running" "panel self-update started" "$(current_commit)" "$(current_commit_subject)"
@@ -174,3 +178,4 @@ fi
 
 write_status "succeeded" "panel self-update completed" "$NEW_COMMIT" "$NEW_COMMIT_SUBJECT"
 log "panel self-update completed"
+rm -f "$PID_FILE"

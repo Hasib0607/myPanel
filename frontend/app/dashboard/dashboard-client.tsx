@@ -57,7 +57,7 @@ type NameServer = {
 
 type PanelUpdateStatus = {
   status: {
-    state: "unknown" | "running" | "succeeded" | "failed";
+    state: "unknown" | "queued" | "running" | "succeeded" | "failed";
     message: string;
     branch?: string;
     commit?: string;
@@ -163,7 +163,7 @@ export function DashboardClient() {
   const panelUpdate = useQuery({
     queryKey: ["panel-update-status"],
     queryFn: () => apiGet<PanelUpdateStatus>("/webhooks/panel-update/status"),
-    refetchInterval: (query) => query.state.data?.status.state === "running" ? 5_000 : false
+    refetchInterval: (query) => ["queued", "running"].includes(query.state.data?.status.state ?? "") ? 5_000 : false
   });
 
   const refreshNameServers = async () => {
@@ -328,7 +328,7 @@ export function DashboardClient() {
                   <span
                     className={[
                       "rounded-full px-2 py-1 text-xs font-semibold",
-                      panelUpdate.data?.status.state === "running" ? "bg-amber-50 text-amber-700" : "",
+                      panelUpdate.data?.status.state === "queued" || panelUpdate.data?.status.state === "running" ? "bg-amber-50 text-amber-700" : "",
                       panelUpdate.data?.status.state === "succeeded" ? "bg-emerald-50 text-emerald-700" : "",
                       panelUpdate.data?.status.state === "failed" ? "bg-red-50 text-panel-danger" : "",
                       !panelUpdate.data || panelUpdate.data.status.state === "unknown" ? "bg-slate-100 text-panel-muted" : ""
