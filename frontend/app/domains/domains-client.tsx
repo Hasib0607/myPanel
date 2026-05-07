@@ -47,6 +47,13 @@ function normalizeDomainInput(value: string) {
     .replace(/\.$/, "");
 }
 
+function validDomainInput(value: string) {
+  const labels = value.split(".");
+  if (labels.length < 2 || value.length > 253) return false;
+  if (!/^[a-z]{2,63}$/.test(labels[labels.length - 1] ?? "")) return false;
+  return labels.every((label) => /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(label));
+}
+
 export function DomainsClient() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
@@ -114,6 +121,14 @@ export function DomainsClient() {
     event.preventDefault();
     setError("");
     setNotice("");
+    if (!normalizedNewDomain) {
+      setError("Type a domain first, for example example.com.");
+      return;
+    }
+    if (!validDomainInput(normalizedNewDomain)) {
+      setError("Enter a valid root domain, like example.com.");
+      return;
+    }
     createDomain.mutate();
   }
 
@@ -134,7 +149,7 @@ export function DomainsClient() {
               <input checked={forceSsl} onChange={(event) => setForceSsl(event.target.checked)} type="checkbox" />
               Force SSL
             </label>
-            <button className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-4 text-sm font-semibold text-white disabled:opacity-60" disabled={!normalizedNewDomain || createDomain.isPending} type="submit">
+            <button className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-4 text-sm font-semibold text-white disabled:opacity-60" disabled={createDomain.isPending} type="submit">
               <Plus size={16} />
               {createDomain.isPending ? "Adding" : "Add"}
             </button>
