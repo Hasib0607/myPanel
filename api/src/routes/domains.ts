@@ -1,4 +1,5 @@
 import dns from "node:dns/promises";
+import path from "node:path";
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
@@ -7,6 +8,8 @@ import { audit } from "../lib/audit.js";
 import { ensureDomainFileStructure } from "../lib/domainFiles.js";
 import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
+import { sysagent } from "../lib/sysagent.js";
+import { renderZone } from "./dns.js";
 
 export function normalizeDomainName(value: string) {
   return value
@@ -258,6 +261,22 @@ function parseCreateDomain(body: unknown) {
   }
 }
 
+async function publishDomainHosting(domainId: string) {
+  const domain = await prisma.domain.findUniqueOrThrow({
+    where: { id: domainId },
+    include: { dnsRecords: { orderBy: [{ type: "asc" }, { name: "asc" }] } }
+  });
+  const fileScaffold = await ensureDomainFileStructure(domain.name);
+  const zone = renderZone(domain.name, domain.dnsRecords);
+  const dnsResult = await sysagent.applyDnsZone({ domain: domain.name, zone });
+  const nginxResult = await sysagent.writeStaticNginxVhost({
+    name: domain.name,
+    serverName: `${domain.name} www.${domain.name}`,
+    rootPath: path.join(env.FILE_MANAGER_ROOT, domain.name, "public_html")
+  });
+  return { domain, fileScaffold, zone, dnsResult, nginxResult };
+}
+
 export const domainRoutes: FastifyPluginAsync = async (app) => {
   app.addHook("preHandler", app.requireAuth);
 
@@ -306,11 +325,11 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
       throw error;
     }
 
-    let fileScaffold: Awaited<ReturnType<typeof ensureDomainFileStructure>> | null = null;
+    let publishResult: Awaited<ReturnType<typeof publishDomainHosting>> | null = null;
     try {
-      fileScaffold = await ensureDomainFileStructure(domain.name);
+      publishResult = await publishDomainHosting(domain.id);
     } catch (error) {
-      app.log.warn({ error, domain: domain.name }, "domain file scaffold failed");
+      app.log.warn({ error, domain: domain.name }, "domain hosting publish failed");
     }
 
     await clearDomainCaches(domain.id);
@@ -319,7 +338,7 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
       resource: "domain",
       resourceId: domain.id,
       description: `Created domain ${domain.name}`,
-      metadata: fileScaffold ? { fileScaffold } : undefined
+      metadata: publishResult ? JSON.parse(JSON.stringify({ publish: publishResult })) as Prisma.InputJsonValue : undefined
     });
     return reply.code(201).send(domain);
   });
@@ -382,6 +401,20 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
         }
       ]
     };
+  });
+
+  app.post("/:domainId/publish", async (request, reply) => {
+    const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
+    const publish = await publishDomainHosting(domainId);
+    await clearDomainCaches(domainId);
+    await audit(request, {
+      action: "APPLY",
+      resource: "domain",
+      resourceId: domainId,
+      description: `Published DNS and website hosting for ${publish.domain.name}`,
+      metadata: JSON.parse(JSON.stringify({ dnsResult: publish.dnsResult, nginxResult: publish.nginxResult, fileScaffold: publish.fileScaffold })) as Prisma.InputJsonValue
+    });
+    return reply.code(202).send(publish);
   });
 
   app.delete("/:domainId", async (request) => {

@@ -65,6 +65,8 @@ export const sysagent = {
     request<{ ok: true; path: string; dryRun?: boolean }>("/files/write", { method: "PUT", body: JSON.stringify(body) }),
   writeNginxVhost: (body: unknown) =>
     request("/nginx/vhost", { method: "POST", body: JSON.stringify(body) }),
+  writeStaticNginxVhost: (body: unknown) =>
+    request("/nginx/static-vhost", { method: "POST", body: JSON.stringify(body) }),
   issueCertificate: (body: unknown) =>
     request("/ssl/issue", { method: "POST", body: JSON.stringify(body) }),
   renewCertificate: (domain: string) =>

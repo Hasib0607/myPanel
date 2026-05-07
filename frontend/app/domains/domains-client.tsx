@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Eye, Mail, Network, Plus, Search, ShieldCheck, Split, Trash2 } from "lucide-react";
+import { AlertTriangle, Eye, Globe2, Mail, Network, Plus, Search, ShieldCheck, Split, Trash2 } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { apiDeleteBody, apiGet, apiPatch, apiPost } from "@/lib/api";
 
@@ -110,6 +110,17 @@ export function DomainsClient() {
       await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
     onError: (err) => setError(err instanceof Error ? err.message : "Could not delete domain")
+  });
+
+  const publishDomain = useMutation({
+    mutationFn: (domain: Domain) => apiPost(`/domains/${domain.id}/publish`, {}),
+    onSuccess: async () => {
+      setError("");
+      setNotice("DNS zone and website vhost published.");
+      await queryClient.invalidateQueries({ queryKey: ["domains"] });
+      await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : "Could not publish domain")
   });
 
   function submitSearch(event: FormEvent<HTMLFormElement>) {
@@ -243,6 +254,18 @@ export function DomainsClient() {
                       <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`/domains/${domain.id}/mail/accounts`} title="Mail accounts">
                         <Mail size={15} />
                       </Link>
+                      <button
+                        className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100 disabled:opacity-60"
+                        disabled={publishDomain.isPending}
+                        onClick={() => {
+                          setNotice("");
+                          publishDomain.mutate(domain);
+                        }}
+                        title="Publish DNS and website"
+                        type="button"
+                      >
+                        <Globe2 size={15} />
+                      </button>
                       <button
                         className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line text-panel-danger hover:bg-red-50 disabled:opacity-60"
                         disabled={deleteDomain.isPending}
