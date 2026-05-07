@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Callable, TypeVar
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -7,6 +8,7 @@ from app.command import run_command
 from app.config import settings
 
 router = APIRouter()
+T = TypeVar("T")
 
 
 class VhostRequest(BaseModel):
@@ -41,6 +43,21 @@ def safe_web_root(root_path: str) -> Path:
     return target
 
 
+def run_live_step(action: str, fn: Callable[[], T]) -> T:
+    try:
+        return fn()
+    except PermissionError as error:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Nginx {action} permission denied: {error}. "
+                "Run vps-panel-sysagent as root, then restart vps-panel-sysagent and vps-panel-api."
+            ),
+        ) from error
+    except OSError as error:
+        raise HTTPException(status_code=500, detail=f"Nginx {action} failed: {error}") from error
+
+
 def enable_site(available: Path, enabled: Path) -> None:
     if enabled.is_symlink():
         if enabled.resolve() == available:
@@ -61,10 +78,10 @@ def write_vhost(body: VhostRequest) -> dict:
         "proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; }} }"
     )
     if settings.allow_live_nginx:
-        available.parent.mkdir(parents=True, exist_ok=True)
-        available.write_text(config, encoding="utf-8")
-        enabled.parent.mkdir(parents=True, exist_ok=True)
-        enable_site(available, enabled)
+        run_live_step("vhost write", lambda: available.parent.mkdir(parents=True, exist_ok=True))
+        run_live_step("vhost write", lambda: available.write_text(config, encoding="utf-8"))
+        run_live_step("vhost enable", lambda: enabled.parent.mkdir(parents=True, exist_ok=True))
+        run_live_step("vhost enable", lambda: enable_site(available, enabled))
     return {
         "write": {"dryRun": not settings.allow_live_nginx, "command": ["write-file", str(available)], "returncode": 0},
         "enable": {"dryRun": not settings.allow_live_nginx, "command": ["symlink", str(available), str(enabled)], "returncode": 0},
@@ -94,11 +111,11 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
     )
 
     if settings.allow_live_nginx:
-        available.parent.mkdir(parents=True, exist_ok=True)
-        enabled.parent.mkdir(parents=True, exist_ok=True)
-        root_path.mkdir(parents=True, exist_ok=True)
-        available.write_text(config, encoding="utf-8")
-        enable_site(available, enabled)
+        run_live_step("static vhost write", lambda: available.parent.mkdir(parents=True, exist_ok=True))
+        run_live_step("static vhost enable", lambda: enabled.parent.mkdir(parents=True, exist_ok=True))
+        run_live_step("website root create", lambda: root_path.mkdir(parents=True, exist_ok=True))
+        run_live_step("static vhost write", lambda: available.write_text(config, encoding="utf-8"))
+        run_live_step("static vhost enable", lambda: enable_site(available, enabled))
 
     return {
         "write": {"dryRun": not settings.allow_live_nginx, "command": ["write-file", str(available)], "returncode": 0},
