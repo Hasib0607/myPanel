@@ -73,7 +73,7 @@ def create_file(body: CreateFileRequest) -> dict:
     target = safe_path(f"{body.parentPath.rstrip('/')}/{body.name}")
     if not target.parent.samefile(parent):
         raise HTTPException(status_code=400, detail="Path escapes parent folder")
-    if not settings.allow_live_system_commands:
+    if not settings.allow_live_file_manager:
         return dry_run(["write-file", str(target)], target)
     if target.exists() and not body.overwrite:
         raise HTTPException(status_code=409, detail="Target already exists")
@@ -92,7 +92,7 @@ def create_folder(body: CreateFolderRequest) -> dict:
     target = safe_path(f"{body.parentPath.rstrip('/')}/{body.name}")
     if not target.parent.samefile(parent):
         raise HTTPException(status_code=400, detail="Path escapes parent folder")
-    if not settings.allow_live_system_commands:
+    if not settings.allow_live_file_manager:
         return dry_run(["mkdir", str(target)], target)
 
     target.mkdir(parents=False, exist_ok=False)
@@ -104,7 +104,7 @@ def delete_files(body: DeleteRequest) -> dict:
     removed: list[str] = []
     for item_path in body.paths:
         target = safe_path(item_path)
-        if not settings.allow_live_system_commands:
+        if not settings.allow_live_file_manager:
             return dry_run(["rm", "-rf", str(target)], target)
         if target.is_dir() and not target.is_symlink():
             shutil.rmtree(target)
@@ -122,7 +122,7 @@ def chmod_file(body: ChmodRequest) -> dict:
 
     target = safe_path(body.path)
     mode = int(body.mode, 8)
-    if not settings.allow_live_system_commands:
+    if not settings.allow_live_file_manager:
         return dry_run(["chmod", body.mode, str(target)], target)
 
     os.chmod(target, mode)
@@ -134,7 +134,7 @@ def write_file(body: WriteRequest) -> dict:
     target = safe_path(body.path)
     if not target.is_file():
         raise HTTPException(status_code=400, detail="Path is not a file")
-    if not settings.allow_live_system_commands:
+    if not settings.allow_live_file_manager:
         return dry_run(["write-file", str(target)], target)
 
     target.write_text(body.content, encoding="utf-8")
