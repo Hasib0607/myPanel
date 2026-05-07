@@ -9,10 +9,11 @@ LOCK_FILE="${PANEL_UPDATE_LOCK_FILE:-/tmp/vps-panel-self-update.lock}"
 NPM_BIN="${NPM_BIN:-npm}"
 SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
 SUDO_BIN="${SUDO_BIN:-sudo}"
-SERVICES="${PANEL_UPDATE_SERVICES:-vps-panel-api vps-panel-workers vps-panel-frontend}"
+SERVICES="${PANEL_UPDATE_SERVICES:-vps-panel-workers vps-panel-frontend vps-panel-api}"
 HEALTH_URL="${PANEL_UPDATE_HEALTH_URL:-http://127.0.0.1:4000/health}"
 DIRTY_STRATEGY="${PANEL_UPDATE_DIRTY_STRATEGY:-fail}"
-COMMAND_TIMEOUT="${PANEL_UPDATE_COMMAND_TIMEOUT:-120}"
+COMMAND_TIMEOUT="${PANEL_UPDATE_COMMAND_TIMEOUT:-30}"
+SYSTEMCTL_NO_BLOCK="${PANEL_UPDATE_SYSTEMCTL_NO_BLOCK:-true}"
 
 mkdir -p "$(dirname "$LOG_FILE")"
 mkdir -p "$(dirname "$STATUS_FILE")"
@@ -82,7 +83,28 @@ run_timeout() {
 run_systemctl() {
   local action="$1"
   local service="$2"
-  run_timeout "$SUDO_BIN" -n "$SYSTEMCTL_BIN" "$action" "$service"
+  if [[ "$action" == "restart" && "$SYSTEMCTL_NO_BLOCK" == "true" ]]; then
+    run_timeout "$SUDO_BIN" -n "$SYSTEMCTL_BIN" "$action" --no-block "$service"
+  else
+    run_timeout "$SUDO_BIN" -n "$SYSTEMCTL_BIN" "$action" "$service"
+  fi
+}
+
+wait_service_active() {
+  local service="$1"
+  local attempts="${PANEL_UPDATE_SERVICE_ACTIVE_ATTEMPTS:-20}"
+  for i in $(seq 1 "$attempts"); do
+    if "$SUDO_BIN" -n "$SYSTEMCTL_BIN" is-active "$service" >/dev/null 2>&1; then
+      log "$service active"
+      return 0
+    fi
+    log "$service not active yet, retry $i/$attempts..."
+    sleep 1
+  done
+
+  log "$service did not become active"
+  run_systemctl status "$service" || true
+  return 1
 }
 
 cd "$APP_DIR"
@@ -124,8 +146,9 @@ run "$NPM_BIN" --workspace api run prisma:generate
 run "$NPM_BIN" --workspace frontend run build
 
 for service in $SERVICES; do
+  write_status "running" "restarting $service" "$NEW_COMMIT" "$NEW_COMMIT_SUBJECT"
   run_systemctl restart "$service"
-  run_systemctl is-active "$service"
+  wait_service_active "$service"
 done
 
 if command -v curl >/dev/null 2>&1; then

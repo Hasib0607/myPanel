@@ -1,4 +1,4 @@
-export const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api/v1";
+export const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "/api/v1";
 
 function readCookie(name: string) {
   if (typeof document === "undefined") return null;

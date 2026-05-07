@@ -41,6 +41,9 @@ PANEL_UPDATE_BRANCH=main
 PANEL_UPDATE_WORKDIR=/opt/vps-panel
 PANEL_UPDATE_SCRIPT=/opt/vps-panel/scripts/deploy/update-panel.sh
 PANEL_UPDATE_DIRTY_STRATEGY=fail
+PANEL_UPDATE_COMMAND_TIMEOUT=30
+PANEL_UPDATE_SYSTEMCTL_NO_BLOCK=true
+PANEL_UPDATE_SERVICE_ACTIVE_ATTEMPTS=20
 ```
 
 3. Allow the `panel` user to restart only the panel services:
@@ -52,7 +55,7 @@ sudo visudo -f /etc/sudoers.d/vps-panel-update
 Add:
 
 ```sudoers
-panel ALL=(root) NOPASSWD: /bin/systemctl restart vps-panel-api, /bin/systemctl restart vps-panel-workers, /bin/systemctl restart vps-panel-frontend
+panel ALL=(root) NOPASSWD: /bin/systemctl restart --no-block vps-panel-api, /bin/systemctl restart --no-block vps-panel-workers, /bin/systemctl restart --no-block vps-panel-frontend, /bin/systemctl is-active vps-panel-api, /bin/systemctl is-active vps-panel-workers, /bin/systemctl is-active vps-panel-frontend
 ```
 
 If `systemctl` is located somewhere else, use `which systemctl` and update the path.
@@ -90,7 +93,7 @@ The update script writes `/var/log/vps-panel/self-update-status.json` with one o
 - `succeeded`
 - `failed`
 
-The script also verifies each restarted service with `systemctl is-active` and checks `http://127.0.0.1:4000/health` when `curl` is installed.
+The script restarts services with `systemctl restart --no-block`, verifies each service with `systemctl is-active`, and checks `http://127.0.0.1:4000/health` when `curl` is installed. The API service restarts last so the status endpoint stays reachable for as long as possible.
 
 If you want the VPS to discard local tracked edits and always follow GitHub, set:
 
