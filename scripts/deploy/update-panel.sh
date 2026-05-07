@@ -8,7 +8,7 @@ STATUS_FILE="${PANEL_UPDATE_STATUS_FILE:-/var/log/vps-panel/self-update-status.j
 LOCK_FILE="${PANEL_UPDATE_LOCK_FILE:-/tmp/vps-panel-self-update.lock}"
 PID_FILE="${PANEL_UPDATE_PID_FILE:-/tmp/vps-panel-self-update.pid}"
 NPM_BIN="${NPM_BIN:-npm}"
-SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
+SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-}"
 SUDO_BIN="${SUDO_BIN:-sudo}"
 SERVICES="${PANEL_UPDATE_SERVICES:-vps-panel-workers vps-panel-frontend vps-panel-api}"
 HEALTH_URL="${PANEL_UPDATE_HEALTH_URL:-http://127.0.0.1:4000/health}"
@@ -19,6 +19,15 @@ STALE_AFTER_SECONDS="${PANEL_UPDATE_STALE_AFTER_SECONDS:-1200}"
 
 mkdir -p "$(dirname "$LOG_FILE")"
 mkdir -p "$(dirname "$STATUS_FILE")"
+
+if [[ -z "$SYSTEMCTL_BIN" ]]; then
+  SYSTEMCTL_BIN="$(command -v systemctl || true)"
+fi
+
+if [[ -z "$SYSTEMCTL_BIN" ]]; then
+  echo "[$(date -Is)] systemctl was not found in PATH" | tee -a "$LOG_FILE"
+  exit 70
+fi
 
 log() {
   echo "[$(date -Is)] $*" | tee -a "$LOG_FILE"
@@ -78,21 +87,54 @@ run_timeout() {
   fi
 }
 
+sudo_systemctl_output() {
+  "$SUDO_BIN" -n "$SYSTEMCTL_BIN" "$@" 2>&1
+}
+
+ensure_systemctl_permission() {
+  if [[ "$(id -u)" == "0" ]]; then
+    SUDO_BIN=""
+    return 0
+  fi
+
+  local service=""
+  local output=""
+  for service in $SERVICES; do
+    output="$(sudo_systemctl_output is-active "$service" || true)"
+    if printf '%s' "$output" | grep -qiE "password is required|a password is required|not in the sudoers|may not run sudo"; then
+      log "panel user cannot run sudo systemctl without a password"
+      log "Detected systemctl path: $SYSTEMCTL_BIN"
+      log "Add this sudoers rule with: sudo visudo -f /etc/sudoers.d/vps-panel-update"
+      log "panel ALL=(root) NOPASSWD: $SYSTEMCTL_BIN --no-block restart vps-panel-api, $SYSTEMCTL_BIN --no-block restart vps-panel-workers, $SYSTEMCTL_BIN --no-block restart vps-panel-frontend, $SYSTEMCTL_BIN is-active vps-panel-api, $SYSTEMCTL_BIN is-active vps-panel-workers, $SYSTEMCTL_BIN is-active vps-panel-frontend, $SYSTEMCTL_BIN status vps-panel-api, $SYSTEMCTL_BIN status vps-panel-workers, $SYSTEMCTL_BIN status vps-panel-frontend"
+      write_status "failed" "sudoers missing for panel service restarts; systemctl path is $SYSTEMCTL_BIN" "$(current_commit)" "$(current_commit_subject)"
+      exit 69
+    fi
+  done
+}
+
 run_systemctl() {
   local action="$1"
   local service="$2"
+  local cmd=()
+  if [[ -n "$SUDO_BIN" ]]; then
+    cmd=("$SUDO_BIN" -n)
+  fi
   if [[ "$action" == "restart" && "$SYSTEMCTL_NO_BLOCK" == "true" ]]; then
-    run_timeout "$SUDO_BIN" -n "$SYSTEMCTL_BIN" --no-block "$action" "$service"
+    run_timeout "${cmd[@]}" "$SYSTEMCTL_BIN" --no-block "$action" "$service"
   else
-    run_timeout "$SUDO_BIN" -n "$SYSTEMCTL_BIN" "$action" "$service"
+    run_timeout "${cmd[@]}" "$SYSTEMCTL_BIN" "$action" "$service"
   fi
 }
 
 wait_service_active() {
   local service="$1"
   local attempts="${PANEL_UPDATE_SERVICE_ACTIVE_ATTEMPTS:-20}"
+  local cmd=()
+  if [[ -n "$SUDO_BIN" ]]; then
+    cmd=("$SUDO_BIN" -n)
+  fi
   for i in $(seq 1 "$attempts"); do
-    if "$SUDO_BIN" -n "$SYSTEMCTL_BIN" is-active "$service" >/dev/null 2>&1; then
+    if "${cmd[@]}" "$SYSTEMCTL_BIN" is-active "$service" >/dev/null 2>&1; then
       log "$service active"
       return 0
     fi
@@ -193,6 +235,7 @@ run git pull --ff-only origin "$BRANCH"
 NEW_COMMIT="$(current_commit)"
 NEW_COMMIT_SUBJECT="$(current_commit_subject)"
 write_status "running" "source updated; building panel" "$NEW_COMMIT" "$NEW_COMMIT_SUBJECT"
+ensure_systemctl_permission
 
 run "$NPM_BIN" install
 run "$NPM_BIN" --workspace api run prisma:generate

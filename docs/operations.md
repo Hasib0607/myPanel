@@ -60,7 +60,13 @@ Add:
 panel ALL=(root) NOPASSWD: /bin/systemctl --no-block restart vps-panel-api, /bin/systemctl --no-block restart vps-panel-workers, /bin/systemctl --no-block restart vps-panel-frontend, /bin/systemctl is-active vps-panel-api, /bin/systemctl is-active vps-panel-workers, /bin/systemctl is-active vps-panel-frontend, /bin/systemctl status vps-panel-api, /bin/systemctl status vps-panel-workers, /bin/systemctl status vps-panel-frontend
 ```
 
-If `systemctl` is located somewhere else, use `which systemctl` and update the path.
+If `systemctl` is located somewhere else, use `which systemctl` and update the path. On many Ubuntu installs it is `/usr/bin/systemctl`, so the rule would be:
+
+```sudoers
+panel ALL=(root) NOPASSWD: /usr/bin/systemctl --no-block restart vps-panel-api, /usr/bin/systemctl --no-block restart vps-panel-workers, /usr/bin/systemctl --no-block restart vps-panel-frontend, /usr/bin/systemctl is-active vps-panel-api, /usr/bin/systemctl is-active vps-panel-workers, /usr/bin/systemctl is-active vps-panel-frontend, /usr/bin/systemctl status vps-panel-api, /usr/bin/systemctl status vps-panel-workers, /usr/bin/systemctl status vps-panel-frontend
+```
+
+The update script resolves `systemctl` to an absolute path and fails before building if the `panel` user cannot run these commands without a password.
 
 4. Restart the API once after changing `.env`:
 
