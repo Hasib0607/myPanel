@@ -137,6 +137,14 @@ async function vanityNameserverGlueMatches(domain: string, nameServers: ActiveNa
   return true;
 }
 
+function hasExpectedVanityNameServers(domain: string, nameServers: ActiveNameServer[]) {
+  if (!env.ALLOW_PENDING_VANITY_NAMESERVER_DOMAINS) return false;
+  const vanityNameServers = nameServers
+    .map((nameServer) => normalizeNameServer(nameServer.hostname))
+    .filter((hostname) => hostname.endsWith(`.${domain}`));
+  return vanityNameServers.length > 0 && vanityNameServers.length === nameServers.length;
+}
+
 async function resolvePublicNameServers(domain: string) {
   const resolvers = env.DOMAIN_NAMESERVER_RESOLVERS.split(",").map((resolver) => resolver.trim()).filter(Boolean);
   const errors: string[] = [];
@@ -182,6 +190,7 @@ async function assertDomainUsesHostingNameServers(domain: string, nameServers: A
     actual = await resolvePublicNameServers(domain);
   } catch (error) {
     if (await vanityNameserverGlueMatches(domain, nameServers)) return;
+    if (hasExpectedVanityNameServers(domain, nameServers)) return;
     const detail = error instanceof Error ? ` ${error.message}` : "";
     throw Object.assign(new Error(`${nameserverMismatchMessage(domain, expected, [])}${detail}`), { statusCode: 400 });
   }
