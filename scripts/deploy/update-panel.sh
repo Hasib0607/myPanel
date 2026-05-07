@@ -11,6 +11,7 @@ NPM_BIN="${NPM_BIN:-npm}"
 SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-}"
 SUDO_BIN="${SUDO_BIN:-sudo}"
 SERVICES="${PANEL_UPDATE_SERVICES:-vps-panel-workers vps-panel-frontend vps-panel-api}"
+API_SERVICE="${PANEL_UPDATE_API_SERVICE:-vps-panel-api}"
 HEALTH_URL="${PANEL_UPDATE_HEALTH_URL:-http://127.0.0.1:4000/health}"
 DIRTY_STRATEGY="${PANEL_UPDATE_DIRTY_STRATEGY:-fail}"
 COMMAND_TIMEOUT="${PANEL_UPDATE_COMMAND_TIMEOUT:-30}"
@@ -248,7 +249,12 @@ run "$NPM_BIN" --workspace api run prisma:generate
 
 run "$NPM_BIN" --workspace frontend run build
 
+API_RESTART_NEEDED="false"
 for service in $SERVICES; do
+  if [[ "$service" == "$API_SERVICE" ]]; then
+    API_RESTART_NEEDED="true"
+    continue
+  fi
   write_status "running" "restarting $service" "$NEW_COMMIT" "$NEW_COMMIT_SUBJECT"
   run_systemctl restart "$service"
   wait_service_active "$service"
@@ -275,6 +281,12 @@ else
   log "curl not installed; skipping API health check"
 fi
 
-write_status "succeeded" "panel self-update completed" "$NEW_COMMIT" "$NEW_COMMIT_SUBJECT"
-log "panel self-update completed"
+if [[ "$API_RESTART_NEEDED" == "true" ]]; then
+  write_status "succeeded" "panel self-update completed; restarting $API_SERVICE" "$NEW_COMMIT" "$NEW_COMMIT_SUBJECT"
+  log "panel self-update completed; restarting $API_SERVICE"
+  run_systemctl restart "$API_SERVICE"
+else
+  write_status "succeeded" "panel self-update completed" "$NEW_COMMIT" "$NEW_COMMIT_SUBJECT"
+  log "panel self-update completed"
+fi
 rm -f "$PID_FILE"
