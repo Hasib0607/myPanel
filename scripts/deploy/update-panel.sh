@@ -10,7 +10,7 @@ PID_FILE="${PANEL_UPDATE_PID_FILE:-/tmp/vps-panel-self-update.pid}"
 NPM_BIN="${NPM_BIN:-npm}"
 SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-}"
 SUDO_BIN="${SUDO_BIN:-sudo}"
-SERVICES="${PANEL_UPDATE_SERVICES:-vps-panel-workers vps-panel-frontend vps-panel-api}"
+SERVICES="${PANEL_UPDATE_SERVICES:-vps-panel-sysagent vps-panel-workers vps-panel-frontend vps-panel-api}"
 API_SERVICE="${PANEL_UPDATE_API_SERVICE:-vps-panel-api}"
 HEALTH_URL="${PANEL_UPDATE_HEALTH_URL:-http://127.0.0.1:4000/health}"
 DIRTY_STRATEGY="${PANEL_UPDATE_DIRTY_STRATEGY:-fail}"
@@ -100,13 +100,15 @@ ensure_systemctl_permission() {
 
   local service=""
   local output=""
+  local sudoers_rule="panel ALL=(root) NOPASSWD:"
   for service in $SERVICES; do
+    sudoers_rule="$sudoers_rule $SYSTEMCTL_BIN --no-block restart $service, $SYSTEMCTL_BIN is-active $service, $SYSTEMCTL_BIN status $service,"
     output="$(sudo_systemctl_output is-active "$service" || true)"
     if printf '%s' "$output" | grep -qiE "password is required|a password is required|not in the sudoers|may not run sudo"; then
       log "panel user cannot run sudo systemctl without a password"
       log "Detected systemctl path: $SYSTEMCTL_BIN"
       log "Add this sudoers rule with: sudo visudo -f /etc/sudoers.d/vps-panel-update"
-      log "panel ALL=(root) NOPASSWD: $SYSTEMCTL_BIN --no-block restart vps-panel-api, $SYSTEMCTL_BIN --no-block restart vps-panel-workers, $SYSTEMCTL_BIN --no-block restart vps-panel-frontend, $SYSTEMCTL_BIN is-active vps-panel-api, $SYSTEMCTL_BIN is-active vps-panel-workers, $SYSTEMCTL_BIN is-active vps-panel-frontend, $SYSTEMCTL_BIN status vps-panel-api, $SYSTEMCTL_BIN status vps-panel-workers, $SYSTEMCTL_BIN status vps-panel-frontend"
+      log "${sudoers_rule%,}"
       write_status "failed" "sudoers missing for panel service restarts; systemctl path is $SYSTEMCTL_BIN" "$(current_commit)" "$(current_commit_subject)"
       exit 69
     fi

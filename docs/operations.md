@@ -42,6 +42,7 @@ PANEL_UPDATE_WORKDIR=/opt/vps-panel
 PANEL_UPDATE_SCRIPT=/opt/vps-panel/scripts/deploy/update-panel.sh
 PANEL_UPDATE_PID_FILE=/tmp/vps-panel-self-update.pid
 PANEL_UPDATE_API_SERVICE=vps-panel-api
+PANEL_UPDATE_SERVICES=vps-panel-sysagent vps-panel-workers vps-panel-frontend vps-panel-api
 PANEL_UPDATE_DIRTY_STRATEGY=fail
 PANEL_UPDATE_COMMAND_TIMEOUT=30
 PANEL_UPDATE_SYSTEMCTL_NO_BLOCK=true
@@ -58,13 +59,13 @@ sudo visudo -f /etc/sudoers.d/vps-panel-update
 Add:
 
 ```sudoers
-panel ALL=(root) NOPASSWD: /bin/systemctl --no-block restart vps-panel-api, /bin/systemctl --no-block restart vps-panel-workers, /bin/systemctl --no-block restart vps-panel-frontend, /bin/systemctl is-active vps-panel-api, /bin/systemctl is-active vps-panel-workers, /bin/systemctl is-active vps-panel-frontend, /bin/systemctl status vps-panel-api, /bin/systemctl status vps-panel-workers, /bin/systemctl status vps-panel-frontend
+panel ALL=(root) NOPASSWD: /bin/systemctl --no-block restart vps-panel-sysagent, /bin/systemctl is-active vps-panel-sysagent, /bin/systemctl status vps-panel-sysagent, /bin/systemctl --no-block restart vps-panel-api, /bin/systemctl is-active vps-panel-api, /bin/systemctl status vps-panel-api, /bin/systemctl --no-block restart vps-panel-workers, /bin/systemctl is-active vps-panel-workers, /bin/systemctl status vps-panel-workers, /bin/systemctl --no-block restart vps-panel-frontend, /bin/systemctl is-active vps-panel-frontend, /bin/systemctl status vps-panel-frontend
 ```
 
 If `systemctl` is located somewhere else, use `which systemctl` and update the path. On many Ubuntu installs it is `/usr/bin/systemctl`, so the rule would be:
 
 ```sudoers
-panel ALL=(root) NOPASSWD: /usr/bin/systemctl --no-block restart vps-panel-api, /usr/bin/systemctl --no-block restart vps-panel-workers, /usr/bin/systemctl --no-block restart vps-panel-frontend, /usr/bin/systemctl is-active vps-panel-api, /usr/bin/systemctl is-active vps-panel-workers, /usr/bin/systemctl is-active vps-panel-frontend, /usr/bin/systemctl status vps-panel-api, /usr/bin/systemctl status vps-panel-workers, /usr/bin/systemctl status vps-panel-frontend
+panel ALL=(root) NOPASSWD: /usr/bin/systemctl --no-block restart vps-panel-sysagent, /usr/bin/systemctl is-active vps-panel-sysagent, /usr/bin/systemctl status vps-panel-sysagent, /usr/bin/systemctl --no-block restart vps-panel-api, /usr/bin/systemctl is-active vps-panel-api, /usr/bin/systemctl status vps-panel-api, /usr/bin/systemctl --no-block restart vps-panel-workers, /usr/bin/systemctl is-active vps-panel-workers, /usr/bin/systemctl status vps-panel-workers, /usr/bin/systemctl --no-block restart vps-panel-frontend, /usr/bin/systemctl is-active vps-panel-frontend, /usr/bin/systemctl status vps-panel-frontend
 ```
 
 The update script resolves `systemctl` to an absolute path and fails before building if the `panel` user cannot run these commands without a password.
