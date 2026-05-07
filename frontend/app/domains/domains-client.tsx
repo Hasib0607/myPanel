@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Eye, Plus, Search, Trash2 } from "lucide-react";
+import { AlertTriangle, Eye, Mail, Network, Plus, Search, ShieldCheck, Split, Trash2 } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { apiDeleteBody, apiGet, apiPatch, apiPost } from "@/lib/api";
 
@@ -37,6 +37,16 @@ function statusClass(status: DomainStatus) {
   return "bg-amber-50 text-amber-700";
 }
 
+function normalizeDomainInput(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/^www\./, "")
+    .split(/[/?#:]/)[0]
+    .replace(/\.$/, "");
+}
+
 export function DomainsClient() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
@@ -44,6 +54,8 @@ export function DomainsClient() {
   const [newDomain, setNewDomain] = useState("");
   const [forceSsl, setForceSsl] = useState(true);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const normalizedNewDomain = normalizeDomainInput(newDomain);
 
   const queryPath = useMemo(() => {
     const params = new URLSearchParams({ page: "1", pageSize: "50" });
@@ -57,11 +69,14 @@ export function DomainsClient() {
   });
 
   const createDomain = useMutation({
-    mutationFn: () => apiPost<Domain>("/domains", { name: newDomain, forceSsl }),
-    onSuccess: async () => {
+    mutationFn: () => apiPost<Domain>("/domains", { name: normalizedNewDomain, forceSsl }),
+    onSuccess: async (domain) => {
       setNewDomain("");
       setForceSsl(true);
       setError("");
+      setNotice(`${domain.name} added with default DNS records.`);
+      setSearch("");
+      setDraftSearch("");
       await queryClient.invalidateQueries({ queryKey: ["domains"] });
       await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
@@ -71,14 +86,19 @@ export function DomainsClient() {
   const updateStatus = useMutation({
     mutationFn: ({ id, status }: { id: string; status: DomainStatus }) => apiPatch(`/domains/${id}/status`, { status }),
     onSuccess: async () => {
+      setError("");
+      setNotice("Domain status updated.");
       await queryClient.invalidateQueries({ queryKey: ["domains"] });
       await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-    }
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : "Could not update domain")
   });
 
   const deleteDomain = useMutation({
     mutationFn: (domain: Domain) => apiDeleteBody(`/domains/${domain.id}`, { confirmName: domain.name }),
     onSuccess: async () => {
+      setError("");
+      setNotice("Domain deleted.");
       await queryClient.invalidateQueries({ queryKey: ["domains"] });
       await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
@@ -92,6 +112,8 @@ export function DomainsClient() {
 
   function submitNewDomain(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setError("");
+    setNotice("");
     createDomain.mutate();
   }
 
@@ -112,9 +134,9 @@ export function DomainsClient() {
               <input checked={forceSsl} onChange={(event) => setForceSsl(event.target.checked)} type="checkbox" />
               Force SSL
             </label>
-            <button className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-4 text-sm font-semibold text-white disabled:opacity-60" disabled={!newDomain || createDomain.isPending} type="submit">
+            <button className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-4 text-sm font-semibold text-white disabled:opacity-60" disabled={!normalizedNewDomain || createDomain.isPending} type="submit">
               <Plus size={16} />
-              Add
+              {createDomain.isPending ? "Adding" : "Add"}
             </button>
           </form>
         }
@@ -144,6 +166,12 @@ export function DomainsClient() {
           <div className="mb-4 flex items-center gap-3 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-panel-danger">
             <AlertTriangle size={18} />
             {error || (domains.error instanceof Error ? domains.error.message : "Could not load domains")}
+          </div>
+        ) : null}
+
+        {notice ? (
+          <div className="mb-4 rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+            {notice}
           </div>
         ) : null}
 
@@ -188,10 +216,24 @@ export function DomainsClient() {
                       <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`/domains/${domain.id}/overview`} title="View domain">
                         <Eye size={15} />
                       </Link>
+                      <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`/domains/${domain.id}/dns`} title="DNS records">
+                        <Network size={15} />
+                      </Link>
+                      <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`/domains/${domain.id}/subdomains`} title="Subdomains">
+                        <Split size={15} />
+                      </Link>
+                      <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`/domains/${domain.id}/ssl`} title="SSL">
+                        <ShieldCheck size={15} />
+                      </Link>
+                      <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`/domains/${domain.id}/mail/accounts`} title="Mail accounts">
+                        <Mail size={15} />
+                      </Link>
                       <button
-                        className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line text-panel-danger hover:bg-red-50"
+                        className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line text-panel-danger hover:bg-red-50 disabled:opacity-60"
+                        disabled={deleteDomain.isPending}
                         onClick={() => {
                           if (window.confirm(`Delete ${domain.name}? This removes its DNS, mail accounts, and deployment metadata.`)) {
+                            setNotice("");
                             deleteDomain.mutate(domain);
                           }
                         }}

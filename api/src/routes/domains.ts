@@ -6,8 +6,27 @@ import { audit } from "../lib/audit.js";
 import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
 
+export function normalizeDomainName(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/^www\./, "")
+    .split(/[/?#:]/)[0]
+    .replace(/\.$/, "");
+}
+
+const domainNameSchema = z.string().transform((value) => normalizeDomainName(value)).superRefine((value, ctx) => {
+  const labels = value.split(".");
+  const validLabels = labels.every((label) => /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(label));
+
+  if (labels.length < 2 || value.length > 253 || !validLabels || !/^[a-z]{2,63}$/.test(labels[labels.length - 1] ?? "")) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Enter a valid root domain, like example.com" });
+  }
+});
+
 const createDomainSchema = z.object({
-  name: z.string().trim().toLowerCase().regex(/^[a-z0-9.-]+\.[a-z]{2,}$/),
+  name: domainNameSchema,
   forceSsl: z.boolean().default(true)
 });
 
@@ -23,8 +42,14 @@ const updateDomainSchema = z.object({
   sslExpiry: z.coerce.date().nullable().optional()
 });
 
-function defaultRecords(domainId: string, domain: string) {
-  return [
+type ActiveNameServer = {
+  hostname: string;
+  ipv4: string | null;
+  ipv6: string | null;
+};
+
+export function defaultRecords(domainId: string, domain: string, nameServers: ActiveNameServer[] = []) {
+  const records: Prisma.DnsRecordCreateManyInput[] = [
     { domainId, type: "A" as const, name: "@", value: env.VPS_IP },
     { domainId, type: "A" as const, name: "www", value: env.VPS_IP },
     { domainId, type: "MX" as const, name: "@", value: `mail.${domain}`, priority: 10 },
@@ -32,6 +57,50 @@ function defaultRecords(domainId: string, domain: string) {
     { domainId, type: "TXT" as const, name: "@", value: `v=spf1 ip4:${env.VPS_IP} ~all` },
     { domainId, type: "TXT" as const, name: "_dmarc", value: `v=DMARC1; p=quarantine; rua=mailto:admin@${domain}` }
   ];
+
+  for (const nameServer of nameServers) {
+    const hostname = nameServer.hostname.replace(/\.$/, "");
+    records.push({ domainId, type: "NS" as const, name: "@", value: `${hostname}.` });
+
+    if (hostname.endsWith(`.${domain}`)) {
+      const label = hostname.slice(0, -(domain.length + 1));
+      if (label && nameServer.ipv4) {
+        records.push({ domainId, type: "A" as const, name: label, value: nameServer.ipv4 });
+      }
+      if (label && nameServer.ipv6) {
+        records.push({ domainId, type: "AAAA" as const, name: label, value: nameServer.ipv6 });
+      }
+    }
+  }
+
+  return records;
+}
+
+function domainInclude() {
+  return {
+    _count: { select: { subdomains: true, dnsRecords: true, mailAccounts: true } }
+  };
+}
+
+function clearDomainCaches(domainId?: string) {
+  const keys = ["domain_list"];
+  if (domainId) keys.push(`dns_records:${domainId}`);
+  return redis.del(...keys);
+}
+
+function zodIssueMessage(error: z.ZodError) {
+  return error.issues[0]?.message ?? "Validation failed";
+}
+
+function parseCreateDomain(body: unknown) {
+  try {
+    return createDomainSchema.parse(body);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      throw Object.assign(new Error(zodIssueMessage(error)), { statusCode: 400 });
+    }
+    throw error;
+  }
 }
 
 export const domainRoutes: FastifyPluginAsync = async (app) => {
@@ -60,13 +129,18 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.post("/", async (request, reply) => {
-    const body = createDomainSchema.parse(request.body);
+    const body = parseCreateDomain(request.body);
     let domain;
     try {
       domain = await prisma.$transaction(async (tx) => {
         const created = await tx.domain.create({ data: { name: body.name, forceSsl: body.forceSsl } });
-        await tx.dnsRecord.createMany({ data: defaultRecords(created.id, created.name) });
-        return created;
+        const nameServers = await tx.nameServer.findMany({
+          where: { active: true },
+          orderBy: [{ sortOrder: "asc" }, { hostname: "asc" }],
+          select: { hostname: true, ipv4: true, ipv6: true }
+        });
+        await tx.dnsRecord.createMany({ data: defaultRecords(created.id, created.name, nameServers), skipDuplicates: true });
+        return tx.domain.findUniqueOrThrow({ where: { id: created.id }, include: domainInclude() });
       });
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
@@ -75,7 +149,7 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
       throw error;
     }
 
-    await redis.del("domain_list");
+    await clearDomainCaches(domain.id);
     await audit(request, { action: "CREATE", resource: "domain", resourceId: domain.id, description: `Created domain ${domain.name}` });
     return reply.code(201).send(domain);
   });
@@ -91,15 +165,19 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
   app.patch("/:domainId/status", async (request) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const body = z.object({ status: z.enum(["ACTIVE", "PENDING", "SUSPENDED"]) }).parse(request.body);
-    await redis.del("domain_list");
-    return prisma.domain.update({ where: { id: domainId }, data: { status: body.status } });
+    const domain = await prisma.domain.update({ where: { id: domainId }, data: { status: body.status }, include: domainInclude() });
+    await clearDomainCaches(domainId);
+    await audit(request, { action: "UPDATE", resource: "domain", resourceId: domainId, description: `Updated ${domain.name} status to ${body.status}` });
+    return domain;
   });
 
   app.patch("/:domainId", async (request) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const body = updateDomainSchema.parse(request.body);
-    await redis.del("domain_list");
-    return prisma.domain.update({ where: { id: domainId }, data: body });
+    const domain = await prisma.domain.update({ where: { id: domainId }, data: body, include: domainInclude() });
+    await clearDomainCaches(domainId);
+    await audit(request, { action: "UPDATE", resource: "domain", resourceId: domainId, description: `Updated domain ${domain.name}` });
+    return domain;
   });
 
   app.get("/:domainId/health", async (request) => {
@@ -144,7 +222,7 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
       throw app.httpErrors.badRequest("Domain deletion requires exact domain name confirmation");
     }
     await prisma.domain.delete({ where: { id: domainId } });
-    await redis.del("domain_list");
+    await clearDomainCaches(domainId);
     await audit(request, { action: "DELETE", resource: "domain", resourceId: domainId, description: `Deleted domain ${domain.name}` });
     return { ok: true };
   });
@@ -153,6 +231,8 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const body = subdomainSchema.parse(request.body);
     const subdomain = await prisma.subdomain.create({ data: { domainId, ...body } });
+    await clearDomainCaches(domainId);
+    await audit(request, { action: "CREATE", resource: "subdomain", resourceId: subdomain.id, description: `Created subdomain ${body.name}` });
     return reply.code(201).send(subdomain);
   });
 };
