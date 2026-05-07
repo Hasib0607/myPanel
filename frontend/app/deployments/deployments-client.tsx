@@ -4,7 +4,7 @@ import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Clipboard, Filter, FolderGit2, GitBranch, Github, Play, Plus, RefreshCw, Search, Square, Wand2, X } from "lucide-react";
-import { apiGet, apiGetText, apiPost } from "@/lib/api";
+import { apiGet, apiGetText, apiPost, apiPut } from "@/lib/api";
 import type { Deployment, DeploymentFramework, DeploymentListResponse, DetectionResponse, PreflightResponse, QueueResponse, DeploymentSourceProvider } from "./deployment-types";
 import { frameworkOptions, sourceOptions } from "./deployment-types";
 import { EmptyState, ResultNotice, actionIcon, formatDate, healthBadge, queryString, statusBadge } from "./deployment-ui";
@@ -140,6 +140,8 @@ export function DeploymentsClient() {
   const [repoSearch, setRepoSearch] = useState("");
   const [selectedRepo, setSelectedRepo] = useState<GithubRepo | null>(null);
   const [repoPickerOpen, setRepoPickerOpen] = useState(false);
+  const [githubToken, setGithubToken] = useState("");
+  const [githubUsername, setGithubUsername] = useState("");
   const [copyingLogsFor, setCopyingLogsFor] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
 
@@ -160,6 +162,11 @@ export function DeploymentsClient() {
     enabled: repoPickerOpen,
     queryKey: ["deployments-github-repos", repoSearch],
     queryFn: () => apiGet<GithubRepoResponse>(`/deployments/github/repos?${queryString({ search: repoSearch })}`)
+  });
+  const githubConnection = useQuery({
+    enabled: repoPickerOpen,
+    queryKey: ["deployments-github-connection"],
+    queryFn: () => apiGet<{ connected: boolean; username: string | null; scopes: string[] }>("/deployments/github/connection")
   });
 
   useEffect(() => {
@@ -282,6 +289,21 @@ export function DeploymentsClient() {
     onSuccess: (deployment) => setNotice(`${deployment.name} logs copied. You can paste/share it now.`),
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not copy logs"),
     onSettled: () => setCopyingLogsFor(null)
+  });
+
+  const saveGithubToken = useMutation({
+    mutationFn: () => apiPut<{ connected: boolean; username: string | null; scopes: string[] }>("/deployments/github/connection", {
+      username: githubUsername || null,
+      token: githubToken,
+      scopes: []
+    }),
+    onSuccess: async () => {
+      setGithubToken("");
+      setNotice("GitHub token connected. Repository list refreshed.");
+      await queryClient.invalidateQueries({ queryKey: ["deployments-github-connection"] });
+      await queryClient.invalidateQueries({ queryKey: ["deployments-github-repos"] });
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not connect GitHub token")
   });
 
   function submitSearch(event: FormEvent<HTMLFormElement>) {
@@ -535,6 +557,21 @@ export function DeploymentsClient() {
                 <Search className="absolute left-3 top-2.5 text-panel-muted" size={15} />
                 <input className="h-9 w-full rounded-md border border-panel-line pl-9 pr-3 text-sm" onChange={(event) => setRepoSearch(event.target.value)} placeholder="Search GitHub repositories" value={repoSearch} />
               </div>
+              {!githubConnection.data?.connected ? (
+                <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3">
+                  <div className="text-xs font-semibold text-amber-900">Connect GitHub token</div>
+                  <div className="mt-1 text-xs text-amber-800">Use a fine-grained token with repository read access for the repos you want to deploy.</div>
+                  <div className="mt-3 grid grid-cols-[1fr_2fr_auto] gap-2">
+                    <input className="h-9 rounded-md border border-amber-200 bg-white px-3 text-sm" onChange={(event) => setGithubUsername(event.target.value)} placeholder="username" value={githubUsername} />
+                    <input className="h-9 rounded-md border border-amber-200 bg-white px-3 text-sm" onChange={(event) => setGithubToken(event.target.value)} placeholder="github_pat_..." type="password" value={githubToken} />
+                    <button className="h-9 rounded-md bg-slate-900 px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={!githubToken || saveGithubToken.isPending} onClick={() => saveGithubToken.mutate()} type="button">
+                      Connect
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-2 text-xs text-emerald-700">Connected{githubConnection.data.username ? ` as ${githubConnection.data.username}` : ""}.</div>
+              )}
               {repos.data?.note ? <div className="mt-2 text-xs text-amber-700">{repos.data.note}</div> : null}
               {repos.data?.dryRun ? <div className="mt-2 text-xs text-amber-700">GitHub token is not connected; showing dry-run placeholder repositories.</div> : null}
             </div>
