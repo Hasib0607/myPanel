@@ -51,6 +51,7 @@ type PanelUpdateStatus = {
     branch?: string;
     commit?: string;
     commitSubject?: string;
+    dirtyFiles?: string;
     updatedAt: string | null;
     logFile?: string;
   };
@@ -260,6 +261,9 @@ export function DashboardClient() {
                   <div className="mt-2 text-xs font-medium text-panel-ink">{panelUpdate.data.status.commitSubject}</div>
                 ) : null}
                 {panelUpdate.data?.status.commit ? <div className="mt-1 font-mono text-xs text-panel-muted">Commit {panelUpdate.data.status.commit}</div> : null}
+                {panelUpdate.data?.status.dirtyFiles ? (
+                  <pre className="mt-2 max-h-24 overflow-auto rounded-md bg-red-50 p-2 font-mono text-xs text-panel-danger">{panelUpdate.data.status.dirtyFiles}</pre>
+                ) : null}
               </div>
               <div className="mt-3 max-h-40 overflow-auto rounded-md bg-slate-950 p-3 font-mono text-xs text-slate-100">
                 {(panelUpdate.data?.recentLog ?? []).slice(-8).map((line, index) => (

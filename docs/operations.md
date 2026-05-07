@@ -40,6 +40,7 @@ PANEL_UPDATE_REPO_FULL_NAME=your-github-owner/your-panel-repo
 PANEL_UPDATE_BRANCH=main
 PANEL_UPDATE_WORKDIR=/opt/vps-panel
 PANEL_UPDATE_SCRIPT=/opt/vps-panel/scripts/deploy/update-panel.sh
+PANEL_UPDATE_DIRTY_STRATEGY=fail
 ```
 
 3. Allow the `panel` user to restart only the panel services:
@@ -90,3 +91,11 @@ The update script writes `/var/log/vps-panel/self-update-status.json` with one o
 - `failed`
 
 The script also verifies each restarted service with `systemctl is-active` and checks `http://127.0.0.1:4000/health` when `curl` is installed.
+
+If you want the VPS to discard local tracked edits and always follow GitHub, set:
+
+```bash
+PANEL_UPDATE_DIRTY_STRATEGY=reset
+```
+
+Use this only when `/opt/vps-panel` is treated as a deployment checkout and all real changes are pushed from GitHub. Ignored files such as `.env` are kept, but local tracked code edits are discarded.

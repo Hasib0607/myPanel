@@ -11,6 +11,7 @@ SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
 SUDO_BIN="${SUDO_BIN:-sudo}"
 SERVICES="${PANEL_UPDATE_SERVICES:-vps-panel-api vps-panel-workers vps-panel-frontend}"
 HEALTH_URL="${PANEL_UPDATE_HEALTH_URL:-http://127.0.0.1:4000/health}"
+DIRTY_STRATEGY="${PANEL_UPDATE_DIRTY_STRATEGY:-fail}"
 
 mkdir -p "$(dirname "$LOG_FILE")"
 mkdir -p "$(dirname "$STATUS_FILE")"
@@ -34,12 +35,14 @@ write_status() {
   local message="$2"
   local commit="${3:-}"
   local commit_subject="${4:-}"
-  printf '{"state":"%s","message":"%s","branch":"%s","commit":"%s","commitSubject":"%s","updatedAt":"%s","logFile":"%s"}\n' \
+  local dirty_files="${5:-}"
+  printf '{"state":"%s","message":"%s","branch":"%s","commit":"%s","commitSubject":"%s","dirtyFiles":"%s","updatedAt":"%s","logFile":"%s"}\n' \
     "$(json_escape "$state")" \
     "$(json_escape "$message")" \
     "$(json_escape "$BRANCH")" \
     "$(json_escape "$commit")" \
     "$(json_escape "$commit_subject")" \
+    "$(json_escape "$dirty_files")" \
     "$(date -Is)" \
     "$(json_escape "$LOG_FILE")" > "$STATUS_FILE"
 }
@@ -71,14 +74,22 @@ cd "$APP_DIR"
 log "starting panel self-update in $APP_DIR on branch $BRANCH"
 write_status "running" "panel self-update started" "$(current_commit)" "$(current_commit_subject)"
 
-if [[ -n "$(git status --porcelain)" ]]; then
-  log "worktree is dirty; refusing to auto-update"
+run git fetch origin "$BRANCH"
+
+DIRTY_FILES="$(git status --porcelain)"
+if [[ -n "$DIRTY_FILES" ]]; then
+  log "worktree is dirty"
   git status --short 2>&1 | tee -a "$LOG_FILE"
-  write_status "failed" "worktree is dirty; refusing to auto-update" "$(current_commit)" "$(current_commit_subject)"
-  exit 2
+  if [[ "$DIRTY_STRATEGY" == "reset" ]]; then
+    write_status "running" "worktree dirty; resetting to origin/$BRANCH" "$(current_commit)" "$(current_commit_subject)" "$DIRTY_FILES"
+    run git reset --hard "origin/$BRANCH"
+    run git clean -fd
+  else
+    write_status "failed" "worktree is dirty; refusing to auto-update" "$(current_commit)" "$(current_commit_subject)" "$DIRTY_FILES"
+    exit 2
+  fi
 fi
 
-run git fetch origin "$BRANCH"
 run git checkout "$BRANCH"
 run git pull --ff-only origin "$BRANCH"
 NEW_COMMIT="$(current_commit)"
