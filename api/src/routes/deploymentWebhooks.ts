@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import path from "node:path";
@@ -15,6 +15,17 @@ import { getSecret } from "../lib/secrets.js";
 type ParsedJsonWithRaw = {
   payload: unknown;
   rawBody: Buffer;
+};
+
+type PanelUpdateStatus = {
+  state?: string;
+  message?: string;
+  branch?: string;
+  commit?: string;
+  commitSubject?: string;
+  updatedAt?: string | null;
+  logFile?: string;
+  [key: string]: unknown;
 };
 
 function webhookSecretRef(deploymentSlug: string) {
@@ -110,6 +121,18 @@ function spawnPanelUpdate() {
     }
   });
   child.unref();
+}
+
+function gitCommitSubject(commit: string | undefined) {
+  if (!commit || !/^[a-f0-9]{7,40}$/i.test(commit)) return Promise.resolve("");
+  return new Promise<string>((resolve) => {
+    execFile(
+      "git",
+      ["show", "-s", "--format=%s", commit],
+      { cwd: env.PANEL_UPDATE_WORKDIR, timeout: 3000 },
+      (error, stdout) => resolve(error ? "" : stdout.trim())
+    );
+  });
 }
 
 export const deploymentWebhookRoutes: FastifyPluginAsync = async (app) => {
@@ -216,14 +239,17 @@ export const deploymentWebhookRoutes: FastifyPluginAsync = async (app) => {
   app.get("/panel-update/status", { preHandler: app.requireAuth }, async () => {
     const statusFile = env.PANEL_UPDATE_STATUS_FILE;
     const logFile = env.PANEL_UPDATE_LOG_FILE;
-    const status = await fsPromises.readFile(statusFile, "utf8")
-      .then((content) => JSON.parse(content) as unknown)
+    const status: PanelUpdateStatus = await fsPromises.readFile(statusFile, "utf8")
+      .then((content) => JSON.parse(content) as PanelUpdateStatus)
       .catch(() => ({
         state: "unknown",
         message: "No panel update status has been written yet",
         updatedAt: null,
         logFile
       }));
+    if (!status.commitSubject && typeof status.commit === "string") {
+      status.commitSubject = await gitCommitSubject(status.commit);
+    }
     const recentLog = await fsPromises.readFile(logFile, "utf8")
       .then((content) => content.split(/\r?\n/).filter(Boolean).slice(-80))
       .catch(() => []);
