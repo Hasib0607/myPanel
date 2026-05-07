@@ -6,7 +6,11 @@ function resolveApiBase() {
     const configuredUrl = new URL(configured, window.location.origin);
     const browserIsLocal = ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
     const apiIsLocal = ["localhost", "127.0.0.1", "::1"].includes(configuredUrl.hostname);
+    const sameHostname = configuredUrl.hostname === window.location.hostname;
+    const sameOrigin = configuredUrl.origin === window.location.origin;
+
     if (apiIsLocal && !browserIsLocal) return "/api/v1";
+    if (sameHostname && !sameOrigin) return "/api/v1";
   }
 
   return configured;
