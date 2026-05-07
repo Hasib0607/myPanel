@@ -104,13 +104,13 @@ function configuredPanelUpdateScript() {
   if (relative.startsWith("..") || path.isAbsolute(relative)) {
     throw new Error("Panel update script must live inside PANEL_UPDATE_WORKDIR");
   }
-  fs.accessSync(script, fs.constants.X_OK);
+  fs.accessSync(script, fs.constants.R_OK);
   return { appDir, script };
 }
 
 function spawnPanelUpdate() {
   const { appDir, script } = configuredPanelUpdateScript();
-  const child = spawn(script, [], {
+  const child = spawn("bash", [script], {
     cwd: appDir,
     detached: true,
     stdio: "ignore",
