@@ -9,6 +9,7 @@ import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { env } from "../config/env.js";
 import { audit } from "../lib/audit.js";
+import { ensureDomainFileStructure } from "../lib/domainFiles.js";
 
 const execFileAsync = promisify(execFile);
 const textReadLimit = 1024 * 1024;
@@ -196,6 +197,7 @@ const listQuery = z.object({
 const pathQuery = z.object({ path: z.string() });
 const createSchema = z.object({ parentPath: z.string().default("."), name: z.string(), content: z.string().default("") });
 const folderSchema = z.object({ parentPath: z.string().default("."), name: z.string() });
+const domainScaffoldSchema = z.object({ domain: z.string().trim().toLowerCase() });
 const saveSchema = z.object({ path: z.string(), content: z.string(), expectedModifiedAt: z.string().optional() });
 const renameSchema = z.object({ path: z.string(), name: z.string() });
 const copyMoveSchema = z.object({ sourcePath: z.string(), targetParentPath: z.string().default("."), name: z.string().optional(), overwrite: z.boolean().default(false) });
@@ -293,6 +295,19 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
     const folder = safeChild(parent, body.name);
     await fs.mkdir(folder, { recursive: false });
     return reply.code(201).send(await statEntry(folder));
+  });
+
+  app.post("/domain-scaffold", async (request, reply) => {
+    const body = domainScaffoldSchema.parse(request.body);
+    const scaffold = await ensureDomainFileStructure(body.domain);
+    const root = safePath(scaffold.relativeRoot);
+    await audit(request, {
+      action: "CREATE",
+      resource: "file",
+      description: `Prepared default file folders for ${scaffold.domain}`,
+      metadata: { domain: scaffold.domain, folders: scaffold.folders }
+    });
+    return reply.code(201).send({ root: await statEntry(root), scaffold });
   });
 
   app.patch("/rename", async (request) => {

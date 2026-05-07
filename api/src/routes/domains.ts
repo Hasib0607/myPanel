@@ -4,6 +4,7 @@ import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { env } from "../config/env.js";
 import { audit } from "../lib/audit.js";
+import { ensureDomainFileStructure } from "../lib/domainFiles.js";
 import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
 
@@ -305,8 +306,21 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
       throw error;
     }
 
+    let fileScaffold: Awaited<ReturnType<typeof ensureDomainFileStructure>> | null = null;
+    try {
+      fileScaffold = await ensureDomainFileStructure(domain.name);
+    } catch (error) {
+      app.log.warn({ error, domain: domain.name }, "domain file scaffold failed");
+    }
+
     await clearDomainCaches(domain.id);
-    await audit(request, { action: "CREATE", resource: "domain", resourceId: domain.id, description: `Created domain ${domain.name}` });
+    await audit(request, {
+      action: "CREATE",
+      resource: "domain",
+      resourceId: domain.id,
+      description: `Created domain ${domain.name}`,
+      metadata: fileScaffold ? { fileScaffold } : undefined
+    });
     return reply.code(201).send(domain);
   });
 

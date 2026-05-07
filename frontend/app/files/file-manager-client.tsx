@@ -82,6 +82,15 @@ type DownloadResponse = {
   contentBase64: string;
 };
 
+type DomainScaffoldResponse = {
+  root: FileEntry;
+  scaffold: {
+    domain: string;
+    relativeRoot: string;
+    folders: string[];
+  };
+};
+
 type MonacoEditor = {
   getValue: () => string;
   setValue: (value: string) => void;
@@ -297,14 +306,14 @@ export function FileManagerClient() {
   });
 
   const createDomainFolder = useMutation({
-    mutationFn: (domainName: string) => apiPost<FileEntry>("/files/folders", { parentPath: ".", name: domainName }),
-    onSuccess: async (folder) => {
-      setCurrentPath(folder.path);
+    mutationFn: (domainName: string) => apiPost<DomainScaffoldResponse>("/files/domain-scaffold", { domain: domainName }),
+    onSuccess: async (response) => {
+      setCurrentPath(response.root.path);
       setSelectedPath(null);
-      setLastResult(`Created folder for ${folder.name}.`);
+      setLastResult(`Default folders ready for ${response.scaffold.domain}.`);
       await invalidateFiles();
     },
-    onError: (err) => setLastResult(err instanceof Error ? err.message : "Could not create domain folder")
+    onError: (err) => setLastResult(err instanceof Error ? err.message : "Could not create default folders")
   });
 
   const renameItem = useMutation({
@@ -498,14 +507,14 @@ export function FileManagerClient() {
         {lastResult ? <div className="border-b border-panel-line bg-slate-50 px-4 py-2 text-sm text-slate-700">{lastResult}</div> : null}
         {list.isError && selectedDomain ? (
           <div className="border-b border-panel-line bg-amber-50 px-4 py-3 text-sm text-amber-800">
-            <div className="font-medium">No folder exists for {selectedDomain.name} yet.</div>
+            <div className="font-medium">No default folders exist for {selectedDomain.name} yet.</div>
             <button
               className="mt-2 h-8 rounded-md border border-amber-300 bg-white px-3 text-xs font-semibold hover:bg-amber-100 disabled:opacity-60"
               disabled={createDomainFolder.isPending}
               onClick={() => createDomainFolder.mutate(selectedDomain.name)}
               type="button"
             >
-              Create domain folder
+              Create default folders
             </button>
           </div>
         ) : list.isError ? (
