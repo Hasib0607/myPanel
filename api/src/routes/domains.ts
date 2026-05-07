@@ -59,6 +59,35 @@ function nameserverMismatchMessage(domain: string, expected: string[], actual: s
   return `Before adding ${domain}, change its nameservers to this hosting nameserver: ${expectedText}. Current nameservers: ${actualText}.`;
 }
 
+async function resolvePublicNameServers(domain: string) {
+  const resolvers = env.DOMAIN_NAMESERVER_RESOLVERS.split(",").map((resolver) => resolver.trim()).filter(Boolean);
+  const errors: string[] = [];
+
+  for (const resolverAddress of resolvers) {
+    const resolver = new dns.Resolver();
+    resolver.setServers([resolverAddress]);
+    try {
+      const records = await resolver.resolveNs(domain);
+      if (records.length > 0) {
+        return records.map((nameServer) => normalizeNameServer(nameServer)).sort();
+      }
+    } catch (error) {
+      errors.push(`${resolverAddress}: ${error instanceof Error ? error.message : "lookup failed"}`);
+    }
+  }
+
+  try {
+    const records = await dns.resolveNs(domain);
+    if (records.length > 0) {
+      return records.map((nameServer) => normalizeNameServer(nameServer)).sort();
+    }
+  } catch (error) {
+    errors.push(`system: ${error instanceof Error ? error.message : "lookup failed"}`);
+  }
+
+  throw Object.assign(new Error(`No public nameservers found. Resolver checks: ${errors.join("; ") || "none"}`), { statusCode: 400 });
+}
+
 async function assertDomainUsesHostingNameServers(domain: string, nameServers: ActiveNameServer[]) {
   if (!env.REQUIRE_DOMAIN_NAMESERVER_MATCH) return;
 
@@ -69,9 +98,10 @@ async function assertDomainUsesHostingNameServers(domain: string, nameServers: A
 
   let actual: string[];
   try {
-    actual = (await dns.resolveNs(domain)).map((nameServer) => normalizeNameServer(nameServer)).sort();
-  } catch {
-    throw Object.assign(new Error(nameserverMismatchMessage(domain, expected, [])), { statusCode: 400 });
+    actual = await resolvePublicNameServers(domain);
+  } catch (error) {
+    const detail = error instanceof Error ? ` ${error.message}` : "";
+    throw Object.assign(new Error(`${nameserverMismatchMessage(domain, expected, [])}${detail}`), { statusCode: 400 });
   }
 
   const actualSet = new Set(actual);

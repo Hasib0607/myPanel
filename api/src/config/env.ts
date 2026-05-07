@@ -26,6 +26,7 @@ const envSchema = z.object({
   SYSAGENT_URL: z.string().url().default("http://127.0.0.1:5000"),
   VPS_IP: z.string().default("127.0.0.1"),
   REQUIRE_DOMAIN_NAMESERVER_MATCH: z.coerce.boolean().default(true),
+  DOMAIN_NAMESERVER_RESOLVERS: z.string().default("1.1.1.1,8.8.8.8,9.9.9.9"),
   FILE_MANAGER_ROOT: z.string().default("/var/www")
 });
 
