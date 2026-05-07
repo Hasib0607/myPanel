@@ -95,6 +95,48 @@ async function resolveNameServersWithDoh(domain: string, errors: string[]) {
   return [];
 }
 
+async function resolvePublicAddress(hostname: string, recordType: "A" | "AAAA") {
+  const resolvers = env.DOMAIN_NAMESERVER_RESOLVERS.split(",").map((resolver) => resolver.trim()).filter(Boolean);
+
+  for (const resolverAddress of resolvers) {
+    const resolver = new dns.Resolver();
+    resolver.setServers([resolverAddress]);
+    try {
+      const records = recordType === "A" ? await resolver.resolve4(hostname) : await resolver.resolve6(hostname);
+      if (records.length > 0) return records;
+    } catch {
+      // Try the next resolver.
+    }
+  }
+
+  try {
+    return recordType === "A" ? await dns.resolve4(hostname) : await dns.resolve6(hostname);
+  } catch {
+    return [];
+  }
+}
+
+async function vanityNameserverGlueMatches(domain: string, nameServers: ActiveNameServer[]) {
+  if (!env.ALLOW_VANITY_NAMESERVER_GLUE_FALLBACK) return false;
+
+  const vanityNameServers = nameServers.filter((nameServer) => normalizeNameServer(nameServer.hostname).endsWith(`.${domain}`));
+  if (vanityNameServers.length === 0) return false;
+
+  for (const nameServer of vanityNameServers) {
+    const hostname = normalizeNameServer(nameServer.hostname);
+    if (nameServer.ipv4) {
+      const records = await resolvePublicAddress(hostname, "A");
+      if (!records.includes(nameServer.ipv4)) return false;
+    }
+    if (nameServer.ipv6) {
+      const records = await resolvePublicAddress(hostname, "AAAA");
+      if (!records.includes(nameServer.ipv6)) return false;
+    }
+  }
+
+  return true;
+}
+
 async function resolvePublicNameServers(domain: string) {
   const resolvers = env.DOMAIN_NAMESERVER_RESOLVERS.split(",").map((resolver) => resolver.trim()).filter(Boolean);
   const errors: string[] = [];
@@ -139,13 +181,14 @@ async function assertDomainUsesHostingNameServers(domain: string, nameServers: A
   try {
     actual = await resolvePublicNameServers(domain);
   } catch (error) {
+    if (await vanityNameserverGlueMatches(domain, nameServers)) return;
     const detail = error instanceof Error ? ` ${error.message}` : "";
     throw Object.assign(new Error(`${nameserverMismatchMessage(domain, expected, [])}${detail}`), { statusCode: 400 });
   }
 
   const actualSet = new Set(actual);
   const allExpectedPresent = expected.every((nameServer) => actualSet.has(nameServer));
-  if (!allExpectedPresent) {
+  if (!allExpectedPresent && !(await vanityNameserverGlueMatches(domain, nameServers))) {
     throw Object.assign(new Error(nameserverMismatchMessage(domain, expected, actual)), { statusCode: 400 });
   }
 }
