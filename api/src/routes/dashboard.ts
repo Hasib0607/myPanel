@@ -19,8 +19,14 @@ export const dashboardRoutes: FastifyPluginAsync = async (app) => {
 
     let systemStats = null;
     let sysagentHealthy = false;
+    let productionServices: Array<{ name: string; port: number; status: "healthy" | "down" | "pending"; detail: string }> = [];
     try {
-      systemStats = await sysagent.stats();
+      const [stats, serviceStatus] = await Promise.all([
+        sysagent.stats(),
+        sysagent.services().catch(() => ({ items: [] }))
+      ]);
+      systemStats = stats;
+      productionServices = serviceStatus.items;
       sysagentHealthy = true;
     } catch {
       systemStats = { unavailable: true };
@@ -44,10 +50,12 @@ export const dashboardRoutes: FastifyPluginAsync = async (app) => {
 
     services.push(
       { name: "System Agent", port: 5000, status: sysagentHealthy ? "healthy" : "down", detail: sysagentHealthy ? "localhost API reachable" : "sysagent unavailable" },
-      { name: "Nginx", port: 80, status: "pending", detail: "production service check pending" },
-      { name: "BIND9", port: 53, status: "pending", detail: "DNS module pending" },
-      { name: "Postfix", port: 25, status: "pending", detail: "mail module pending" },
-      { name: "Dovecot", port: 993, status: "pending", detail: "mail module pending" }
+      ...(productionServices.length > 0 ? productionServices : [
+        { name: "Nginx", port: 80, status: "down" as const, detail: "sysagent service check unavailable" },
+        { name: "BIND9", port: 53, status: "down" as const, detail: "sysagent service check unavailable" },
+        { name: "Postfix", port: 25, status: "down" as const, detail: "sysagent service check unavailable" },
+        { name: "Dovecot", port: 993, status: "down" as const, detail: "sysagent service check unavailable" }
+      ])
     );
 
     return {

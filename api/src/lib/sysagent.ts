@@ -18,6 +18,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const sysagent = {
   stats: () => request("/system/stats"),
+  services: () => request<{ items: Array<{ name: string; port: number; status: "healthy" | "down"; detail: string }> }>("/system/services"),
   firewallRules: () => request("/firewall/rules"),
   firewallStatus: () => request("/firewall/status"),
   applyFirewallRule: (body: unknown) =>

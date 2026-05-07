@@ -91,7 +91,22 @@ for service in $SERVICES; do
 done
 
 if command -v curl >/dev/null 2>&1; then
-  run curl --fail --silent --show-error "$HEALTH_URL"
+  log "Waiting for API health at $HEALTH_URL"
+
+  for i in {1..20}; do
+    if curl --fail --silent --show-error "$HEALTH_URL" 2>&1 | tee -a "$LOG_FILE"; then
+      log "API health check passed"
+      break
+    fi
+
+    log "API not ready yet, retry $i/20..."
+    sleep 2
+
+    if [ "$i" -eq 20 ]; then
+      log "API health check failed after retries"
+      exit 7
+    fi
+  done
 else
   log "curl not installed; skipping API health check"
 fi
