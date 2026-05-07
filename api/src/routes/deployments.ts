@@ -97,6 +97,7 @@ function slugify(value: string) {
 function includeFullDeployment() {
   return {
     domain: true,
+    domainBindings: { include: { domain: true }, orderBy: [{ role: "asc" as const }, { createdAt: "asc" as const }] },
     env: { orderBy: { key: "asc" as const } },
     releases: { orderBy: { createdAt: "desc" as const }, take: 10 },
     logs: { orderBy: { createdAt: "desc" as const }, take: 100 }
@@ -107,6 +108,15 @@ async function findDeployment(idOrSlug: string) {
   return prisma.deployment.findFirstOrThrow({
     where: { OR: [{ id: idOrSlug }, { slug: idOrSlug }] },
     include: includeFullDeployment()
+  });
+}
+
+async function syncPrimaryDomainBinding(deploymentId: string, domainId: string | null | undefined) {
+  if (!domainId) return;
+  await prisma.deploymentDomain.upsert({
+    where: { deploymentId_domainId: { deploymentId, domainId } },
+    update: { role: "primary" },
+    create: { deploymentId, domainId, role: "primary" }
   });
 }
 
@@ -149,6 +159,16 @@ async function nextAvailablePort() {
     if (!used.has(port)) return port;
   }
   throw new Error("No available deployment ports");
+}
+
+async function uniqueDeploymentSlug(base: string, existingDeploymentId?: string) {
+  const normalized = slugify(base || "app") || "app";
+  for (let index = 0; index < 100; index += 1) {
+    const candidate = index === 0 ? normalized : `${normalized}-${index + 1}`;
+    const existing = await prisma.deployment.findUnique({ where: { slug: candidate }, select: { id: true } });
+    if (!existing || existing.id === existingDeploymentId) return candidate;
+  }
+  return `${normalized}-${Date.now()}`;
 }
 
 async function preflight(body: z.infer<typeof preflightSchema>, deploymentId?: string) {
@@ -286,7 +306,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     const [items, total] = await Promise.all([
       prisma.deployment.findMany({
         where,
-        include: { domain: true, releases: { orderBy: { createdAt: "desc" }, take: 1 }, _count: { select: { releases: true, logs: true, env: true } } },
+        include: { domain: true, domainBindings: { include: { domain: true }, orderBy: [{ role: "asc" }, { createdAt: "asc" }] }, releases: { orderBy: { createdAt: "desc" }, take: 1 }, _count: { select: { releases: true, logs: true, env: true } } },
         orderBy: { createdAt: "desc" },
         skip: (query.page - 1) * query.pageSize,
         take: query.pageSize
@@ -450,25 +470,48 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     }).parse(request.body);
     const port = body.port ?? await nextAvailablePort();
     const rootPath = body.rootPath ?? path.join("D:/Projects/Cpanel/.local-www", body.githubRepo);
-    const deployment = await prisma.deployment.create({
-      data: {
-        ...body,
-        slug: body.slug || slugify(body.name || body.githubRepo),
+    const existingDeployment = await prisma.deployment.findFirst({
+      where: {
         sourceProvider: "GITHUB",
-        gitUrl: body.gitUrl ?? `https://github.com/${body.githubOwner}/${body.githubRepo}.git`,
-        repoUrl: body.repoUrl ?? `https://github.com/${body.githubOwner}/${body.githubRepo}`,
-        rootPath,
-        port,
-        status: "STOPPED"
+        githubOwner: { equals: body.githubOwner, mode: "insensitive" },
+        githubRepo: { equals: body.githubRepo, mode: "insensitive" }
       }
     });
-    await addLog(deployment.id, "QUEUED", "GitHub project imported", undefined, {
+
+    const deployment = existingDeployment
+      ? await prisma.deployment.update({
+          where: { id: existingDeployment.id },
+          data: {
+            ...body,
+            slug: await uniqueDeploymentSlug(body.slug || body.name || body.githubRepo, existingDeployment.id),
+            sourceProvider: "GITHUB",
+            gitUrl: body.gitUrl ?? `https://github.com/${body.githubOwner}/${body.githubRepo}.git`,
+            repoUrl: body.repoUrl ?? `https://github.com/${body.githubOwner}/${body.githubRepo}`,
+            rootPath,
+            port: body.port ?? existingDeployment.port,
+            status: "STOPPED"
+          }
+        })
+      : await prisma.deployment.create({
+          data: {
+            ...body,
+            slug: await uniqueDeploymentSlug(body.slug || body.name || body.githubRepo),
+            sourceProvider: "GITHUB",
+            gitUrl: body.gitUrl ?? `https://github.com/${body.githubOwner}/${body.githubRepo}.git`,
+            repoUrl: body.repoUrl ?? `https://github.com/${body.githubOwner}/${body.githubRepo}`,
+            rootPath,
+            port,
+            status: "STOPPED"
+          }
+        });
+    await addLog(deployment.id, "QUEUED", existingDeployment ? "GitHub project settings refreshed" : "GitHub project imported", undefined, {
       repository: `${body.githubOwner}/${body.githubRepo}`,
       branch: body.branch,
       rootPath,
       autoDeployEnabled: body.autoDeployEnabled
     });
-    return reply.code(201).send(await findDeployment(deployment.id));
+    await syncPrimaryDomainBinding(deployment.id, deployment.domainId);
+    return reply.code(existingDeployment ? 200 : 201).send(await findDeployment(deployment.id));
   });
 
   app.post("/", async (request, reply) => {
@@ -476,13 +519,14 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     const deployment = await prisma.deployment.create({
       data: {
         ...body,
-        slug: body.slug || slugify(body.name),
+        slug: await uniqueDeploymentSlug(body.slug || body.name),
         status: "STOPPED",
         env: {
           create: Object.entries(body.envVars).map(([key, value]) => ({ key, value, isSecret: false }))
         }
       }
     });
+    await syncPrimaryDomainBinding(deployment.id, deployment.domainId);
     await addLog(deployment.id, "QUEUED", "Project created");
     await audit(request, { action: "CREATE", resource: "deployment", resourceId: deployment.id, description: `Created deployment ${deployment.name}` });
     return reply.code(201).send(await findDeployment(deployment.id));
@@ -504,6 +548,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
         slug: body.slug ?? undefined
       }
     });
+    await syncPrimaryDomainBinding(deployment.id, body.domainId);
     return findDeployment(deployment.id);
   });
 
@@ -516,6 +561,60 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     }
     await prisma.deployment.delete({ where: { id: deployment.id } });
     await audit(request, { action: "DELETE", resource: "deployment", resourceId: deployment.id, description: `Deleted deployment ${deployment.slug}` });
+    return { ok: true };
+  });
+
+  app.get("/:deploymentId/domains", async (request) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const deployment = await findDeployment(deploymentId);
+    return deployment.domainBindings;
+  });
+
+  app.post("/:deploymentId/domains", async (request, reply) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const body = z.object({ domainId: z.string(), primary: z.boolean().default(false) }).parse(request.body ?? {});
+    const deployment = await findDeployment(deploymentId);
+    await prisma.domain.findUniqueOrThrow({ where: { id: body.domainId } });
+    const binding = await prisma.deploymentDomain.upsert({
+      where: { deploymentId_domainId: { deploymentId: deployment.id, domainId: body.domainId } },
+      update: { role: body.primary ? "primary" : "alias" },
+      create: { deploymentId: deployment.id, domainId: body.domainId, role: body.primary ? "primary" : "alias" },
+      include: { domain: true }
+    });
+    if (body.primary || !deployment.domainId) {
+      await prisma.deployment.update({ where: { id: deployment.id }, data: { domainId: body.domainId } });
+      await prisma.deploymentDomain.updateMany({ where: { deploymentId: deployment.id, domainId: { not: body.domainId }, role: "primary" }, data: { role: "alias" } });
+    }
+    await audit(request, { action: "UPDATE", resource: "deployment", resourceId: deployment.id, description: `Bound domain ${binding.domain.name} to ${deployment.slug}` });
+    return reply.code(201).send(binding);
+  });
+
+  app.patch("/:deploymentId/domains/:domainId/primary", async (request) => {
+    const { deploymentId, domainId } = z.object({ deploymentId: z.string(), domainId: z.string() }).parse(request.params);
+    const deployment = await findDeployment(deploymentId);
+    const binding = await prisma.deploymentDomain.findUniqueOrThrow({
+      where: { deploymentId_domainId: { deploymentId: deployment.id, domainId } },
+      include: { domain: true }
+    });
+    await prisma.$transaction([
+      prisma.deployment.update({ where: { id: deployment.id }, data: { domainId } }),
+      prisma.deploymentDomain.updateMany({ where: { deploymentId: deployment.id }, data: { role: "alias" } }),
+      prisma.deploymentDomain.update({ where: { id: binding.id }, data: { role: "primary" } })
+    ]);
+    await audit(request, { action: "UPDATE", resource: "deployment", resourceId: deployment.id, description: `Set primary domain ${binding.domain.name} for ${deployment.slug}` });
+    return { ok: true };
+  });
+
+  app.delete("/:deploymentId/domains/:domainId", async (request) => {
+    const { deploymentId, domainId } = z.object({ deploymentId: z.string(), domainId: z.string() }).parse(request.params);
+    const deployment = await findDeployment(deploymentId);
+    await prisma.deploymentDomain.delete({ where: { deploymentId_domainId: { deploymentId: deployment.id, domainId } } });
+    if (deployment.domainId === domainId) {
+      const next = await prisma.deploymentDomain.findFirst({ where: { deploymentId: deployment.id }, orderBy: { createdAt: "asc" } });
+      await prisma.deployment.update({ where: { id: deployment.id }, data: { domainId: next?.domainId ?? null } });
+      if (next) await prisma.deploymentDomain.update({ where: { id: next.id }, data: { role: "primary" } });
+    }
+    await audit(request, { action: "UPDATE", resource: "deployment", resourceId: deployment.id, description: `Removed a domain from ${deployment.slug}` });
     return { ok: true };
   });
 

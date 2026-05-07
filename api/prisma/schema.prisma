@@ -170,6 +170,7 @@ model Domain {
   dnsRecords   DnsRecord[]
   mailAccounts MailAccount[]
   deployments  Deployment[]
+  deploymentBindings DeploymentDomain[]
 
   @@index([name])
   @@map("domains")
@@ -307,6 +308,7 @@ model Deployment {
   createdAt             DateTime                  @default(now()) @map("created_at")
   updatedAt             DateTime                  @updatedAt @map("updated_at")
   domain                Domain?                   @relation(fields: [domainId], references: [id], onDelete: SetNull)
+  domainBindings        DeploymentDomain[]
   env                   DeploymentEnvVar[]
   releases              DeploymentRelease[]
   logs                  DeploymentLog[]
@@ -316,6 +318,20 @@ model Deployment {
   @@index([sourceProvider])
   @@index([githubOwner, githubRepo])
   @@map("deployments")
+}
+
+model DeploymentDomain {
+  id           String     @id @default(cuid())
+  deploymentId String     @map("deployment_id")
+  domainId     String     @map("domain_id")
+  role         String     @default("alias")
+  createdAt    DateTime   @default(now()) @map("created_at")
+  deployment   Deployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+  domain       Domain     @relation(fields: [domainId], references: [id], onDelete: Cascade)
+
+  @@unique([deploymentId, domainId])
+  @@index([domainId])
+  @@map("deployment_domains")
 }
 
 model DeploymentEnvVar {

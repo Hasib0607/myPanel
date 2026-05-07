@@ -1,35 +1,18 @@
 "use client";
 
-import Link from "next/link";
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Clipboard, Filter, FolderGit2, GitBranch, Github, Play, Plus, RefreshCw, Search, Square, Wand2, X } from "lucide-react";
-import { apiGet, apiGetText, apiPost, apiPut } from "@/lib/api";
-import type { Deployment, DeploymentFramework, DeploymentListResponse, DetectionResponse, PreflightResponse, QueueResponse, DeploymentSourceProvider } from "./deployment-types";
+import { CheckCircle2, Clipboard, Filter, FolderGit2, GitBranch, Github, Globe2, KeyRound, Pencil, Play, Plus, RefreshCw, Search, Settings2, Square, Trash2, Wand2, X } from "lucide-react";
+import { apiDelete, apiDeleteBody, apiGet, apiGetText, apiPatch, apiPost, apiPut } from "@/lib/api";
+import type { Deployment, DeploymentDomainBinding, DeploymentEnvVar, DeploymentFramework, DeploymentListResponse, DetectionResponse, PreflightResponse, QueueResponse, DeploymentSourceProvider } from "./deployment-types";
 import { frameworkOptions, sourceOptions } from "./deployment-types";
-import { EmptyState, ResultNotice, actionIcon, formatDate, healthBadge, queryString, statusBadge } from "./deployment-ui";
+import { ResultNotice, actionIcon, formatDate, healthBadge, queryString, statusBadge } from "./deployment-ui";
 
-type GithubRepo = {
-  id?: string;
-  owner: string;
-  name: string;
-  fullName: string;
-  private: boolean;
-  defaultBranch: string;
-  updatedAt?: string;
-};
-
-type GithubRepoResponse = {
-  connected: boolean;
-  dryRun: boolean;
-  items: GithubRepo[];
-  note?: string;
-};
-
-type GithubDetectResponse = DetectionResponse & {
-  repository: string;
-  dryRun: boolean;
-};
+type GithubRepo = { id?: string; owner: string; name: string; fullName: string; private: boolean; defaultBranch: string; updatedAt?: string };
+type GithubRepoResponse = { connected: boolean; dryRun: boolean; items: GithubRepo[]; note?: string };
+type GithubDetectResponse = DetectionResponse & { repository: string; dryRun: boolean };
+type Domain = { id: string; name: string };
+type DomainListResponse = { items: Domain[] };
 
 type Draft = {
   name: string;
@@ -50,15 +33,6 @@ type Draft = {
   outputDirectory: string;
   envText: string;
   dbType: "" | "POSTGRESQL" | "MYSQL";
-};
-
-type Domain = {
-  id: string;
-  name: string;
-};
-
-type DomainListResponse = {
-  items: Domain[];
 };
 
 const initialDraft: Draft = {
@@ -82,29 +56,22 @@ const initialDraft: Draft = {
   dbType: ""
 };
 
+function slugify(value: string) {
+  return value.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
 function deploymentRootForRepo(repoName: string) {
   return `/var/www/deployments/${slugify(repoName)}`;
 }
 
 function parseEnv(text: string) {
-  return Object.fromEntries(
-    text
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line && !line.startsWith("#") && line.includes("="))
-      .map((line) => {
-        const index = line.indexOf("=");
-        return [line.slice(0, index).trim(), line.slice(index + 1)];
-      })
-  );
-}
-
-function slugify(value: string) {
-  return value.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return Object.fromEntries(text.split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith("#") && line.includes("=")).map((line) => {
+    const index = line.indexOf("=");
+    return [line.slice(0, index).trim(), line.slice(index + 1)];
+  }));
 }
 
 function formPayload(draft: Draft) {
-  const port = Number(draft.port);
   return {
     name: draft.name,
     slug: draft.slug || slugify(draft.name),
@@ -118,7 +85,7 @@ function formPayload(draft: Draft) {
     branch: draft.branch || "main",
     rootPath: draft.rootPath,
     rootDirectory: draft.rootDirectory || ".",
-    port,
+    port: Number(draft.port),
     installCommand: draft.installCommand || null,
     buildCommand: draft.buildCommand || null,
     startCommand: draft.startCommand || null,
@@ -130,19 +97,58 @@ function formPayload(draft: Draft) {
   };
 }
 
+function draftFromDeployment(deployment: Deployment): Draft {
+  return {
+    name: deployment.name,
+    slug: deployment.slug,
+    domainId: deployment.domainId ?? "",
+    sourceProvider: deployment.sourceProvider,
+    framework: deployment.framework,
+    gitUrl: deployment.gitUrl ?? "",
+    githubOwner: deployment.githubOwner ?? "",
+    githubRepo: deployment.githubRepo ?? "",
+    branch: deployment.branch,
+    rootPath: deployment.rootPath,
+    rootDirectory: deployment.rootDirectory,
+    port: String(deployment.port),
+    installCommand: deployment.installCommand ?? "",
+    buildCommand: deployment.buildCommand ?? "",
+    startCommand: deployment.startCommand ?? "",
+    outputDirectory: deployment.outputDirectory ?? "",
+    envText: Object.entries((deployment.env ?? []).reduce<Record<string, string>>((acc, item) => {
+      if (!item.isSecret && item.value !== null) acc[item.key] = item.value;
+      return acc;
+    }, {})).map(([key, value]) => `${key}=${value}`).join("\n") || "NODE_ENV=production",
+    dbType: deployment.dbType ?? ""
+  };
+}
+
+function okNotice(message: string) {
+  return !/could|error|failed|invalid/i.test(message);
+}
+
 export function DeploymentsClient() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
+  const [draftSearch, setDraftSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [sourceFilter, setSourceFilter] = useState("");
-  const [draftSearch, setDraftSearch] = useState("");
+  const [activeTab, setActiveTab] = useState<"overview" | "domains" | "env" | "settings">("overview");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [repoPickerOpen, setRepoPickerOpen] = useState(false);
+  const [editingOpen, setEditingOpen] = useState(false);
   const [draft, setDraft] = useState<Draft>(initialDraft);
+  const [editDraft, setEditDraft] = useState<Draft>(initialDraft);
   const [repoSearch, setRepoSearch] = useState("");
   const [selectedRepo, setSelectedRepo] = useState<GithubRepo | null>(null);
-  const [repoPickerOpen, setRepoPickerOpen] = useState(false);
   const [githubToken, setGithubToken] = useState("");
   const [githubUsername, setGithubUsername] = useState("");
-  const [copyingLogsFor, setCopyingLogsFor] = useState<string | null>(null);
+  const [domainToAdd, setDomainToAdd] = useState("");
+  const [envKey, setEnvKey] = useState("");
+  const [envValue, setEnvValue] = useState("");
+  const [envSecret, setEnvSecret] = useState(false);
+  const [deleteText, setDeleteText] = useState("");
   const [notice, setNotice] = useState("");
 
   const deployments = useQuery({
@@ -150,153 +156,84 @@ export function DeploymentsClient() {
     queryFn: () => apiGet<DeploymentListResponse>(`/deployments?${queryString({ search, status: statusFilter, sourceProvider: sourceFilter, page: 1, pageSize: 50 })}`),
     refetchInterval: 8000
   });
-  const domains = useQuery({
-    queryKey: ["domains", "deployment-create"],
-    queryFn: () => apiGet<DomainListResponse>("/domains?page=1&pageSize=100")
-  });
-  const nextPort = useQuery({
-    queryKey: ["deployments-next-port"],
-    queryFn: () => apiGet<{ port: number }>("/deployments/ports/next")
-  });
-  const repos = useQuery({
-    enabled: repoPickerOpen,
-    queryKey: ["deployments-github-repos", repoSearch],
-    queryFn: () => apiGet<GithubRepoResponse>(`/deployments/github/repos?${queryString({ search: repoSearch })}`)
-  });
-  const githubConnection = useQuery({
-    enabled: repoPickerOpen,
-    queryKey: ["deployments-github-connection"],
-    queryFn: () => apiGet<{ connected: boolean; username: string | null; scopes: string[] }>("/deployments/github/connection")
-  });
+  const domains = useQuery({ queryKey: ["domains", "deployment-create"], queryFn: () => apiGet<DomainListResponse>("/domains?page=1&pageSize=100") });
+  const nextPort = useQuery({ queryKey: ["deployments-next-port"], queryFn: () => apiGet<{ port: number }>("/deployments/ports/next") });
+  const repos = useQuery({ enabled: repoPickerOpen, queryKey: ["deployments-github-repos", repoSearch], queryFn: () => apiGet<GithubRepoResponse>(`/deployments/github/repos?${queryString({ search: repoSearch })}`) });
+  const githubConnection = useQuery({ enabled: repoPickerOpen, queryKey: ["deployments-github-connection"], queryFn: () => apiGet<{ connected: boolean; username: string | null; scopes: string[] }>("/deployments/github/connection") });
+
+  const selected = useMemo(() => (deployments.data?.items ?? []).find((item) => item.id === selectedId) ?? deployments.data?.items?.[0] ?? null, [deployments.data?.items, selectedId]);
+
+  useEffect(() => {
+    if (!selectedId && deployments.data?.items?.[0]) setSelectedId(deployments.data.items[0].id);
+  }, [deployments.data?.items, selectedId]);
 
   useEffect(() => {
     if (!draft.port && nextPort.data?.port) setDraft((current) => ({ ...current, port: String(nextPort.data.port) }));
   }, [draft.port, nextPort.data?.port]);
 
+  const invalidateDeployments = async () => {
+    await queryClient.invalidateQueries({ queryKey: ["deployments"] });
+    await queryClient.invalidateQueries({ queryKey: ["deployments-next-port"] });
+  };
+
   const createDeployment = useMutation({
     mutationFn: () => apiPost<Deployment>("/deployments", formPayload(draft)),
     onSuccess: async (deployment) => {
-      setNotice(`${deployment.name} created. Ready for deploy.`);
+      setNotice(`${deployment.name} created.`);
+      setSelectedId(deployment.id);
+      setCreateOpen(false);
       setDraft({ ...initialDraft, port: String((nextPort.data?.port ?? deployment.port) + 1) });
-      await queryClient.invalidateQueries({ queryKey: ["deployments"] });
-      await queryClient.invalidateQueries({ queryKey: ["deployments-next-port"] });
+      await invalidateDeployments();
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not create deployment")
   });
 
-  function selectRepo(repo: GithubRepo) {
-    setSelectedRepo(repo);
-    setDraft((current) => ({
-      ...current,
-      name: current.name || repo.name,
-      slug: current.slug || slugify(repo.name),
-      githubOwner: repo.owner,
-      githubRepo: repo.name,
-      gitUrl: `https://github.com/${repo.fullName}.git`,
-      branch: repo.defaultBranch,
-      rootPath: deploymentRootForRepo(repo.name),
-      sourceProvider: "GITHUB"
-    }));
-    setNotice(`${repo.fullName} selected. Review settings, then import and deploy.`);
-  }
-
-  const importAndDeployGithub = useMutation({
-    mutationFn: async (repo?: GithubRepo) => {
-      const targetRepo = repo ?? selectedRepo;
-      if (!targetRepo) throw new Error("Select a GitHub repository first");
-      const detection = await apiGet<GithubDetectResponse>(
-        `/deployments/github/repos/${encodeURIComponent(targetRepo.owner)}/${encodeURIComponent(targetRepo.name)}/detect?${queryString({ branch: targetRepo.defaultBranch, rootDirectory: draft.rootDirectory || "." })}`
-      );
-      const suggestions = detection.suggestions;
-      const repoDraft = {
-        ...draft,
-        name: draft.name || targetRepo.name,
-        slug: draft.slug || slugify(targetRepo.name),
-        githubOwner: targetRepo.owner,
-        githubRepo: targetRepo.name,
-        gitUrl: `https://github.com/${targetRepo.fullName}.git`,
-        branch: draft.branch || targetRepo.defaultBranch,
-        rootPath: deploymentRootForRepo(targetRepo.name),
-        sourceProvider: "GITHUB" as const,
-        framework: detection.detected,
-        installCommand: suggestions.installCommand ?? "",
-        buildCommand: suggestions.buildCommand ?? "",
-        startCommand: suggestions.startCommand ?? "",
-        outputDirectory: suggestions.outputDirectory ?? ""
-      };
-      const deployment = await apiPost<Deployment>("/deployments/github/import", {
-        ...formPayload(repoDraft),
-        githubOwner: targetRepo.owner,
-        githubRepo: targetRepo.name
-      });
-      const queue = await apiPost<QueueResponse>(`/deployments/${deployment.slug}/deploy`);
-      return { deployment, queue, detection };
+  const updateDeployment = useMutation({
+    mutationFn: () => {
+      if (!selected) throw new Error("Select a project first");
+      return apiPatch<Deployment>(`/deployments/${selected.slug}`, formPayload(editDraft));
     },
-    onSuccess: async ({ deployment, detection }) => {
-      setNotice(`${deployment.name} imported, ${detection.detected} detected, and deployment queued.`);
-      setSelectedRepo(null);
-      setRepoPickerOpen(false);
-      await queryClient.invalidateQueries({ queryKey: ["deployments"] });
-      await queryClient.invalidateQueries({ queryKey: ["deployments-next-port"] });
+    onSuccess: async (deployment) => {
+      setNotice(`${deployment.name} updated.`);
+      setEditingOpen(false);
+      setSelectedId(deployment.id);
+      await invalidateDeployments();
     },
-    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not import and deploy repository")
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not update deployment")
   });
 
   const detect = useMutation({
-    mutationFn: () => apiPost<DetectionResponse>("/deployments/detect", { rootPath: draft.rootPath }),
-    onSuccess: (result) => {
-      setDraft((current) => ({
-        ...current,
-        framework: result.detected,
-        installCommand: result.suggestions.installCommand ?? "",
-        buildCommand: result.suggestions.buildCommand ?? "",
-        startCommand: result.suggestions.startCommand ?? "",
-        outputDirectory: result.suggestions.outputDirectory ?? ""
-      }));
+    mutationFn: (target: "create" | "edit") => apiPost<DetectionResponse>("/deployments/detect", { rootPath: target === "create" ? draft.rootPath : editDraft.rootPath }),
+    onSuccess: (result, target) => {
+      const apply = (current: Draft) => ({ ...current, framework: result.detected, installCommand: result.suggestions.installCommand ?? "", buildCommand: result.suggestions.buildCommand ?? "", startCommand: result.suggestions.startCommand ?? "", outputDirectory: result.suggestions.outputDirectory ?? "" });
+      if (target === "create") setDraft(apply);
+      else setEditDraft(apply);
       setNotice(`${result.detected} detected: ${result.reason}`);
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Framework detection failed")
-  });
-
-  const preflight = useMutation({
-    mutationFn: () => apiPost<PreflightResponse>("/deployments/preflight", {
-      rootPath: draft.rootPath,
-      domainId: draft.domainId || null,
-      port: Number(draft.port),
-      dbType: draft.dbType || null,
-      gitUrl: draft.gitUrl || null
-    }),
-    onSuccess: (result) => setNotice(result.ok ? "Preflight passed." : `Preflight needs attention: ${result.checks.filter((check) => !check.ok).map((check) => check.label).join(", ")}`),
-    onError: (error) => setNotice(error instanceof Error ? error.message : "Preflight failed")
   });
 
   const action = useMutation({
     mutationFn: ({ deployment, name }: { deployment: Deployment; name: "deploy" | "start" | "stop" | "restart" }) => apiPost<QueueResponse>(`/deployments/${deployment.slug}/${name}`),
     onSuccess: async (_result, variables) => {
       setNotice(`${variables.name} requested for ${variables.deployment.name}.`);
-      await queryClient.invalidateQueries({ queryKey: ["deployments"] });
+      await invalidateDeployments();
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Action failed")
   });
 
   const copyLogs = useMutation({
     mutationFn: async (deployment: Deployment) => {
-      setCopyingLogsFor(deployment.id);
       const text = await apiGetText(`/deployments/${deployment.slug}/logs/export?limit=500`);
       await navigator.clipboard.writeText(text);
       return deployment;
     },
-    onSuccess: (deployment) => setNotice(`${deployment.name} logs copied. You can paste/share it now.`),
-    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not copy logs"),
-    onSettled: () => setCopyingLogsFor(null)
+    onSuccess: (deployment) => setNotice(`${deployment.name} logs copied.`),
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not copy logs")
   });
 
   const saveGithubToken = useMutation({
-    mutationFn: () => apiPut<{ connected: boolean; username: string | null; scopes: string[] }>("/deployments/github/connection", {
-      username: githubUsername || null,
-      token: githubToken,
-      scopes: []
-    }),
+    mutationFn: () => apiPut("/deployments/github/connection", { username: githubUsername || null, token: githubToken, scopes: [] }),
     onSuccess: async () => {
       setGithubToken("");
       setNotice("GitHub token connected. Repository list refreshed.");
@@ -306,308 +243,274 @@ export function DeploymentsClient() {
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not connect GitHub token")
   });
 
+  const importAndDeployGithub = useMutation({
+    mutationFn: async (repo: GithubRepo) => {
+      const detection = await apiGet<GithubDetectResponse>(`/deployments/github/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/detect?${queryString({ branch: repo.defaultBranch, rootDirectory: draft.rootDirectory || "." })}`);
+      const repoDraft = { ...draft, name: repo.name, slug: slugify(repo.name), githubOwner: repo.owner, githubRepo: repo.name, gitUrl: `https://github.com/${repo.fullName}.git`, branch: repo.defaultBranch, rootPath: deploymentRootForRepo(repo.name), sourceProvider: "GITHUB" as const, framework: detection.detected, installCommand: detection.suggestions.installCommand ?? "", buildCommand: detection.suggestions.buildCommand ?? "", startCommand: detection.suggestions.startCommand ?? "", outputDirectory: detection.suggestions.outputDirectory ?? "" };
+      const deployment = await apiPost<Deployment>("/deployments/github/import", { ...formPayload(repoDraft), githubOwner: repo.owner, githubRepo: repo.name });
+      await apiPost<QueueResponse>(`/deployments/${deployment.slug}/deploy`);
+      return { deployment, detection };
+    },
+    onSuccess: async ({ deployment, detection }) => {
+      setNotice(`${deployment.name} imported, ${detection.detected} detected, and deploy queued.`);
+      setCreateOpen(false);
+      setRepoPickerOpen(false);
+      setSelectedId(deployment.id);
+      await invalidateDeployments();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not import repository")
+  });
+
+  const addDomain = useMutation({
+    mutationFn: () => {
+      if (!selected) throw new Error("Select a project first");
+      return apiPost<DeploymentDomainBinding>(`/deployments/${selected.slug}/domains`, { domainId: domainToAdd, primary: !selected.domainId });
+    },
+    onSuccess: async () => {
+      setDomainToAdd("");
+      setNotice("Domain added to project.");
+      await invalidateDeployments();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not add domain")
+  });
+
+  const setPrimaryDomain = useMutation({
+    mutationFn: (binding: DeploymentDomainBinding) => apiPatch(`/deployments/${selected?.slug}/domains/${binding.domainId}/primary`, {}),
+    onSuccess: async () => {
+      setNotice("Primary domain updated.");
+      await invalidateDeployments();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not update primary domain")
+  });
+
+  const removeDomain = useMutation({
+    mutationFn: (binding: DeploymentDomainBinding) => apiDelete(`/deployments/${selected?.slug}/domains/${binding.domainId}`),
+    onSuccess: async () => {
+      setNotice("Domain removed.");
+      await invalidateDeployments();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not remove domain")
+  });
+
+  const saveEnv = useMutation({
+    mutationFn: () => {
+      if (!selected) throw new Error("Select a project first");
+      return apiPut<DeploymentEnvVar>(`/deployments/${selected.slug}/env/${encodeURIComponent(envKey)}`, { value: envValue, isSecret: envSecret });
+    },
+    onSuccess: async () => {
+      setNotice(`${envKey} saved.`);
+      setEnvKey("");
+      setEnvValue("");
+      setEnvSecret(false);
+      await invalidateDeployments();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not save env")
+  });
+
+  const removeEnv = useMutation({
+    mutationFn: (key: string) => apiDelete(`/deployments/${selected?.slug}/env/${encodeURIComponent(key)}`),
+    onSuccess: async () => {
+      setNotice("Environment variable removed.");
+      await invalidateDeployments();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not remove env")
+  });
+
+  const deleteProject = useMutation({
+    mutationFn: () => {
+      if (!selected) throw new Error("Select a project first");
+      return apiDeleteBody(`/deployments/${selected.slug}`, { confirmSlug: deleteText });
+    },
+    onSuccess: async () => {
+      setNotice("Project deleted.");
+      setDeleteText("");
+      setSelectedId(null);
+      await invalidateDeployments();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not delete project")
+  });
+
   function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSearch(draftSearch.trim());
   }
 
+  function openEdit() {
+    if (!selected) return;
+    setEditDraft(draftFromDeployment(selected));
+    setEditingOpen(true);
+  }
+
+  const tabs = [
+    { key: "overview", label: "Overview" },
+    { key: "domains", label: "Domains" },
+    { key: "env", label: "Environment" },
+    { key: "settings", label: "Settings" }
+  ] as const;
+
   return (
-    <section className="grid h-[calc(100vh-81px)] grid-cols-[410px_minmax(620px,1fr)] gap-6 overflow-hidden p-8">
-      <aside className="min-h-0 overflow-auto rounded-md border border-panel-line bg-white">
-        <div className="border-b border-panel-line p-4">
-          <div className="flex items-center gap-2 text-sm font-semibold">
-            <Plus size={16} />
-            New Project
+    <section className="flex h-[calc(100vh-81px)] flex-col overflow-hidden bg-slate-50">
+      <div className="border-b border-panel-line bg-white px-8 py-5">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-semibold text-panel-ink">Deployments</h1>
+            <p className="mt-1 text-sm text-panel-muted">Import, deploy, operate, and tune projects from one cockpit.</p>
           </div>
-          <div className="mt-1 text-xs text-panel-muted">GitHub, Git URL, file root, commands, env, port and DB in one pass.</div>
+          <button className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-4 text-sm font-semibold text-white" onClick={() => setCreateOpen(true)} type="button"><Plus size={16} />Create Project</button>
         </div>
+      </div>
 
-        <div className="space-y-4 p-4">
-          <div className="grid grid-cols-2 gap-2">
-            {sourceOptions.map((source) => (
-              <button className={`h-9 rounded-md border text-xs font-semibold ${draft.sourceProvider === source ? "border-panel-accent bg-teal-50 text-panel-accent" : "border-panel-line hover:bg-slate-50"}`} key={source} onClick={() => {
-                setDraft({ ...draft, sourceProvider: source });
-                if (source === "GITHUB") setRepoPickerOpen(true);
-              }} type="button">
-                {source.replace("_", " ")}
-              </button>
-            ))}
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <label className="space-y-1 text-xs font-medium text-panel-muted">
-              Project name
-              <input className="h-9 w-full rounded-md border border-panel-line px-3 text-sm text-panel-ink" onChange={(event) => setDraft({ ...draft, name: event.target.value, slug: draft.slug || slugify(event.target.value) })} placeholder="my app" value={draft.name} />
-            </label>
-            <label className="space-y-1 text-xs font-medium text-panel-muted">
-              Slug
-              <input className="h-9 w-full rounded-md border border-panel-line px-3 text-sm text-panel-ink" onChange={(event) => setDraft({ ...draft, slug: event.target.value })} placeholder="my-app" value={draft.slug} />
-            </label>
-          </div>
-
-          <label className="space-y-1 text-xs font-medium text-panel-muted">
-            Domain
-            <select className="h-9 w-full rounded-md border border-panel-line px-2 text-sm text-panel-ink" onChange={(event) => setDraft({ ...draft, domainId: event.target.value })} value={draft.domainId}>
-              <option value="">No domain yet</option>
-              {(domains.data?.items ?? []).map((domain) => <option key={domain.id} value={domain.id}>{domain.name}</option>)}
-            </select>
-          </label>
-
-          {draft.sourceProvider === "GITHUB" ? (
-            <div className="rounded-md border border-panel-line p-3">
-              <div className="mb-2 flex items-center justify-between gap-2 text-xs font-semibold uppercase text-panel-muted">
-                <span className="flex items-center gap-2">
-                  <Github size={15} />
-                  GitHub Import
-                </span>
-                <button className="rounded border border-panel-line px-2 py-1 text-[11px] text-panel-ink hover:bg-slate-50" onClick={() => setRepoPickerOpen(true)} type="button">
-                  Choose repo
-                </button>
-              </div>
-              {selectedRepo ? (
-                <div className="mt-3 rounded-md bg-slate-50 p-2 text-xs">
-                  <div className="font-semibold text-panel-ink">{selectedRepo.fullName}</div>
-                  <div className="mt-1 text-panel-muted">Branch {draft.branch || selectedRepo.defaultBranch} · port {draft.port || "pending"}</div>
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-
-          <div className="grid grid-cols-2 gap-3">
-            <label className="space-y-1 text-xs font-medium text-panel-muted">
-              Git URL
-              <input className="h-9 w-full rounded-md border border-panel-line px-3 text-sm text-panel-ink" onChange={(event) => setDraft({ ...draft, gitUrl: event.target.value })} placeholder="https://github.com/owner/repo.git" value={draft.gitUrl} />
-            </label>
-            <label className="space-y-1 text-xs font-medium text-panel-muted">
-              Branch
-              <input className="h-9 w-full rounded-md border border-panel-line px-3 text-sm text-panel-ink" onChange={(event) => setDraft({ ...draft, branch: event.target.value })} value={draft.branch} />
-            </label>
-          </div>
-
-          <label className="space-y-1 text-xs font-medium text-panel-muted">
-            App root path
-            <input className="h-9 w-full rounded-md border border-panel-line px-3 text-sm text-panel-ink" onChange={(event) => setDraft({ ...draft, rootPath: event.target.value })} value={draft.rootPath} />
-          </label>
-
-          <div className="grid grid-cols-3 gap-3">
-            <label className="space-y-1 text-xs font-medium text-panel-muted">
-              Framework
-              <select className="h-9 w-full rounded-md border border-panel-line px-2 text-sm text-panel-ink" onChange={(event) => setDraft({ ...draft, framework: event.target.value as DeploymentFramework })} value={draft.framework}>
-                {frameworkOptions.map((framework) => <option key={framework} value={framework}>{framework}</option>)}
-              </select>
-            </label>
-            <label className="space-y-1 text-xs font-medium text-panel-muted">
-              Port
-              <input className="h-9 w-full rounded-md border border-panel-line px-3 text-sm text-panel-ink" onChange={(event) => setDraft({ ...draft, port: event.target.value })} value={draft.port} />
-            </label>
-            <label className="space-y-1 text-xs font-medium text-panel-muted">
-              Database
-              <select className="h-9 w-full rounded-md border border-panel-line px-2 text-sm text-panel-ink" onChange={(event) => setDraft({ ...draft, dbType: event.target.value as Draft["dbType"] })} value={draft.dbType}>
-                <option value="">None</option>
-                <option value="POSTGRESQL">PostgreSQL</option>
-                <option value="MYSQL">MySQL</option>
-              </select>
-            </label>
-          </div>
-
-          <div className="grid grid-cols-1 gap-3">
-            {(["installCommand", "buildCommand", "startCommand", "outputDirectory"] as const).map((field) => (
-              <input className="h-9 rounded-md border border-panel-line px-3 font-mono text-xs" key={field} onChange={(event) => setDraft({ ...draft, [field]: event.target.value })} placeholder={field} value={draft[field]} />
-            ))}
-          </div>
-
-          <textarea className="h-24 w-full rounded-md border border-panel-line p-3 font-mono text-xs" onChange={(event) => setDraft({ ...draft, envText: event.target.value })} value={draft.envText} />
-
-          <ResultNotice message={notice} ok={notice.includes("passed") || notice.includes("created") || notice.includes("imported")} />
-
-          <div className="grid grid-cols-3 gap-2">
-            <button className="flex h-10 items-center justify-center gap-2 rounded-md border border-panel-line text-sm font-medium hover:bg-slate-50" onClick={() => detect.mutate()} type="button">
-              <Wand2 size={15} />
-              Detect
-            </button>
-            <button className="flex h-10 items-center justify-center gap-2 rounded-md border border-panel-line text-sm font-medium hover:bg-slate-50" onClick={() => preflight.mutate()} type="button">
-              <CheckCircle2 size={15} />
-              Check
-            </button>
-            <button className="flex h-10 items-center justify-center gap-2 rounded-md bg-panel-accent text-sm font-semibold text-white disabled:opacity-60" disabled={!draft.name || !draft.rootPath || !draft.port || createDeployment.isPending} onClick={() => createDeployment.mutate()} type="button">
-              <Plus size={15} />
-              Create
-            </button>
-          </div>
-          {draft.sourceProvider === "GITHUB" ? (
-            <button className="flex h-10 w-full items-center justify-center gap-2 rounded-md bg-slate-900 text-sm font-semibold text-white disabled:opacity-60" disabled={!selectedRepo || !draft.rootPath || !draft.port || importAndDeployGithub.isPending} onClick={() => importAndDeployGithub.mutate(undefined)} type="button">
-              <Play size={15} />
-              Import and deploy selected GitHub project
-            </button>
-          ) : null}
-        </div>
-      </aside>
-
-      <main className="min-h-0 overflow-hidden rounded-md border border-panel-line bg-white">
-        <div className="flex items-center justify-between gap-3 border-b border-panel-line p-4">
-          <div className="flex items-center gap-2">
-            <form className="relative" onSubmit={submitSearch}>
+      <div className="flex min-h-0 flex-1 gap-6 p-6">
+        <aside className="flex w-[420px] min-h-0 flex-col rounded-md border border-panel-line bg-white">
+          <div className="border-b border-panel-line p-4">
+            {notice ? <ResultNotice message={notice} ok={okNotice(notice)} /> : null}
+            <form className="relative mt-3" onSubmit={submitSearch}>
               <Search className="absolute left-3 top-2.5 text-panel-muted" size={15} />
-              <input className="h-9 w-72 rounded-md border border-panel-line pl-9 pr-3 text-sm" onChange={(event) => setDraftSearch(event.target.value)} placeholder="Search deployments" value={draftSearch} />
+              <input className="h-9 w-full rounded-md border border-panel-line pl-9 pr-3 text-sm" onChange={(event) => setDraftSearch(event.target.value)} placeholder="Search projects" value={draftSearch} />
             </form>
-            <div className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-2 text-panel-muted">
-              <Filter size={14} />
-              <select className="h-7 bg-transparent text-sm text-panel-ink outline-none" onChange={(event) => setStatusFilter(event.target.value)} value={statusFilter}>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <select className="h-9 rounded-md border border-panel-line px-2 text-sm" onChange={(event) => setStatusFilter(event.target.value)} value={statusFilter}>
                 <option value="">All status</option>
                 {["QUEUED", "RUNNING", "STOPPED", "DEPLOYING", "BUILDING", "FAILED"].map((status) => <option key={status} value={status}>{status}</option>)}
               </select>
+              <select className="h-9 rounded-md border border-panel-line px-2 text-sm" onChange={(event) => setSourceFilter(event.target.value)} value={sourceFilter}>
+                <option value="">All sources</option>
+                {sourceOptions.map((source) => <option key={source} value={source}>{source.replace("_", " ")}</option>)}
+              </select>
             </div>
-            <select className="h-9 rounded-md border border-panel-line px-2 text-sm" onChange={(event) => setSourceFilter(event.target.value)} value={sourceFilter}>
-              <option value="">All sources</option>
-              {sourceOptions.map((source) => <option key={source} value={source}>{source.replace("_", " ")}</option>)}
-            </select>
           </div>
-          <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium hover:bg-slate-50" onClick={() => deployments.refetch()} type="button">
-            <RefreshCw size={15} />
-            Refresh
-          </button>
-        </div>
 
-        <div className="h-[calc(100%-66px)] overflow-auto">
-          {(deployments.data?.items ?? []).length > 0 ? (
-            <table className="w-full text-sm">
-              <thead className="sticky top-0 bg-slate-50 text-left text-xs uppercase text-panel-muted">
-                <tr>
-                  <th className="px-4 py-3">Project</th>
-                  <th className="px-4 py-3">Source</th>
-                  <th className="px-4 py-3">Runtime</th>
-                  <th className="px-4 py-3">State</th>
-                  <th className="px-4 py-3">Release</th>
-                  <th className="px-4 py-3">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {deployments.data?.items.map((deployment) => {
-                  const latest = deployment.releases?.[0];
-                  return (
-                    <tr className="border-t border-panel-line hover:bg-slate-50" key={deployment.id}>
-                      <td className="max-w-0 px-4 py-4">
-                        <Link className="font-semibold text-panel-ink hover:text-panel-accent" href={`/deployments/${deployment.slug}/overview`}>{deployment.name}</Link>
-                        <div className="mt-1 truncate text-xs text-panel-muted">{deployment.rootPath}</div>
-                      </td>
-                      <td className="px-4 py-4">
-                        <div className="flex items-center gap-2">
-                          {deployment.sourceProvider === "GITHUB" ? <Github size={15} /> : <FolderGit2 size={15} />}
-                          <span className="text-xs font-semibold">{deployment.sourceProvider}</span>
-                        </div>
-                        <div className="mt-1 flex items-center gap-1 text-xs text-panel-muted"><GitBranch size={13} />{deployment.branch}</div>
-                      </td>
-                      <td className="px-4 py-4 text-xs">
-                        <div className="font-semibold">{deployment.framework}</div>
-                        <div className="mt-1 text-panel-muted">:{deployment.port}</div>
-                      </td>
-                      <td className="space-y-2 px-4 py-4">
-                        {statusBadge(deployment.status)}
-                        <div>{healthBadge(deployment.healthStatus)}</div>
-                      </td>
-                      <td className="px-4 py-4 text-xs">
-                        <div className="font-semibold">{latest?.status ?? "No release"}</div>
-                        <div className="mt-1 text-panel-muted">{formatDate(latest?.createdAt)}</div>
-                      </td>
-                      <td className="px-4 py-4">
-                        <div className="flex flex-wrap gap-2">
-                          {(["deploy", "start", "stop", "restart"] as const).map((name) => (
-                            <button className="flex h-8 items-center gap-1 rounded-md border border-panel-line px-2 text-xs font-medium hover:bg-slate-50 disabled:opacity-50" disabled={action.isPending} key={name} onClick={() => action.mutate({ deployment, name })} type="button">
-                              {name === "deploy" ? <Play size={13} /> : name === "stop" ? <Square size={13} /> : actionIcon(name)}
-                              {name}
-                            </button>
-                          ))}
-                          <button className="flex h-8 items-center gap-1 rounded-md border border-panel-line px-2 text-xs font-medium hover:bg-slate-50 disabled:opacity-50" disabled={copyingLogsFor === deployment.id} onClick={() => copyLogs.mutate(deployment)} type="button">
-                            <Clipboard size={13} />
-                            logs
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          ) : (
-            <div className="p-8">
-              <EmptyState title="No deployments yet" detail="Create or import a project to start the deployment engine." />
-            </div>
-          )}
-        </div>
-      </main>
+          <div className="min-h-0 flex-1 overflow-auto p-3">
+            {(deployments.data?.items ?? []).map((deployment) => <ProjectCard active={selected?.id === deployment.id} deployment={deployment} key={deployment.id} onSelect={() => { setSelectedId(deployment.id); setActiveTab("overview"); }} />)}
+            {(deployments.data?.items ?? []).length === 0 ? <div className="p-8 text-center text-sm text-panel-muted">No projects yet.</div> : null}
+          </div>
+        </aside>
 
-      {repoPickerOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-6">
-          <div className="flex max-h-[82vh] w-full max-w-3xl flex-col rounded-md border border-panel-line bg-white shadow-xl">
-            <div className="flex items-center justify-between border-b border-panel-line p-4">
-              <div>
-                <div className="flex items-center gap-2 text-sm font-semibold">
-                  <Github size={17} />
-                  GitHub Projects
-                </div>
-                <div className="mt-1 text-xs text-panel-muted">Select a repository to auto-detect framework and start deploy.</div>
-              </div>
-              <button className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-50" onClick={() => setRepoPickerOpen(false)} type="button">
-                <X size={16} />
-              </button>
-            </div>
-
-            <div className="border-b border-panel-line p-4">
-              <div className="relative">
-                <Search className="absolute left-3 top-2.5 text-panel-muted" size={15} />
-                <input className="h-9 w-full rounded-md border border-panel-line pl-9 pr-3 text-sm" onChange={(event) => setRepoSearch(event.target.value)} placeholder="Search GitHub repositories" value={repoSearch} />
-              </div>
-              {!githubConnection.data?.connected ? (
-                <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3">
-                  <div className="text-xs font-semibold text-amber-900">Connect GitHub token</div>
-                  <div className="mt-1 text-xs text-amber-800">Use a fine-grained token with repository read access for the repos you want to deploy.</div>
-                  <div className="mt-3 grid grid-cols-[1fr_2fr_auto] gap-2">
-                    <input className="h-9 rounded-md border border-amber-200 bg-white px-3 text-sm" onChange={(event) => setGithubUsername(event.target.value)} placeholder="username" value={githubUsername} />
-                    <input className="h-9 rounded-md border border-amber-200 bg-white px-3 text-sm" onChange={(event) => setGithubToken(event.target.value)} placeholder="github_pat_..." type="password" value={githubToken} />
-                    <button className="h-9 rounded-md bg-slate-900 px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={!githubToken || saveGithubToken.isPending} onClick={() => saveGithubToken.mutate()} type="button">
-                      Connect
-                    </button>
+        <main className="min-w-0 flex-1 overflow-hidden rounded-md border border-panel-line bg-white">
+          {selected ? (
+            <div className="flex h-full flex-col">
+              <div className="border-b border-panel-line p-5">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-3">
+                      <h2 className="truncate text-xl font-semibold text-panel-ink">{selected.name}</h2>
+                      {statusBadge(selected.status)}
+                      {healthBadge(selected.healthStatus)}
+                    </div>
+                    <div className="mt-2 flex flex-wrap items-center gap-3 text-sm text-panel-muted">
+                      <span>{selected.framework}</span>
+                      <span>:{selected.port}</span>
+                      <span className="truncate">{selected.rootPath}</span>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap justify-end gap-2">
+                    {(["deploy", "start", "stop", "restart"] as const).map((name) => (
+                      <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium hover:bg-slate-50 disabled:opacity-50" disabled={action.isPending} key={name} onClick={() => action.mutate({ deployment: selected, name })} type="button">
+                        {name === "deploy" ? <Play size={15} /> : name === "stop" ? <Square size={15} /> : actionIcon(name)}{name}
+                      </button>
+                    ))}
+                    <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium hover:bg-slate-50" onClick={() => copyLogs.mutate(selected)} type="button"><Clipboard size={15} />Logs</button>
+                    <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium hover:bg-slate-50" onClick={openEdit} type="button"><Pencil size={15} />Edit</button>
                   </div>
                 </div>
-              ) : (
-                <div className="mt-2 text-xs text-emerald-700">Connected{githubConnection.data.username ? ` as ${githubConnection.data.username}` : ""}.</div>
-              )}
-              {repos.data?.note ? <div className="mt-2 text-xs text-amber-700">{repos.data.note}</div> : null}
-              {repos.data?.dryRun ? <div className="mt-2 text-xs text-amber-700">GitHub token is not connected; showing dry-run placeholder repositories.</div> : null}
-            </div>
+                <div className="mt-5 flex gap-1">
+                  {tabs.map((tab) => <button className={`h-9 rounded-md px-3 text-sm font-medium ${activeTab === tab.key ? "bg-slate-900 text-white" : "text-panel-muted hover:bg-slate-50 hover:text-panel-ink"}`} key={tab.key} onClick={() => setActiveTab(tab.key)} type="button">{tab.label}</button>)}
+                </div>
+              </div>
 
-            <div className="min-h-0 flex-1 overflow-auto p-2">
-              {repos.isLoading ? <div className="p-8 text-center text-sm text-panel-muted">Loading repositories...</div> : null}
-              {(repos.data?.items ?? []).map((repo) => (
-                <button
-                  className="flex w-full items-center justify-between gap-4 rounded-md px-3 py-3 text-left hover:bg-slate-50 disabled:opacity-60"
-                  disabled={importAndDeployGithub.isPending}
-                  key={repo.fullName}
-                  onClick={() => {
-                    selectRepo(repo);
-                    importAndDeployGithub.mutate(repo);
-                  }}
-                  type="button"
-                >
-                  <span className="min-w-0">
-                    <span className="block truncate text-sm font-semibold text-panel-ink">{repo.fullName}</span>
-                    <span className="mt-1 block text-xs text-panel-muted">
-                      {repo.private ? "private" : "public"} · {repo.defaultBranch}{repo.updatedAt ? ` · updated ${formatDate(repo.updatedAt)}` : ""}
-                    </span>
-                  </span>
-                  <span className="flex h-8 shrink-0 items-center gap-2 rounded-md bg-panel-accent px-3 text-xs font-semibold text-white">
-                    <Play size={13} />
-                    deploy
-                  </span>
-                </button>
-              ))}
-              {!repos.isLoading && (repos.data?.items ?? []).length === 0 ? (
-                <div className="p-8 text-center text-sm text-panel-muted">No repositories found.</div>
-              ) : null}
+              <div className="min-h-0 flex-1 overflow-auto p-5">
+                {activeTab === "overview" ? <OverviewPanel deployment={selected} /> : null}
+                {activeTab === "domains" ? <DomainsPanel deployment={selected} domains={domains.data?.items ?? []} domainToAdd={domainToAdd} setDomainToAdd={setDomainToAdd} addDomain={() => addDomain.mutate()} setPrimary={(binding) => setPrimaryDomain.mutate(binding)} removeDomain={(binding) => removeDomain.mutate(binding)} /> : null}
+                {activeTab === "env" ? <EnvPanel deployment={selected} envKey={envKey} envValue={envValue} envSecret={envSecret} setEnvKey={setEnvKey} setEnvValue={setEnvValue} setEnvSecret={setEnvSecret} saveEnv={() => saveEnv.mutate()} removeEnv={(key) => removeEnv.mutate(key)} /> : null}
+                {activeTab === "settings" ? <SettingsPanel deployment={selected} deleteText={deleteText} setDeleteText={setDeleteText} onEdit={openEdit} onDelete={() => deleteProject.mutate()} deleting={deleteProject.isPending} /> : null}
+              </div>
             </div>
-          </div>
-        </div>
-      ) : null}
+          ) : <div className="p-10 text-center text-sm text-panel-muted">Select or create a project.</div>}
+        </main>
+      </div>
+
+      {createOpen ? <ProjectModal title="Create Project" draft={draft} setDraft={setDraft} domains={domains.data?.items ?? []} onClose={() => setCreateOpen(false)} onDetect={() => detect.mutate("create")} onSubmit={() => createDeployment.mutate()} submitLabel="Create" busy={createDeployment.isPending} openGithub={() => setRepoPickerOpen(true)} /> : null}
+      {editingOpen ? <ProjectModal title="Edit Project" draft={editDraft} setDraft={setEditDraft} domains={domains.data?.items ?? []} onClose={() => setEditingOpen(false)} onDetect={() => detect.mutate("edit")} onSubmit={() => updateDeployment.mutate()} submitLabel="Save changes" busy={updateDeployment.isPending} openGithub={() => setRepoPickerOpen(true)} /> : null}
+      {repoPickerOpen ? <GithubModal repos={repos.data} loading={repos.isLoading} repoSearch={repoSearch} setRepoSearch={setRepoSearch} connection={githubConnection.data} githubToken={githubToken} setGithubToken={setGithubToken} githubUsername={githubUsername} setGithubUsername={setGithubUsername} saveToken={() => saveGithubToken.mutate()} savingToken={saveGithubToken.isPending} onClose={() => setRepoPickerOpen(false)} onDeploy={(repo) => importAndDeployGithub.mutate(repo)} deploying={importAndDeployGithub.isPending} /> : null}
     </section>
   );
+}
+
+function ProjectCard({ deployment, active, onSelect }: { deployment: Deployment; active: boolean; onSelect: () => void }) {
+  const latest = deployment.releases?.[0];
+  return (
+    <button className={`mb-3 w-full rounded-md border p-4 text-left transition ${active ? "border-panel-accent bg-teal-50" : "border-panel-line bg-white hover:bg-slate-50"}`} onClick={onSelect} type="button">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="truncate text-sm font-semibold text-panel-ink">{deployment.name}</div>
+          <div className="mt-1 flex items-center gap-2 text-xs text-panel-muted">{deployment.sourceProvider === "GITHUB" ? <Github size={13} /> : <FolderGit2 size={13} />} {deployment.branch}</div>
+        </div>
+        {statusBadge(deployment.status)}
+      </div>
+      <div className="mt-4 grid grid-cols-3 gap-2 text-xs">
+        <span className="rounded bg-slate-100 px-2 py-1 font-semibold">{deployment.framework}</span>
+        <span className="rounded bg-slate-100 px-2 py-1">:{deployment.port}</span>
+        <span className="rounded bg-slate-100 px-2 py-1">{latest?.status ?? "No release"}</span>
+      </div>
+      <div className="mt-3 truncate text-xs text-panel-muted">{deployment.domainBindings?.map((item) => item.domain.name).join(", ") || deployment.domain?.name || deployment.rootPath}</div>
+    </button>
+  );
+}
+
+function ProjectModal({ title, draft, setDraft, domains, onClose, onDetect, onSubmit, submitLabel, busy, openGithub }: { title: string; draft: Draft; setDraft: (draft: Draft) => void; domains: Domain[]; onClose: () => void; onDetect: () => void; onSubmit: () => void; submitLabel: string; busy?: boolean; openGithub: () => void }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-6">
+      <div className="flex max-h-[88vh] w-full max-w-3xl flex-col rounded-md border border-panel-line bg-white shadow-xl">
+        <div className="flex items-center justify-between border-b border-panel-line p-4"><div className="text-sm font-semibold">{title}</div><button className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line" onClick={onClose} type="button"><X size={16} /></button></div>
+        <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
+          <div className="grid grid-cols-4 gap-2">{sourceOptions.map((source) => <button className={`h-9 rounded-md border text-xs font-semibold ${draft.sourceProvider === source ? "border-panel-accent bg-teal-50 text-panel-accent" : "border-panel-line"}`} key={source} onClick={() => { setDraft({ ...draft, sourceProvider: source }); if (source === "GITHUB") openGithub(); }} type="button">{source.replace("_", " ")}</button>)}</div>
+          {draft.sourceProvider === "GITHUB" ? <button className="flex h-10 w-full items-center justify-center gap-2 rounded-md border border-panel-line text-sm font-medium hover:bg-slate-50" onClick={openGithub} type="button"><Github size={15} />Choose GitHub project</button> : null}
+          <DeploymentFormFields value={draft} onChange={setDraft} domains={domains} />
+        </div>
+        <div className="flex justify-between border-t border-panel-line p-4"><button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm" onClick={onDetect} type="button"><Wand2 size={15} />Detect</button><div className="flex gap-2"><button className="h-9 rounded-md border border-panel-line px-3 text-sm" onClick={onClose} type="button">Cancel</button><button className="h-9 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={!draft.name || !draft.rootPath || !draft.port || busy} onClick={onSubmit} type="button">{submitLabel}</button></div></div>
+      </div>
+    </div>
+  );
+}
+
+function DeploymentFormFields({ value, onChange, domains }: { value: Draft; onChange: (next: Draft) => void; domains: Domain[] }) {
+  return <div className="space-y-4">
+    <div className="grid grid-cols-2 gap-3"><Input label="Project name" value={value.name} onChange={(name) => onChange({ ...value, name, slug: value.slug || slugify(name) })} /><Input label="Slug" value={value.slug} onChange={(slug) => onChange({ ...value, slug })} /></div>
+    <label className="space-y-1 text-xs font-medium text-panel-muted">Primary domain<select className="h-9 w-full rounded-md border border-panel-line px-2 text-sm text-panel-ink" onChange={(event) => onChange({ ...value, domainId: event.target.value })} value={value.domainId}><option value="">No domain</option>{domains.map((domain) => <option key={domain.id} value={domain.id}>{domain.name}</option>)}</select></label>
+    <div className="grid grid-cols-2 gap-3"><Input label="Git URL" value={value.gitUrl} onChange={(gitUrl) => onChange({ ...value, gitUrl })} /><Input label="Branch" value={value.branch} onChange={(branch) => onChange({ ...value, branch })} /></div>
+    <Input label="App root path" value={value.rootPath} onChange={(rootPath) => onChange({ ...value, rootPath })} />
+    <div className="grid grid-cols-3 gap-3"><label className="space-y-1 text-xs font-medium text-panel-muted">Framework<select className="h-9 w-full rounded-md border border-panel-line px-2 text-sm text-panel-ink" onChange={(event) => onChange({ ...value, framework: event.target.value as DeploymentFramework })} value={value.framework}>{frameworkOptions.map((framework) => <option key={framework} value={framework}>{framework}</option>)}</select></label><Input label="Port" value={value.port} onChange={(port) => onChange({ ...value, port })} /><label className="space-y-1 text-xs font-medium text-panel-muted">Database<select className="h-9 w-full rounded-md border border-panel-line px-2 text-sm text-panel-ink" onChange={(event) => onChange({ ...value, dbType: event.target.value as Draft["dbType"] })} value={value.dbType}><option value="">None</option><option value="POSTGRESQL">PostgreSQL</option><option value="MYSQL">MySQL</option></select></label></div>
+    {(["installCommand", "buildCommand", "startCommand", "outputDirectory"] as const).map((field) => <input className="h-9 w-full rounded-md border border-panel-line px-3 font-mono text-xs" key={field} onChange={(event) => onChange({ ...value, [field]: event.target.value })} placeholder={field} value={value[field]} />)}
+    <textarea className="h-28 w-full rounded-md border border-panel-line p-3 font-mono text-xs" onChange={(event) => onChange({ ...value, envText: event.target.value })} value={value.envText} />
+  </div>;
+}
+
+function Input({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  return <label className="space-y-1 text-xs font-medium text-panel-muted">{label}<input className="h-9 w-full rounded-md border border-panel-line px-3 text-sm text-panel-ink" onChange={(event) => onChange(event.target.value)} value={value} /></label>;
+}
+
+function OverviewPanel({ deployment }: { deployment: Deployment }) {
+  const latest = deployment.releases?.[0];
+  return <div className="grid grid-cols-4 gap-4"><Metric label="Source" value={deployment.sourceProvider} /><Metric label="Branch" value={deployment.branch} /><Metric label="Latest release" value={latest?.status ?? "No release"} /><Metric label="Updated" value={formatDate(deployment.updatedAt)} /></div>;
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return <div className="rounded-md border border-panel-line p-4"><div className="text-xs uppercase text-panel-muted">{label}</div><div className="mt-3 truncate text-sm font-semibold">{value}</div></div>;
+}
+
+function DomainsPanel({ deployment, domains, domainToAdd, setDomainToAdd, addDomain, setPrimary, removeDomain }: { deployment: Deployment; domains: Domain[]; domainToAdd: string; setDomainToAdd: (id: string) => void; addDomain: () => void; setPrimary: (binding: DeploymentDomainBinding) => void; removeDomain: (binding: DeploymentDomainBinding) => void }) {
+  const boundIds = new Set((deployment.domainBindings ?? []).map((binding) => binding.domainId));
+  return <div className="space-y-4"><div className="flex gap-2"><select className="h-10 min-w-72 rounded-md border border-panel-line px-2 text-sm" onChange={(event) => setDomainToAdd(event.target.value)} value={domainToAdd}><option value="">Select domain</option>{domains.filter((domain) => !boundIds.has(domain.id)).map((domain) => <option key={domain.id} value={domain.id}>{domain.name}</option>)}</select><button className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={!domainToAdd} onClick={addDomain} type="button"><Plus size={15} />Add domain</button></div><div className="overflow-hidden rounded-md border border-panel-line">{(deployment.domainBindings ?? []).map((binding) => <div className="flex items-center justify-between border-b border-panel-line p-3 last:border-b-0" key={binding.id}><div><div className="font-semibold">{binding.domain.name}</div><div className="text-xs text-panel-muted">{binding.role}</div></div><div className="flex gap-2"><button className="h-8 rounded-md border border-panel-line px-2 text-xs" disabled={binding.role === "primary"} onClick={() => setPrimary(binding)} type="button">Make primary</button><button className="h-8 rounded-md border border-panel-line px-2 text-xs text-panel-danger" onClick={() => removeDomain(binding)} type="button">Remove</button></div></div>)}{(deployment.domainBindings ?? []).length === 0 ? <div className="p-8 text-center text-sm text-panel-muted">No domains attached.</div> : null}</div></div>;
+}
+
+function EnvPanel({ deployment, envKey, envValue, envSecret, setEnvKey, setEnvValue, setEnvSecret, saveEnv, removeEnv }: { deployment: Deployment; envKey: string; envValue: string; envSecret: boolean; setEnvKey: (value: string) => void; setEnvValue: (value: string) => void; setEnvSecret: (value: boolean) => void; saveEnv: () => void; removeEnv: (key: string) => void }) {
+  return <div className="grid grid-cols-[1fr_360px] gap-5"><div className="overflow-hidden rounded-md border border-panel-line">{(deployment.env ?? []).map((item) => <div className="flex items-center justify-between border-b border-panel-line p-3 last:border-b-0" key={item.key}><div><div className="font-mono text-sm font-semibold">{item.key}</div><div className="mt-1 max-w-xl truncate font-mono text-xs text-panel-muted">{item.isSecret ? item.secretRef ?? "[secret]" : item.value}</div></div><button className="h-8 rounded-md border border-panel-line px-2 text-xs text-panel-danger" onClick={() => removeEnv(item.key)} type="button"><Trash2 size={13} /></button></div>)}{(deployment.env ?? []).length === 0 ? <div className="p-8 text-center text-sm text-panel-muted">No environment variables.</div> : null}</div><div className="rounded-md border border-panel-line p-4"><div className="mb-3 flex items-center gap-2 text-sm font-semibold"><KeyRound size={16} />Add env</div><div className="space-y-3"><input className="h-9 w-full rounded-md border border-panel-line px-3 font-mono text-sm" onChange={(event) => setEnvKey(event.target.value.toUpperCase())} placeholder="KEY" value={envKey} /><textarea className="h-28 w-full rounded-md border border-panel-line p-3 font-mono text-sm" onChange={(event) => setEnvValue(event.target.value)} placeholder="value" value={envValue} /><label className="flex items-center gap-2 text-sm text-panel-muted"><input checked={envSecret} onChange={(event) => setEnvSecret(event.target.checked)} type="checkbox" /> Store as secret</label><button className="h-10 w-full rounded-md bg-panel-accent text-sm font-semibold text-white disabled:opacity-60" disabled={!envKey} onClick={saveEnv} type="button">Save variable</button></div></div></div>;
+}
+
+function SettingsPanel({ deployment, deleteText, setDeleteText, onEdit, onDelete, deleting }: { deployment: Deployment; deleteText: string; setDeleteText: (value: string) => void; onEdit: () => void; onDelete: () => void; deleting?: boolean }) {
+  return <div className="space-y-5"><div className="rounded-md border border-panel-line p-4"><div className="flex items-center gap-2 text-sm font-semibold"><Settings2 size={16} />Project settings</div><button className="mt-4 flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm" onClick={onEdit} type="button"><Pencil size={15} />Edit all settings</button></div><div className="rounded-md border border-red-200 bg-red-50 p-4"><div className="flex items-center gap-2 text-sm font-semibold text-red-800"><Trash2 size={16} />Delete project</div><p className="mt-1 text-sm text-red-700">Type <strong>{deployment.slug}</strong> to permanently delete this project metadata.</p><div className="mt-4 flex gap-2"><input className="h-9 rounded-md border border-red-200 bg-white px-3 text-sm" onChange={(event) => setDeleteText(event.target.value)} value={deleteText} /><button className="h-9 rounded-md bg-red-600 px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={deleteText !== deployment.slug || deleting} onClick={onDelete} type="button">Delete</button></div></div></div>;
+}
+
+function GithubModal({ repos, loading, repoSearch, setRepoSearch, connection, githubToken, setGithubToken, githubUsername, setGithubUsername, saveToken, savingToken, onClose, onDeploy, deploying }: { repos?: GithubRepoResponse; loading: boolean; repoSearch: string; setRepoSearch: (value: string) => void; connection?: { connected: boolean; username: string | null }; githubToken: string; setGithubToken: (value: string) => void; githubUsername: string; setGithubUsername: (value: string) => void; saveToken: () => void; savingToken?: boolean; onClose: () => void; onDeploy: (repo: GithubRepo) => void; deploying?: boolean }) {
+  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-6"><div className="flex max-h-[82vh] w-full max-w-3xl flex-col rounded-md border border-panel-line bg-white shadow-xl"><div className="flex items-center justify-between border-b border-panel-line p-4"><div><div className="flex items-center gap-2 text-sm font-semibold"><Github size={17} />GitHub Projects</div><div className="mt-1 text-xs text-panel-muted">Select a repository to auto-detect and deploy.</div></div><button className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line" onClick={onClose} type="button"><X size={16} /></button></div><div className="border-b border-panel-line p-4"><div className="relative"><Search className="absolute left-3 top-2.5 text-panel-muted" size={15} /><input className="h-9 w-full rounded-md border border-panel-line pl-9 pr-3 text-sm" onChange={(event) => setRepoSearch(event.target.value)} placeholder="Search GitHub repositories" value={repoSearch} /></div>{!connection?.connected ? <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3"><div className="text-xs font-semibold text-amber-900">Connect GitHub token</div><div className="mt-3 grid grid-cols-[1fr_2fr_auto] gap-2"><input className="h-9 rounded-md border border-amber-200 bg-white px-3 text-sm" onChange={(event) => setGithubUsername(event.target.value)} placeholder="username" value={githubUsername} /><input className="h-9 rounded-md border border-amber-200 bg-white px-3 text-sm" onChange={(event) => setGithubToken(event.target.value)} placeholder="github_pat_..." type="password" value={githubToken} /><button className="h-9 rounded-md bg-slate-900 px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={!githubToken || savingToken} onClick={saveToken} type="button">Connect</button></div></div> : <div className="mt-2 text-xs text-emerald-700">Connected{connection.username ? ` as ${connection.username}` : ""}.</div>}{repos?.dryRun ? <div className="mt-2 text-xs text-amber-700">GitHub token is not connected; showing dry-run placeholder repositories.</div> : null}</div><div className="min-h-0 flex-1 overflow-auto p-2">{loading ? <div className="p-8 text-center text-sm text-panel-muted">Loading repositories...</div> : null}{(repos?.items ?? []).map((repo) => <button className="flex w-full items-center justify-between gap-4 rounded-md px-3 py-3 text-left hover:bg-slate-50 disabled:opacity-60" disabled={deploying} key={repo.fullName} onClick={() => onDeploy(repo)} type="button"><span className="min-w-0"><span className="block truncate text-sm font-semibold text-panel-ink">{repo.fullName}</span><span className="mt-1 block text-xs text-panel-muted">{repo.private ? "private" : "public"} · {repo.defaultBranch}</span></span><span className="flex h-8 shrink-0 items-center gap-2 rounded-md bg-panel-accent px-3 text-xs font-semibold text-white"><Play size={13} />deploy</span></button>)}{!loading && (repos?.items ?? []).length === 0 ? <div className="p-8 text-center text-sm text-panel-muted">No repositories found.</div> : null}</div></div></div>;
 }

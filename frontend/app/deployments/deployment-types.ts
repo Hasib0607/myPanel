@@ -9,6 +9,15 @@ export type DeploymentDomain = {
   name: string;
 };
 
+export type DeploymentDomainBinding = {
+  id: string;
+  deploymentId: string;
+  domainId: string;
+  role: string;
+  createdAt: string;
+  domain: DeploymentDomain;
+};
+
 export type DeploymentRelease = {
   id: string;
   status: ReleaseStatus;
@@ -77,6 +86,7 @@ export type Deployment = {
   createdAt: string;
   updatedAt: string;
   domain?: DeploymentDomain | null;
+  domainBindings?: DeploymentDomainBinding[];
   env?: DeploymentEnvVar[];
   releases?: DeploymentRelease[];
   logs?: DeploymentLog[];
