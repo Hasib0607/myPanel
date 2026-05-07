@@ -272,7 +272,14 @@ async function publishDomainHosting(domainId: string) {
   const nginxResult = await sysagent.writeStaticNginxVhost({
     name: domain.name,
     serverName: `${domain.name} www.${domain.name}`,
-    rootPath: path.join(env.FILE_MANAGER_ROOT, domain.name, "public_html")
+    rootPath: path.join(env.FILE_MANAGER_ROOT, domain.name, "public_html"),
+    forceHttps: domain.forceSsl && domain.sslEnabled,
+    ...(domain.sslEnabled
+      ? {
+          sslCertificate: `/etc/letsencrypt/live/${domain.name}/fullchain.pem`,
+          sslCertificateKey: `/etc/letsencrypt/live/${domain.name}/privkey.pem`
+        }
+      : {})
   });
   return { domain, fileScaffold, zone, dnsResult, nginxResult };
 }
@@ -364,6 +371,16 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const body = updateDomainSchema.parse(request.body);
     const domain = await prisma.domain.update({ where: { id: domainId }, data: body, include: domainInclude() });
+    if (typeof body.forceSsl === "boolean" && domain.sslEnabled) {
+      await sysagent.writeStaticNginxVhost({
+        name: domain.name,
+        serverName: `${domain.name} www.${domain.name}`,
+        rootPath: path.join(env.FILE_MANAGER_ROOT, domain.name, "public_html"),
+        forceHttps: domain.forceSsl,
+        sslCertificate: `/etc/letsencrypt/live/${domain.name}/fullchain.pem`,
+        sslCertificateKey: `/etc/letsencrypt/live/${domain.name}/privkey.pem`
+      });
+    }
     await clearDomainCaches(domainId);
     await audit(request, { action: "UPDATE", resource: "domain", resourceId: domainId, description: `Updated domain ${domain.name}` });
     return domain;

@@ -41,7 +41,7 @@ write_file() {
 log "Installing Ubuntu packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y ca-certificates curl gnupg git nginx postgresql postgresql-contrib redis-server bind9 bind9utils ufw python3 python3-venv python3-pip unzip zip openssl
+apt-get install -y ca-certificates curl gnupg git nginx certbot python3-certbot-nginx postgresql postgresql-contrib redis-server bind9 bind9utils ufw python3 python3-venv python3-pip unzip zip openssl
 
 if ! command -v node >/dev/null 2>&1 || [[ "$(node -p 'Number(process.versions.node.split(`.`)[0])')" -lt 20 ]]; then
   log "Installing Node.js 22"
@@ -142,6 +142,7 @@ ALLOW_LIVE_SYSTEM_COMMANDS=false
 ALLOW_LIVE_FILE_MANAGER=true
 ALLOW_LIVE_DNS=true
 ALLOW_LIVE_NGINX=true
+ALLOW_LIVE_SSL=true
 EOF
 chown "$APP_USER:$APP_USER" "$APP_DIR/.env"
 chmod 0640 "$APP_DIR/.env"

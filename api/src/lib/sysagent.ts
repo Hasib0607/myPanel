@@ -1,5 +1,14 @@
 import { env } from "../config/env.js";
 
+export type SysagentCommandResult = {
+  dryRun?: boolean;
+  command?: string[];
+  cwd?: string | null;
+  stdout?: string;
+  stderr?: string;
+  returncode?: number;
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${env.SYSAGENT_URL}${path}`, {
     ...init,
@@ -69,11 +78,11 @@ export const sysagent = {
   writeNginxVhost: (body: unknown) =>
     request("/nginx/vhost", { method: "POST", body: JSON.stringify(body) }),
   writeStaticNginxVhost: (body: unknown) =>
-    request("/nginx/static-vhost", { method: "POST", body: JSON.stringify(body) }),
+    request<{ write: SysagentCommandResult; enable: SysagentCommandResult; test: SysagentCommandResult; reload: SysagentCommandResult; configPath: string; rootPath: string; sslEnabled?: boolean; forceHttps?: boolean }>("/nginx/static-vhost", { method: "POST", body: JSON.stringify(body) }),
   issueCertificate: (body: unknown) =>
-    request("/ssl/issue", { method: "POST", body: JSON.stringify(body) }),
+    request<SysagentCommandResult>("/ssl/issue", { method: "POST", body: JSON.stringify(body) }),
   renewCertificate: (domain: string) =>
-    request(`/ssl/renew/${encodeURIComponent(domain)}`, { method: "POST" }),
+    request<SysagentCommandResult>(`/ssl/renew/${encodeURIComponent(domain)}`, { method: "POST" }),
   setupDkim: (body: unknown) =>
     request("/mail-config/dkim", { method: "POST", body: JSON.stringify(body) }),
   createMailbox: (body: unknown) =>

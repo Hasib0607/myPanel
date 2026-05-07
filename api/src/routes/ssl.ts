@@ -1,5 +1,7 @@
+import path from "node:path";
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
+import { env } from "../config/env.js";
 import { sslQueue } from "../jobs/queues.js";
 import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
@@ -42,7 +44,10 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
     const job = await sslQueue.add("issue", {
       domainId,
       domain: domain.name,
-      email: body.email ?? `admin@${domain.name}`
+      email: body.email ?? `admin@${domain.name}`,
+      webRoot: path.join(env.FILE_MANAGER_ROOT, domain.name, "public_html"),
+      includeWww: true,
+      forceSsl: domain.forceSsl
     });
 
     await prisma.domain.update({
@@ -61,7 +66,8 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
     const domain = await prisma.domain.findUniqueOrThrow({ where: { id: domainId } });
     const job = await sslQueue.add("renew", {
       domainId,
-      domain: domain.name
+      domain: domain.name,
+      forceSsl: domain.forceSsl
     });
 
     return reply.code(202).send({ queued: true, jobId: job.id });
