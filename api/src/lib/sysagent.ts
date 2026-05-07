@@ -10,7 +10,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
 
   if (!response.ok) {
-    throw new Error(`sysagent ${path} failed with ${response.status}`);
+    const detail = await response.text().catch(() => "");
+    throw new Error(`sysagent ${path} failed with ${response.status}${detail ? `: ${detail}` : ""}`);
   }
 
   return response.json() as Promise<T>;

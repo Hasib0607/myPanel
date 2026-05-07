@@ -41,6 +41,16 @@ def safe_web_root(root_path: str) -> Path:
     return target
 
 
+def enable_site(available: Path, enabled: Path) -> None:
+    if enabled.is_symlink():
+        if enabled.resolve() == available:
+            return
+        enabled.unlink()
+    elif enabled.exists():
+        enabled.unlink()
+    enabled.symlink_to(available)
+
+
 @router.post("/vhost")
 def write_vhost(body: VhostRequest) -> dict:
     available = safe_nginx_path(body.sitesAvailable, body.name)
@@ -53,8 +63,8 @@ def write_vhost(body: VhostRequest) -> dict:
     if settings.allow_live_nginx:
         available.parent.mkdir(parents=True, exist_ok=True)
         available.write_text(config, encoding="utf-8")
-        if not enabled.exists():
-            enabled.symlink_to(available)
+        enabled.parent.mkdir(parents=True, exist_ok=True)
+        enable_site(available, enabled)
     return {
         "write": {"dryRun": not settings.allow_live_nginx, "command": ["write-file", str(available)], "returncode": 0},
         "enable": {"dryRun": not settings.allow_live_nginx, "command": ["symlink", str(available), str(enabled)], "returncode": 0},
@@ -88,8 +98,7 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
         enabled.parent.mkdir(parents=True, exist_ok=True)
         root_path.mkdir(parents=True, exist_ok=True)
         available.write_text(config, encoding="utf-8")
-        if not enabled.exists():
-            enabled.symlink_to(available)
+        enable_site(available, enabled)
 
     return {
         "write": {"dryRun": not settings.allow_live_nginx, "command": ["write-file", str(available)], "returncode": 0},
