@@ -190,6 +190,14 @@ function isPermissionError(error: unknown) {
   return error instanceof Error && "code" in error && ((error as NodeJS.ErrnoException).code === "EACCES" || (error as NodeJS.ErrnoException).code === "EPERM");
 }
 
+function assertLiveSysagentResult(result: { dryRun?: boolean }) {
+  if (result.dryRun) {
+    const error = new Error("Sysagent live file operations are disabled. Set ALLOW_LIVE_SYSTEM_COMMANDS=true on the sysagent service, then restart vps-panel-sysagent and vps-panel-api.");
+    (error as Error & { statusCode?: number }).statusCode = 503;
+    throw error;
+  }
+}
+
 const listQuery = z.object({
   path: z.string().default("."),
   search: z.string().default(""),
@@ -286,7 +294,7 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
       await fs.writeFile(file, body.content, "utf8");
     } catch (error) {
       if (!isPermissionError(error)) throw error;
-      await sysagent.writeFile({ path: body.path, content: body.content });
+      assertLiveSysagentResult(await sysagent.writeFile({ path: body.path, content: body.content }));
     }
     return { ok: true, file: await statEntry(file) };
   });
@@ -299,7 +307,7 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
       await fs.writeFile(file, body.content, { encoding: "utf8", flag: "wx" });
     } catch (error) {
       if (!isPermissionError(error)) throw error;
-      await sysagent.createFile({ parentPath: body.parentPath, name: body.name, content: body.content, overwrite: false });
+      assertLiveSysagentResult(await sysagent.createFile({ parentPath: body.parentPath, name: body.name, content: body.content, overwrite: false }));
     }
     return reply.code(201).send(await statEntry(file));
   });
@@ -312,7 +320,7 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
       await fs.mkdir(folder, { recursive: false });
     } catch (error) {
       if (!isPermissionError(error)) throw error;
-      await sysagent.createFolder({ parentPath: body.parentPath, name: body.name });
+      assertLiveSysagentResult(await sysagent.createFolder({ parentPath: body.parentPath, name: body.name }));
     }
     return reply.code(201).send(await statEntry(folder));
   });
@@ -379,7 +387,7 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
         await fs.rm(resolved, { recursive: true, force: true });
       } catch (error) {
         if (!isPermissionError(error)) throw error;
-        await sysagent.deleteFiles({ paths: [itemPath] });
+        assertLiveSysagentResult(await sysagent.deleteFiles({ paths: [itemPath] }));
       }
       removed.push(itemPath);
     }
@@ -397,7 +405,7 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
       await fs.writeFile(file, buffer, { flag: body.overwrite ? "w" : "wx" });
     } catch (error) {
       if (!isPermissionError(error)) throw error;
-      await sysagent.createFile({ parentPath: body.parentPath, name: body.name, contentBase64: body.contentBase64, overwrite: body.overwrite });
+      assertLiveSysagentResult(await sysagent.createFile({ parentPath: body.parentPath, name: body.name, contentBase64: body.contentBase64, overwrite: body.overwrite }));
     }
     return reply.code(201).send(await statEntry(file));
   });
@@ -429,7 +437,7 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
       await fs.chmod(target, Number.parseInt(body.mode, 8));
     } catch (error) {
       if (!isPermissionError(error)) throw error;
-      await sysagent.chmodFile({ path: body.path, mode: body.mode });
+      assertLiveSysagentResult(await sysagent.chmodFile({ path: body.path, mode: body.mode }));
     }
     return { ok: true, file: await statEntry(target) };
   });
