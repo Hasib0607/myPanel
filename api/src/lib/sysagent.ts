@@ -59,6 +59,8 @@ export const sysagent = {
     request<{ ok: true; path: string; dryRun?: boolean }>("/files/files", { method: "POST", body: JSON.stringify(body) }),
   createFolder: (body: unknown) =>
     request<{ ok: true; path: string; dryRun?: boolean }>("/files/folders", { method: "POST", body: JSON.stringify(body) }),
+  createDomainScaffold: (body: unknown) =>
+    request<{ ok: true; domain: string; root: string; relativeRoot: string; folders: string[]; dryRun?: boolean }>("/files/domain-scaffold", { method: "POST", body: JSON.stringify(body) }),
   chmodFile: (body: unknown) =>
     request<{ ok: true; path: string; mode: string; dryRun?: boolean }>("/files/chmod", { method: "POST", body: JSON.stringify(body) }),
   writeFile: (body: unknown) =>

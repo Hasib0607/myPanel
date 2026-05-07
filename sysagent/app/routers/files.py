@@ -39,6 +39,23 @@ class CreateFolderRequest(BaseModel):
     name: str
 
 
+class DomainScaffoldRequest(BaseModel):
+    domain: str = Field(pattern=r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
+
+
+DEFAULT_DOMAIN_FOLDERS = [
+    "public_html",
+    "public_ftp",
+    "etc",
+    "logs",
+    "mail",
+    "tmp",
+    "ssl",
+    "backups",
+    "private",
+]
+
+
 def assert_safe_name(name: str) -> None:
     if not name or name in {".", ".."} or "/" in name or "\\" in name or re.search(r'[<>:"|?*\x00-\x1f]', name):
         raise HTTPException(status_code=400, detail="Unsafe file or folder name")
@@ -63,6 +80,44 @@ def dry_run(command: list[str], path: Path) -> dict:
         "command": command,
         "path": str(path),
         "ok": True,
+    }
+
+
+@router.post("/domain-scaffold")
+def create_domain_scaffold(body: DomainScaffoldRequest) -> dict:
+    domain = body.domain.strip().lower()
+    domain_root = safe_path(domain)
+    if not settings.allow_live_file_manager:
+        return dry_run(["domain-scaffold", str(domain_root)], domain_root)
+
+    domain_root.mkdir(parents=True, exist_ok=True)
+    for folder in DEFAULT_DOMAIN_FOLDERS:
+        (domain_root / folder).mkdir(parents=True, exist_ok=True)
+    (domain_root / "public_html" / ".well-known").mkdir(parents=True, exist_ok=True)
+
+    index_path = domain_root / "public_html" / "index.html"
+    if not index_path.exists():
+        index_path.write_text(
+            f"""<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>{domain}</title>
+  </head>
+  <body>
+    <h1>{domain}</h1>
+  </body>
+</html>
+""",
+            encoding="utf-8",
+        )
+
+    return {
+        "ok": True,
+        "domain": domain,
+        "root": str(domain_root),
+        "relativeRoot": domain,
+        "folders": DEFAULT_DOMAIN_FOLDERS,
     }
 
 

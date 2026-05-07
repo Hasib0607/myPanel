@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { env } from "../config/env.js";
+import { sysagent } from "./sysagent.js";
 
 export const domainDefaultFolders = [
   "public_html",
@@ -26,19 +27,11 @@ function assertSafeDomainName(domain: string) {
   }
 }
 
-export async function ensureDomainFileStructure(domain: string) {
-  const normalizedDomain = domain.trim().toLowerCase();
-  assertSafeDomainName(normalizedDomain);
+function isPermissionError(error: unknown) {
+  return error instanceof Error && "code" in error && ((error as NodeJS.ErrnoException).code === "EACCES" || (error as NodeJS.ErrnoException).code === "EPERM");
+}
 
-  const root = fileManagerRoot();
-  const domainRoot = path.resolve(root, normalizedDomain);
-  const insideRoot = domainRoot === root || domainRoot.startsWith(`${root}${path.sep}`);
-  if (!insideRoot) {
-    const error = new Error("Domain folder escapes file manager root");
-    (error as Error & { statusCode?: number }).statusCode = 400;
-    throw error;
-  }
-
+async function createDomainFileStructureLocally(normalizedDomain: string, domainRoot: string) {
   await fs.mkdir(domainRoot, { recursive: true });
   await Promise.all(domainDefaultFolders.map((folder) => fs.mkdir(path.join(domainRoot, folder), { recursive: true })));
   await fs.mkdir(path.join(domainRoot, "public_html", ".well-known"), { recursive: true });
@@ -68,4 +61,36 @@ export async function ensureDomainFileStructure(domain: string) {
     relativeRoot: normalizedDomain,
     folders: domainDefaultFolders
   };
+}
+
+export async function ensureDomainFileStructure(domain: string) {
+  const normalizedDomain = domain.trim().toLowerCase();
+  assertSafeDomainName(normalizedDomain);
+
+  const root = fileManagerRoot();
+  const domainRoot = path.resolve(root, normalizedDomain);
+  const insideRoot = domainRoot === root || domainRoot.startsWith(`${root}${path.sep}`);
+  if (!insideRoot) {
+    const error = new Error("Domain folder escapes file manager root");
+    (error as Error & { statusCode?: number }).statusCode = 400;
+    throw error;
+  }
+
+  try {
+    return await createDomainFileStructureLocally(normalizedDomain, domainRoot);
+  } catch (error) {
+    if (!isPermissionError(error)) throw error;
+    const result = await sysagent.createDomainScaffold({ domain: normalizedDomain });
+    if (result.dryRun) {
+      const dryRunError = new Error("Sysagent live file manager operations are disabled. Set ALLOW_LIVE_FILE_MANAGER=true and restart vps-panel-sysagent.");
+      (dryRunError as Error & { statusCode?: number }).statusCode = 503;
+      throw dryRunError;
+    }
+    return {
+      domain: result.domain,
+      root: result.root,
+      relativeRoot: result.relativeRoot,
+      folders: result.folders
+    };
+  }
 }
