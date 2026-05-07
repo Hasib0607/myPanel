@@ -245,7 +245,7 @@ export function DeploymentsClient() {
   });
 
   const action = useMutation({
-    mutationFn: ({ deployment, name }: { deployment: Deployment; name: "deploy" | "start" | "stop" | "restart" }) => apiPost<QueueResponse>(`/deployments/${deployment.slug}/${name}`),
+    mutationFn: ({ deployment, name }: { deployment: Deployment; name: "deploy" | "start" | "stop" | "restart" }) => apiPost<QueueResponse>(`/deployments/${deployment.slug}/${name}`, {}),
     onSuccess: async (result, variables) => {
       const queued = result.queue?.queued;
       const reason = result.queue?.reason ?? result.reason;
@@ -283,6 +283,7 @@ export function DeploymentsClient() {
       setNotice("Logs copied. You can paste/share them now.");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Could not copy logs");
+      throw error;
     }
   }
 
@@ -570,7 +571,19 @@ function GithubModal({ repos, loading, repoSearch, setRepoSearch, connection, gi
   return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-6"><div className="flex max-h-[82vh] w-full max-w-3xl flex-col rounded-md border border-panel-line bg-white shadow-xl"><div className="flex items-center justify-between border-b border-panel-line p-4"><div><div className="flex items-center gap-2 text-sm font-semibold"><Github size={17} />GitHub Projects</div><div className="mt-1 text-xs text-panel-muted">Select a repository to auto-detect and deploy.</div></div><button className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line" onClick={onClose} type="button"><X size={16} /></button></div><div className="border-b border-panel-line p-4"><div className="relative"><Search className="absolute left-3 top-2.5 text-panel-muted" size={15} /><input className="h-9 w-full rounded-md border border-panel-line pl-9 pr-3 text-sm" onChange={(event) => setRepoSearch(event.target.value)} placeholder="Search GitHub repositories" value={repoSearch} /></div>{!connection?.connected ? <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3"><div className="text-xs font-semibold text-amber-900">Connect GitHub token</div><div className="mt-3 grid grid-cols-[1fr_2fr_auto] gap-2"><input className="h-9 rounded-md border border-amber-200 bg-white px-3 text-sm" onChange={(event) => setGithubUsername(event.target.value)} placeholder="username" value={githubUsername} /><input className="h-9 rounded-md border border-amber-200 bg-white px-3 text-sm" onChange={(event) => setGithubToken(event.target.value)} placeholder="github_pat_..." type="password" value={githubToken} /><button className="h-9 rounded-md bg-slate-900 px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={!githubToken || savingToken} onClick={saveToken} type="button">Connect</button></div></div> : <div className="mt-2 text-xs text-emerald-700">Connected{connection.username ? ` as ${connection.username}` : ""}.</div>}{repos?.dryRun ? <div className="mt-2 text-xs text-amber-700">GitHub token is not connected; showing dry-run placeholder repositories.</div> : null}</div><div className="min-h-0 flex-1 overflow-auto p-2">{loading ? <div className="p-8 text-center text-sm text-panel-muted">Loading repositories...</div> : null}{(repos?.items ?? []).map((repo) => <button className="flex w-full items-center justify-between gap-4 rounded-md px-3 py-3 text-left hover:bg-slate-50 disabled:opacity-60" disabled={deploying} key={repo.fullName} onClick={() => onDeploy(repo)} type="button"><span className="min-w-0"><span className="block truncate text-sm font-semibold text-panel-ink">{repo.fullName}</span><span className="mt-1 block text-xs text-panel-muted">{repo.private ? "private" : "public"} · {repo.defaultBranch}</span></span><span className="flex h-8 shrink-0 items-center gap-2 rounded-md bg-panel-accent px-3 text-xs font-semibold text-white"><Play size={13} />deploy</span></button>)}{!loading && (repos?.items ?? []).length === 0 ? <div className="p-8 text-center text-sm text-panel-muted">No repositories found.</div> : null}</div></div></div>;
 }
 
-function LogsModal({ title, text, onCopy, onClose }: { title: string; text: string; onCopy: () => void; onClose: () => void }) {
+function LogsModal({ title, text, onCopy, onClose }: { title: string; text: string; onCopy: () => Promise<void> | void; onClose: () => void }) {
+  const [copied, setCopied] = useState(false);
+
+  async function handleCopy() {
+    try {
+      await onCopy();
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1800);
+    } catch {
+      setCopied(false);
+    }
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-6">
       <div className="flex h-[78vh] w-full max-w-5xl flex-col rounded-md border border-panel-line bg-white shadow-xl">
@@ -583,7 +596,7 @@ function LogsModal({ title, text, onCopy, onClose }: { title: string; text: stri
         </div>
         <pre className="min-h-0 flex-1 overflow-auto bg-slate-950 p-4 font-mono text-xs leading-5 text-slate-100">{text || "No logs yet."}</pre>
         <div className="flex justify-end gap-2 border-t border-panel-line p-4">
-          <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium hover:bg-slate-50" onClick={onCopy} type="button"><Clipboard size={15} />Copy logs</button>
+          <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium hover:bg-slate-50" onClick={handleCopy} type="button"><Clipboard size={15} />{copied ? "Copied" : "Copy logs"}</button>
           <button className="h-9 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white" onClick={onClose} type="button">Close</button>
         </div>
       </div>

@@ -71,40 +71,33 @@ async function csrfHeader(): Promise<Record<string, string>> {
   return token ? { "x-csrf-token": decodeURIComponent(token) } : {};
 }
 
-export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
-  return fetchJson<T>(path, {
-    method: "POST",
+async function jsonRequestInit(method: "POST" | "PATCH" | "PUT", body?: unknown): Promise<RequestInit> {
+  const headers: Record<string, string> = {
+    ...(await csrfHeader())
+  };
+
+  if (body !== undefined) {
+    headers["content-type"] = "application/json";
+  }
+
+  return {
+    method,
     credentials: "include",
-    headers: {
-      "content-type": "application/json",
-      ...(await csrfHeader())
-    },
-    body: body ? JSON.stringify(body) : undefined
-  });
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined
+  };
+}
+
+export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
+  return fetchJson<T>(path, await jsonRequestInit("POST", body));
 }
 
 export async function apiPatch<T>(path: string, body?: unknown): Promise<T> {
-  return fetchJson<T>(path, {
-    method: "PATCH",
-    credentials: "include",
-    headers: {
-      "content-type": "application/json",
-      ...(await csrfHeader())
-    },
-    body: body ? JSON.stringify(body) : undefined
-  });
+  return fetchJson<T>(path, await jsonRequestInit("PATCH", body));
 }
 
 export async function apiPut<T>(path: string, body?: unknown): Promise<T> {
-  return fetchJson<T>(path, {
-    method: "PUT",
-    credentials: "include",
-    headers: {
-      "content-type": "application/json",
-      ...(await csrfHeader())
-    },
-    body: body ? JSON.stringify(body) : undefined
-  });
+  return fetchJson<T>(path, await jsonRequestInit("PUT", body));
 }
 
 export async function apiDelete<T>(path: string): Promise<T> {
