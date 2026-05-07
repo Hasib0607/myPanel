@@ -29,7 +29,7 @@ class StaticVhostRequest(BaseModel):
 
 def safe_nginx_path(root: str, name: str) -> Path:
     directory = Path(root).resolve()
-    target = (directory / f"{name}.conf").resolve()
+    target = directory / f"{name}.conf"
     if target.parent != directory:
         raise ValueError("Nginx config path escapes target directory")
     return target
