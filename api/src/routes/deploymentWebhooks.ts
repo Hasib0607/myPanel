@@ -124,6 +124,27 @@ function spawnPanelUpdate() {
   return child.pid;
 }
 
+async function startPanelUpdate(source: string, commit = "", commitSubject = "") {
+  await recoverStalePanelUpdateProcess();
+  await writePanelUpdateStatus({
+    state: "queued",
+    message: `${source}; starting panel update`,
+    commit,
+    commitSubject
+  });
+  const pid = spawnPanelUpdate();
+  if (pid) {
+    await writePanelUpdateStatus({
+      state: "running",
+      message: `panel update process started with pid ${pid}`,
+      commit,
+      commitSubject,
+      pid
+    });
+  }
+  return pid;
+}
+
 async function writePanelUpdateStatus(status: PanelUpdateStatus) {
   await fsPromises.mkdir(path.dirname(env.PANEL_UPDATE_STATUS_FILE), { recursive: true });
   await fsPromises.writeFile(env.PANEL_UPDATE_STATUS_FILE, `${JSON.stringify({
@@ -339,6 +360,25 @@ export const deploymentWebhookRoutes: FastifyPluginAsync = async (app) => {
     return { status, recentLog };
   });
 
+  app.post("/panel-update/rebuild", { preHandler: app.requireAuth }, async (request, reply) => {
+    try {
+      const pid = await startPanelUpdate("Manual rebuild requested");
+      await audit(request, {
+        action: "DEPLOY",
+        resource: "panel_update",
+        description: "Manual panel rebuild requested"
+      });
+      return reply.code(202).send({ accepted: true, queued: true, pid: pid ?? null });
+    } catch (error) {
+      request.log.error({ error }, "could not start manual panel rebuild");
+      await writePanelUpdateStatus({
+        state: "failed",
+        message: error instanceof Error ? error.message : "Could not start manual panel rebuild"
+      }).catch(() => undefined);
+      return reply.code(500).send({ error: error instanceof Error ? error.message : "Could not start manual panel rebuild" });
+    }
+  });
+
   app.post("/panel-update", async (request, reply) => {
     if (!env.PANEL_UPDATE_WEBHOOK_SECRET) {
       return reply.code(503).send({ error: "Panel update webhook is not configured" });
@@ -375,25 +415,11 @@ export const deploymentWebhookRoutes: FastifyPluginAsync = async (app) => {
     }
 
     try {
-      await recoverStalePanelUpdateProcess();
-      await writePanelUpdateStatus({
-        state: "queued",
-        message: "GitHub push received; starting panel update",
-        branch,
-        commit: payload.after?.slice(0, 7) ?? payload.head_commit?.id?.slice(0, 7) ?? "",
-        commitSubject: payload.head_commit?.message?.split(/\r?\n/)[0] ?? ""
-      });
-      const pid = spawnPanelUpdate();
-      if (pid) {
-        await writePanelUpdateStatus({
-          state: "running",
-          message: `panel update process started with pid ${pid}`,
-          branch,
-          commit: payload.after?.slice(0, 7) ?? payload.head_commit?.id?.slice(0, 7) ?? "",
-          commitSubject: payload.head_commit?.message?.split(/\r?\n/)[0] ?? "",
-          pid
-        });
-      }
+      await startPanelUpdate(
+        "GitHub push received",
+        payload.after?.slice(0, 7) ?? payload.head_commit?.id?.slice(0, 7) ?? "",
+        payload.head_commit?.message?.split(/\r?\n/)[0] ?? ""
+      );
     } catch (error) {
       request.log.error({ error }, "could not start panel update script");
       await writePanelUpdateStatus({

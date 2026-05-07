@@ -221,6 +221,12 @@ export function DashboardClient() {
     },
     onError: (err) => setServiceNotice(err instanceof Error ? err.message : "Service action failed")
   });
+  const rebuildPanel = useMutation({
+    mutationFn: () => apiPost<{ accepted: boolean; queued: boolean; pid: number | null }>("/webhooks/panel-update/rebuild", {}),
+    onSuccess: async () => {
+      await panelUpdate.refetch();
+    }
+  });
 
   const data = dashboard.data;
   const statsUnavailable = data?.systemStats?.unavailable;
@@ -314,13 +320,24 @@ export function DashboardClient() {
                   </div>
                   <div className="mt-1 text-xs text-panel-muted">Git push auto pull, build, migration, and service restart status.</div>
                 </div>
-                <button
-                  className="grid h-9 w-9 place-items-center rounded-md border border-panel-line hover:bg-slate-50"
-                  onClick={() => panelUpdate.refetch()}
-                  type="button"
-                >
-                  <RefreshCw size={15} />
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60"
+                    disabled={rebuildPanel.isPending || panelUpdate.data?.status.state === "queued" || panelUpdate.data?.status.state === "running"}
+                    onClick={() => rebuildPanel.mutate()}
+                    type="button"
+                  >
+                    <RotateCw size={14} />
+                    Rebuild
+                  </button>
+                  <button
+                    className="grid h-9 w-9 place-items-center rounded-md border border-panel-line hover:bg-slate-50"
+                    onClick={() => panelUpdate.refetch()}
+                    type="button"
+                  >
+                    <RefreshCw size={15} />
+                  </button>
+                </div>
               </div>
               <div className="mt-4 rounded-md border border-panel-line p-3 text-sm">
                 <div className="flex items-center justify-between gap-3">
@@ -352,6 +369,7 @@ export function DashboardClient() {
                 ))}
                 {panelUpdate.data?.recentLog.length === 0 ? <div className="text-slate-400">No update logs yet.</div> : null}
                 {panelUpdate.isError ? <div className="text-red-200">{panelUpdate.error instanceof Error ? panelUpdate.error.message : "Could not load update status"}</div> : null}
+                {rebuildPanel.isError ? <div className="text-red-200">{rebuildPanel.error instanceof Error ? rebuildPanel.error.message : "Could not start rebuild"}</div> : null}
               </div>
             </div>
 
