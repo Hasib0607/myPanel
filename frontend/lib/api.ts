@@ -135,3 +135,23 @@ export async function apiGet<T>(path: string): Promise<T> {
     cache: "no-store"
   });
 }
+
+export async function apiGetText(path: string): Promise<string> {
+  const url = apiUrl(path);
+  let response: Response;
+
+  try {
+    response = await fetch(url, {
+      credentials: "include",
+      cache: "no-store"
+    });
+  } catch {
+    throw new Error(`Could not reach API at ${url}. Check Nginx /api/v1 proxy and API service.`);
+  }
+
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(text || `API request failed: ${response.status}`);
+  }
+  return text;
+}

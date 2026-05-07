@@ -258,6 +258,15 @@ async function githubJson<T>(path: string, token: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+function logMetadataText(metadata: Prisma.JsonValue | null) {
+  if (!metadata) return "";
+  try {
+    return `\n${JSON.stringify(metadata, null, 2)}`;
+  } catch {
+    return "";
+  }
+}
+
 export const deploymentRoutes: FastifyPluginAsync = async (app) => {
   app.addHook("preHandler", app.requireAuth);
 
@@ -408,6 +417,30 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     };
   });
 
+  app.get("/github/repos/:owner/:repo/detect", async (request) => {
+    const params = z.object({ owner: z.string(), repo: z.string() }).parse(request.params);
+    const query = z.object({ branch: z.string().default("main"), rootDirectory: z.string().default(".") }).parse(request.query);
+    const connection = await prisma.gitHubConnection.findUnique({ where: { id: "superadmin" } });
+    const token = connection?.tokenSecretRef ? await getSecret(connection.tokenSecretRef) : null;
+    if (!token) {
+      return {
+        repository: `${params.owner}/${params.repo}`,
+        dryRun: true,
+        ...(await detectFramework({ files: ["package.json", "next.config.js"] }))
+      };
+    }
+
+    const requestedPath = query.rootDirectory === "." ? "" : query.rootDirectory.replace(/^\/+|\/+$/g, "");
+    const contentsPath = `/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/contents/${requestedPath}?ref=${encodeURIComponent(query.branch)}`;
+    const contents = await githubJson<Array<{ name: string; type: string }>>(contentsPath, token);
+    const files = Array.isArray(contents) ? contents.map((item) => item.name) : [];
+    return {
+      repository: `${params.owner}/${params.repo}`,
+      dryRun: false,
+      ...(await detectFramework({ files }))
+    };
+  });
+
   app.post("/github/import", async (request, reply) => {
     const body = baseDeploymentSchema.extend({
       githubOwner: z.string(),
@@ -429,7 +462,12 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
         status: "STOPPED"
       }
     });
-    await addLog(deployment.id, "QUEUED", "GitHub project imported in dry-run mode", undefined, { dryRun: true });
+    await addLog(deployment.id, "QUEUED", "GitHub project imported", undefined, {
+      repository: `${body.githubOwner}/${body.githubRepo}`,
+      branch: body.branch,
+      rootPath,
+      autoDeployEnabled: body.autoDeployEnabled
+    });
     return reply.code(201).send(await findDeployment(deployment.id));
   });
 
@@ -589,6 +627,28 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       orderBy: { createdAt: "asc" },
       take: query.limit
     });
+  });
+
+  app.get("/:deploymentId/logs/export", async (request, reply) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const query = z.object({ releaseId: z.string().optional(), limit: z.coerce.number().int().min(1).max(1000).default(500) }).parse(request.query);
+    const deployment = await findDeployment(deploymentId);
+    const logs = await prisma.deploymentLog.findMany({
+      where: { deploymentId: deployment.id, ...(query.releaseId ? { releaseId: query.releaseId } : {}) },
+      orderBy: { createdAt: "asc" },
+      take: query.limit
+    });
+    const lines = [
+      `Deployment: ${deployment.name} (${deployment.slug})`,
+      `Repository: ${deployment.githubOwner && deployment.githubRepo ? `${deployment.githubOwner}/${deployment.githubRepo}` : deployment.gitUrl ?? "manual"}`,
+      `Branch: ${deployment.branch}`,
+      `Status: ${deployment.status}`,
+      `Exported: ${new Date().toISOString()}`,
+      "",
+      ...logs.map((log) => `[${log.createdAt.toISOString()}] ${log.step}: ${log.message}${logMetadataText(log.metadata)}`)
+    ];
+    reply.header("content-type", "text/plain; charset=utf-8");
+    return lines.join("\n");
   });
 
   app.get("/:deploymentId/logs/stream", async (request, reply) => {

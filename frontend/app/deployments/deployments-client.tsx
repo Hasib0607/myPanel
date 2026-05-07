@@ -3,24 +3,32 @@
 import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Filter, FolderGit2, GitBranch, Github, Play, Plus, RefreshCw, Search, Square, Wand2 } from "lucide-react";
-import { apiGet, apiPost } from "@/lib/api";
+import { CheckCircle2, Clipboard, Filter, FolderGit2, GitBranch, Github, Play, Plus, RefreshCw, Search, Square, Wand2, X } from "lucide-react";
+import { apiGet, apiGetText, apiPost } from "@/lib/api";
 import type { Deployment, DeploymentFramework, DeploymentListResponse, DetectionResponse, PreflightResponse, QueueResponse, DeploymentSourceProvider } from "./deployment-types";
 import { frameworkOptions, sourceOptions } from "./deployment-types";
 import { EmptyState, ResultNotice, actionIcon, formatDate, healthBadge, queryString, statusBadge } from "./deployment-ui";
 
 type GithubRepo = {
+  id?: string;
   owner: string;
   name: string;
   fullName: string;
   private: boolean;
   defaultBranch: string;
+  updatedAt?: string;
 };
 
 type GithubRepoResponse = {
   connected: boolean;
   dryRun: boolean;
   items: GithubRepo[];
+  note?: string;
+};
+
+type GithubDetectResponse = DetectionResponse & {
+  repository: string;
+  dryRun: boolean;
 };
 
 type Draft = {
@@ -63,7 +71,7 @@ const initialDraft: Draft = {
   githubOwner: "",
   githubRepo: "",
   branch: "main",
-  rootPath: "D:/Projects/Cpanel/.local-www/new-app",
+  rootPath: "/var/www/deployments/new-app",
   rootDirectory: ".",
   port: "",
   installCommand: "npm install",
@@ -73,6 +81,10 @@ const initialDraft: Draft = {
   envText: "NODE_ENV=production",
   dbType: ""
 };
+
+function deploymentRootForRepo(repoName: string) {
+  return `/var/www/deployments/${slugify(repoName)}`;
+}
 
 function parseEnv(text: string) {
   return Object.fromEntries(
@@ -127,6 +139,8 @@ export function DeploymentsClient() {
   const [draft, setDraft] = useState<Draft>(initialDraft);
   const [repoSearch, setRepoSearch] = useState("");
   const [selectedRepo, setSelectedRepo] = useState<GithubRepo | null>(null);
+  const [repoPickerOpen, setRepoPickerOpen] = useState(false);
+  const [copyingLogsFor, setCopyingLogsFor] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
 
   const deployments = useQuery({
@@ -143,7 +157,7 @@ export function DeploymentsClient() {
     queryFn: () => apiGet<{ port: number }>("/deployments/ports/next")
   });
   const repos = useQuery({
-    enabled: repoSearch.length > 1,
+    enabled: repoPickerOpen,
     queryKey: ["deployments-github-repos", repoSearch],
     queryFn: () => apiGet<GithubRepoResponse>(`/deployments/github/repos?${queryString({ search: repoSearch })}`)
   });
@@ -173,36 +187,48 @@ export function DeploymentsClient() {
       githubRepo: repo.name,
       gitUrl: `https://github.com/${repo.fullName}.git`,
       branch: repo.defaultBranch,
-      rootPath: current.rootPath.replace(/new-app$/i, repo.name),
+      rootPath: deploymentRootForRepo(repo.name),
       sourceProvider: "GITHUB"
     }));
     setNotice(`${repo.fullName} selected. Review settings, then import and deploy.`);
   }
 
   const importAndDeployGithub = useMutation({
-    mutationFn: async () => {
-      if (!selectedRepo) throw new Error("Select a GitHub repository first");
+    mutationFn: async (repo?: GithubRepo) => {
+      const targetRepo = repo ?? selectedRepo;
+      if (!targetRepo) throw new Error("Select a GitHub repository first");
+      const detection = await apiGet<GithubDetectResponse>(
+        `/deployments/github/repos/${encodeURIComponent(targetRepo.owner)}/${encodeURIComponent(targetRepo.name)}/detect?${queryString({ branch: targetRepo.defaultBranch, rootDirectory: draft.rootDirectory || "." })}`
+      );
+      const suggestions = detection.suggestions;
+      const repoDraft = {
+        ...draft,
+        name: draft.name || targetRepo.name,
+        slug: draft.slug || slugify(targetRepo.name),
+        githubOwner: targetRepo.owner,
+        githubRepo: targetRepo.name,
+        gitUrl: `https://github.com/${targetRepo.fullName}.git`,
+        branch: draft.branch || targetRepo.defaultBranch,
+        rootPath: deploymentRootForRepo(targetRepo.name),
+        sourceProvider: "GITHUB" as const,
+        framework: detection.detected,
+        installCommand: suggestions.installCommand ?? "",
+        buildCommand: suggestions.buildCommand ?? "",
+        startCommand: suggestions.startCommand ?? "",
+        outputDirectory: suggestions.outputDirectory ?? ""
+      };
       const deployment = await apiPost<Deployment>("/deployments/github/import", {
-        ...formPayload({
-          ...draft,
-          name: draft.name || selectedRepo.name,
-          slug: draft.slug || slugify(selectedRepo.name),
-          githubOwner: selectedRepo.owner,
-          githubRepo: selectedRepo.name,
-          gitUrl: `https://github.com/${selectedRepo.fullName}.git`,
-          branch: draft.branch || selectedRepo.defaultBranch,
-          rootPath: draft.rootPath.replace(/new-app$/i, selectedRepo.name),
-          sourceProvider: "GITHUB"
-        }),
-        githubOwner: selectedRepo.owner,
-        githubRepo: selectedRepo.name
+        ...formPayload(repoDraft),
+        githubOwner: targetRepo.owner,
+        githubRepo: targetRepo.name
       });
       const queue = await apiPost<QueueResponse>(`/deployments/${deployment.slug}/deploy`);
-      return { deployment, queue };
+      return { deployment, queue, detection };
     },
-    onSuccess: async ({ deployment }) => {
-      setNotice(`${deployment.name} imported and deployment queued.`);
+    onSuccess: async ({ deployment, detection }) => {
+      setNotice(`${deployment.name} imported, ${detection.detected} detected, and deployment queued.`);
       setSelectedRepo(null);
+      setRepoPickerOpen(false);
       await queryClient.invalidateQueries({ queryKey: ["deployments"] });
       await queryClient.invalidateQueries({ queryKey: ["deployments-next-port"] });
     },
@@ -246,6 +272,18 @@ export function DeploymentsClient() {
     onError: (error) => setNotice(error instanceof Error ? error.message : "Action failed")
   });
 
+  const copyLogs = useMutation({
+    mutationFn: async (deployment: Deployment) => {
+      setCopyingLogsFor(deployment.id);
+      const text = await apiGetText(`/deployments/${deployment.slug}/logs/export?limit=500`);
+      await navigator.clipboard.writeText(text);
+      return deployment;
+    },
+    onSuccess: (deployment) => setNotice(`${deployment.name} logs copied. You can paste/share it now.`),
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not copy logs"),
+    onSettled: () => setCopyingLogsFor(null)
+  });
+
   function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSearch(draftSearch.trim());
@@ -265,7 +303,10 @@ export function DeploymentsClient() {
         <div className="space-y-4 p-4">
           <div className="grid grid-cols-2 gap-2">
             {sourceOptions.map((source) => (
-              <button className={`h-9 rounded-md border text-xs font-semibold ${draft.sourceProvider === source ? "border-panel-accent bg-teal-50 text-panel-accent" : "border-panel-line hover:bg-slate-50"}`} key={source} onClick={() => setDraft({ ...draft, sourceProvider: source })} type="button">
+              <button className={`h-9 rounded-md border text-xs font-semibold ${draft.sourceProvider === source ? "border-panel-accent bg-teal-50 text-panel-accent" : "border-panel-line hover:bg-slate-50"}`} key={source} onClick={() => {
+                setDraft({ ...draft, sourceProvider: source });
+                if (source === "GITHUB") setRepoPickerOpen(true);
+              }} type="button">
                 {source.replace("_", " ")}
               </button>
             ))}
@@ -292,19 +333,14 @@ export function DeploymentsClient() {
 
           {draft.sourceProvider === "GITHUB" ? (
             <div className="rounded-md border border-panel-line p-3">
-              <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase text-panel-muted">
-                <Github size={15} />
-                GitHub Import
-              </div>
-              <input className="h-9 w-full rounded-md border border-panel-line px-3 text-sm" onChange={(event) => setRepoSearch(event.target.value)} placeholder="Search repo name" value={repoSearch} />
-              <div className="mt-2 max-h-44 space-y-1 overflow-auto">
-                {(repos.data?.items ?? []).map((repo) => (
-                  <button className={`flex h-9 w-full items-center justify-between rounded-md px-2 text-left text-sm ${selectedRepo?.fullName === repo.fullName ? "bg-teal-50 text-panel-accent" : "hover:bg-slate-50"}`} key={repo.fullName} onClick={() => selectRepo(repo)} type="button">
-                    <span className="truncate">{repo.fullName}</span>
-                    <span className="ml-2 shrink-0 text-xs text-panel-muted">{repo.private ? "private" : repo.defaultBranch}</span>
-                  </button>
-                ))}
-                {repoSearch.length > 1 && repos.data?.items.length === 0 ? <div className="py-4 text-center text-xs text-panel-muted">No repositories returned.</div> : null}
+              <div className="mb-2 flex items-center justify-between gap-2 text-xs font-semibold uppercase text-panel-muted">
+                <span className="flex items-center gap-2">
+                  <Github size={15} />
+                  GitHub Import
+                </span>
+                <button className="rounded border border-panel-line px-2 py-1 text-[11px] text-panel-ink hover:bg-slate-50" onClick={() => setRepoPickerOpen(true)} type="button">
+                  Choose repo
+                </button>
               </div>
               {selectedRepo ? (
                 <div className="mt-3 rounded-md bg-slate-50 p-2 text-xs">
@@ -377,7 +413,7 @@ export function DeploymentsClient() {
             </button>
           </div>
           {draft.sourceProvider === "GITHUB" ? (
-            <button className="flex h-10 w-full items-center justify-center gap-2 rounded-md bg-slate-900 text-sm font-semibold text-white disabled:opacity-60" disabled={!selectedRepo || !draft.rootPath || !draft.port || importAndDeployGithub.isPending} onClick={() => importAndDeployGithub.mutate()} type="button">
+            <button className="flex h-10 w-full items-center justify-center gap-2 rounded-md bg-slate-900 text-sm font-semibold text-white disabled:opacity-60" disabled={!selectedRepo || !draft.rootPath || !draft.port || importAndDeployGithub.isPending} onClick={() => importAndDeployGithub.mutate(undefined)} type="button">
               <Play size={15} />
               Import and deploy selected GitHub project
             </button>
@@ -459,6 +495,10 @@ export function DeploymentsClient() {
                               {name}
                             </button>
                           ))}
+                          <button className="flex h-8 items-center gap-1 rounded-md border border-panel-line px-2 text-xs font-medium hover:bg-slate-50 disabled:opacity-50" disabled={copyingLogsFor === deployment.id} onClick={() => copyLogs.mutate(deployment)} type="button">
+                            <Clipboard size={13} />
+                            logs
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -473,6 +513,64 @@ export function DeploymentsClient() {
           )}
         </div>
       </main>
+
+      {repoPickerOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-6">
+          <div className="flex max-h-[82vh] w-full max-w-3xl flex-col rounded-md border border-panel-line bg-white shadow-xl">
+            <div className="flex items-center justify-between border-b border-panel-line p-4">
+              <div>
+                <div className="flex items-center gap-2 text-sm font-semibold">
+                  <Github size={17} />
+                  GitHub Projects
+                </div>
+                <div className="mt-1 text-xs text-panel-muted">Select a repository to auto-detect framework and start deploy.</div>
+              </div>
+              <button className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-50" onClick={() => setRepoPickerOpen(false)} type="button">
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="border-b border-panel-line p-4">
+              <div className="relative">
+                <Search className="absolute left-3 top-2.5 text-panel-muted" size={15} />
+                <input className="h-9 w-full rounded-md border border-panel-line pl-9 pr-3 text-sm" onChange={(event) => setRepoSearch(event.target.value)} placeholder="Search GitHub repositories" value={repoSearch} />
+              </div>
+              {repos.data?.note ? <div className="mt-2 text-xs text-amber-700">{repos.data.note}</div> : null}
+              {repos.data?.dryRun ? <div className="mt-2 text-xs text-amber-700">GitHub token is not connected; showing dry-run placeholder repositories.</div> : null}
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-auto p-2">
+              {repos.isLoading ? <div className="p-8 text-center text-sm text-panel-muted">Loading repositories...</div> : null}
+              {(repos.data?.items ?? []).map((repo) => (
+                <button
+                  className="flex w-full items-center justify-between gap-4 rounded-md px-3 py-3 text-left hover:bg-slate-50 disabled:opacity-60"
+                  disabled={importAndDeployGithub.isPending}
+                  key={repo.fullName}
+                  onClick={() => {
+                    selectRepo(repo);
+                    importAndDeployGithub.mutate(repo);
+                  }}
+                  type="button"
+                >
+                  <span className="min-w-0">
+                    <span className="block truncate text-sm font-semibold text-panel-ink">{repo.fullName}</span>
+                    <span className="mt-1 block text-xs text-panel-muted">
+                      {repo.private ? "private" : "public"} · {repo.defaultBranch}{repo.updatedAt ? ` · updated ${formatDate(repo.updatedAt)}` : ""}
+                    </span>
+                  </span>
+                  <span className="flex h-8 shrink-0 items-center gap-2 rounded-md bg-panel-accent px-3 text-xs font-semibold text-white">
+                    <Play size={13} />
+                    deploy
+                  </span>
+                </button>
+              ))}
+              {!repos.isLoading && (repos.data?.items ?? []).length === 0 ? (
+                <div className="p-8 text-center text-sm text-panel-muted">No repositories found.</div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }
