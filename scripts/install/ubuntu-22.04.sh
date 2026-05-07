@@ -72,6 +72,7 @@ log "Installing Node dependencies"
 runuser -u "$APP_USER" -- bash -lc "cd '$APP_DIR' && npm install"
 runuser -u "$APP_USER" -- bash -lc "cd '$APP_DIR/api' && npm install"
 runuser -u "$APP_USER" -- bash -lc "cd '$APP_DIR/frontend' && npm install"
+npm install -g pm2
 
 log "Installing sysagent Python dependencies"
 runuser -u "$APP_USER" -- bash -lc "cd '$APP_DIR/sysagent' && python3 -m venv .venv && . .venv/bin/activate && pip install --upgrade pip && pip install -r requirements.txt"
@@ -138,7 +139,7 @@ ALLOW_PENDING_VANITY_NAMESERVER_DOMAINS=true
 DOMAIN_NAMESERVER_RESOLVERS=1.1.1.1,8.8.8.8,9.9.9.9
 DOMAIN_NAMESERVER_DOH_URLS=https://cloudflare-dns.com/dns-query,https://dns.google/resolve,https://dns.quad9.net/dns-query
 FILE_MANAGER_ROOT=/var/www
-ALLOW_LIVE_SYSTEM_COMMANDS=false
+ALLOW_LIVE_SYSTEM_COMMANDS=true
 ALLOW_LIVE_FILE_MANAGER=true
 ALLOW_LIVE_DNS=true
 ALLOW_LIVE_NGINX=true

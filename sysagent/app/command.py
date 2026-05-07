@@ -17,7 +17,17 @@ def run_command(command: Sequence[str], cwd: str | None = None, env: dict[str, s
             "returncode": 0,
         }
 
-    completed = subprocess.run(command, cwd=cwd, env={**os.environ, **(env or {})}, capture_output=True, text=True, check=False)
+    try:
+        completed = subprocess.run(command, cwd=cwd, env={**os.environ, **(env or {})}, capture_output=True, text=True, check=False)
+    except FileNotFoundError as error:
+        return {
+            "dryRun": False,
+            "command": list(command),
+            "cwd": cwd,
+            "stdout": "",
+            "stderr": str(error),
+            "returncode": 127,
+        }
     return {
         "dryRun": False,
         "command": list(command),

@@ -1,5 +1,5 @@
 import { Worker } from "bullmq";
-import { Prisma } from "@prisma/client";
+import { DeploymentFramework, DeploymentProcessManager, Prisma } from "@prisma/client";
 import { redis } from "../lib/redis.js";
 import { logger } from "../lib/logger.js";
 import { prisma } from "../lib/prisma.js";
@@ -12,6 +12,15 @@ type DeployJobData = {
 };
 
 type DeployStep = "PREFLIGHT" | "CLONING" | "INSTALLING" | "MIGRATING" | "BUILDING" | "CONFIGURING_PROXY" | "STARTING" | "HEALTH_CHECK" | "SUCCEEDED" | "FAILED" | "ROLLBACK";
+
+const defaultProcessManagerByFramework: Record<DeploymentFramework, DeploymentProcessManager> = {
+  LARAVEL: "SUPERVISOR",
+  NEXTJS: "PM2",
+  NODEJS: "PM2",
+  PYTHON: "SUPERVISOR",
+  GO: "SUPERVISOR",
+  STATIC: "STATIC"
+};
 
 async function writeLog(deploymentId: string, releaseId: string | undefined, step: DeployStep, message: string, metadata: Prisma.InputJsonObject = {}, level = "info") {
   return prisma.deploymentLog.create({
@@ -39,6 +48,16 @@ async function runStep<T>(deploymentId: string, releaseId: string | undefined, s
   }
 }
 
+function assertLiveResult(result: unknown, label: string) {
+  const value = result as { dryRun?: boolean; returncode?: number; stderr?: string; reason?: string };
+  if (value?.dryRun) {
+    throw new Error(`${label} did not run live. Set ALLOW_LIVE_SYSTEM_COMMANDS=true on vps-panel-sysagent, restart vps-panel-sysagent and vps-panel-workers, then retry.`);
+  }
+  if (typeof value?.returncode === "number" && value.returncode !== 0) {
+    throw new Error(`${label} failed with exit code ${value.returncode}${value.stderr ? `: ${value.stderr}` : ""}`);
+  }
+}
+
 async function markRelease(releaseId: string | undefined, status: "RUNNING" | "SUCCEEDED" | "FAILED" | "ROLLED_BACK", startedAt?: Date) {
   if (!releaseId) return;
   const finished = status === "SUCCEEDED" || status === "FAILED" || status === "ROLLED_BACK" ? new Date() : undefined;
@@ -56,17 +75,36 @@ async function markRelease(releaseId: string | undefined, status: "RUNNING" | "S
 async function processLifecycleAction(action: string, deploymentId: string, releaseId: string | undefined) {
   const deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: { domain: true } });
   const processAction = action === "redeploy" || action === "deploy" ? "start" : action;
+  const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
+
+  if (processAction !== "stop" && deployment.domain) {
+    const nginxResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config", () =>
+      sysagent.deploymentNginx({
+        deploymentId: deployment.id,
+        serverName: deployment.domain?.name,
+        upstreamPort: deployment.port,
+        rootPath: deployment.rootPath,
+        forceSsl: deployment.domain?.forceSsl ?? true
+      })
+    );
+    assertLiveResult((nginxResult as { write?: unknown }).write, "Nginx proxy config write");
+    assertLiveResult((nginxResult as { enable?: unknown }).enable, "Nginx proxy config enable");
+    assertLiveResult((nginxResult as { test?: unknown }).test, "Nginx config test");
+    assertLiveResult((nginxResult as { reload?: unknown }).reload, "Nginx reload");
+  }
+
   const result = await runStep(deployment.id, releaseId, "STARTING", `${action} process`, () =>
     sysagent.deploymentProcess({
       deploymentId: deployment.id,
       name: deployment.slug,
       rootPath: deployment.rootPath,
       action: processAction,
-      processManager: deployment.processManager,
+      processManager,
       startCommand: deployment.startCommand,
       port: deployment.port
     })
   );
+  assertLiveResult(result, `${action} process`);
   const nextStatus = action === "stop" ? "STOPPED" : "RUNNING";
   await prisma.deployment.update({ where: { id: deployment.id }, data: { status: nextStatus } });
   return { result, status: nextStatus };
@@ -130,7 +168,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       );
     }
 
-    await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config", () =>
+    const nginxResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config", () =>
       sysagent.deploymentNginx({
         deploymentId: deployment.id,
         serverName: deployment.domain?.name,
@@ -139,6 +177,10 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         forceSsl: deployment.domain?.forceSsl ?? true
       })
     );
+    assertLiveResult((nginxResult as { write?: unknown }).write, "Nginx proxy config write");
+    assertLiveResult((nginxResult as { enable?: unknown }).enable, "Nginx proxy config enable");
+    assertLiveResult((nginxResult as { test?: unknown }).test, "Nginx config test");
+    assertLiveResult((nginxResult as { reload?: unknown }).reload, "Nginx reload");
 
     if (deployment.domain?.forceSsl) {
       await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "SSL request", () =>
@@ -153,17 +195,19 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "SSL request skipped", { reason: deployment.domain ? "Force SSL is disabled" : "No linked domain" });
     }
 
-    await runStep(deployment.id, releaseId, "STARTING", "Process start", () =>
+    const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
+    const startResult = await runStep(deployment.id, releaseId, "STARTING", "Process start", () =>
       sysagent.deploymentProcess({
         deploymentId: deployment.id,
         name: deployment.slug,
         rootPath: deployment.rootPath,
         action: "start",
-        processManager: deployment.processManager,
+        processManager,
         startCommand: deployment.startCommand,
         port: deployment.port
       })
     );
+    assertLiveResult(startResult, "Process start");
 
     await runStep(deployment.id, releaseId, "HEALTH_CHECK", "Health check", () =>
       sysagent.deploymentHealth({
