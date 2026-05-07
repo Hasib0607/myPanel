@@ -54,6 +54,17 @@ type TreeResponse = {
   children: TreeEntry[];
 };
 
+type Domain = {
+  id: string;
+  name: string;
+  status: "ACTIVE" | "PENDING" | "SUSPENDED";
+};
+
+type DomainListResponse = {
+  items: Domain[];
+  total: number;
+};
+
 type ReadResponse = {
   file: FileEntry;
   content: string;
@@ -166,12 +177,20 @@ export function FileManagerClient() {
   const [theme, setTheme] = useState<"vs" | "vs-dark">("vs");
   const [lastResult, setLastResult] = useState("");
   const [imagePreview, setImagePreview] = useState("");
+  const [selectedDomainId, setSelectedDomainId] = useState("");
+
+  const domains = useQuery({
+    queryKey: ["domains", "file-manager"],
+    queryFn: () => apiGet<DomainListResponse>("/domains?page=1&pageSize=100")
+  });
+  const selectedDomain = domains.data?.items.find((domain) => domain.id === selectedDomainId) ?? null;
+  const domainRootPath = selectedDomain?.name ?? ".";
 
   const listPath = `/files/list?${queryString({ path: currentPath, search, sort, direction, page: 1, pageSize: 200 })}`;
 
   const overview = useQuery({ queryKey: ["files-overview"], queryFn: () => apiGet<Overview>("/files/overview") });
   const list = useQuery({ queryKey: ["files-list", currentPath, search, sort, direction], queryFn: () => apiGet<ListResponse>(listPath) });
-  const tree = useQuery({ queryKey: ["files-tree"], queryFn: () => apiGet<TreeResponse>("/files/tree?path=.&depth=4") });
+  const tree = useQuery({ queryKey: ["files-tree", domainRootPath], queryFn: () => apiGet<TreeResponse>(`/files/tree?${queryString({ path: domainRootPath, depth: 4 })}`) });
 
   const selectedEntry = useMemo(() => list.data?.items.find((item) => item.path === selectedPath) ?? null, [list.data?.items, selectedPath]);
   const canEdit = selectedEntry?.type === "file" && selectedEntry.kind === "text";
@@ -277,6 +296,17 @@ export function FileManagerClient() {
     onError: (err) => setLastResult(err instanceof Error ? err.message : "Could not create folder")
   });
 
+  const createDomainFolder = useMutation({
+    mutationFn: (domainName: string) => apiPost<FileEntry>("/files/folders", { parentPath: ".", name: domainName }),
+    onSuccess: async (folder) => {
+      setCurrentPath(folder.path);
+      setSelectedPath(null);
+      setLastResult(`Created folder for ${folder.name}.`);
+      await invalidateFiles();
+    },
+    onError: (err) => setLastResult(err instanceof Error ? err.message : "Could not create domain folder")
+  });
+
   const renameItem = useMutation({
     mutationFn: ({ path, name }: { path: string; name: string }) => apiPatch<{ ok: true; file: FileEntry }>("/files/rename", { path, name }),
     onSuccess: async (response) => {
@@ -374,17 +404,31 @@ export function FileManagerClient() {
     await invalidateFiles();
   }
 
+  function selectDomain(domainId: string) {
+    const domain = domains.data?.items.find((item) => item.id === domainId) ?? null;
+    setSelectedDomainId(domainId);
+    setCurrentPath(domain?.name ?? ".");
+    setSelectedPath(null);
+    setSearch("");
+    setDraftSearch("");
+    setLastResult("");
+  }
+
   return (
     <section className="grid h-[calc(100vh-81px)] grid-cols-[300px_minmax(520px,1fr)_380px] overflow-hidden p-8">
       <aside className="min-h-0 rounded-l-md border border-panel-line bg-white">
         <div className="border-b border-panel-line p-4">
-          <div className="truncate text-sm font-semibold">{overview.data?.root ?? "File root"}</div>
+          <div className="truncate text-sm font-semibold">{selectedDomain ? selectedDomain.name : overview.data?.root ?? "File root"}</div>
           <div className="mt-1 text-xs text-panel-muted">{overview.data ? `${formatBytes(overview.data.textReadLimit)} editor limit` : "Loading..."}</div>
         </div>
         <div className="h-[calc(100%-73px)] overflow-auto p-3">
-          <button className={`mb-2 flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-slate-100 ${currentPath === "." ? "bg-slate-100 font-semibold" : ""}`} onClick={() => setCurrentPath(".")} type="button">
+          <button
+            className={`mb-2 flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-slate-100 ${currentPath === domainRootPath ? "bg-slate-100 font-semibold" : ""}`}
+            onClick={() => setCurrentPath(domainRootPath)}
+            type="button"
+          >
             <Folder size={15} />
-            root
+            {selectedDomain ? selectedDomain.name : "root"}
           </button>
           {tree.data?.children.map((node) => <TreeNode currentPath={currentPath} key={node.path} node={node} onOpen={setCurrentPath} />)}
         </div>
@@ -392,6 +436,23 @@ export function FileManagerClient() {
 
       <main className="min-h-0 border-y border-panel-line bg-white">
         <div className="space-y-3 border-b border-panel-line p-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              className="h-9 min-w-64 rounded-md border border-panel-line px-2 text-sm"
+              onChange={(event) => selectDomain(event.target.value)}
+              value={selectedDomainId}
+            >
+              <option value="">All files</option>
+              {(domains.data?.items ?? []).map((domain) => (
+                <option key={domain.id} value={domain.id}>{domain.name}</option>
+              ))}
+            </select>
+            {selectedDomain ? (
+              <span className="text-xs text-panel-muted">Showing /var/www/{selectedDomain.name}</span>
+            ) : (
+              <span className="text-xs text-panel-muted">Showing full file root</span>
+            )}
+          </div>
           <div className="flex flex-wrap items-center gap-2">
             <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50" onClick={() => list.refetch()} type="button"><RefreshCw size={15} /> Refresh</button>
             <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50" onClick={() => {
@@ -426,7 +487,7 @@ export function FileManagerClient() {
               <option value="asc">Asc</option>
               <option value="desc">Desc</option>
             </select>
-            {list.data?.breadcrumbs.map((crumb) => (
+            {list.data?.breadcrumbs.filter((crumb) => !selectedDomain || crumb.path !== ".").map((crumb) => (
               <button className="h-8 rounded-md px-2 text-xs text-panel-muted hover:bg-slate-100" key={crumb.path} onClick={() => setCurrentPath(crumb.path)} type="button">
                 {crumb.name}
               </button>
@@ -435,6 +496,23 @@ export function FileManagerClient() {
         </div>
 
         {lastResult ? <div className="border-b border-panel-line bg-slate-50 px-4 py-2 text-sm text-slate-700">{lastResult}</div> : null}
+        {list.isError && selectedDomain ? (
+          <div className="border-b border-panel-line bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            <div className="font-medium">No folder exists for {selectedDomain.name} yet.</div>
+            <button
+              className="mt-2 h-8 rounded-md border border-amber-300 bg-white px-3 text-xs font-semibold hover:bg-amber-100 disabled:opacity-60"
+              disabled={createDomainFolder.isPending}
+              onClick={() => createDomainFolder.mutate(selectedDomain.name)}
+              type="button"
+            >
+              Create domain folder
+            </button>
+          </div>
+        ) : list.isError ? (
+          <div className="border-b border-panel-line bg-red-50 px-4 py-3 text-sm text-panel-danger">
+            {list.error instanceof Error ? list.error.message : "Could not load files"}
+          </div>
+        ) : null}
 
         <div className="h-[calc(100%-122px)] overflow-auto">
           <table className="w-full text-sm">
