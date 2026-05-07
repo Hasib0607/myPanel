@@ -10,6 +10,7 @@ import { z } from "zod";
 import { env } from "../config/env.js";
 import { audit } from "../lib/audit.js";
 import { ensureDomainFileStructure } from "../lib/domainFiles.js";
+import { sysagent } from "../lib/sysagent.js";
 
 const execFileAsync = promisify(execFile);
 const textReadLimit = 1024 * 1024;
@@ -185,6 +186,10 @@ async function checksum(file: string) {
   return hash.digest("hex");
 }
 
+function isPermissionError(error: unknown) {
+  return error instanceof Error && "code" in error && ((error as NodeJS.ErrnoException).code === "EACCES" || (error as NodeJS.ErrnoException).code === "EPERM");
+}
+
 const listQuery = z.object({
   path: z.string().default("."),
   search: z.string().default(""),
@@ -277,7 +282,12 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
       throw app.httpErrors.conflict("File changed on disk; reload before saving");
     }
     if (Buffer.byteLength(body.content, "utf8") > textReadLimit) throw app.httpErrors.payloadTooLarge("Content is too large");
-    await fs.writeFile(file, body.content, "utf8");
+    try {
+      await fs.writeFile(file, body.content, "utf8");
+    } catch (error) {
+      if (!isPermissionError(error)) throw error;
+      await sysagent.writeFile({ path: body.path, content: body.content });
+    }
     return { ok: true, file: await statEntry(file) };
   });
 
@@ -285,7 +295,12 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
     const body = createSchema.parse(request.body);
     const parent = safePath(body.parentPath);
     const file = safeChild(parent, body.name);
-    await fs.writeFile(file, body.content, { encoding: "utf8", flag: "wx" });
+    try {
+      await fs.writeFile(file, body.content, { encoding: "utf8", flag: "wx" });
+    } catch (error) {
+      if (!isPermissionError(error)) throw error;
+      await sysagent.createFile({ parentPath: body.parentPath, name: body.name, content: body.content, overwrite: false });
+    }
     return reply.code(201).send(await statEntry(file));
   });
 
@@ -293,7 +308,12 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
     const body = folderSchema.parse(request.body);
     const parent = safePath(body.parentPath);
     const folder = safeChild(parent, body.name);
-    await fs.mkdir(folder, { recursive: false });
+    try {
+      await fs.mkdir(folder, { recursive: false });
+    } catch (error) {
+      if (!isPermissionError(error)) throw error;
+      await sysagent.createFolder({ parentPath: body.parentPath, name: body.name });
+    }
     return reply.code(201).send(await statEntry(folder));
   });
 
@@ -355,7 +375,12 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
     const removed = [];
     for (const itemPath of body.paths) {
       const resolved = safePath(itemPath);
-      await fs.rm(resolved, { recursive: true, force: true });
+      try {
+        await fs.rm(resolved, { recursive: true, force: true });
+      } catch (error) {
+        if (!isPermissionError(error)) throw error;
+        await sysagent.deleteFiles({ paths: [itemPath] });
+      }
       removed.push(itemPath);
     }
     await audit(request, { action: "DELETE", resource: "file", description: `Deleted ${removed.length} file manager item(s)`, metadata: { paths: removed } });
@@ -368,7 +393,12 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
     const file = safeChild(parent, body.name);
     const buffer = Buffer.from(body.contentBase64, "base64");
     if (buffer.byteLength > uploadLimit) throw app.httpErrors.payloadTooLarge("Upload is too large");
-    await fs.writeFile(file, buffer, { flag: body.overwrite ? "w" : "wx" });
+    try {
+      await fs.writeFile(file, buffer, { flag: body.overwrite ? "w" : "wx" });
+    } catch (error) {
+      if (!isPermissionError(error)) throw error;
+      await sysagent.createFile({ parentPath: body.parentPath, name: body.name, contentBase64: body.contentBase64, overwrite: body.overwrite });
+    }
     return reply.code(201).send(await statEntry(file));
   });
 
@@ -395,7 +425,12 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
     if (process.platform === "win32") {
       return { dryRun: true, path: body.path, mode: body.mode, reason: "chmod is Linux-oriented; Windows local mode is dry-run" };
     }
-    await fs.chmod(target, Number.parseInt(body.mode, 8));
+    try {
+      await fs.chmod(target, Number.parseInt(body.mode, 8));
+    } catch (error) {
+      if (!isPermissionError(error)) throw error;
+      await sysagent.chmodFile({ path: body.path, mode: body.mode });
+    }
     return { ok: true, file: await statEntry(target) };
   });
 

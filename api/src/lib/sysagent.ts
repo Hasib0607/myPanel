@@ -53,6 +53,16 @@ export const sysagent = {
     request("/dns/zone/apply", { method: "POST", body: JSON.stringify(body) }),
   provisionDatabase: (body: unknown) =>
     request("/database/provision", { method: "POST", body: JSON.stringify(body) }),
+  deleteFiles: (body: unknown) =>
+    request<{ ok: true; removed: string[]; dryRun?: boolean }>("/files/delete", { method: "DELETE", body: JSON.stringify(body) }),
+  createFile: (body: unknown) =>
+    request<{ ok: true; path: string; dryRun?: boolean }>("/files/files", { method: "POST", body: JSON.stringify(body) }),
+  createFolder: (body: unknown) =>
+    request<{ ok: true; path: string; dryRun?: boolean }>("/files/folders", { method: "POST", body: JSON.stringify(body) }),
+  chmodFile: (body: unknown) =>
+    request<{ ok: true; path: string; mode: string; dryRun?: boolean }>("/files/chmod", { method: "POST", body: JSON.stringify(body) }),
+  writeFile: (body: unknown) =>
+    request<{ ok: true; path: string; dryRun?: boolean }>("/files/write", { method: "PUT", body: JSON.stringify(body) }),
   writeNginxVhost: (body: unknown) =>
     request("/nginx/vhost", { method: "POST", body: JSON.stringify(body) }),
   issueCertificate: (body: unknown) =>
