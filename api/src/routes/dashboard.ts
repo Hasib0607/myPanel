@@ -1,4 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
+import { z } from "zod";
+import { audit } from "../lib/audit.js";
 import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
 import { sysagent } from "../lib/sysagent.js";
@@ -74,5 +76,21 @@ export const dashboardRoutes: FastifyPluginAsync = async (app) => {
       services,
       generatedAt: new Date().toISOString()
     };
+  });
+
+  app.post("/services/:serviceKey/:action", { preHandler: app.requireAuth }, async (request, reply) => {
+    const { serviceKey, action } = z.object({
+      serviceKey: z.enum(["nginx", "bind9", "postfix", "dovecot"]),
+      action: z.enum(["install", "start", "stop", "restart", "enable", "disable"])
+    }).parse(request.params);
+    const result = await sysagent.serviceAction(serviceKey, action);
+    await audit(request, {
+      action: action === "stop" ? "STOP" : action === "restart" ? "RESTART" : "APPLY",
+      resource: "system_service",
+      resourceId: serviceKey,
+      description: `${action} requested for ${serviceKey}`,
+      metadata: { result: result as any }
+    });
+    return reply.code(202).send({ serviceKey, action, result });
   });
 };

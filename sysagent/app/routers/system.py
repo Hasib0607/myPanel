@@ -2,16 +2,23 @@ import shutil
 import subprocess
 
 import psutil
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+
+from app.command import run_command
 
 router = APIRouter()
 
-SERVICE_CHECKS = [
-    {"name": "Nginx", "port": 80, "units": ["nginx"]},
-    {"name": "BIND9", "port": 53, "units": ["bind9", "named"]},
-    {"name": "Postfix", "port": 25, "units": ["postfix"]},
-    {"name": "Dovecot", "port": 993, "units": ["dovecot"]},
-]
+SERVICE_CHECKS = {
+    "nginx": {"name": "Nginx", "port": 80, "unit": "nginx", "units": ["nginx"], "packages": ["nginx"]},
+    "bind9": {"name": "BIND9", "port": 53, "unit": "bind9", "units": ["bind9", "named"], "packages": ["bind9", "bind9utils", "bind9-doc"]},
+    "postfix": {"name": "Postfix", "port": 25, "unit": "postfix", "units": ["postfix"], "packages": ["postfix"]},
+    "dovecot": {"name": "Dovecot", "port": 993, "unit": "dovecot", "units": ["dovecot"], "packages": ["dovecot-core", "dovecot-imapd", "dovecot-lmtpd"]},
+}
+
+
+class ServiceActionRequest(BaseModel):
+    action: str
 
 
 @router.get("/stats")
@@ -62,12 +69,28 @@ def systemd_state(units: list[str]) -> tuple[str, str | None]:
     return "inactive", ", ".join(details)
 
 
+def unit_installed(units: list[str]) -> bool:
+    if not shutil.which("systemctl"):
+        return False
+    for unit in units:
+        completed = subprocess.run(
+            ["systemctl", "list-unit-files", f"{unit}.service", "--no-legend"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode == 0 and completed.stdout.strip():
+            return True
+    return False
+
+
 @router.get("/services")
 def services() -> dict:
     ports = listening_ports()
     items = []
-    for service in SERVICE_CHECKS:
+    for key, service in SERVICE_CHECKS.items():
         state, detail = systemd_state(service["units"])
+        installed = unit_installed(service["units"])
         port_open = service["port"] in ports
         healthy = state == "active" and port_open
         status = "healthy" if healthy else "down"
@@ -81,12 +104,35 @@ def services() -> dict:
             message = f"not active; {detail}"
 
         items.append({
+            "key": key,
             "name": service["name"],
             "port": service["port"],
             "status": status,
             "detail": message,
             "systemdState": state,
             "portListening": port_open,
+            "installed": installed,
+            "manageable": True,
+            "availableActions": ["install"] if not installed else ["start", "stop", "restart", "enable", "disable"],
         })
 
     return {"items": items}
+
+
+@router.post("/services/{service_key}/action")
+def service_action(service_key: str, body: ServiceActionRequest) -> dict:
+    service = SERVICE_CHECKS.get(service_key)
+    if not service:
+        raise HTTPException(status_code=404, detail="Unknown service")
+
+    action = body.action
+    if action == "install":
+        return run_command(
+            ["apt-get", "install", "-y", *service["packages"]],
+            env={"DEBIAN_FRONTEND": "noninteractive"},
+        )
+
+    if action not in {"start", "stop", "restart", "enable", "disable"}:
+        raise HTTPException(status_code=400, detail="Unsupported service action")
+
+    return run_command(["systemctl", action, service["unit"]])

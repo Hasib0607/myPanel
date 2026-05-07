@@ -1,13 +1,15 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, CheckCircle2, Clock3, Plus, RefreshCw, RotateCw, ServerCrash, Terminal, Trash2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Clock3, Download, Play, Plus, RefreshCw, RotateCw, ServerCrash, Square, Terminal, Trash2 } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { StatCard } from "@/components/stat-card";
 import { apiDelete, apiGet, apiPost } from "@/lib/api";
 
 type ServiceStatus = "healthy" | "down" | "pending";
+type ManagedServiceAction = "install" | "start" | "stop" | "restart" | "enable" | "disable";
 
 type DashboardData = {
   counts: {
@@ -31,7 +33,16 @@ type DashboardData = {
         network: Record<string, number>;
       }
     | { unavailable: true };
-  services: Array<{ name: string; port: number; status: ServiceStatus; detail: string }>;
+  services: Array<{
+    key?: string;
+    name: string;
+    port: number;
+    status: ServiceStatus;
+    detail: string;
+    installed?: boolean;
+    manageable?: boolean;
+    availableActions?: string[];
+  }>;
   generatedAt: string;
 };
 
@@ -90,10 +101,55 @@ function Meter({ label, value, detail }: { label: string; value: number; detail?
   );
 }
 
+function ServiceActionButton({ label, title, disabled, onClick, children }: { label: string; title: string; disabled: boolean; onClick: () => void; children: ReactNode }) {
+  return (
+    <button
+      aria-label={label}
+      className="grid h-8 w-8 place-items-center rounded-md border border-panel-line text-panel-muted hover:bg-slate-50 hover:text-panel-ink disabled:opacity-50"
+      disabled={disabled}
+      onClick={onClick}
+      title={title}
+      type="button"
+    >
+      {children}
+    </button>
+  );
+}
+
+function ServiceActions({ serviceKey, status, installed, disabled, onAction }: { serviceKey: string; status: ServiceStatus; installed: boolean; disabled: boolean; onAction: (action: ManagedServiceAction) => void }) {
+  if (!installed) {
+    return (
+      <div className="flex items-center gap-2">
+        <ServiceActionButton disabled={disabled} label={`Install ${serviceKey}`} onClick={() => onAction("install")} title="Install service">
+          <Download size={14} />
+        </ServiceActionButton>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      {status === "healthy" ? (
+        <ServiceActionButton disabled={disabled} label={`Stop ${serviceKey}`} onClick={() => onAction("stop")} title="Stop service">
+          <Square size={13} />
+        </ServiceActionButton>
+      ) : (
+        <ServiceActionButton disabled={disabled} label={`Start ${serviceKey}`} onClick={() => onAction("start")} title="Start service">
+          <Play size={14} />
+        </ServiceActionButton>
+      )}
+      <ServiceActionButton disabled={disabled} label={`Restart ${serviceKey}`} onClick={() => onAction("restart")} title="Restart service">
+        <RotateCw size={14} />
+      </ServiceActionButton>
+    </div>
+  );
+}
+
 export function DashboardClient() {
   const queryClient = useQueryClient();
   const [nameServerForm, setNameServerForm] = useState({ hostname: "", ipv4: "", ipv6: "", sortOrder: 10 });
   const [nameServerError, setNameServerError] = useState<string | null>(null);
+  const [serviceNotice, setServiceNotice] = useState<string | null>(null);
 
   const dashboard = useQuery({
     queryKey: ["dashboard"],
@@ -155,6 +211,16 @@ export function DashboardClient() {
     onSuccess: refreshNameServers,
     onError: (err) => setNameServerError(err instanceof Error ? err.message : "Could not delete nameserver")
   });
+  const serviceAction = useMutation({
+    mutationFn: ({ serviceKey, action }: { serviceKey: string; action: ManagedServiceAction }) =>
+      apiPost<{ serviceKey: string; action: string; result: { dryRun?: boolean; returncode?: number; stdout?: string; stderr?: string } }>(`/dashboard/services/${serviceKey}/${action}`),
+    onSuccess: async (data) => {
+      const dryRun = data.result?.dryRun ? "dry-run " : "";
+      setServiceNotice(`${dryRun}${data.action} requested for ${data.serviceKey}`);
+      await dashboard.refetch();
+    },
+    onError: (err) => setServiceNotice(err instanceof Error ? err.message : "Service action failed")
+  });
 
   const data = dashboard.data;
   const statsUnavailable = data?.systemStats?.unavailable;
@@ -203,6 +269,7 @@ export function DashboardClient() {
                   <th className="px-4 py-3">Port</th>
                   <th className="px-4 py-3">State</th>
                   <th className="px-4 py-3">Detail</th>
+                  <th className="px-4 py-3">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -217,10 +284,24 @@ export function DashboardClient() {
                       </span>
                     </td>
                     <td className="px-4 py-3 text-panel-muted">{service.detail}</td>
+                    <td className="px-4 py-3">
+                      {service.key && service.manageable ? (
+                        <ServiceActions
+                          disabled={serviceAction.isPending}
+                          installed={Boolean(service.installed)}
+                          serviceKey={service.key}
+                          status={service.status}
+                          onAction={(action) => serviceAction.mutate({ serviceKey: service.key!, action })}
+                        />
+                      ) : (
+                        <span className="text-xs text-panel-muted">system</span>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            {serviceNotice ? <div className="border-t border-panel-line px-4 py-3 text-xs text-panel-muted">{serviceNotice}</div> : null}
           </div>
 
           <div className="space-y-6">

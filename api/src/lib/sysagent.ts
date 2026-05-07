@@ -18,7 +18,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const sysagent = {
   stats: () => request("/system/stats"),
-  services: () => request<{ items: Array<{ name: string; port: number; status: "healthy" | "down"; detail: string }> }>("/system/services"),
+  services: () => request<{ items: Array<{ key: string; name: string; port: number; status: "healthy" | "down"; detail: string; installed: boolean; manageable: boolean; availableActions: string[] }> }>("/system/services"),
+  serviceAction: (serviceKey: string, action: string) =>
+    request(`/system/services/${encodeURIComponent(serviceKey)}/action`, { method: "POST", body: JSON.stringify({ action }) }),
   firewallRules: () => request("/firewall/rules"),
   firewallStatus: () => request("/firewall/status"),
   applyFirewallRule: (body: unknown) =>
