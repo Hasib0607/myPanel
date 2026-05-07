@@ -27,13 +27,14 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
   app.get("/domains/:domainId/status", async (request) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const domain = await prisma.domain.findUniqueOrThrow({ where: { id: domainId } });
+    const effectiveExpiry = domain.sslEnabled ? domain.sslExpiry : null;
     return {
       domainId: domain.id,
       domain: domain.name,
       sslEnabled: domain.sslEnabled,
-      sslExpiry: domain.sslExpiry,
+      sslExpiry: effectiveExpiry,
       forceSsl: domain.forceSsl,
-      ...expiryStatus(domain.sslExpiry)
+      ...expiryStatus(effectiveExpiry)
     };
   });
 
@@ -53,7 +54,8 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
     await prisma.domain.update({
       where: { id: domainId },
       data: {
-        sslEnabled: false
+        sslEnabled: false,
+        sslExpiry: null
       }
     });
     await redis.del("domain_list", `ssl_expiry:${domain.name}`);
