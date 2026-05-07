@@ -48,9 +48,13 @@ def safe_web_root(root_path: str) -> Path:
 
 
 def safe_letsencrypt_path(path: str) -> Path:
-    root = Path("/etc/letsencrypt/live").resolve()
-    target = Path(path).resolve()
-    if root not in target.parents:
+    root = Path("/etc/letsencrypt/live")
+    target = Path(path)
+    if not target.is_absolute():
+        raise HTTPException(status_code=400, detail="SSL certificate path must be absolute")
+    try:
+        target.relative_to(root)
+    except ValueError:
         raise HTTPException(status_code=400, detail="SSL certificate path escapes /etc/letsencrypt/live")
     return target
 
