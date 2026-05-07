@@ -12,6 +12,7 @@ SUDO_BIN="${SUDO_BIN:-sudo}"
 SERVICES="${PANEL_UPDATE_SERVICES:-vps-panel-api vps-panel-workers vps-panel-frontend}"
 HEALTH_URL="${PANEL_UPDATE_HEALTH_URL:-http://127.0.0.1:4000/health}"
 DIRTY_STRATEGY="${PANEL_UPDATE_DIRTY_STRATEGY:-fail}"
+COMMAND_TIMEOUT="${PANEL_UPDATE_COMMAND_TIMEOUT:-120}"
 
 mkdir -p "$(dirname "$LOG_FILE")"
 mkdir -p "$(dirname "$STATUS_FILE")"
@@ -69,6 +70,21 @@ run() {
   "$@" 2>&1 | tee -a "$LOG_FILE"
 }
 
+run_timeout() {
+  log "+ $*"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$COMMAND_TIMEOUT" "$@" 2>&1 | tee -a "$LOG_FILE"
+  else
+    "$@" 2>&1 | tee -a "$LOG_FILE"
+  fi
+}
+
+run_systemctl() {
+  local action="$1"
+  local service="$2"
+  run_timeout "$SUDO_BIN" -n "$SYSTEMCTL_BIN" "$action" "$service"
+}
+
 cd "$APP_DIR"
 
 log "starting panel self-update in $APP_DIR on branch $BRANCH"
@@ -108,8 +124,8 @@ run "$NPM_BIN" --workspace api run prisma:generate
 run "$NPM_BIN" --workspace frontend run build
 
 for service in $SERVICES; do
-  run "$SUDO_BIN" "$SYSTEMCTL_BIN" restart "$service"
-  run "$SUDO_BIN" "$SYSTEMCTL_BIN" is-active "$service"
+  run_systemctl restart "$service"
+  run_systemctl is-active "$service"
 done
 
 if command -v curl >/dev/null 2>&1; then
