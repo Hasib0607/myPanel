@@ -34,7 +34,7 @@ function isPermissionError(error: unknown) {
 async function createDomainFileStructureLocally(normalizedDomain: string, domainRoot: string) {
   await fs.mkdir(domainRoot, { recursive: true });
   await Promise.all(domainDefaultFolders.map((folder) => fs.mkdir(path.join(domainRoot, folder), { recursive: true })));
-  await fs.mkdir(path.join(domainRoot, "public_html", ".well-known"), { recursive: true });
+  await fs.mkdir(path.join(domainRoot, "public_html", ".well-known", "acme-challenge"), { recursive: true });
 
   const indexPath = path.join(domainRoot, "public_html", "index.html");
   await fs.writeFile(

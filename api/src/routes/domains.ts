@@ -332,6 +332,7 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
       throw error;
     }
 
+    const fileScaffold = await ensureDomainFileStructure(domain.name);
     let publishResult: Awaited<ReturnType<typeof publishDomainHosting>> | null = null;
     try {
       publishResult = await publishDomainHosting(domain.id);
@@ -345,7 +346,7 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
       resource: "domain",
       resourceId: domain.id,
       description: `Created domain ${domain.name}`,
-      metadata: publishResult ? JSON.parse(JSON.stringify({ publish: publishResult })) as Prisma.InputJsonValue : undefined
+      metadata: JSON.parse(JSON.stringify({ fileScaffold, publish: publishResult })) as Prisma.InputJsonValue
     });
     return reply.code(201).send(domain);
   });

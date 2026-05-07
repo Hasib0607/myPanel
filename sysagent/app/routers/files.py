@@ -93,7 +93,7 @@ def create_domain_scaffold(body: DomainScaffoldRequest) -> dict:
     domain_root.mkdir(parents=True, exist_ok=True)
     for folder in DEFAULT_DOMAIN_FOLDERS:
         (domain_root / folder).mkdir(parents=True, exist_ok=True)
-    (domain_root / "public_html" / ".well-known").mkdir(parents=True, exist_ok=True)
+    (domain_root / "public_html" / ".well-known" / "acme-challenge").mkdir(parents=True, exist_ok=True)
 
     index_path = domain_root / "public_html" / "index.html"
     if not index_path.exists():
