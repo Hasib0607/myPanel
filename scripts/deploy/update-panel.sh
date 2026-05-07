@@ -33,18 +33,28 @@ write_status() {
   local state="$1"
   local message="$2"
   local commit="${3:-}"
-  printf '{"state":"%s","message":"%s","branch":"%s","commit":"%s","updatedAt":"%s","logFile":"%s"}\n' \
+  local commit_subject="${4:-}"
+  printf '{"state":"%s","message":"%s","branch":"%s","commit":"%s","commitSubject":"%s","updatedAt":"%s","logFile":"%s"}\n' \
     "$(json_escape "$state")" \
     "$(json_escape "$message")" \
     "$(json_escape "$BRANCH")" \
     "$(json_escape "$commit")" \
+    "$(json_escape "$commit_subject")" \
     "$(date -Is)" \
     "$(json_escape "$LOG_FILE")" > "$STATUS_FILE"
 }
 
+current_commit() {
+  git rev-parse --short HEAD 2>/dev/null || true
+}
+
+current_commit_subject() {
+  git log -1 --pretty=%s 2>/dev/null || true
+}
+
 on_error() {
   local exit_code=$?
-  write_status "failed" "panel self-update failed with exit code $exit_code" "$(git rev-parse --short HEAD 2>/dev/null || true)"
+  write_status "failed" "panel self-update failed with exit code $exit_code" "$(current_commit)" "$(current_commit_subject)"
   log "panel self-update failed with exit code $exit_code"
   exit "$exit_code"
 }
@@ -59,20 +69,21 @@ run() {
 cd "$APP_DIR"
 
 log "starting panel self-update in $APP_DIR on branch $BRANCH"
-write_status "running" "panel self-update started" "$(git rev-parse --short HEAD 2>/dev/null || true)"
+write_status "running" "panel self-update started" "$(current_commit)" "$(current_commit_subject)"
 
 if [[ -n "$(git status --porcelain)" ]]; then
   log "worktree is dirty; refusing to auto-update"
   git status --short 2>&1 | tee -a "$LOG_FILE"
-  write_status "failed" "worktree is dirty; refusing to auto-update" "$(git rev-parse --short HEAD 2>/dev/null || true)"
+  write_status "failed" "worktree is dirty; refusing to auto-update" "$(current_commit)" "$(current_commit_subject)"
   exit 2
 fi
 
 run git fetch origin "$BRANCH"
 run git checkout "$BRANCH"
 run git pull --ff-only origin "$BRANCH"
-NEW_COMMIT="$(git rev-parse --short HEAD)"
-write_status "running" "source updated; building panel" "$NEW_COMMIT"
+NEW_COMMIT="$(current_commit)"
+NEW_COMMIT_SUBJECT="$(current_commit_subject)"
+write_status "running" "source updated; building panel" "$NEW_COMMIT" "$NEW_COMMIT_SUBJECT"
 
 run "$NPM_BIN" install
 run "$NPM_BIN" --workspace api run prisma:generate
@@ -111,5 +122,5 @@ else
   log "curl not installed; skipping API health check"
 fi
 
-write_status "succeeded" "panel self-update completed" "$NEW_COMMIT"
+write_status "succeeded" "panel self-update completed" "$NEW_COMMIT" "$NEW_COMMIT_SUBJECT"
 log "panel self-update completed"

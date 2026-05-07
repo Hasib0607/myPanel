@@ -50,6 +50,7 @@ type PanelUpdateStatus = {
     message: string;
     branch?: string;
     commit?: string;
+    commitSubject?: string;
     updatedAt: string | null;
     logFile?: string;
   };
@@ -255,7 +256,10 @@ export function DashboardClient() {
                   </span>
                 </div>
                 <div className="mt-2 text-xs text-panel-muted">{panelUpdate.data?.status.message ?? "Checking update status..."}</div>
-                {panelUpdate.data?.status.commit ? <div className="mt-2 font-mono text-xs text-panel-muted">Commit {panelUpdate.data.status.commit}</div> : null}
+                {panelUpdate.data?.status.commitSubject ? (
+                  <div className="mt-2 text-xs font-medium text-panel-ink">{panelUpdate.data.status.commitSubject}</div>
+                ) : null}
+                {panelUpdate.data?.status.commit ? <div className="mt-1 font-mono text-xs text-panel-muted">Commit {panelUpdate.data.status.commit}</div> : null}
               </div>
               <div className="mt-3 max-h-40 overflow-auto rounded-md bg-slate-950 p-3 font-mono text-xs text-slate-100">
                 {(panelUpdate.data?.recentLog ?? []).slice(-8).map((line, index) => (
