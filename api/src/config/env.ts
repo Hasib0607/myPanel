@@ -27,6 +27,7 @@ const envSchema = z.object({
   VPS_IP: z.string().default("127.0.0.1"),
   REQUIRE_DOMAIN_NAMESERVER_MATCH: z.coerce.boolean().default(true),
   DOMAIN_NAMESERVER_RESOLVERS: z.string().default("1.1.1.1,8.8.8.8,9.9.9.9"),
+  DOMAIN_NAMESERVER_DOH_URLS: z.string().default("https://cloudflare-dns.com/dns-query,https://dns.google/resolve,https://dns.quad9.net/dns-query"),
   FILE_MANAGER_ROOT: z.string().default("/var/www")
 });
 

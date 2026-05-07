@@ -59,6 +59,42 @@ function nameserverMismatchMessage(domain: string, expected: string[], actual: s
   return `Before adding ${domain}, change its nameservers to this hosting nameserver: ${expectedText}. Current nameservers: ${actualText}.`;
 }
 
+type DnsJsonAnswer = {
+  type?: number;
+  data?: string;
+};
+
+type DnsJsonResponse = {
+  Status?: number;
+  Answer?: DnsJsonAnswer[];
+};
+
+async function resolveNameServersWithDoh(domain: string, errors: string[]) {
+  const urls = env.DOMAIN_NAMESERVER_DOH_URLS.split(",").map((url) => url.trim()).filter(Boolean);
+
+  for (const baseUrl of urls) {
+    try {
+      const url = new URL(baseUrl);
+      url.searchParams.set("name", domain);
+      url.searchParams.set("type", "NS");
+      const response = await fetch(url, {
+        headers: { accept: "application/dns-json" },
+        signal: AbortSignal.timeout(5000)
+      });
+      const body = await response.json() as DnsJsonResponse;
+      const records = (body.Answer ?? [])
+        .filter((answer) => answer.type === 2 && answer.data)
+        .map((answer) => normalizeNameServer(answer.data ?? ""));
+      if (records.length > 0) return records.sort();
+      errors.push(`${baseUrl}: status ${body.Status ?? response.status}`);
+    } catch (error) {
+      errors.push(`${baseUrl}: ${error instanceof Error ? error.message : "lookup failed"}`);
+    }
+  }
+
+  return [];
+}
+
 async function resolvePublicNameServers(domain: string) {
   const resolvers = env.DOMAIN_NAMESERVER_RESOLVERS.split(",").map((resolver) => resolver.trim()).filter(Boolean);
   const errors: string[] = [];
@@ -75,6 +111,9 @@ async function resolvePublicNameServers(domain: string) {
       errors.push(`${resolverAddress}: ${error instanceof Error ? error.message : "lookup failed"}`);
     }
   }
+
+  const dohRecords = await resolveNameServersWithDoh(domain, errors);
+  if (dohRecords.length > 0) return dohRecords;
 
   try {
     const records = await dns.resolveNs(domain);
