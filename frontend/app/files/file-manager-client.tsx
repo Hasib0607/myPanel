@@ -1,13 +1,13 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Archive,
-  Check,
   ChevronRight,
   Copy,
   Download,
+  Edit3,
   Eye,
   FileCode2,
   FilePlus,
@@ -15,13 +15,13 @@ import {
   FolderPlus,
   Image as ImageIcon,
   RefreshCw,
-  Save,
   Search,
   Settings2,
   Trash2,
   Upload
 } from "lucide-react";
-import { apiDeleteBody, apiGet, apiPatch, apiPost, apiPut } from "@/lib/api";
+import { apiDeleteBody, apiGet, apiPatch, apiPost } from "@/lib/api";
+import Link from "next/link";
 
 type FileEntry = {
   name: string;
@@ -65,11 +65,6 @@ type DomainListResponse = {
   total: number;
 };
 
-type ReadResponse = {
-  file: FileEntry;
-  content: string;
-};
-
 type Overview = {
   root: string;
   platform: string;
@@ -91,34 +86,6 @@ type DomainScaffoldResponse = {
   };
 };
 
-type MonacoEditor = {
-  getValue: () => string;
-  setValue: (value: string) => void;
-  updateOptions: (options: Record<string, unknown>) => void;
-  dispose: () => void;
-  onDidChangeModelContent: (listener: () => void) => { dispose: () => void };
-};
-
-const languageMap: Record<string, string> = {
-  ".css": "css",
-  ".env": "ini",
-  ".go": "go",
-  ".html": "html",
-  ".js": "javascript",
-  ".json": "json",
-  ".jsx": "javascript",
-  ".md": "markdown",
-  ".php": "php",
-  ".py": "python",
-  ".sh": "shell",
-  ".sql": "sql",
-  ".ts": "typescript",
-  ".tsx": "typescript",
-  ".xml": "xml",
-  ".yaml": "yaml",
-  ".yml": "yaml"
-};
-
 function formatBytes(value: number) {
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
@@ -138,6 +105,10 @@ function queryString(values: Record<string, string | number>) {
   const params = new URLSearchParams();
   Object.entries(values).forEach(([key, value]) => params.set(key, String(value)));
   return params.toString();
+}
+
+function editorHref(filePath: string) {
+  return `/files/editor?${queryString({ path: filePath })}`;
 }
 
 function TreeNode({ node, currentPath, onOpen }: { node: TreeEntry; currentPath: string; onOpen: (path: string) => void }) {
@@ -169,21 +140,12 @@ function TreeNode({ node, currentPath, onOpen }: { node: TreeEntry; currentPath:
 
 export function FileManagerClient() {
   const queryClient = useQueryClient();
-  const editorHostRef = useRef<HTMLDivElement | null>(null);
-  const editorRef = useRef<MonacoEditor | null>(null);
-  const suppressEditorChange = useRef(false);
   const [currentPath, setCurrentPath] = useState(".");
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [draftSearch, setDraftSearch] = useState("");
   const [sort, setSort] = useState<"name" | "size" | "modifiedAt">("name");
   const [direction, setDirection] = useState<"asc" | "desc">("asc");
-  const [content, setContent] = useState("");
-  const [dirty, setDirty] = useState(false);
-  const [wordWrap, setWordWrap] = useState(true);
-  const [minimap, setMinimap] = useState(false);
-  const [fontSize, setFontSize] = useState(14);
-  const [theme, setTheme] = useState<"vs" | "vs-dark">("vs");
   const [lastResult, setLastResult] = useState("");
   const [imagePreview, setImagePreview] = useState("");
   const [selectedDomainId, setSelectedDomainId] = useState("");
@@ -203,63 +165,11 @@ export function FileManagerClient() {
 
   const selectedEntry = useMemo(() => list.data?.items.find((item) => item.path === selectedPath) ?? null, [list.data?.items, selectedPath]);
   const canEdit = selectedEntry?.type === "file" && selectedEntry.kind === "text";
-  const selectedLanguage = selectedEntry ? languageMap[selectedEntry.extension] ?? "plaintext" : "plaintext";
-
-  const readFile = useQuery({
-    enabled: Boolean(canEdit && selectedPath),
-    queryKey: ["files-read", selectedPath],
-    queryFn: () => apiGet<ReadResponse>(`/files/read?${queryString({ path: selectedPath ?? "" })}`)
-  });
 
   const invalidateFiles = async () => {
     await queryClient.invalidateQueries({ queryKey: ["files-list"] });
     await queryClient.invalidateQueries({ queryKey: ["files-tree"] });
   };
-
-  useEffect(() => {
-    if (readFile.data) {
-      setContent(readFile.data.content);
-      setDirty(false);
-      suppressEditorChange.current = true;
-      editorRef.current?.setValue(readFile.data.content);
-      suppressEditorChange.current = false;
-    }
-  }, [readFile.data]);
-
-  useEffect(() => {
-    let disposed = false;
-    if (!editorHostRef.current || !canEdit) return;
-    import("monaco-editor").then((monaco) => {
-      if (disposed || !editorHostRef.current) return;
-      editorRef.current?.dispose();
-      editorRef.current = monaco.editor.create(editorHostRef.current, {
-        value: content,
-        language: selectedLanguage,
-        theme,
-        automaticLayout: true,
-        minimap: { enabled: minimap },
-        wordWrap: wordWrap ? "on" : "off",
-        fontSize,
-        scrollBeyondLastLine: false
-      }) as MonacoEditor;
-      editorRef.current.onDidChangeModelContent(() => {
-        if (suppressEditorChange.current) return;
-        const value = editorRef.current?.getValue() ?? "";
-        setContent(value);
-        setDirty(value !== (readFile.data?.content ?? ""));
-      });
-    });
-
-    return () => {
-      disposed = true;
-      editorRef.current?.dispose();
-      editorRef.current = null;
-    };
-  }, [canEdit, selectedLanguage, selectedPath]);
-
-  useEffect(() => {
-    editorRef.current?.updateOptions({ minimap: { enabled: minimap }, wordWrap: wordWrap ? "on" : "off", fontSize, theme });
-  }, [fontSize, minimap, theme, wordWrap]);
 
   useEffect(() => {
     let cancelled = false;
@@ -274,17 +184,6 @@ export function FileManagerClient() {
       cancelled = true;
     };
   }, [selectedEntry?.path, selectedEntry?.kind]);
-
-  const saveFile = useMutation({
-    mutationFn: () => apiPut<{ ok: true; file: FileEntry }>("/files/write", { path: selectedPath, content, expectedModifiedAt: readFile.data?.file.modifiedAt }),
-    onSuccess: async () => {
-      setDirty(false);
-      setLastResult("Saved.");
-      await invalidateFiles();
-      await queryClient.invalidateQueries({ queryKey: ["files-read", selectedPath] });
-    },
-    onError: (err) => setLastResult(err instanceof Error ? err.message : "Could not save")
-  });
 
   const createFile = useMutation({
     mutationFn: ({ name, value }: { name: string; value: string }) => apiPost<FileEntry>("/files/files", { parentPath: currentPath, name, content: value }),
@@ -574,6 +473,11 @@ export function FileManagerClient() {
           {selectedEntry ? (
             <div className="space-y-4 overflow-auto p-4">
               <div className="grid grid-cols-2 gap-2">
+                {canEdit ? (
+                  <Link className="flex h-9 items-center justify-center gap-2 rounded-md bg-panel-accent px-2 text-sm font-semibold text-white hover:bg-panel-accent/90" href={editorHref(selectedEntry.path)}>
+                    <Edit3 size={15} /> Edit
+                  </Link>
+                ) : null}
                 {selectedEntry.type === "file" ? (
                   <button className="flex h-9 items-center justify-center gap-2 rounded-md border border-panel-line px-2 text-sm hover:bg-slate-50" onClick={() => download(selectedEntry.path).catch((error) => setLastResult(error instanceof Error ? error.message : "Download failed"))} type="button"><Download size={15} /> Download</button>
                 ) : null}
@@ -623,37 +527,13 @@ export function FileManagerClient() {
               </div>
 
               {canEdit ? (
-                <div className="space-y-3">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button className="flex h-9 items-center gap-2 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={!dirty || saveFile.isPending} onClick={() => saveFile.mutate()} type="button"><Save size={15} /> Save</button>
-                    <button className="h-9 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50" onClick={() => {
-                      if (selectedEntry.extension === ".json") {
-                        try {
-                          const formatted = JSON.stringify(JSON.parse(content), null, 2);
-                          setContent(formatted);
-                          editorRef.current?.setValue(formatted);
-                          setDirty(true);
-                        } catch {
-                          setLastResult("Invalid JSON.");
-                        }
-                      }
-                    }} type="button">Format</button>
-                    <label className="flex items-center gap-2 text-xs"><input checked={wordWrap} onChange={(event) => setWordWrap(event.target.checked)} type="checkbox" /> Wrap</label>
-                    <label className="flex items-center gap-2 text-xs"><input checked={minimap} onChange={(event) => setMinimap(event.target.checked)} type="checkbox" /> Minimap</label>
-                    <select className="h-8 rounded-md border border-panel-line px-2 text-xs" onChange={(event) => setTheme(event.target.value as "vs" | "vs-dark")} value={theme}>
-                      <option value="vs">Light</option>
-                      <option value="vs-dark">Dark</option>
-                    </select>
-                    <input className="h-8 w-16 rounded-md border border-panel-line px-2 text-xs" max={22} min={11} onChange={(event) => setFontSize(Number(event.target.value))} type="number" value={fontSize} />
-                  </div>
-                  <div className="h-[480px] overflow-hidden rounded-md border border-panel-line" ref={editorHostRef} />
+                <div className="rounded-md border border-panel-line p-4 text-sm text-panel-muted">
+                  Open this text file in the full-page editor for a larger workspace.
                 </div>
               ) : selectedEntry.kind === "image" && imagePreview ? (
                 <div className="rounded-md border border-panel-line p-3">
                   <img alt={selectedEntry.name} className="max-h-96 w-full object-contain" src={imagePreview} />
                 </div>
-              ) : selectedEntry.extension === ".md" && readFile.data ? (
-                <pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded-md bg-slate-50 p-3 text-sm">{readFile.data.content}</pre>
               ) : (
                 <div className="rounded-md border border-dashed border-panel-line p-6 text-center text-sm text-panel-muted">
                   <Eye className="mx-auto mb-2" size={18} />
@@ -665,12 +545,6 @@ export function FileManagerClient() {
             <div className="p-8 text-center text-sm text-panel-muted">Select an item to inspect, preview, edit, or operate on it.</div>
           )}
 
-          {dirty ? (
-            <div className="mt-auto flex items-center gap-2 border-t border-panel-line bg-amber-50 px-4 py-3 text-sm text-amber-800">
-              <Check size={16} />
-              Unsaved changes
-            </div>
-          ) : null}
         </div>
       </aside>
     </section>
