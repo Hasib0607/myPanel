@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, BadgeCheck, Clock, RefreshCw, ShieldCheck } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
@@ -23,10 +24,37 @@ type SslStatus = {
   alert: boolean;
 };
 
+type SslQueueResponse = {
+  queued: boolean;
+  jobId: string;
+};
+
+type SslJobStatus = {
+  id: string;
+  name: string;
+  state: "completed" | "failed" | "active" | "waiting" | "delayed" | "paused" | "prioritized" | "waiting-children" | string;
+  failedReason?: string;
+  returnvalue?: unknown;
+  attemptsMade: number;
+  timestamp: number;
+  processedOn?: number;
+  finishedOn?: number;
+};
+
 export function SslClient({ domainId }: { domainId: string }) {
   const queryClient = useQueryClient();
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const domain = useQuery({ queryKey: ["domain", domainId], queryFn: () => apiGet<DomainDetail>(`/domains/${domainId}`) });
   const ssl = useQuery({ queryKey: ["ssl-status", domainId], queryFn: () => apiGet<SslStatus>(`/ssl/domains/${domainId}/status`) });
+  const jobStatus = useQuery({
+    queryKey: ["ssl-job", activeJobId],
+    queryFn: () => apiGet<SslJobStatus>(`/ssl/jobs/${activeJobId}`),
+    enabled: Boolean(activeJobId),
+    refetchInterval: (query) => {
+      const state = query.state.data?.state;
+      return state === "completed" || state === "failed" ? false : 2000;
+    }
+  });
   const update = useMutation({
     mutationFn: (forceSsl: boolean) => apiPatch(`/domains/${domainId}`, { forceSsl }),
     onSuccess: async () => {
@@ -35,12 +63,18 @@ export function SslClient({ domainId }: { domainId: string }) {
     }
   });
   const issue = useMutation({
-    mutationFn: () => apiPost(`/ssl/domains/${domainId}/issue`, {}),
-    onSuccess: async () => queryClient.invalidateQueries({ queryKey: ["ssl-status", domainId] })
+    mutationFn: () => apiPost<SslQueueResponse>(`/ssl/domains/${domainId}/issue`, {}),
+    onSuccess: async (data) => {
+      setActiveJobId(data.jobId);
+      await queryClient.invalidateQueries({ queryKey: ["ssl-status", domainId] });
+    }
   });
   const renew = useMutation({
-    mutationFn: () => apiPost(`/ssl/domains/${domainId}/renew`, {}),
-    onSuccess: async () => queryClient.invalidateQueries({ queryKey: ["ssl-status", domainId] })
+    mutationFn: () => apiPost<SslQueueResponse>(`/ssl/domains/${domainId}/renew`, {}),
+    onSuccess: async (data) => {
+      setActiveJobId(data.jobId);
+      await queryClient.invalidateQueries({ queryKey: ["ssl-status", domainId] });
+    }
   });
   const markIssued = useMutation({
     mutationFn: () => apiPost(`/ssl/domains/${domainId}/mark-issued`, {}),
@@ -51,11 +85,23 @@ export function SslClient({ domainId }: { domainId: string }) {
     }
   });
 
+  useEffect(() => {
+    if (jobStatus.data?.state === "completed") {
+      void queryClient.invalidateQueries({ queryKey: ["domain", domainId] });
+      void queryClient.invalidateQueries({ queryKey: ["ssl-status", domainId] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    }
+  }, [domainId, jobStatus.data?.state, queryClient]);
+
   const status = ssl.data;
   const statusText = status?.state ?? "missing";
-  const actionError = issue.error ?? renew.error ?? update.error ?? markIssued.error;
+  const actionError = issue.error ?? renew.error ?? update.error ?? markIssued.error ?? jobStatus.error;
   const actionErrorText = actionError instanceof Error ? actionError.message : null;
-  const isBusy = issue.isPending || renew.isPending || update.isPending;
+  const liveJobState = jobStatus.data?.state;
+  const jobFailedReason = jobStatus.data?.failedReason;
+  const jobIsRunning = Boolean(activeJobId && liveJobState && !["completed", "failed"].includes(liveJobState));
+  const isBusy = issue.isPending || renew.isPending || update.isPending || jobIsRunning;
+  const jobAgeSeconds = jobStatus.data ? Math.max(0, Math.round((Date.now() - jobStatus.data.timestamp) / 1000)) : 0;
 
   return (
     <>
@@ -69,10 +115,22 @@ export function SslClient({ domainId }: { domainId: string }) {
             </div>
           ) : null}
 
-          {issue.isSuccess || renew.isSuccess ? (
+          {jobFailedReason ? (
+            <div className="flex items-start gap-3 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+              <AlertTriangle className="mt-0.5 shrink-0" size={18} />
+              <div>
+                <div className="font-semibold">SSL job failed</div>
+                <div className="mt-1 whitespace-pre-wrap break-words">{jobFailedReason}</div>
+              </div>
+            </div>
+          ) : null}
+
+          {activeJobId && liveJobState && liveJobState !== "failed" ? (
             <div className="flex items-center gap-3 rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
               <BadgeCheck size={18} />
-              SSL job queued. Refresh after the worker finishes; failed Certbot runs will now stay visible instead of marking SSL as enabled.
+              {liveJobState === "completed"
+                ? "SSL job completed. Certificate status has been refreshed."
+                : `SSL job ${liveJobState}. Waiting for worker... (${jobAgeSeconds}s)`}
             </div>
           ) : null}
 

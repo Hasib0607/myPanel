@@ -21,8 +21,40 @@ function expiryStatus(expiry: Date | null) {
   };
 }
 
+async function sslJobStatus(jobId: string) {
+  const job = await sslQueue.getJob(jobId);
+  if (!job) {
+    throw Object.assign(new Error("SSL job not found. It may have already been cleaned up."), { statusCode: 404 });
+  }
+
+  const state = await job.getState();
+  return {
+    id: job.id,
+    name: job.name,
+    state,
+    progress: job.progress,
+    failedReason: job.failedReason,
+    stacktrace: job.stacktrace,
+    returnvalue: job.returnvalue,
+    attemptsMade: job.attemptsMade,
+    timestamp: job.timestamp,
+    processedOn: job.processedOn,
+    finishedOn: job.finishedOn,
+    data: {
+      domainId: job.data.domainId,
+      domain: job.data.domain,
+      source: job.data.source
+    }
+  };
+}
+
 export const sslRoutes: FastifyPluginAsync = async (app) => {
   app.addHook("preHandler", app.requireAuth);
+
+  app.get("/jobs/:jobId", async (request) => {
+    const { jobId } = z.object({ jobId: z.string() }).parse(request.params);
+    return sslJobStatus(jobId);
+  });
 
   app.get("/domains/:domainId/status", async (request) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
