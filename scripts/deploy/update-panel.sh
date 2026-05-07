@@ -15,15 +15,10 @@ HEALTH_URL="${PANEL_UPDATE_HEALTH_URL:-http://127.0.0.1:4000/health}"
 DIRTY_STRATEGY="${PANEL_UPDATE_DIRTY_STRATEGY:-fail}"
 COMMAND_TIMEOUT="${PANEL_UPDATE_COMMAND_TIMEOUT:-30}"
 SYSTEMCTL_NO_BLOCK="${PANEL_UPDATE_SYSTEMCTL_NO_BLOCK:-true}"
+STALE_AFTER_SECONDS="${PANEL_UPDATE_STALE_AFTER_SECONDS:-1200}"
 
 mkdir -p "$(dirname "$LOG_FILE")"
 mkdir -p "$(dirname "$STATUS_FILE")"
-
-exec 9>"$LOCK_FILE"
-if ! flock -n 9; then
-  echo "[$(date -Is)] another panel update is already running" | tee -a "$LOG_FILE"
-  exit 75
-fi
 
 log() {
   echo "[$(date -Is)] $*" | tee -a "$LOG_FILE"
@@ -110,7 +105,68 @@ wait_service_active() {
   return 1
 }
 
+pid_is_running() {
+  local pid="$1"
+  [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" >/dev/null 2>&1
+}
+
+pid_age_seconds() {
+  local pid="$1"
+  ps -p "$pid" -o etimes= 2>/dev/null | tr -d ' ' || true
+}
+
+terminate_update_pid() {
+  local pid="$1"
+  log "terminating stale panel update process $pid"
+  kill -TERM "-$pid" >/dev/null 2>&1 || kill -TERM "$pid" >/dev/null 2>&1 || true
+  sleep 3
+  if pid_is_running "$pid"; then
+    log "stale panel update process $pid ignored TERM; sending KILL"
+    kill -KILL "-$pid" >/dev/null 2>&1 || kill -KILL "$pid" >/dev/null 2>&1 || true
+  fi
+}
+
+acquire_update_lock() {
+  exec 9>"$LOCK_FILE"
+  if flock -n 9; then
+    return 0
+  fi
+
+  log "another panel update is already running"
+
+  local existing_pid=""
+  local existing_age=""
+  if [[ -f "$PID_FILE" ]]; then
+    existing_pid="$(tr -dc '0-9' < "$PID_FILE" || true)"
+  fi
+
+  if [[ -n "$existing_pid" ]] && pid_is_running "$existing_pid"; then
+    existing_age="$(pid_age_seconds "$existing_pid")"
+    log "existing panel update pid $existing_pid has been running for ${existing_age:-unknown}s"
+    if [[ "$existing_age" =~ ^[0-9]+$ ]] && (( existing_age >= STALE_AFTER_SECONDS )); then
+      write_status "running" "recovering stale panel update process $existing_pid" "$(current_commit)" "$(current_commit_subject)"
+      terminate_update_pid "$existing_pid"
+      rm -f "$PID_FILE"
+      sleep 1
+      if flock -n 9; then
+        log "recovered stale panel update lock"
+        return 0
+      fi
+    fi
+  elif [[ -n "$existing_pid" ]]; then
+    log "removing dead panel update pid file for $existing_pid"
+    rm -f "$PID_FILE"
+    if flock -n 9; then
+      return 0
+    fi
+  fi
+
+  write_status "running" "another panel update is already running" "$(current_commit)" "$(current_commit_subject)"
+  exit 75
+}
+
 cd "$APP_DIR"
+acquire_update_lock
 printf '%s\n' "$$" > "$PID_FILE"
 
 log "starting panel self-update in $APP_DIR on branch $BRANCH"

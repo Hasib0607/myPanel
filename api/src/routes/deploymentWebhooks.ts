@@ -134,6 +134,66 @@ async function writePanelUpdateStatus(status: PanelUpdateStatus) {
   })}\n`);
 }
 
+function pidIsRunning(pid: number) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function signalPanelUpdatePid(pid: number, signal: NodeJS.Signals) {
+  try {
+    process.kill(-pid, signal);
+    return;
+  } catch {
+    // The process may not be a process-group leader, so fall back to the direct pid.
+  }
+
+  try {
+    process.kill(pid, signal);
+  } catch {
+    // Already gone.
+  }
+}
+
+async function readPanelUpdateStatus() {
+  return fsPromises.readFile(env.PANEL_UPDATE_STATUS_FILE, "utf8")
+    .then((content) => JSON.parse(content) as PanelUpdateStatus)
+    .catch(() => null);
+}
+
+async function recoverStalePanelUpdateProcess() {
+  const status = await readPanelUpdateStatus();
+  const runningLike = status?.state === "running" || status?.state === "queued";
+  const updatedAt = status?.updatedAt ? new Date(status.updatedAt).getTime() : 0;
+  const ageMs = updatedAt ? Date.now() - updatedAt : 0;
+  const stale = runningLike && Number.isFinite(ageMs) && ageMs > env.PANEL_UPDATE_STALE_AFTER_SECONDS * 1000;
+  if (!stale) return false;
+
+  const rawPid = await fsPromises.readFile(env.PANEL_UPDATE_PID_FILE, "utf8").catch(() => "");
+  const pid = Number.parseInt(rawPid, 10);
+  if (Number.isFinite(pid) && pid > 1 && pidIsRunning(pid)) {
+    signalPanelUpdatePid(pid, "SIGTERM");
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    if (pidIsRunning(pid)) {
+      signalPanelUpdatePid(pid, "SIGKILL");
+    }
+  }
+
+  await fsPromises.rm(env.PANEL_UPDATE_PID_FILE, { force: true }).catch(() => undefined);
+  await writePanelUpdateStatus({
+    state: "failed",
+    message: `stale panel update recovered after ${Math.round(ageMs / 60000)} minutes`,
+    branch: status?.branch,
+    commit: typeof status?.commit === "string" ? status.commit : "",
+    commitSubject: typeof status?.commitSubject === "string" ? status.commitSubject : "",
+    staleRecovered: true
+  });
+  return true;
+}
+
 function gitCommitSubject(commit: string | undefined) {
   if (!commit || !/^[a-f0-9]{7,40}$/i.test(commit)) return Promise.resolve("");
   return new Promise<string>((resolve) => {
@@ -248,22 +308,19 @@ export const deploymentWebhookRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.get("/panel-update/status", { preHandler: app.requireAuth }, async () => {
-    const statusFile = env.PANEL_UPDATE_STATUS_FILE;
     const logFile = env.PANEL_UPDATE_LOG_FILE;
-    const status: PanelUpdateStatus = await fsPromises.readFile(statusFile, "utf8")
-      .then((content) => JSON.parse(content) as PanelUpdateStatus)
-      .catch(() => ({
+    const status: PanelUpdateStatus = await readPanelUpdateStatus() ?? {
         state: "unknown",
         message: "No panel update status has been written yet",
         updatedAt: null,
         logFile
-      }));
+      };
     if (!status.commitSubject && typeof status.commit === "string") {
       status.commitSubject = await gitCommitSubject(status.commit);
     }
     if ((status.state === "running" || status.state === "queued") && status.updatedAt) {
       const ageMs = Date.now() - new Date(status.updatedAt).getTime();
-      if (Number.isFinite(ageMs) && ageMs > 20 * 60 * 1000) {
+      if (Number.isFinite(ageMs) && ageMs > env.PANEL_UPDATE_STALE_AFTER_SECONDS * 1000) {
         status.state = "failed";
         status.message = `panel update looks stale after ${Math.round(ageMs / 60000)} minutes; check ${logFile}`;
         status.stale = true;
@@ -311,6 +368,7 @@ export const deploymentWebhookRoutes: FastifyPluginAsync = async (app) => {
     }
 
     try {
+      await recoverStalePanelUpdateProcess();
       await writePanelUpdateStatus({
         state: "queued",
         message: "GitHub push received; starting panel update",

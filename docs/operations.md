@@ -40,10 +40,12 @@ PANEL_UPDATE_REPO_FULL_NAME=your-github-owner/your-panel-repo
 PANEL_UPDATE_BRANCH=main
 PANEL_UPDATE_WORKDIR=/opt/vps-panel
 PANEL_UPDATE_SCRIPT=/opt/vps-panel/scripts/deploy/update-panel.sh
+PANEL_UPDATE_PID_FILE=/tmp/vps-panel-self-update.pid
 PANEL_UPDATE_DIRTY_STRATEGY=fail
 PANEL_UPDATE_COMMAND_TIMEOUT=30
 PANEL_UPDATE_SYSTEMCTL_NO_BLOCK=true
 PANEL_UPDATE_SERVICE_ACTIVE_ATTEMPTS=20
+PANEL_UPDATE_STALE_AFTER_SECONDS=1200
 ```
 
 3. Allow the `panel` user to restart only the panel services:
@@ -94,6 +96,8 @@ The update script writes `/var/log/vps-panel/self-update-status.json` with one o
 - `failed`
 
 The script restarts services with `systemctl --no-block restart`, verifies each service with `systemctl is-active`, and checks `http://127.0.0.1:4000/health` when `curl` is installed. The API service restarts last so the status endpoint stays reachable for as long as possible.
+
+The updater writes a PID file and treats a running update as stale after `PANEL_UPDATE_STALE_AFTER_SECONDS` seconds. Future webhook runs and direct script runs can recover a stale update process instead of leaving the dashboard permanently stuck on `running`.
 
 If you want the VPS to discard local tracked edits and always follow GitHub, set:
 
