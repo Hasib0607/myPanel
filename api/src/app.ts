@@ -3,6 +3,7 @@ import cors from "@fastify/cors";
 import jwt from "@fastify/jwt";
 import rateLimit from "@fastify/rate-limit";
 import sensible from "@fastify/sensible";
+import websocket from "@fastify/websocket";
 import Fastify from "fastify";
 import { ZodError } from "zod";
 import { env } from "./config/env.js";
@@ -12,6 +13,7 @@ import { auditRoutes } from "./routes/audit.js";
 import { dashboardRoutes } from "./routes/dashboard.js";
 import { deploymentRoutes } from "./routes/deployments.js";
 import { deploymentWebhookRoutes } from "./routes/deploymentWebhooks.js";
+import { terminalRoutes } from "./routes/terminal.js";
 import { dnsRoutes } from "./routes/dns.js";
 import { domainRoutes } from "./routes/domains.js";
 import { fileRoutes } from "./routes/files.js";
@@ -40,6 +42,7 @@ export function buildApp() {
     timeWindow: "1 minute"
   });
   app.register(sensible);
+  app.register(websocket);
 
   app.addHook("onRequest", async (_request, reply) => {
     reply.header("x-content-type-options", "nosniff");
@@ -100,6 +103,7 @@ export function buildApp() {
   app.register(fileRoutes, { prefix: "/api/v1/files" });
   app.register(deploymentRoutes, { prefix: "/api/v1/deployments" });
   app.register(deploymentWebhookRoutes, { prefix: "/api/v1/webhooks" });
+  app.register(terminalRoutes, { prefix: "/api/v1/terminal" });
 
   return app;
 }

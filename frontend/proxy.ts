@@ -8,6 +8,7 @@ const protectedRoutes = [
   "/firewall",
   "/files",
   "/deployments",
+  "/terminal",
   "/security"
 ];
 
@@ -57,6 +58,7 @@ export const config = {
     "/firewall/:path*",
     "/files/:path*",
     "/deployments/:path*",
+    "/terminal/:path*",
     "/security/:path*",
     "/login"
   ]
