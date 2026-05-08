@@ -164,7 +164,9 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
     sysagent.deploymentHealth({
       deploymentId: deployment.id,
       port: deployment.port,
-      healthUrl: deployment.healthUrl
+      healthUrl: deployment.healthUrl,
+      processName: deployment.slug,
+      processManager
     })
   );
   assertLiveResult(health, `${action} health check`);
@@ -310,7 +312,9 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       sysagent.deploymentHealth({
         deploymentId: deployment.id,
         port: deployment.port,
-        healthUrl: deployment.healthUrl
+        healthUrl: deployment.healthUrl,
+        processName: deployment.slug,
+        processManager
       })
     );
     assertLiveResult(health, "Health check");

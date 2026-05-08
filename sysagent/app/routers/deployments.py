@@ -79,6 +79,8 @@ class HealthRequest(BaseModel):
     deploymentId: str
     port: int = Field(ge=1, le=65535)
     healthUrl: str | None = None
+    processName: str | None = None
+    processManager: str | None = None
 
 
 def path_info(root_path: str) -> dict:
@@ -468,18 +470,35 @@ server {{
 
 
 def _curl_once(url: str) -> dict:
+    # --connect-timeout: per-connection attempt limit (5 s)
+    # --max-time: total wall-clock limit across all retries (90 s)
+    # Without a large --max-time, curl exhausts the budget after 2-3 retries
+    # even when --retry 10 is requested, because retry delays count against it.
     return run_command([
         "curl",
         "-fsS",
-        "--retry",
-        "10",
-        "--retry-delay",
-        "2",
+        "--retry", "10",
+        "--retry-delay", "3",
         "--retry-connrefused",
-        "--max-time",
-        "5",
+        "--connect-timeout", "5",
+        "--max-time", "90",
         url,
     ])
+
+
+def _pm2_restart_count(process_name: str) -> int | None:
+    """Return the PM2 restart count for process_name, or None if not found / error."""
+    result = run_command(["pm2", "jlist"])
+    if result.get("returncode") != 0:
+        return None
+    try:
+        processes = json.loads(result.get("stdout") or "[]")
+        for proc in processes:
+            if proc.get("name") == process_name:
+                return int(proc.get("pm2_env", {}).get("restart_time", 0))
+    except (json.JSONDecodeError, ValueError, AttributeError):
+        pass
+    return None
 
 
 @router.post("/health")
@@ -491,12 +510,27 @@ def health(body: HealthRequest) -> dict:
     if first.get("returncode") != 0:
         return first
 
-    # Phase 2: wait 3 s then verify the process is still up (catches immediate crashes).
-    time.sleep(3)
+    # Phase 2: wait 8 s then verify the process is still up (catches immediate crashes).
+    time.sleep(8)
     second = _curl_once(url)
     if second.get("returncode") != 0:
         second["stderr"] = (
-            "App responded on first check but crashed within 3 s. "
+            "App responded on first check but crashed within 8 s. "
             + (second.get("stderr") or "")
         ).strip()
+        return second
+
+    # Phase 3: PM2 crash-loop detection.
+    # If the process has already restarted since we started it, it is crash-looping
+    # and will go down again shortly — fail the deployment now with a clear message.
+    if body.processName and (body.processManager or "").upper() == "PM2":
+        restarts = _pm2_restart_count(body.processName)
+        if restarts is not None and restarts > 0:
+            second["returncode"] = 1
+            second["stderr"] = (
+                f"PM2 process '{body.processName}' has already restarted {restarts} time(s) — "
+                "the app is crash-looping. Run `pm2 logs {name}` on the server to see the error."
+            ).replace("{name}", body.processName)
+            return second
+
     return second
