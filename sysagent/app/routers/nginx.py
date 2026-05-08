@@ -84,25 +84,53 @@ def enable_site(available: Path, enabled: Path) -> None:
     enabled.symlink_to(available)
 
 
+def test_and_reload_or_rollback(enabled: Path) -> tuple[dict, dict]:
+    test = run_command(["nginx", "-t"], allow_live=settings.allow_live_nginx)
+    if test.get("returncode") != 0 and settings.allow_live_nginx:
+        run_live_step("vhost rollback", lambda: enabled.unlink(missing_ok=True))
+        return test, {
+            "dryRun": False,
+            "command": ["systemctl", "reload", "nginx"],
+            "stdout": "",
+            "stderr": "Skipped because nginx -t failed; site symlink was rolled back",
+            "returncode": 1,
+        }
+
+    return test, run_command(["systemctl", "reload", "nginx"], allow_live=settings.allow_live_nginx)
+
+
 @router.post("/vhost")
 def write_vhost(body: VhostRequest) -> dict:
     available = safe_nginx_path(body.sitesAvailable, body.name)
     enabled = safe_nginx_path(body.sitesEnabled, body.name)
     config = (
-        f"server {{ listen 80; server_name {body.serverName}; "
-        f"location / {{ proxy_pass http://127.0.0.1:{body.upstreamPort}; "
-        "proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; }} }"
+        "server {\n"
+        "    listen 80;\n"
+        f"    server_name {body.serverName};\n"
+        "\n"
+        "    location / {\n"
+        f"        proxy_pass http://127.0.0.1:{body.upstreamPort};\n"
+        "        proxy_http_version 1.1;\n"
+        "        proxy_set_header Host $host;\n"
+        "        proxy_set_header X-Real-IP $remote_addr;\n"
+        "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+        "        proxy_set_header X-Forwarded-Proto $scheme;\n"
+        "        proxy_set_header Upgrade $http_upgrade;\n"
+        "        proxy_set_header Connection \"upgrade\";\n"
+        "    }\n"
+        "}\n"
     )
     if settings.allow_live_nginx:
         run_live_step("vhost write", lambda: available.parent.mkdir(parents=True, exist_ok=True))
         run_live_step("vhost write", lambda: available.write_text(config, encoding="utf-8"))
         run_live_step("vhost enable", lambda: enabled.parent.mkdir(parents=True, exist_ok=True))
         run_live_step("vhost enable", lambda: enable_site(available, enabled))
+    test, reload = test_and_reload_or_rollback(enabled)
     return {
         "write": {"dryRun": not settings.allow_live_nginx, "command": ["write-file", str(available)], "returncode": 0},
         "enable": {"dryRun": not settings.allow_live_nginx, "command": ["symlink", str(available), str(enabled)], "returncode": 0},
-        "test": run_command(["nginx", "-t"], allow_live=settings.allow_live_nginx),
-        "reload": run_command(["systemctl", "reload", "nginx"], allow_live=settings.allow_live_nginx),
+        "test": test,
+        "reload": reload,
         "configPath": str(available),
     }
 
@@ -170,12 +198,13 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
         run_live_step("website root create", lambda: root_path.mkdir(parents=True, exist_ok=True))
         run_live_step("static vhost write", lambda: available.write_text(config, encoding="utf-8"))
         run_live_step("static vhost enable", lambda: enable_site(available, enabled))
+    test, reload = test_and_reload_or_rollback(enabled)
 
     return {
         "write": {"dryRun": not settings.allow_live_nginx, "command": ["write-file", str(available)], "returncode": 0},
         "enable": {"dryRun": not settings.allow_live_nginx, "command": ["symlink", str(available), str(enabled)], "returncode": 0},
-        "test": run_command(["nginx", "-t"], allow_live=settings.allow_live_nginx),
-        "reload": run_command(["systemctl", "reload", "nginx"], allow_live=settings.allow_live_nginx),
+        "test": test,
+        "reload": reload,
         "configPath": str(available),
         "rootPath": str(root_path),
         "sslEnabled": has_ssl,

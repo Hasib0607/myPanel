@@ -270,7 +270,7 @@ async function publishDomainHosting(domainId: string) {
   const zone = renderZone(domain.name, domain.dnsRecords);
   const dnsResult = await sysagent.applyDnsZone({ domain: domain.name, zone });
   const nginxResult = await sysagent.writeStaticNginxVhost({
-    name: domain.name,
+    name: `domain-${domain.name}`,
     serverName: `${domain.name} www.${domain.name}`,
     rootPath: path.join(env.FILE_MANAGER_ROOT, domain.name, "public_html"),
     forceHttps: domain.forceSsl && domain.sslEnabled,

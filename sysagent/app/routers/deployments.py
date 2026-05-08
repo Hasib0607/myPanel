@@ -124,7 +124,8 @@ def parse_deployment_command(command: str) -> list[str]:
 
 def nginx_config_name(deployment_id: str, server_name: str) -> str:
     primary = server_name.split()[0] if server_name else deployment_id
-    return re.sub(r"[^a-zA-Z0-9_.-]+", "-", primary).strip("-") or deployment_id
+    safe_name = re.sub(r"[^a-zA-Z0-9_.-]+", "-", primary).strip("-") or deployment_id
+    return f"domain-{safe_name}"
 
 
 def guarded_deployment_command(root_path: str, command: str) -> dict:
@@ -228,17 +229,34 @@ def process(body: ProcessRequest) -> dict:
 
 @router.post("/nginx")
 def nginx(body: NginxRequest) -> dict:
-    server_name = body.serverName or f"{body.deploymentId}.local"
+    if not body.serverName:
+        return {
+            "skipped": True,
+            "reason": "No domain/serverName linked to deployment",
+            "serverName": None,
+        }
+
+    server_name = body.serverName
     config_name = nginx_config_name(body.deploymentId, server_name)
     config_path = f"/etc/nginx/sites-available/{config_name}.conf"
     enabled_path = f"/etc/nginx/sites-enabled/{config_name}.conf"
-    config = (
-        f"server {{ listen 80; server_name {server_name}; "
-        f"location / {{ proxy_pass http://127.0.0.1:{body.upstreamPort}; "
-        "proxy_http_version 1.1; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; "
-        "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; proxy_set_header X-Forwarded-Proto $scheme; "
-        "proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection \"upgrade\"; }} }"
-    )
+    config = f"""
+server {{
+    listen 80;
+    server_name {server_name};
+
+    location / {{
+        proxy_pass http://127.0.0.1:{body.upstreamPort};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }}
+}}
+""".lstrip()
     write = guarded_write_file(body.rootPath, config_path, config)
     enable = {"dryRun": True, "command": ["symlink", config_path, enabled_path], "returncode": 0, "stdout": "", "stderr": ""}
     if settings.allow_live_system_commands:
@@ -247,11 +265,23 @@ def nginx(body: NginxRequest) -> dict:
             enabled.unlink()
         enabled.symlink_to(config_path)
         enable = {"dryRun": False, "command": ["symlink", config_path, enabled_path], "returncode": 0, "stdout": "", "stderr": ""}
+    test = run_command(["nginx", "-t"])
+    if test.get("returncode") != 0 and settings.allow_live_system_commands:
+        enabled = Path(enabled_path)
+        if enabled.exists() or enabled.is_symlink():
+            enabled.unlink()
+    reload = run_command(["systemctl", "reload", "nginx"]) if test.get("returncode") == 0 else {
+        "dryRun": False,
+        "command": ["systemctl", "reload", "nginx"],
+        "stdout": "",
+        "stderr": "Skipped because nginx -t failed",
+        "returncode": 1,
+    }
     return {
         "write": write,
         "enable": enable,
-        "test": run_command(["nginx", "-t"]),
-        "reload": run_command(["systemctl", "reload", "nginx"]),
+        "test": test,
+        "reload": reload,
         "configPath": config_path,
         "enabledPath": enabled_path,
         "serverName": server_name,

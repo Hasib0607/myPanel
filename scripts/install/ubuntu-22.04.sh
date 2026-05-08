@@ -9,6 +9,7 @@ PANEL_LOGIN_PORT="${PANEL_LOGIN_PORT:-2083}"
 PANEL_PORT="${PANEL_PORT:-4000}"
 FRONTEND_PORT="${FRONTEND_PORT:-3000}"
 SYSAGENT_PORT="${SYSAGENT_PORT:-5000}"
+PANEL_NGINX_SITE="${PANEL_NGINX_SITE:-00-vps-panel}"
 DB_NAME="${DB_NAME:-panel_main}"
 DB_USER="${DB_USER:-panel_user}"
 DB_PASSWORD="${DB_PASSWORD:-$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-24)}"
@@ -233,7 +234,10 @@ EOF
 
 log "Writing Nginx panel listener"
 rm -f /etc/nginx/sites-enabled/default
-write_file /etc/nginx/sites-available/vps-panel-2083 <<EOF
+rm -f /etc/nginx/sites-enabled/vps-panel /etc/nginx/sites-enabled/vps-panel-2083
+rm -f /etc/nginx/sites-available/vps-panel /etc/nginx/sites-available/vps-panel-2083
+write_file "/etc/nginx/sites-available/$PANEL_NGINX_SITE" <<EOF
+# Protected panel listener. Domain/project publishing must never overwrite this file.
 server {
     listen $PANEL_LOGIN_PORT;
     server_name $VPS_IP _;
@@ -271,7 +275,7 @@ server {
     }
 }
 EOF
-ln -sf /etc/nginx/sites-available/vps-panel-2083 /etc/nginx/sites-enabled/vps-panel-2083
+ln -sf "/etc/nginx/sites-available/$PANEL_NGINX_SITE" "/etc/nginx/sites-enabled/$PANEL_NGINX_SITE"
 
 log "Writing sudoers for panel self-update"
 SYSTEMCTL_BIN="$(command -v systemctl)"
