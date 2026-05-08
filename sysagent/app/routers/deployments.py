@@ -49,6 +49,7 @@ class CommandRequest(BaseModel):
     rootPath: str
     command: str | None = None
     packageManager: str | None = None
+    env: dict[str, str] | None = None
 
 
 class ProcessRequest(BaseModel):
@@ -59,6 +60,7 @@ class ProcessRequest(BaseModel):
     processManager: str | None = None
     startCommand: str | None = None
     port: int | None = Field(default=None, ge=1, le=65535)
+    env: dict[str, str] | None = None
 
 
 class NginxRequest(BaseModel):
@@ -159,13 +161,13 @@ def nginx_config_name(deployment_id: str, server_name: str) -> str:
     return f"domain-{safe_name}"
 
 
-def guarded_deployment_command(root_path: str, command: str) -> dict:
+def guarded_deployment_command(root_path: str, command: str, env: dict[str, str] | None = None) -> dict:
     info = path_info(root_path)
     try:
         parsed = parse_deployment_command(command)
     except ValueError as error:
         return blocked_command(str(error), [command], info)
-    return guarded_command(root_path, parsed, cwd=deployment_cwd(root_path))
+    return guarded_command_with_env(root_path, parsed, cwd=deployment_cwd(root_path), env=env)
 
 
 def pm2_env(port: int | None) -> dict[str, str]:
@@ -226,7 +228,9 @@ def pm2_start(body: ProcessRequest, start_command: list[str]) -> dict:
         "--",
         *start_command[1:],
     ]
-    start = guarded_command_with_env(body.rootPath, command, cwd=cwd, env=pm2_env(body.port))
+    # Merge: default PM2 host/port vars first, then user-defined env vars (user wins on conflict).
+    process_env = {**pm2_env(body.port), **(body.env or {})}
+    start = guarded_command_with_env(body.rootPath, command, cwd=cwd, env=process_env)
     save = guarded_command(body.rootPath, ["pm2", "save"], cwd=cwd) if start.get("returncode") == 0 else {
         "dryRun": start.get("dryRun", False),
         "command": ["pm2", "save"],
@@ -332,19 +336,19 @@ def install(body: CommandRequest) -> dict:
         "GO": "go mod download",
         "NONE": "true",
     }.get((body.packageManager or "NONE").upper(), "true")
-    return guarded_deployment_command(body.rootPath, command)
+    return guarded_deployment_command(body.rootPath, command, env=body.env)
 
 
 @router.post("/build")
 def build(body: CommandRequest) -> dict:
     command = body.command or "true"
-    return guarded_deployment_command(body.rootPath, command)
+    return guarded_deployment_command(body.rootPath, command, env=body.env)
 
 
 @router.post("/migrate")
 def migrate(body: CommandRequest) -> dict:
     command = body.command or "true"
-    return guarded_deployment_command(body.rootPath, command)
+    return guarded_deployment_command(body.rootPath, command, env=body.env)
 
 
 @router.post("/process")

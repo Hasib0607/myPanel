@@ -91,6 +91,21 @@ async function githubCloneToken(sourceProvider: string, gitUrl: string | null) {
   return getSecret(githubTokenSecretRef());
 }
 
+async function resolveEnvVars(env: { key: string; value: string | null; secretRef: string | null }[]): Promise<Record<string, string>> {
+  const resolved: Record<string, string> = {};
+  await Promise.all(
+    env.map(async (v) => {
+      if (v.value !== null && v.value !== undefined) {
+        resolved[v.key] = v.value;
+      } else if (v.secretRef) {
+        const secret = await getSecret(v.secretRef);
+        if (secret !== null) resolved[v.key] = secret;
+      }
+    })
+  );
+  return resolved;
+}
+
 function assertCommandTree(result: unknown, label: string) {
   if (!result || typeof result !== "object") return;
   const value = result as { dryRun?: boolean; returncode?: number; stderr?: string; reason?: string; command?: unknown };
@@ -105,7 +120,8 @@ function assertCommandTree(result: unknown, label: string) {
 }
 
 async function processLifecycleAction(action: string, deploymentId: string, releaseId: string | undefined) {
-  const deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: { domain: true } });
+  const deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: { domain: true, env: true } });
+  const envVars = await resolveEnvVars(deployment.env);
   const processAction = action === "redeploy" || action === "deploy" ? "start" : action;
   const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
 
@@ -133,7 +149,8 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
       action: processAction,
       processManager,
       startCommand: renderDeploymentCommand(deployment.startCommand, deployment.port),
-      port: deployment.port
+      port: deployment.port,
+      env: envVars
     })
   );
   assertLiveResult(result, `${action} process`);
@@ -208,13 +225,16 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       throw new Error(`No runnable start command found for ${deployment.slug}. Add a package.json start script or set a manual start command.`);
     }
 
+    const envVars = await resolveEnvVars(deployment.env);
+
     if (deployment.installCommand || deployment.packageManager) {
       await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "BUILDING" } });
       const installResult = await runStep(deployment.id, releaseId, "INSTALLING", "Dependency install", () =>
         sysagent.deploymentInstall({
           rootPath: deployment.rootPath,
           command: renderDeploymentCommand(deployment.installCommand, deployment.port),
-          packageManager: deployment.packageManager
+          packageManager: deployment.packageManager,
+          env: envVars
         })
       );
       assertCommandTree(installResult, "Dependency install");
@@ -224,7 +244,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       const migrateResult = await runStep(deployment.id, releaseId, "MIGRATING", "Database migration", () =>
         sysagent.deploymentMigrate({
           rootPath: deployment.rootPath,
-          command: "php artisan migrate --force"
+          command: "php artisan migrate --force",
+          env: envVars
         })
       );
       assertCommandTree(migrateResult, "Database migration");
@@ -236,7 +257,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       const buildResult = await runStep(deployment.id, releaseId, "BUILDING", "Build", () =>
         sysagent.deploymentBuild({
           rootPath: deployment.rootPath,
-          command: renderDeploymentCommand(deployment.buildCommand, deployment.port)
+          command: renderDeploymentCommand(deployment.buildCommand, deployment.port),
+          env: envVars
         })
       );
       assertCommandTree(buildResult, "Build");
@@ -278,7 +300,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         action: "start",
         processManager,
         startCommand: renderDeploymentCommand(deployment.startCommand, deployment.port),
-        port: deployment.port
+        port: deployment.port,
+        env: envVars
       })
     );
     assertLiveResult(startResult, "Process start");

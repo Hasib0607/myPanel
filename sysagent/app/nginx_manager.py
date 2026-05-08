@@ -23,7 +23,10 @@ def assert_managed_config_name(name: str) -> None:
 def safe_nginx_path(root: str, name: str) -> Path:
     assert_managed_config_name(name)
     directory = Path(root).resolve()
-    target = (directory / f"{name}.conf").resolve()
+    # Do NOT resolve the target itself: if a symlink already exists here (e.g. from a
+    # previous deploy in sites-enabled), resolve() would follow it to sites-available,
+    # making target.parent != directory and raising a false-positive 400.
+    target = directory / f"{name}.conf"
     if target.parent != directory:
         raise HTTPException(status_code=400, detail="Nginx config path escapes target directory")
     return target
