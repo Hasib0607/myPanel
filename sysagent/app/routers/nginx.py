@@ -31,6 +31,14 @@ class StaticVhostRequest(BaseModel):
     sitesEnabled: str = "/etc/nginx/sites-enabled"
 
 
+class RedirectVhostRequest(BaseModel):
+    name: str = Field(pattern=r"^[a-zA-Z0-9_.-]+$")
+    serverName: str = Field(pattern=r"^[a-zA-Z0-9_. -]+$")
+    redirectUrl: str
+    sitesAvailable: str = "/etc/nginx/sites-available"
+    sitesEnabled: str = "/etc/nginx/sites-enabled"
+
+
 def safe_nginx_path(root: str, name: str) -> Path:
     directory = Path(root).resolve()
     target = directory / f"{name}.conf"
@@ -209,4 +217,36 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
         "rootPath": str(root_path),
         "sslEnabled": has_ssl,
         "forceHttps": body.forceHttps,
+    }
+
+
+@router.post("/redirect-vhost")
+def write_redirect_vhost(body: RedirectVhostRequest) -> dict:
+    available = safe_nginx_path(body.sitesAvailable, body.name)
+    enabled = safe_nginx_path(body.sitesEnabled, body.name)
+    if not body.redirectUrl.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="Redirect URL must start with http:// or https://")
+
+    config = (
+        "server {\n"
+        "    listen 80;\n"
+        f"    server_name {body.serverName};\n"
+        f"    return 301 {body.redirectUrl}$request_uri;\n"
+        "}\n"
+    )
+
+    if settings.allow_live_nginx:
+        run_live_step("redirect vhost write", lambda: available.parent.mkdir(parents=True, exist_ok=True))
+        run_live_step("redirect vhost enable", lambda: enabled.parent.mkdir(parents=True, exist_ok=True))
+        run_live_step("redirect vhost write", lambda: available.write_text(config, encoding="utf-8"))
+        run_live_step("redirect vhost enable", lambda: enable_site(available, enabled))
+    test, reload = test_and_reload_or_rollback(enabled)
+
+    return {
+        "write": {"dryRun": not settings.allow_live_nginx, "command": ["write-file", str(available)], "returncode": 0},
+        "enable": {"dryRun": not settings.allow_live_nginx, "command": ["symlink", str(available), str(enabled)], "returncode": 0},
+        "test": test,
+        "reload": reload,
+        "configPath": str(available),
+        "redirectUrl": body.redirectUrl,
     }

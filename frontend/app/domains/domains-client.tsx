@@ -3,11 +3,12 @@
 import Link from "next/link";
 import { FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Eye, Globe2, Mail, Network, Plus, Search, ShieldCheck, Split, Trash2 } from "lucide-react";
+import { AlertTriangle, Eye, Globe2, Mail, Network, Plus, Search, Settings2, ShieldCheck, Split, Trash2, X } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { apiDeleteBody, apiGet, apiPatch, apiPost } from "@/lib/api";
 
 type DomainStatus = "ACTIVE" | "PENDING" | "SUSPENDED";
+type DomainHostingMode = "PUBLIC_HTML" | "DEPLOYMENT_PROXY" | "REDIRECT";
 
 type Domain = {
   id: string;
@@ -16,12 +17,36 @@ type Domain = {
   sslEnabled: boolean;
   sslExpiry: string | null;
   forceSsl: boolean;
+  hostingMode: DomainHostingMode;
+  documentRoot: string;
+  redirectUrl: string | null;
+  hostingDeploymentId: string | null;
   createdAt: string;
   _count: {
     subdomains: number;
     dnsRecords: number;
     mailAccounts: number;
   };
+};
+
+type Deployment = {
+  id: string;
+  name: string;
+  slug: string;
+  port: number;
+};
+
+type DeploymentListResponse = {
+  items: Deployment[];
+  total: number;
+};
+
+type HostingDraft = {
+  domain: Domain;
+  hostingMode: DomainHostingMode;
+  documentRoot: string;
+  redirectUrl: string;
+  hostingDeploymentId: string;
 };
 
 type DomainListResponse = {
@@ -62,6 +87,7 @@ export function DomainsClient() {
   const [forceSsl, setForceSsl] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [hostingDraft, setHostingDraft] = useState<HostingDraft | null>(null);
   const normalizedNewDomain = normalizeDomainInput(newDomain);
 
   const queryPath = useMemo(() => {
@@ -73,6 +99,11 @@ export function DomainsClient() {
   const domains = useQuery({
     queryKey: ["domains", search],
     queryFn: () => apiGet<DomainListResponse>(queryPath)
+  });
+
+  const deployments = useQuery({
+    queryKey: ["deployments", "domain-hosting"],
+    queryFn: () => apiGet<DeploymentListResponse>("/deployments?page=1&pageSize=100")
   });
 
   const createDomain = useMutation({
@@ -122,6 +153,44 @@ export function DomainsClient() {
     },
     onError: (err) => setError(err instanceof Error ? err.message : "Could not publish domain")
   });
+
+  const updateHosting = useMutation({
+    mutationFn: (draft: HostingDraft) => apiPatch(`/domains/${draft.domain.id}`, {
+      hostingMode: draft.hostingMode,
+      documentRoot: draft.documentRoot.trim() || "public_html",
+      redirectUrl: draft.hostingMode === "REDIRECT" ? draft.redirectUrl.trim() : null,
+      hostingDeploymentId: draft.hostingMode === "DEPLOYMENT_PROXY" ? draft.hostingDeploymentId : null
+    }),
+    onSuccess: async () => {
+      setError("");
+      setNotice("Domain hosting updated and published.");
+      setHostingDraft(null);
+      await queryClient.invalidateQueries({ queryKey: ["domains"] });
+      await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : "Could not update hosting")
+  });
+
+  function openHosting(domain: Domain) {
+    setNotice("");
+    setError("");
+    setHostingDraft({
+      domain,
+      hostingMode: domain.hostingMode,
+      documentRoot: domain.documentRoot || "public_html",
+      redirectUrl: domain.redirectUrl ?? "",
+      hostingDeploymentId: domain.hostingDeploymentId ?? ""
+    });
+  }
+
+  function hostingLabel(domain: Domain) {
+    if (domain.hostingMode === "DEPLOYMENT_PROXY") {
+      const deployment = deployments.data?.items.find((item) => item.id === domain.hostingDeploymentId);
+      return deployment ? `${deployment.name} :${deployment.port}` : "deployment proxy";
+    }
+    if (domain.hostingMode === "REDIRECT") return domain.redirectUrl || "redirect";
+    return domain.documentRoot || "public_html";
+  }
 
   function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -214,6 +283,7 @@ export function DomainsClient() {
                 <th className="px-4 py-3">DNS</th>
                 <th className="px-4 py-3">Mailboxes</th>
                 <th className="px-4 py-3">Subdomains</th>
+                <th className="px-4 py-3">Hosting</th>
                 <th className="px-4 py-3">SSL</th>
                 <th className="px-4 py-3">Actions</th>
               </tr>
@@ -236,6 +306,12 @@ export function DomainsClient() {
                   <td className="px-4 py-3">{domain._count.dnsRecords}</td>
                   <td className="px-4 py-3">{domain._count.mailAccounts}</td>
                   <td className="px-4 py-3">{domain._count.subdomains}</td>
+                  <td className="px-4 py-3">
+                    <div className="max-w-48">
+                      <div className="text-xs font-semibold text-slate-700">{domain.hostingMode.replace("_", " ")}</div>
+                      <div className="truncate text-xs text-panel-muted">{hostingLabel(domain)}</div>
+                    </div>
+                  </td>
                   <td className="px-4 py-3">{domain.sslEnabled ? "enabled" : domain.forceSsl ? "pending" : "off"}</td>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2">
@@ -254,6 +330,14 @@ export function DomainsClient() {
                       <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`/domains/${domain.id}/mail/accounts`} title="Mail accounts">
                         <Mail size={15} />
                       </Link>
+                      <button
+                        className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100"
+                        onClick={() => openHosting(domain)}
+                        title="Hosting settings"
+                        type="button"
+                      >
+                        <Settings2 size={15} />
+                      </button>
                       <button
                         className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100 disabled:opacity-60"
                         disabled={publishDomain.isPending}
@@ -286,7 +370,7 @@ export function DomainsClient() {
               ))}
               {domains.data?.items.length === 0 ? (
                 <tr>
-                  <td className="px-4 py-8 text-center text-panel-muted" colSpan={7}>
+                  <td className="px-4 py-8 text-center text-panel-muted" colSpan={8}>
                     No domains found
                   </td>
                 </tr>
@@ -295,6 +379,88 @@ export function DomainsClient() {
           </table>
         </div>
       </section>
+      {hostingDraft ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-6">
+          <div className="w-full max-w-2xl rounded-md border border-panel-line bg-white shadow-xl">
+            <div className="flex items-center justify-between border-b border-panel-line px-5 py-4">
+              <div>
+                <h2 className="text-lg font-semibold text-panel-text">{hostingDraft.domain.name}</h2>
+                <p className="text-sm text-panel-muted">Hosting settings</p>
+              </div>
+              <button className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line hover:bg-slate-50" onClick={() => setHostingDraft(null)} type="button">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="space-y-4 p-5">
+              <label className="block text-sm font-semibold text-panel-muted">
+                Mode
+                <select
+                  className="mt-2 h-11 w-full rounded-md border border-panel-line px-3 text-panel-text"
+                  onChange={(event) => setHostingDraft((draft) => draft ? { ...draft, hostingMode: event.target.value as DomainHostingMode } : draft)}
+                  value={hostingDraft.hostingMode}
+                >
+                  <option value="PUBLIC_HTML">Public HTML</option>
+                  <option value="DEPLOYMENT_PROXY">Deployment proxy</option>
+                  <option value="REDIRECT">Redirect</option>
+                </select>
+              </label>
+
+              {hostingDraft.hostingMode === "PUBLIC_HTML" ? (
+                <label className="block text-sm font-semibold text-panel-muted">
+                  Document root
+                  <input
+                    className="mt-2 h-11 w-full rounded-md border border-panel-line px-3 text-panel-text"
+                    onChange={(event) => setHostingDraft((draft) => draft ? { ...draft, documentRoot: event.target.value } : draft)}
+                    placeholder="public_html"
+                    value={hostingDraft.documentRoot}
+                  />
+                </label>
+              ) : null}
+
+              {hostingDraft.hostingMode === "DEPLOYMENT_PROXY" ? (
+                <label className="block text-sm font-semibold text-panel-muted">
+                  Deployment
+                  <select
+                    className="mt-2 h-11 w-full rounded-md border border-panel-line px-3 text-panel-text"
+                    onChange={(event) => setHostingDraft((draft) => draft ? { ...draft, hostingDeploymentId: event.target.value } : draft)}
+                    value={hostingDraft.hostingDeploymentId}
+                  >
+                    <option value="">Select deployment</option>
+                    {(deployments.data?.items ?? []).map((deployment) => (
+                      <option key={deployment.id} value={deployment.id}>{deployment.name} :{deployment.port}</option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
+
+              {hostingDraft.hostingMode === "REDIRECT" ? (
+                <label className="block text-sm font-semibold text-panel-muted">
+                  Redirect URL
+                  <input
+                    className="mt-2 h-11 w-full rounded-md border border-panel-line px-3 text-panel-text"
+                    onChange={(event) => setHostingDraft((draft) => draft ? { ...draft, redirectUrl: event.target.value } : draft)}
+                    placeholder="https://example.com"
+                    value={hostingDraft.redirectUrl}
+                  />
+                </label>
+              ) : null}
+            </div>
+            <div className="flex justify-end gap-2 border-t border-panel-line px-5 py-4">
+              <button className="h-10 rounded-md border border-panel-line px-4 text-sm font-semibold hover:bg-slate-50" onClick={() => setHostingDraft(null)} type="button">
+                Cancel
+              </button>
+              <button
+                className="h-10 rounded-md bg-panel-accent px-4 text-sm font-semibold text-white disabled:opacity-60"
+                disabled={updateHosting.isPending}
+                onClick={() => updateHosting.mutate(hostingDraft)}
+                type="button"
+              >
+                {updateHosting.isPending ? "Saving" : "Save"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </>
   );
 }

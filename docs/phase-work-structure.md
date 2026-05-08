@@ -79,6 +79,10 @@ Tasks:
 Deliverables:
 - Static public_html sites and Git apps both work.
 
+Status:
+- Implemented domain hosting modes in the database, API publish path, sysagent redirect vhost writer, and Domains UI settings.
+- `PUBLIC_HTML` publishes `/var/www/<domain>/<documentRoot>`, `DEPLOYMENT_PROXY` publishes to the selected deployment port, and `REDIRECT` writes a 301 vhost.
+
 ## Phase 5: Nginx Generator
 
 Goal: safe deterministic Nginx config generation.

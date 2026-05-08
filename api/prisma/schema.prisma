@@ -14,6 +14,12 @@ enum DomainStatus {
   SUSPENDED
 }
 
+enum DomainHostingMode {
+  PUBLIC_HTML
+  DEPLOYMENT_PROXY
+  REDIRECT
+}
+
 enum DnsRecordType {
   A
   AAAA
@@ -161,6 +167,10 @@ model Domain {
   id           String        @id @default(cuid())
   name         String        @unique
   status       DomainStatus  @default(PENDING)
+  hostingMode  DomainHostingMode @default(PUBLIC_HTML) @map("hosting_mode")
+  documentRoot String        @default("public_html") @map("document_root")
+  redirectUrl  String?       @map("redirect_url")
+  hostingDeploymentId String? @map("hosting_deployment_id")
   sslEnabled   Boolean       @default(false) @map("ssl_enabled")
   sslExpiry    DateTime?     @map("ssl_expiry")
   forceSsl     Boolean       @default(true) @map("force_ssl")

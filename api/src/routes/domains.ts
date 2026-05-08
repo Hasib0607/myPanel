@@ -30,9 +30,15 @@ const domainNameSchema = z.string().transform((value) => normalizeDomainName(val
   }
 });
 
+const hostingModeSchema = z.enum(["PUBLIC_HTML", "DEPLOYMENT_PROXY", "REDIRECT"]);
+
 const createDomainSchema = z.object({
   name: domainNameSchema,
-  forceSsl: z.boolean().default(true)
+  forceSsl: z.boolean().default(true),
+  hostingMode: hostingModeSchema.default("PUBLIC_HTML"),
+  documentRoot: z.string().trim().default("public_html"),
+  redirectUrl: z.string().url().nullable().optional(),
+  hostingDeploymentId: z.string().nullable().optional()
 });
 
 const subdomainSchema = z.object({
@@ -44,7 +50,11 @@ const subdomainSchema = z.object({
 const updateDomainSchema = z.object({
   forceSsl: z.boolean().optional(),
   sslEnabled: z.boolean().optional(),
-  sslExpiry: z.coerce.date().nullable().optional()
+  sslExpiry: z.coerce.date().nullable().optional(),
+  hostingMode: hostingModeSchema.optional(),
+  documentRoot: z.string().trim().optional(),
+  redirectUrl: z.string().url().nullable().optional(),
+  hostingDeploymentId: z.string().nullable().optional()
 });
 
 type ActiveNameServer = {
@@ -250,6 +260,36 @@ function zodIssueMessage(error: z.ZodError) {
   return error.issues[0]?.message ?? "Validation failed";
 }
 
+function normalizeDocumentRoot(value?: string | null) {
+  const root = (value || "public_html").trim().replace(/^\/+/, "").replace(/\/+$/, "");
+  if (!root || root.includes("..") || path.isAbsolute(root)) {
+    throw Object.assign(new Error("Document root must be a folder inside the domain root."), { statusCode: 400 });
+  }
+  return root;
+}
+
+function normalizeRedirectUrl(value?: string | null) {
+  if (!value) return null;
+  return value.replace(/\/+$/, "");
+}
+
+async function validateHostingSettings(input: {
+  hostingMode?: "PUBLIC_HTML" | "DEPLOYMENT_PROXY" | "REDIRECT";
+  hostingDeploymentId?: string | null;
+  redirectUrl?: string | null;
+}) {
+  if (input.hostingMode === "DEPLOYMENT_PROXY") {
+    if (!input.hostingDeploymentId) {
+      throw Object.assign(new Error("Select a deployment before using deployment proxy hosting."), { statusCode: 400 });
+    }
+    await prisma.deployment.findUniqueOrThrow({ where: { id: input.hostingDeploymentId } });
+  }
+
+  if (input.hostingMode === "REDIRECT" && !input.redirectUrl) {
+    throw Object.assign(new Error("Set a redirect URL before using redirect hosting."), { statusCode: 400 });
+  }
+}
+
 function parseCreateDomain(body: unknown) {
   try {
     return createDomainSchema.parse(body);
@@ -269,18 +309,50 @@ async function publishDomainHosting(domainId: string) {
   const fileScaffold = await ensureDomainFileStructure(domain.name);
   const zone = renderZone(domain.name, domain.dnsRecords);
   const dnsResult = await sysagent.applyDnsZone({ domain: domain.name, zone });
-  const nginxResult = await sysagent.writeStaticNginxVhost({
-    name: `domain-${domain.name}`,
-    serverName: `${domain.name} www.${domain.name}`,
-    rootPath: path.join(env.FILE_MANAGER_ROOT, domain.name, "public_html"),
-    forceHttps: domain.forceSsl && domain.sslEnabled,
-    ...(domain.sslEnabled
-      ? {
-          sslCertificate: `/etc/letsencrypt/live/${domain.name}/fullchain.pem`,
-          sslCertificateKey: `/etc/letsencrypt/live/${domain.name}/privkey.pem`
-        }
-      : {})
-  });
+
+  let nginxResult;
+  if (domain.hostingMode === "DEPLOYMENT_PROXY") {
+    const deployment = domain.hostingDeploymentId
+      ? await prisma.deployment.findUniqueOrThrow({ where: { id: domain.hostingDeploymentId } })
+      : await prisma.deployment.findFirst({
+          where: {
+            OR: [
+              { domainId: domain.id },
+              { domainBindings: { some: { domainId: domain.id } } }
+            ]
+          },
+          orderBy: { createdAt: "desc" }
+        });
+    if (!deployment) throw Object.assign(new Error("Select a deployment before publishing deployment proxy hosting."), { statusCode: 400 });
+    nginxResult = await sysagent.deploymentNginx({
+      deploymentId: deployment.id,
+      serverName: `${domain.name} www.${domain.name}`,
+      upstreamPort: deployment.port,
+      rootPath: deployment.rootPath,
+      forceSsl: domain.forceSsl && domain.sslEnabled
+    });
+  } else if (domain.hostingMode === "REDIRECT") {
+    if (!domain.redirectUrl) throw Object.assign(new Error("Set a redirect URL before publishing redirect hosting."), { statusCode: 400 });
+    nginxResult = await sysagent.writeRedirectNginxVhost({
+      name: `domain-${domain.name}`,
+      serverName: `${domain.name} www.${domain.name}`,
+      redirectUrl: normalizeRedirectUrl(domain.redirectUrl)
+    });
+  } else {
+    const documentRoot = normalizeDocumentRoot(domain.documentRoot);
+    nginxResult = await sysagent.writeStaticNginxVhost({
+      name: `domain-${domain.name}`,
+      serverName: `${domain.name} www.${domain.name}`,
+      rootPath: path.join(env.FILE_MANAGER_ROOT, domain.name, documentRoot),
+      forceHttps: domain.forceSsl && domain.sslEnabled,
+      ...(domain.sslEnabled
+        ? {
+            sslCertificate: `/etc/letsencrypt/live/${domain.name}/fullchain.pem`,
+            sslCertificateKey: `/etc/letsencrypt/live/${domain.name}/privkey.pem`
+          }
+        : {})
+    });
+  }
   return { domain, fileScaffold, zone, dnsResult, nginxResult };
 }
 
@@ -311,6 +383,9 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
 
   app.post("/", async (request, reply) => {
     const body = parseCreateDomain(request.body);
+    const documentRoot = normalizeDocumentRoot(body.documentRoot);
+    const redirectUrl = normalizeRedirectUrl(body.redirectUrl);
+    await validateHostingSettings({ ...body, redirectUrl });
     let domain;
     try {
       const nameServers = await prisma.nameServer.findMany({
@@ -321,7 +396,16 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
       await assertDomainUsesHostingNameServers(body.name, nameServers);
 
       domain = await prisma.$transaction(async (tx) => {
-        const created = await tx.domain.create({ data: { name: body.name, forceSsl: body.forceSsl } });
+        const created = await tx.domain.create({
+          data: {
+            name: body.name,
+            forceSsl: body.forceSsl,
+            hostingMode: body.hostingMode,
+            documentRoot,
+            redirectUrl,
+            hostingDeploymentId: body.hostingDeploymentId ?? null
+          }
+        });
         await tx.dnsRecord.createMany({ data: defaultRecords(created.id, created.name, nameServers), skipDuplicates: true });
         return tx.domain.findUniqueOrThrow({ where: { id: created.id }, include: domainInclude() });
       });
@@ -371,16 +455,30 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
   app.patch("/:domainId", async (request) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const body = updateDomainSchema.parse(request.body);
-    const domain = await prisma.domain.update({ where: { id: domainId }, data: body, include: domainInclude() });
-    if (typeof body.forceSsl === "boolean" && domain.sslEnabled) {
-      await sysagent.writeStaticNginxVhost({
-        name: domain.name,
-        serverName: `${domain.name} www.${domain.name}`,
-        rootPath: path.join(env.FILE_MANAGER_ROOT, domain.name, "public_html"),
-        forceHttps: domain.forceSsl,
-        sslCertificate: `/etc/letsencrypt/live/${domain.name}/fullchain.pem`,
-        sslCertificateKey: `/etc/letsencrypt/live/${domain.name}/privkey.pem`
-      });
+    const existing = await prisma.domain.findUniqueOrThrow({ where: { id: domainId } });
+    const nextHostingMode = body.hostingMode ?? existing.hostingMode;
+    const nextRedirectUrl = normalizeRedirectUrl(body.redirectUrl === undefined ? existing.redirectUrl : body.redirectUrl);
+    const nextHostingDeploymentId = body.hostingDeploymentId === undefined ? existing.hostingDeploymentId : body.hostingDeploymentId;
+    const data = {
+      ...body,
+      ...(body.documentRoot !== undefined ? { documentRoot: normalizeDocumentRoot(body.documentRoot) } : {}),
+      ...(body.redirectUrl !== undefined ? { redirectUrl: nextRedirectUrl } : {})
+    };
+    await validateHostingSettings({
+      hostingMode: nextHostingMode,
+      hostingDeploymentId: nextHostingDeploymentId,
+      redirectUrl: nextRedirectUrl
+    });
+    const domain = await prisma.domain.update({ where: { id: domainId }, data, include: domainInclude() });
+    if (
+      body.hostingMode !== undefined ||
+      body.documentRoot !== undefined ||
+      body.redirectUrl !== undefined ||
+      body.hostingDeploymentId !== undefined ||
+      typeof body.forceSsl === "boolean" ||
+      typeof body.sslEnabled === "boolean"
+    ) {
+      await publishDomainHosting(domain.id);
     }
     await clearDomainCaches(domainId);
     await audit(request, { action: "UPDATE", resource: "domain", resourceId: domainId, description: `Updated domain ${domain.name}` });
@@ -412,10 +510,14 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
         { key: "mail_dmarc", label: "DMARC record", ok: hasDmarc, detail: hasDmarc ? "DMARC policy present" : "DMARC TXT record missing" },
         { key: "ssl", label: "SSL", ok: domain.sslEnabled, detail: domain.sslEnabled ? "SSL marked enabled" : "SSL not issued yet" },
         {
-          key: "deployment",
-          label: "Deployment",
-          ok: domain.deployments.length > 0,
-          detail: domain.deployments.length > 0 ? `Linked to ${domain.deployments[0].name}` : "No deployment linked"
+          key: "hosting",
+          label: "Hosting",
+          ok: domain.hostingMode === "PUBLIC_HTML" || Boolean(domain.redirectUrl || domain.hostingDeploymentId || domain.deployments.length),
+          detail: domain.hostingMode === "PUBLIC_HTML"
+            ? `${domain.documentRoot} website root`
+            : domain.hostingMode === "REDIRECT"
+              ? domain.redirectUrl ? `Redirects to ${domain.redirectUrl}` : "Redirect URL missing"
+              : domain.hostingDeploymentId || domain.deployments.length > 0 ? "Deployment proxy configured" : "Deployment proxy missing"
         }
       ]
     };

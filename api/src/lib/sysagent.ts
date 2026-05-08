@@ -79,6 +79,8 @@ export const sysagent = {
     request("/nginx/vhost", { method: "POST", body: JSON.stringify(body) }),
   writeStaticNginxVhost: (body: unknown) =>
     request<{ write: SysagentCommandResult; enable: SysagentCommandResult; test: SysagentCommandResult; reload: SysagentCommandResult; configPath: string; rootPath: string; sslEnabled?: boolean; forceHttps?: boolean }>("/nginx/static-vhost", { method: "POST", body: JSON.stringify(body) }),
+  writeRedirectNginxVhost: (body: unknown) =>
+    request<{ write: SysagentCommandResult; enable: SysagentCommandResult; test: SysagentCommandResult; reload: SysagentCommandResult; configPath: string; redirectUrl: string }>("/nginx/redirect-vhost", { method: "POST", body: JSON.stringify(body) }),
   issueCertificate: (body: unknown) =>
     request<SysagentCommandResult>("/ssl/issue", { method: "POST", body: JSON.stringify(body) }),
   renewCertificate: (domain: string) =>
