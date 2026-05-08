@@ -103,9 +103,9 @@ def _config_has_server_name(path: Path, server_name: str) -> bool:
 
 def remove_conflicting_configs(our_name: str, server_name: str, sites_enabled: str) -> list[str]:
     """
-    Scan sites-enabled and remove any panel-managed config (domain-* or deployment-*)
-    that claims server_name, except our own config. Called before writing a new config
-    so that nginx -t doesn't see a duplicate server_name.
+    Scan sites-enabled and remove any config that claims server_name, except our own.
+    Protects panel system configs by name. Intentionally scans all files, not just
+    managed-prefix ones, because the conflicting file may have any name.
     """
     removed: list[str] = []
     enabled_dir = Path(sites_enabled)
@@ -115,11 +115,11 @@ def remove_conflicting_configs(our_name: str, server_name: str, sites_enabled: s
     for conf_path in enabled_dir.iterdir():
         if conf_path.name == our_filename:
             continue
-        if not conf_path.name.startswith(MANAGED_CONFIG_PREFIXES):
+        stem = conf_path.stem.lower()
+        if stem in PROTECTED_CONFIG_NAMES or "vps-panel" in stem:
             continue
-        # Follow symlink to read actual content
         try:
-            target = Path(conf_path.resolve()) if conf_path.is_symlink() else conf_path
+            target = conf_path.resolve() if conf_path.is_symlink() else conf_path
             if _config_has_server_name(target, server_name):
                 conf_path.unlink()
                 removed.append(conf_path.name)
@@ -213,17 +213,22 @@ def publish_nginx_config(name: str, config: str, sites_available: str, sites_ena
         run_live_step("enable temp config", lambda: _enable_site(temp_available, enabled))
         test = run_command(["nginx", "-t"], allow_live=True)
         test_stderr = test.get("stderr") or ""
-        if (
-            test.get("returncode") != 0
-            or (server_name and "conflicting server name" in test_stderr and server_name in test_stderr)
-        ):
+        has_conflict_warn = server_name and "conflicting server name" in test_stderr and server_name in test_stderr
+        if test.get("returncode") != 0 or has_conflict_warn:
             run_live_step("rollback failed config", lambda: _restore(enabled, old_enabled))
             run_live_step("remove temp config", lambda: temp_available.unlink(missing_ok=True))
+            if has_conflict_warn:
+                skip_msg = (
+                    f"Another config in /etc/nginx/sites-enabled/ already claims server_name "
+                    f'"{server_name}" — remove it manually, then redeploy. Previous config restored.'
+                )
+            else:
+                skip_msg = "Skipped because nginx -t failed; previous site config was restored"
             return {
                 "write": write,
                 "enable": enable,
                 "test": test,
-                "reload": skipped_reload("Skipped because nginx -t failed; previous site config was restored"),
+                "reload": skipped_reload(skip_msg),
                 "configPath": str(available),
                 "enabledPath": str(enabled),
                 "rolledBack": True,
