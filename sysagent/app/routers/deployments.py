@@ -2,6 +2,7 @@ import shlex
 import re
 import json
 import base64
+import time
 from pathlib import Path
 
 from fastapi import APIRouter
@@ -225,6 +226,10 @@ def pm2_start(body: ProcessRequest, start_command: list[str]) -> dict:
         "--cwd",
         cwd,
         "--update-env",
+        # 3 s between crash-restarts so port is released before PM2 retries, preventing
+        # a tight loop that exhausts the restart counter and leaves the app permanently down.
+        "--restart-delay",
+        "3000",
         "--",
         *start_command[1:],
     ]
@@ -405,6 +410,9 @@ def nginx(body: NginxRequest) -> dict:
         "        proxy_set_header X-Forwarded-Proto $scheme;\n"
         "        proxy_set_header Upgrade $http_upgrade;\n"
         "        proxy_set_header Connection \"upgrade\";\n"
+        "        proxy_connect_timeout 10s;\n"
+        "        proxy_send_timeout 60s;\n"
+        "        proxy_read_timeout 60s;\n"
         "    }\n"
     )
     if body.forceSsl and has_ssl:
@@ -442,6 +450,9 @@ server {{
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
+        proxy_connect_timeout 10s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
     }}
 }}
 """
@@ -456,9 +467,7 @@ server {{
     }
 
 
-@router.post("/health")
-def health(body: HealthRequest) -> dict:
-    url = body.healthUrl or f"http://127.0.0.1:{body.port}/"
+def _curl_once(url: str) -> dict:
     return run_command([
         "curl",
         "-fsS",
@@ -471,3 +480,23 @@ def health(body: HealthRequest) -> dict:
         "5",
         url,
     ])
+
+
+@router.post("/health")
+def health(body: HealthRequest) -> dict:
+    url = body.healthUrl or f"http://127.0.0.1:{body.port}/"
+
+    # Phase 1: wait for the process to bind (with retries for connection refused).
+    first = _curl_once(url)
+    if first.get("returncode") != 0:
+        return first
+
+    # Phase 2: wait 3 s then verify the process is still up (catches immediate crashes).
+    time.sleep(3)
+    second = _curl_once(url)
+    if second.get("returncode") != 0:
+        second["stderr"] = (
+            "App responded on first check but crashed within 3 s. "
+            + (second.get("stderr") or "")
+        ).strip()
+    return second
