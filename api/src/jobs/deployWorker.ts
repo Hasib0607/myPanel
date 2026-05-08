@@ -58,7 +58,7 @@ function assertLiveResult(result: unknown, label: string) {
   if (typeof value?.returncode === "number" && value.returncode !== 0) {
     const signal = "signal" in value && typeof value.signal === "string" ? value.signal : null;
     const signalHint = value.returncode === -15 || signal === "SIGTERM"
-      ? " The command was terminated by SIGTERM, often because sysagent/workers were restarted during deploy or the server killed the build. Retry after panel update finishes; if it repeats, increase DEPLOYMENT_COMMAND_TIMEOUT_SECONDS or add swap."
+      ? " The command was terminated by SIGTERM. This may be caused by the OS killing the process due to low memory — try adding swap or reducing build memory usage (e.g. NODE_OPTIONS=--max-old-space-size=512 in env vars). If it repeats, increase DEPLOYMENT_COMMAND_TIMEOUT_SECONDS."
       : "";
     throw new Error(`${label} failed with exit code ${value.returncode}${signal ? ` (${signal})` : ""}${value.stderr ? `: ${value.stderr}` : ""}${signalHint}`);
   }
