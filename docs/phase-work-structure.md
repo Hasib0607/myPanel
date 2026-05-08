@@ -147,6 +147,13 @@ Tasks:
 Deliverables:
 - No manual SSH deploy after setup.
 
+Status:
+- GitHub tokens are validated against GitHub before saving and stored through the encrypted secret vault.
+- Repository import defaults to auto deploy, assigns a managed project port, and can create or update the repo webhook.
+- Deploy workers inject the GitHub token only through Git's environment-based auth header, so clone/fetch works for private repos without leaking PATs in logs.
+- Source sync, install, build, migrate, PM2 start, and health checks now fail the release when the underlying command fails.
+- GitHub push webhooks verify per-project secrets and queue a release for matching auto-deploy projects.
+
 ## Phase 9: Installer And Fresh VPS
 
 Goal: one-command fresh server install.

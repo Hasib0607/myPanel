@@ -33,6 +33,7 @@ type Draft = {
   outputDirectory: string;
   envText: string;
   dbType: "" | "POSTGRESQL" | "MYSQL";
+  autoDeployEnabled: boolean;
 };
 
 const initialDraft: Draft = {
@@ -53,7 +54,8 @@ const initialDraft: Draft = {
   startCommand: "npm run start",
   outputDirectory: ".next",
   envText: "NODE_ENV=production",
-  dbType: ""
+  dbType: "",
+  autoDeployEnabled: true
 };
 
 function slugify(value: string) {
@@ -92,7 +94,7 @@ function formPayload(draft: Draft) {
     outputDirectory: draft.outputDirectory || null,
     dbType: draft.dbType || null,
     envVars: parseEnv(draft.envText),
-    autoDeployEnabled: false,
+    autoDeployEnabled: draft.autoDeployEnabled,
     persistentPaths: []
   };
 }
@@ -119,7 +121,8 @@ function draftFromDeployment(deployment: Deployment): Draft {
       if (!item.isSecret && item.value !== null) acc[item.key] = item.value;
       return acc;
     }, {})).map(([key, value]) => `${key}=${value}`).join("\n") || "NODE_ENV=production",
-    dbType: deployment.dbType ?? ""
+    dbType: deployment.dbType ?? "",
+    autoDeployEnabled: deployment.autoDeployEnabled
   };
 }
 
@@ -301,7 +304,7 @@ export function DeploymentsClient() {
   const importAndDeployGithub = useMutation({
     mutationFn: async (repo: GithubRepo) => {
       const detection = await apiGet<GithubDetectResponse>(`/deployments/github/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/detect?${queryString({ branch: repo.defaultBranch, rootDirectory: draft.rootDirectory || "." })}`);
-      const repoDraft = { ...draft, name: repo.name, slug: slugify(repo.name), githubOwner: repo.owner, githubRepo: repo.name, gitUrl: `https://github.com/${repo.fullName}.git`, branch: repo.defaultBranch, rootPath: deploymentRootForRepo(repo.name), sourceProvider: "GITHUB" as const, framework: detection.detected, installCommand: detection.suggestions.installCommand ?? "", buildCommand: detection.suggestions.buildCommand ?? "", startCommand: detection.suggestions.startCommand ?? "", outputDirectory: detection.suggestions.outputDirectory ?? "" };
+      const repoDraft = { ...draft, name: repo.name, slug: slugify(repo.name), githubOwner: repo.owner, githubRepo: repo.name, gitUrl: `https://github.com/${repo.fullName}.git`, branch: repo.defaultBranch, rootPath: deploymentRootForRepo(repo.name), sourceProvider: "GITHUB" as const, framework: detection.detected, installCommand: detection.suggestions.installCommand ?? "", buildCommand: detection.suggestions.buildCommand ?? "", startCommand: detection.suggestions.startCommand ?? "", outputDirectory: detection.suggestions.outputDirectory ?? "", autoDeployEnabled: true };
       const deployment = await apiPost<Deployment>("/deployments/github/import", { ...formPayload(repoDraft), githubOwner: repo.owner, githubRepo: repo.name });
       await apiPost<QueueResponse>(`/deployments/${deployment.slug}/deploy`);
       return { deployment, detection };
@@ -536,6 +539,7 @@ function DeploymentFormFields({ value, onChange, domains }: { value: Draft; onCh
     <div className="grid grid-cols-2 gap-3"><Input label="Git URL" value={value.gitUrl} onChange={(gitUrl) => onChange({ ...value, gitUrl })} /><Input label="Branch" value={value.branch} onChange={(branch) => onChange({ ...value, branch })} /></div>
     <Input label="App root path" value={value.rootPath} onChange={(rootPath) => onChange({ ...value, rootPath })} />
     <div className="grid grid-cols-3 gap-3"><label className="space-y-1 text-xs font-medium text-panel-muted">Framework<select className="h-9 w-full rounded-md border border-panel-line px-2 text-sm text-panel-ink" onChange={(event) => onChange({ ...value, framework: event.target.value as DeploymentFramework })} value={value.framework}>{frameworkOptions.map((framework) => <option key={framework} value={framework}>{framework}</option>)}</select></label><Input label="Port (auto)" readOnly value={value.port} onChange={(port) => onChange({ ...value, port })} /><label className="space-y-1 text-xs font-medium text-panel-muted">Database<select className="h-9 w-full rounded-md border border-panel-line px-2 text-sm text-panel-ink" onChange={(event) => onChange({ ...value, dbType: event.target.value as Draft["dbType"] })} value={value.dbType}><option value="">None</option><option value="POSTGRESQL">PostgreSQL</option><option value="MYSQL">MySQL</option></select></label></div>
+    <label className="flex h-10 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium text-panel-ink"><input checked={value.autoDeployEnabled} onChange={(event) => onChange({ ...value, autoDeployEnabled: event.target.checked })} type="checkbox" /> Auto deploy on GitHub push</label>
     {(["installCommand", "buildCommand", "startCommand", "outputDirectory"] as const).map((field) => <input className="h-9 w-full rounded-md border border-panel-line px-3 font-mono text-xs" key={field} onChange={(event) => onChange({ ...value, [field]: event.target.value })} placeholder={field} value={value[field]} />)}
     <textarea className="h-28 w-full rounded-md border border-panel-line p-3 font-mono text-xs" onChange={(event) => onChange({ ...value, envText: event.target.value })} value={value.envText} />
   </div>;

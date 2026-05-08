@@ -4,6 +4,7 @@ import { redis } from "../lib/redis.js";
 import { logger } from "../lib/logger.js";
 import { detectDeploymentSource } from "../lib/deploymentDetection.js";
 import { prisma } from "../lib/prisma.js";
+import { getSecret } from "../lib/secrets.js";
 import { sysagent } from "../lib/sysagent.js";
 import { sslQueue } from "./queues.js";
 
@@ -77,6 +78,28 @@ function renderDeploymentCommand(command: string | null | undefined, port: numbe
   return command?.replaceAll("{PORT}", String(port)).replaceAll("$PORT", String(port)) ?? null;
 }
 
+function githubTokenSecretRef() {
+  return "github:superadmin:token";
+}
+
+async function githubCloneToken(sourceProvider: string, gitUrl: string | null) {
+  if (sourceProvider !== "GITHUB" || !gitUrl?.startsWith("https://github.com/")) return null;
+  return getSecret(githubTokenSecretRef());
+}
+
+function assertCommandTree(result: unknown, label: string) {
+  if (!result || typeof result !== "object") return;
+  const value = result as { dryRun?: boolean; returncode?: number; stderr?: string; reason?: string; command?: unknown };
+  if (Array.isArray(value.command) || typeof value.returncode === "number" || value.dryRun !== undefined) {
+    assertLiveResult(value, label);
+    return;
+  }
+  for (const [key, child] of Object.entries(result)) {
+    if (child === null || key === "path") continue;
+    assertCommandTree(child, `${label} ${key}`);
+  }
+}
+
 async function processLifecycleAction(action: string, deploymentId: string, releaseId: string | undefined) {
   const deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: { domain: true } });
   const processAction = action === "redeploy" || action === "deploy" ? "start" : action;
@@ -144,14 +167,17 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     }));
 
     if (deployment.gitUrl || action === "pull") {
-      await runStep(deployment.id, releaseId, "CLONING", "Source sync", () =>
+      const gitToken = await githubCloneToken(deployment.sourceProvider, deployment.gitUrl);
+      const syncResult = await runStep(deployment.id, releaseId, "CLONING", "Source sync", () =>
         sysagent.deploymentGitSync({
           rootPath: deployment.rootPath,
           gitUrl: action === "pull" ? null : deployment.gitUrl,
           branch: deployment.branch,
-          commitSha: deployment.commitSha
+          commitSha: deployment.commitSha,
+          gitToken
         })
       );
+      assertCommandTree(syncResult, "Source sync");
     } else {
       await writeLog(deployment.id, releaseId, "CLONING", "Source sync skipped for non-Git source", { sourceProvider: deployment.sourceProvider });
     }
@@ -180,33 +206,36 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
 
     if (deployment.installCommand || deployment.packageManager) {
       await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "BUILDING" } });
-      await runStep(deployment.id, releaseId, "INSTALLING", "Dependency install", () =>
+      const installResult = await runStep(deployment.id, releaseId, "INSTALLING", "Dependency install", () =>
         sysagent.deploymentInstall({
           rootPath: deployment.rootPath,
           command: renderDeploymentCommand(deployment.installCommand, deployment.port),
           packageManager: deployment.packageManager
         })
       );
+      assertCommandTree(installResult, "Dependency install");
     }
 
     if (deployment.framework === "LARAVEL") {
-      await runStep(deployment.id, releaseId, "MIGRATING", "Database migration", () =>
+      const migrateResult = await runStep(deployment.id, releaseId, "MIGRATING", "Database migration", () =>
         sysagent.deploymentMigrate({
           rootPath: deployment.rootPath,
           command: "php artisan migrate --force"
         })
       );
+      assertCommandTree(migrateResult, "Database migration");
     } else {
       await writeLog(deployment.id, releaseId, "MIGRATING", "Migration skipped for framework", { framework: deployment.framework });
     }
 
     if (deployment.buildCommand) {
-      await runStep(deployment.id, releaseId, "BUILDING", "Build", () =>
+      const buildResult = await runStep(deployment.id, releaseId, "BUILDING", "Build", () =>
         sysagent.deploymentBuild({
           rootPath: deployment.rootPath,
           command: renderDeploymentCommand(deployment.buildCommand, deployment.port)
         })
       );
+      assertCommandTree(buildResult, "Build");
     }
 
     const nginxResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config", () =>

@@ -329,6 +329,86 @@ async function githubJson<T>(path: string, token: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function githubRequest<T>(path: string, token: string, init?: RequestInit): Promise<{ data: T; scopes: string[] }> {
+  const response = await fetch(`https://api.github.com${path}`, {
+    ...init,
+    headers: {
+      accept: "application/vnd.github+json",
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "user-agent": "vps-panel",
+      "x-github-api-version": "2022-11-28",
+      ...(init?.headers ?? {})
+    }
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`GitHub API failed with ${response.status}${detail ? `: ${detail.slice(0, 200)}` : ""}`);
+  }
+  const text = await response.text();
+  return {
+    data: (text ? JSON.parse(text) : null) as T,
+    scopes: (response.headers.get("x-oauth-scopes") ?? "").split(",").map((scope) => scope.trim()).filter(Boolean)
+  };
+}
+
+async function ensureGithubWebhook(deployment: { id: string; slug: string; githubOwner: string | null; githubRepo: string | null; webhookSecretHash: string | null }, token: string | null) {
+  if (!token || !deployment.githubOwner || !deployment.githubRepo) return { configured: false, reason: "GitHub token or repository is missing" };
+  const existingSecret = await getSecret(deploymentWebhookSecretRef(deployment.slug));
+  const secret = existingSecret ?? crypto.randomBytes(32).toString("hex");
+  if (!existingSecret) {
+    await putSecret({
+      ref: deploymentWebhookSecretRef(deployment.slug),
+      value: secret,
+      kind: "WEBHOOK_SECRET",
+      label: `${deployment.slug} GitHub webhook secret`,
+      metadata: { deploymentId: deployment.id, deploymentSlug: deployment.slug }
+    });
+    await prisma.deployment.update({
+      where: { id: deployment.id },
+      data: { webhookSecretHash: sha256(secret) }
+    });
+  }
+
+  const webhookUrl = `${env.FRONTEND_URL.replace(/\/$/, "")}/api/v1/webhooks/github`;
+  const hookBody = {
+    name: "web",
+    active: true,
+    events: ["push"],
+    config: {
+      url: webhookUrl,
+      content_type: "json",
+      secret,
+      insecure_ssl: "0"
+    }
+  };
+  try {
+    await githubRequest(`/repos/${encodeURIComponent(deployment.githubOwner)}/${encodeURIComponent(deployment.githubRepo)}/hooks`, token, {
+      method: "POST",
+      body: JSON.stringify(hookBody)
+    });
+    return { configured: true, webhookUrl };
+  } catch (error) {
+    try {
+      const hooks = await githubRequest<Array<{ id: number; config?: { url?: string } }>>(
+        `/repos/${encodeURIComponent(deployment.githubOwner)}/${encodeURIComponent(deployment.githubRepo)}/hooks?per_page=100`,
+        token
+      );
+      const existing = hooks.data.find((hook) => hook.config?.url === webhookUrl);
+      if (existing) {
+        await githubRequest(`/repos/${encodeURIComponent(deployment.githubOwner)}/${encodeURIComponent(deployment.githubRepo)}/hooks/${existing.id}`, token, {
+          method: "PATCH",
+          body: JSON.stringify(hookBody)
+        });
+        return { configured: true, webhookUrl, updatedExisting: true };
+      }
+    } catch {
+      // Return the original hook creation error below.
+    }
+    return { configured: false, webhookUrl, reason: error instanceof Error ? error.message : "Could not create GitHub webhook" };
+  }
+}
+
 function logMetadataText(metadata: Prisma.JsonValue | null) {
   if (!metadata) return "";
   try {
@@ -387,13 +467,18 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
   app.put("/github/connection", async (request) => {
     const body = githubConnectionSchema.parse(request.body);
     const tokenSecretRef = githubTokenSecretRef();
+    let verifiedUsername = body.username ?? null;
+    let verifiedScopes = body.scopes;
     if (typeof body.token === "string") {
+      const verified = await githubRequest<{ login: string }>("/user", body.token);
+      verifiedUsername = verifiedUsername || verified.data.login;
+      verifiedScopes = verified.scopes;
       await putSecret({
         ref: tokenSecretRef,
         value: body.token,
         kind: "GITHUB_TOKEN",
-        label: body.username ? `${body.username} GitHub token` : "GitHub token",
-        metadata: { username: body.username ?? null, scopes: body.scopes }
+        label: verifiedUsername ? `${verifiedUsername} GitHub token` : "GitHub token",
+        metadata: { username: verifiedUsername, scopes: verifiedScopes }
       });
     } else if (body.token === null) {
       await deleteSecret(tokenSecretRef);
@@ -401,18 +486,18 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     const connection = await prisma.gitHubConnection.upsert({
       where: { id: "superadmin" },
       update: {
-        username: body.username ?? undefined,
+        username: verifiedUsername ?? undefined,
         tokenSecretRef: typeof body.token === "string" ? tokenSecretRef : body.token === null ? null : undefined,
         installationId: body.installationId ?? undefined,
-        scopes: body.scopes,
+        scopes: verifiedScopes,
         connectedAt: body.token || body.installationId ? new Date() : undefined
       },
       create: {
         id: "superadmin",
-        username: body.username ?? undefined,
+        username: verifiedUsername ?? undefined,
         tokenSecretRef: typeof body.token === "string" ? tokenSecretRef : undefined,
         installationId: body.installationId ?? undefined,
-        scopes: body.scopes,
+        scopes: verifiedScopes,
         connectedAt: body.token || body.installationId ? new Date() : undefined
       }
     });
@@ -519,14 +604,18 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.post("/github/import", async (request, reply) => {
+    const rawBody = request.body as { autoDeployEnabled?: boolean } | null;
     const body = baseDeploymentSchema.extend({
       githubOwner: z.string(),
       githubRepo: z.string(),
       rootPath: z.string().optional(),
       port: deploymentPortSchema.optional()
     }).parse(request.body);
+    const autoDeployEnabled = rawBody?.autoDeployEnabled ?? true;
     const port = body.port ?? await nextAvailablePort();
     const rootPath = body.rootPath ?? path.join(env.FILE_MANAGER_ROOT, "deployments", body.githubRepo);
+    const connection = await prisma.gitHubConnection.findUnique({ where: { id: "superadmin" } });
+    const token = connection?.tokenSecretRef ? await getSecret(connection.tokenSecretRef) : null;
     const existingDeployment = await prisma.deployment.findFirst({
       where: {
         sourceProvider: "GITHUB",
@@ -548,6 +637,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
             repoUrl: body.repoUrl ?? `https://github.com/${body.githubOwner}/${body.githubRepo}`,
             rootPath,
             port: body.port ?? existingDeployment.port,
+            autoDeployEnabled,
             status: "STOPPED"
           }
         })
@@ -560,14 +650,17 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
             repoUrl: body.repoUrl ?? `https://github.com/${body.githubOwner}/${body.githubRepo}`,
             rootPath,
             port,
+            autoDeployEnabled,
             status: "STOPPED"
           }
         });
+    const webhook = autoDeployEnabled ? await ensureGithubWebhook(deployment, token) : { configured: false, reason: "Auto deploy disabled" };
     await addLog(deployment.id, "QUEUED", existingDeployment ? "GitHub project settings refreshed" : "GitHub project imported", undefined, {
       repository: `${body.githubOwner}/${body.githubRepo}`,
       branch: body.branch,
       rootPath,
-      autoDeployEnabled: body.autoDeployEnabled
+      autoDeployEnabled,
+      webhook
     });
     await syncPrimaryDomainBinding(deployment.id, deployment.domainId);
     return reply.code(existingDeployment ? 200 : 201).send(await findDeployment(deployment.id));

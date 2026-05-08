@@ -1,6 +1,7 @@
 import shlex
 import re
 import json
+import base64
 from pathlib import Path
 
 from fastapi import APIRouter
@@ -41,6 +42,7 @@ class GitSyncRequest(BaseModel):
     gitUrl: str | None = None
     branch: str = "main"
     commitSha: str | None = None
+    gitToken: str | None = None
 
 
 class CommandRequest(BaseModel):
@@ -119,6 +121,18 @@ def guarded_command_with_env(root_path: str, command: list[str], cwd: str | None
     result = run_command(command, cwd=cwd, env=env)
     result["path"] = info
     return result
+
+
+def git_auth_env(token: str | None) -> dict[str, str] | None:
+    if not token:
+        return None
+    basic = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+    return {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+        "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
 
 
 def deployment_cwd(root_path: str) -> str:
@@ -286,16 +300,23 @@ def guarded_write_file(root_path: str, target_path: str, content: str) -> dict:
 @router.post("/git-sync")
 def git_sync(body: GitSyncRequest) -> dict:
     target = Path(body.rootPath)
+    env = git_auth_env(body.gitToken)
+    if target.joinpath(".git").exists():
+        remote = guarded_command_with_env(body.rootPath, ["git", "-C", str(target), "remote", "set-url", "origin", body.gitUrl], env=env) if body.gitUrl else None
+        fetch = guarded_command_with_env(body.rootPath, ["git", "-C", str(target), "fetch", "origin", body.branch, "--prune"], env=env)
+        checkout = guarded_command_with_env(body.rootPath, ["git", "-C", str(target), "checkout", body.commitSha or body.branch], env=env)
+        pull = None if body.commitSha else guarded_command_with_env(body.rootPath, ["git", "-C", str(target), "pull", "--ff-only", "origin", body.branch], env=env)
+        return {"remote": remote, "sync": fetch, "checkout": checkout, "pull": pull}
     if body.gitUrl:
         command = ["git", "clone", "--branch", body.branch, body.gitUrl, str(target)]
     else:
         command = ["git", "-C", str(target), "fetch", "--all", "--prune"]
-    result = guarded_command(body.rootPath, command)
+    result = guarded_command_with_env(body.rootPath, command, env=env)
     checkout = None
     if body.commitSha:
-        checkout = guarded_command(body.rootPath, ["git", "-C", str(target), "checkout", body.commitSha])
+        checkout = guarded_command_with_env(body.rootPath, ["git", "-C", str(target), "checkout", body.commitSha], env=env)
     elif not body.gitUrl:
-        checkout = guarded_command(body.rootPath, ["git", "-C", str(target), "checkout", body.branch])
+        checkout = guarded_command_with_env(body.rootPath, ["git", "-C", str(target), "checkout", body.branch], env=env)
     return {"sync": result, "checkout": checkout}
 
 
