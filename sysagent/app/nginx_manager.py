@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from typing import Callable, TypeVar
 
@@ -90,6 +91,43 @@ def run_live_step(action: str, fn: Callable[[], T]) -> T:
         raise HTTPException(status_code=500, detail=f"Nginx {action} failed: {error}") from error
 
 
+def _config_has_server_name(path: Path, server_name: str) -> bool:
+    """Return True if an nginx config file contains a server_name directive for server_name."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        # Match: server_name <anything> <server_name> <anything>;
+        return bool(re.search(r'\bserver_name\b[^;]*\b' + re.escape(server_name) + r'\b', text))
+    except OSError:
+        return False
+
+
+def remove_conflicting_configs(our_name: str, server_name: str, sites_enabled: str) -> list[str]:
+    """
+    Scan sites-enabled and remove any panel-managed config (domain-* or deployment-*)
+    that claims server_name, except our own config. Called before writing a new config
+    so that nginx -t doesn't see a duplicate server_name.
+    """
+    removed: list[str] = []
+    enabled_dir = Path(sites_enabled)
+    our_filename = f"{our_name}.conf"
+    if not enabled_dir.is_dir():
+        return removed
+    for conf_path in enabled_dir.iterdir():
+        if conf_path.name == our_filename:
+            continue
+        if not conf_path.name.startswith(MANAGED_CONFIG_PREFIXES):
+            continue
+        # Follow symlink to read actual content
+        try:
+            target = Path(conf_path.resolve()) if conf_path.is_symlink() else conf_path
+            if _config_has_server_name(target, server_name):
+                conf_path.unlink()
+                removed.append(conf_path.name)
+        except OSError:
+            pass
+    return removed
+
+
 def _snapshot(path: Path) -> dict:
     if path.is_symlink():
         return {"kind": "symlink", "target": str(path.resolve())}
@@ -124,7 +162,7 @@ def skipped_reload(message: str) -> dict:
     }
 
 
-def publish_nginx_config(name: str, config: str, sites_available: str, sites_enabled: str) -> dict:
+def publish_nginx_config(name: str, config: str, sites_available: str, sites_enabled: str, *, server_name: str | None = None) -> dict:
     available = safe_nginx_path(sites_available, name)
     enabled = safe_nginx_path(sites_enabled, name)
     temp_available = available.with_name(f".{available.name}.tmp")
@@ -159,6 +197,14 @@ def publish_nginx_config(name: str, config: str, sites_available: str, sites_ena
     run_live_step("prepare config directory", lambda: available.parent.mkdir(parents=True, exist_ok=True))
     run_live_step("prepare enabled directory", lambda: enabled.parent.mkdir(parents=True, exist_ok=True))
 
+    if server_name:
+        removed = run_live_step(
+            "remove conflicting configs",
+            lambda: remove_conflicting_configs(name, server_name, sites_enabled),
+        )
+    else:
+        removed = []
+
     old_available = _snapshot(available)
     old_enabled = _snapshot(enabled)
 
@@ -166,7 +212,11 @@ def publish_nginx_config(name: str, config: str, sites_available: str, sites_ena
         run_live_step("write temp config", lambda: temp_available.write_text(config, encoding="utf-8"))
         run_live_step("enable temp config", lambda: _enable_site(temp_available, enabled))
         test = run_command(["nginx", "-t"], allow_live=True)
-        if test.get("returncode") != 0:
+        test_stderr = test.get("stderr") or ""
+        if (
+            test.get("returncode") != 0
+            or (server_name and "conflicting server name" in test_stderr and server_name in test_stderr)
+        ):
             run_live_step("rollback failed config", lambda: _restore(enabled, old_enabled))
             run_live_step("remove temp config", lambda: temp_available.unlink(missing_ok=True))
             return {
@@ -177,6 +227,7 @@ def publish_nginx_config(name: str, config: str, sites_available: str, sites_ena
                 "configPath": str(available),
                 "enabledPath": str(enabled),
                 "rolledBack": True,
+                "removedConflicts": removed,
             }
 
         run_live_step("promote config", lambda: temp_available.replace(available))
@@ -193,6 +244,7 @@ def publish_nginx_config(name: str, config: str, sites_available: str, sites_ena
                 "configPath": str(available),
                 "enabledPath": str(enabled),
                 "rolledBack": True,
+                "removedConflicts": removed,
             }
 
         return {
@@ -203,6 +255,7 @@ def publish_nginx_config(name: str, config: str, sites_available: str, sites_ena
             "configPath": str(available),
             "enabledPath": str(enabled),
             "rolledBack": False,
+            "removedConflicts": removed,
         }
     finally:
         if temp_available.exists() or temp_available.is_symlink():

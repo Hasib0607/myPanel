@@ -461,7 +461,7 @@ server {{
     info = path_info(body.rootPath)
     if not info["allowed"] and settings.allow_live_nginx:
         return blocked_command("Path escapes configured file manager root", ["write-nginx", config_name], info)
-    result = publish_nginx_config(config_name, config, "/etc/nginx/sites-available", "/etc/nginx/sites-enabled")
+    result = publish_nginx_config(config_name, config, "/etc/nginx/sites-available", "/etc/nginx/sites-enabled", server_name=server_name)
     return {
         **result,
         "path": info,
