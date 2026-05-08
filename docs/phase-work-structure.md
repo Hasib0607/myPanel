@@ -53,6 +53,8 @@ Deliverables:
 
 ## Phase 3: PM2 Process Management
 
+Status: implemented. PM2 start/restart now replaces any existing process for the same deployment, runs from the deployment cwd, injects `PORT`, `HOST`, and `HOSTNAME`, saves PM2 state, and verifies the process is online.
+
 Goal: no duplicate or ghost PM2 processes.
 
 Tasks:

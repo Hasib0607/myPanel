@@ -1,5 +1,6 @@
 import shlex
 import re
+import json
 from pathlib import Path
 
 from fastapi import APIRouter
@@ -107,6 +108,15 @@ def guarded_command(root_path: str, command: list[str], cwd: str | None = None) 
     return result
 
 
+def guarded_command_with_env(root_path: str, command: list[str], cwd: str | None = None, env: dict[str, str] | None = None) -> dict:
+    info = path_info(root_path)
+    if not info["allowed"] and settings.allow_live_system_commands:
+        return blocked_command("Path escapes configured file manager root", command, info)
+    result = run_command(command, cwd=cwd, env=env)
+    result["path"] = info
+    return result
+
+
 def deployment_cwd(root_path: str) -> str:
     return str(Path(root_path).resolve())
 
@@ -138,6 +148,109 @@ def guarded_deployment_command(root_path: str, command: str) -> dict:
     except ValueError as error:
         return blocked_command(str(error), [command], info)
     return guarded_command(root_path, parsed, cwd=deployment_cwd(root_path))
+
+
+def pm2_env(port: int | None) -> dict[str, str]:
+    env = {"HOST": "127.0.0.1", "HOSTNAME": "127.0.0.1"}
+    if port:
+        env["PORT"] = str(port)
+    return env
+
+
+def pm2_processes(root_path: str) -> dict:
+    return guarded_command(root_path, ["pm2", "jlist"], cwd=deployment_cwd(root_path))
+
+
+def pm2_process_state(jlist: dict, name: str) -> str | None:
+    try:
+        processes = json.loads(jlist.get("stdout") or "[]")
+    except json.JSONDecodeError:
+        return None
+    for process in processes:
+        if process.get("name") == name:
+            return process.get("pm2_env", {}).get("status")
+    return None
+
+
+def combine_pm2_results(root_path: str, steps: dict[str, dict], required: list[str]) -> dict:
+    info = path_info(root_path)
+    failed = [
+        name for name in required
+        if steps.get(name, {}).get("returncode", 0) != 0 or steps.get(name, {}).get("blocked")
+    ]
+    return {
+        "dryRun": any(step.get("dryRun") for step in steps.values()),
+        "command": ["pm2", "managed-lifecycle"],
+        "cwd": deployment_cwd(root_path),
+        "stdout": "",
+        "stderr": "; ".join(f"{name}: {steps[name].get('stderr') or steps[name].get('reason') or 'failed'}" for name in failed),
+        "returncode": 1 if failed else 0,
+        "path": info,
+        **steps,
+    }
+
+
+def pm2_start(body: ProcessRequest, start_command: list[str]) -> dict:
+    cwd = deployment_cwd(body.rootPath)
+    delete = guarded_command(body.rootPath, ["pm2", "delete", body.name], cwd=cwd)
+    if "not found" in (delete.get("stderr") or "").lower() or "not found" in (delete.get("stdout") or "").lower():
+        delete["returncode"] = 0
+
+    command = [
+        "pm2",
+        "start",
+        start_command[0],
+        "--name",
+        body.name,
+        "--cwd",
+        cwd,
+        "--update-env",
+        "--",
+        *start_command[1:],
+    ]
+    start = guarded_command_with_env(body.rootPath, command, cwd=cwd, env=pm2_env(body.port))
+    save = guarded_command(body.rootPath, ["pm2", "save"], cwd=cwd) if start.get("returncode") == 0 else {
+        "dryRun": start.get("dryRun", False),
+        "command": ["pm2", "save"],
+        "cwd": cwd,
+        "stdout": "",
+        "stderr": "Skipped because pm2 start failed",
+        "returncode": 1,
+    }
+    jlist = pm2_processes(body.rootPath) if start.get("returncode") == 0 else {
+        "dryRun": start.get("dryRun", False),
+        "command": ["pm2", "jlist"],
+        "cwd": cwd,
+        "stdout": "[]",
+        "stderr": "Skipped because pm2 start failed",
+        "returncode": 1,
+    }
+    status = pm2_process_state(jlist, body.name)
+    verify = {
+        "dryRun": jlist.get("dryRun", False),
+        "command": ["pm2", "verify-online", body.name],
+        "cwd": cwd,
+        "stdout": status or "",
+        "stderr": "" if status == "online" or jlist.get("dryRun") else f"PM2 process {body.name} is {status or 'missing'}",
+        "returncode": 0 if status == "online" or jlist.get("dryRun") else 1,
+    }
+    return combine_pm2_results(body.rootPath, {"delete": delete, "start": start, "save": save, "jlist": jlist, "verify": verify}, ["delete", "start", "save", "jlist", "verify"])
+
+
+def pm2_stop(body: ProcessRequest) -> dict:
+    cwd = deployment_cwd(body.rootPath)
+    stop = guarded_command(body.rootPath, ["pm2", "stop", body.name], cwd=cwd)
+    if "not found" in (stop.get("stderr") or "").lower() or "not found" in (stop.get("stdout") or "").lower():
+        stop["returncode"] = 0
+    save = guarded_command(body.rootPath, ["pm2", "save"], cwd=cwd) if stop.get("returncode") == 0 else {
+        "dryRun": stop.get("dryRun", False),
+        "command": ["pm2", "save"],
+        "cwd": cwd,
+        "stdout": "",
+        "stderr": "Skipped because pm2 stop failed",
+        "returncode": 1,
+    }
+    return combine_pm2_results(body.rootPath, {"stop": stop, "save": save}, ["stop", "save"])
 
 
 def guarded_write_file(root_path: str, target_path: str, content: str) -> dict:
@@ -213,12 +326,14 @@ def migrate(body: CommandRequest) -> dict:
 def process(body: ProcessRequest) -> dict:
     manager = (body.processManager or "NONE").upper()
     if manager == "PM2":
-        if body.action == "start":
+        if body.action in {"start", "restart"}:
             try:
                 start_command = parse_deployment_command(body.startCommand or "npm run start")
             except ValueError as error:
                 return blocked_command(str(error), [body.startCommand or "npm run start"], path_info(body.rootPath))
-            command = ["pm2", "start", start_command[0], "--name", body.name, "--", *start_command[1:]]
+            return pm2_start(body, start_command)
+        elif body.action == "stop":
+            return pm2_stop(body)
         else:
             command = ["pm2", body.action, body.name]
     elif manager == "SUPERVISOR":
