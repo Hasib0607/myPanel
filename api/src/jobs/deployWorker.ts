@@ -3,6 +3,7 @@ import { DeploymentFramework, DeploymentProcessManager, Prisma } from "@prisma/c
 import { redis } from "../lib/redis.js";
 import { logger } from "../lib/logger.js";
 import { detectDeploymentSource } from "../lib/deploymentDetection.js";
+import { env } from "../config/env.js";
 import { prisma } from "../lib/prisma.js";
 import { getSecret } from "../lib/secrets.js";
 import { sysagent } from "../lib/sysagent.js";
@@ -14,6 +15,7 @@ type DeployJobData = {
 };
 
 type DeployStep = "PREFLIGHT" | "CLONING" | "INSTALLING" | "MIGRATING" | "BUILDING" | "CONFIGURING_PROXY" | "STARTING" | "HEALTH_CHECK" | "SUCCEEDED" | "FAILED" | "ROLLBACK";
+const buildLogRetentionMs = 24 * 60 * 60 * 1000;
 
 const defaultProcessManagerByFramework: Record<DeploymentFramework, DeploymentProcessManager> = {
   LARAVEL: "SUPERVISOR",
@@ -25,6 +27,7 @@ const defaultProcessManagerByFramework: Record<DeploymentFramework, DeploymentPr
 };
 
 async function writeLog(deploymentId: string, releaseId: string | undefined, step: DeployStep, message: string, metadata: Prisma.InputJsonObject = {}, level = "info") {
+  await pruneBuildLogs(deploymentId);
   return prisma.deploymentLog.create({
     data: {
       deploymentId,
@@ -35,6 +38,23 @@ async function writeLog(deploymentId: string, releaseId: string | undefined, ste
       metadata
     }
   });
+}
+
+function deploymentLogDir(slug: string) {
+  return `${env.DEPLOYMENT_LOG_ROOT.replace(/\/+$/, "")}/${slug}`;
+}
+
+async function pruneBuildLogs(deploymentId: string) {
+  await prisma.deploymentLog.deleteMany({
+    where: {
+      deploymentId,
+      createdAt: { lt: new Date(Date.now() - buildLogRetentionMs) }
+    }
+  });
+}
+
+async function resetBuildLogs(deploymentId: string) {
+  await prisma.deploymentLog.deleteMany({ where: { deploymentId } });
 }
 
 async function runStep<T>(deploymentId: string, releaseId: string | undefined, step: DeployStep, message: string, fn: () => Promise<T>) {
@@ -155,7 +175,8 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
       processManager,
       startCommand: renderDeploymentCommand(deployment.startCommand, deployment.port),
       port: deployment.port,
-      env: envVars
+      env: envVars,
+      logDir: deploymentLogDir(deployment.slug)
     })
   );
   assertLiveResult(result, `${action} process`);
@@ -183,6 +204,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
 async function processDeploy(action: string, deploymentId: string, releaseId: string | undefined) {
   const startedAt = new Date();
   let deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: { domain: true, env: true } });
+  await resetBuildLogs(deployment.id);
   await markRelease(releaseId, "RUNNING", startedAt);
   await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "DEPLOYING" } });
 
@@ -308,7 +330,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         processManager,
         startCommand: renderDeploymentCommand(deployment.startCommand, deployment.port),
         port: deployment.port,
-        env: envVars
+        env: envVars,
+        logDir: deploymentLogDir(deployment.slug)
       })
     );
     assertLiveResult(startResult, "Process start");

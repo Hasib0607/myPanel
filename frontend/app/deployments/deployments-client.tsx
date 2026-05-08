@@ -13,6 +13,7 @@ type GithubRepoResponse = { connected: boolean; dryRun: boolean; items: GithubRe
 type GithubDetectResponse = DetectionResponse & { repository: string; dryRun: boolean };
 type Domain = { id: string; name: string };
 type DomainListResponse = { items: Domain[] };
+type LogType = "build" | "running";
 
 type Draft = {
   name: string;
@@ -268,12 +269,12 @@ export function DeploymentsClient() {
   });
 
   const openLogs = useMutation({
-    mutationFn: async (deployment: Deployment) => {
-      const text = await apiGetText(`/deployments/${deployment.slug}/logs/export?limit=500`);
-      return { deployment, text };
+    mutationFn: async ({ deployment, type }: { deployment: Deployment; type: LogType }) => {
+      const text = await apiGetText(`/deployments/${deployment.slug}/logs/export?${queryString({ type, limit: 500 })}`);
+      return { deployment, text, type };
     },
-    onSuccess: ({ deployment, text }) => {
-      setLogTitle(`${deployment.name} logs`);
+    onSuccess: ({ deployment, text, type }) => {
+      setLogTitle(`${deployment.name} ${type === "build" ? "build log" : "running log"}`);
       setLogText(text);
       setLogModalOpen(true);
     },
@@ -467,7 +468,8 @@ export function DeploymentsClient() {
                         {name === "deploy" ? <Play size={15} /> : name === "stop" ? <Square size={15} /> : actionIcon(name)}{name}
                       </button>
                     ))}
-                    <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium hover:bg-slate-50 disabled:opacity-50" disabled={openLogs.isPending} onClick={() => openLogs.mutate(selected)} type="button"><Clipboard size={15} />Logs</button>
+                    <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium hover:bg-slate-50 disabled:opacity-50" disabled={openLogs.isPending} onClick={() => openLogs.mutate({ deployment: selected, type: "build" })} type="button"><Clipboard size={15} />Build log</button>
+                    <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium hover:bg-slate-50 disabled:opacity-50" disabled={openLogs.isPending} onClick={() => openLogs.mutate({ deployment: selected, type: "running" })} type="button"><Clipboard size={15} />Running log</button>
                     <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium hover:bg-slate-50" onClick={openEdit} type="button"><Pencil size={15} />Edit</button>
                   </div>
                 </div>
@@ -594,7 +596,7 @@ function LogsModal({ title, text, onCopy, onClose }: { title: string; text: stri
         <div className="flex items-center justify-between border-b border-panel-line p-4">
           <div>
             <div className="text-sm font-semibold text-panel-ink">{title}</div>
-            <div className="mt-1 text-xs text-panel-muted">Deploy/start/stop/restart output for sharing and debugging.</div>
+            <div className="mt-1 text-xs text-panel-muted">Separate build and runtime output for sharing and debugging.</div>
           </div>
           <button className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line" onClick={onClose} type="button"><X size={16} /></button>
         </div>

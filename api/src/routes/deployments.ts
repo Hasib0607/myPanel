@@ -418,6 +418,10 @@ function logMetadataText(metadata: Prisma.JsonValue | null) {
   }
 }
 
+function deploymentLogDir(slug: string) {
+  return path.join(env.DEPLOYMENT_LOG_ROOT, slug);
+}
+
 export const deploymentRoutes: FastifyPluginAsync = async (app) => {
   app.addHook("preHandler", app.requireAuth);
 
@@ -884,8 +888,32 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
 
   app.get("/:deploymentId/logs/export", async (request, reply) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
-    const query = z.object({ releaseId: z.string().optional(), limit: z.coerce.number().int().min(1).max(1000).default(500) }).parse(request.query);
+    const query = z.object({
+      type: z.enum(["build", "running"]).default("build"),
+      releaseId: z.string().optional(),
+      limit: z.coerce.number().int().min(1).max(1000).default(500)
+    }).parse(request.query);
     const deployment = await findDeployment(deploymentId);
+
+    if (query.type === "running") {
+      const runtime = await sysagent.deploymentRuntimeLogs({
+        name: deployment.slug,
+        logDir: deploymentLogDir(deployment.slug),
+        lines: query.limit
+      });
+      const lines = [
+        `Deployment: ${deployment.name} (${deployment.slug})`,
+        `Log type: running`,
+        `Runtime log directory: ${runtime.logDir ?? deploymentLogDir(deployment.slug)}`,
+        `Status: ${deployment.status}`,
+        `Exported: ${new Date().toISOString()}`,
+        "",
+        runtime.text || "No runtime logs yet."
+      ];
+      reply.header("content-type", "text/plain; charset=utf-8");
+      return lines.join("\n");
+    }
+
     const logs = await prisma.deploymentLog.findMany({
       where: { deploymentId: deployment.id, ...(query.releaseId ? { releaseId: query.releaseId } : {}) },
       orderBy: { createdAt: "asc" },
@@ -893,6 +921,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     });
     const lines = [
       `Deployment: ${deployment.name} (${deployment.slug})`,
+      `Log type: build`,
       `Repository: ${deployment.githubOwner && deployment.githubRepo ? `${deployment.githubOwner}/${deployment.githubRepo}` : deployment.gitUrl ?? "manual"}`,
       `Branch: ${deployment.branch}`,
       `Status: ${deployment.status}`,

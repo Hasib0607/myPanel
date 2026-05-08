@@ -62,6 +62,7 @@ class ProcessRequest(BaseModel):
     startCommand: str | None = None
     port: int | None = Field(default=None, ge=1, le=65535)
     env: dict[str, str] | None = None
+    logDir: str | None = None
 
 
 class NginxRequest(BaseModel):
@@ -81,6 +82,12 @@ class HealthRequest(BaseModel):
     healthUrl: str | None = None
     processName: str | None = None
     processManager: str | None = None
+
+
+class RuntimeLogsRequest(BaseModel):
+    name: str
+    logDir: str | None = None
+    lines: int = Field(default=300, ge=1, le=2000)
 
 
 def path_info(root_path: str) -> dict:
@@ -195,6 +202,34 @@ def pm2_process_state(jlist: dict, name: str) -> str | None:
     return None
 
 
+def safe_log_dir(name: str, log_dir: str | None = None) -> Path:
+    root = Path(settings.deployment_log_root).resolve()
+    if log_dir:
+        target = Path(log_dir).resolve()
+    else:
+        safe_name = re.sub(r"[^a-zA-Z0-9_.-]+", "-", name).strip("-") or "deployment"
+        target = (root / safe_name).resolve()
+    if target != root and root not in target.parents:
+        raise ValueError("Deployment log directory escapes configured log root")
+    return target
+
+
+def prune_project_logs(log_dir: Path) -> None:
+    cutoff = time.time() - 86400
+    if not log_dir.exists():
+        return
+    for file_path in log_dir.iterdir():
+        if file_path.is_file() and file_path.stat().st_mtime < cutoff:
+            file_path.unlink(missing_ok=True)
+
+
+def reset_runtime_logs(log_dir: Path) -> None:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    prune_project_logs(log_dir)
+    for filename in ("running-out.log", "running-error.log"):
+        (log_dir / filename).write_text("", encoding="utf-8")
+
+
 def combine_pm2_results(root_path: str, steps: dict[str, dict], required: list[str]) -> dict:
     info = path_info(root_path)
     failed = [
@@ -215,6 +250,12 @@ def combine_pm2_results(root_path: str, steps: dict[str, dict], required: list[s
 
 def pm2_start(body: ProcessRequest, start_command: list[str]) -> dict:
     cwd = deployment_cwd(body.rootPath)
+    try:
+        log_dir = safe_log_dir(body.name, body.logDir)
+    except ValueError as error:
+        return blocked_command(str(error), ["pm2", "start", body.name], path_info(body.rootPath))
+    if settings.allow_live_system_commands:
+        reset_runtime_logs(log_dir)
     delete = guarded_command(body.rootPath, ["pm2", "delete", body.name], cwd=cwd)
     if "not found" in (delete.get("stderr") or "").lower() or "not found" in (delete.get("stdout") or "").lower():
         delete["returncode"] = 0
@@ -228,6 +269,11 @@ def pm2_start(body: ProcessRequest, start_command: list[str]) -> dict:
         "--cwd",
         cwd,
         "--update-env",
+        "--output",
+        str(log_dir / "running-out.log"),
+        "--error",
+        str(log_dir / "running-error.log"),
+        "--merge-logs",
         # 3 s between crash-restarts so port is released before PM2 retries, preventing
         # a tight loop that exhausts the restart counter and leaves the app permanently down.
         "--restart-delay",
@@ -280,6 +326,32 @@ def pm2_stop(body: ProcessRequest) -> dict:
         "returncode": 1,
     }
     return combine_pm2_results(body.rootPath, {"stop": stop, "save": save}, ["stop", "save"])
+
+
+@router.post("/runtime-logs")
+def runtime_logs(body: RuntimeLogsRequest) -> dict:
+    try:
+        log_dir = safe_log_dir(body.name, body.logDir)
+    except ValueError as error:
+        return {"ok": False, "error": str(error), "stdout": "", "stderr": "", "text": str(error)}
+    prune_project_logs(log_dir)
+
+    def tail(path: Path) -> str:
+        if not path.exists():
+            return ""
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        return "\n".join(lines[-body.lines:])
+
+    stdout = tail(log_dir / "running-out.log")
+    stderr = tail(log_dir / "running-error.log")
+    text = "\n".join([
+        f"== STDOUT ({log_dir / 'running-out.log'}) ==",
+        stdout or "(empty)",
+        "",
+        f"== STDERR ({log_dir / 'running-error.log'}) ==",
+        stderr or "(empty)",
+    ])
+    return {"ok": True, "logDir": str(log_dir), "stdout": stdout, "stderr": stderr, "text": text}
 
 
 def guarded_write_file(root_path: str, target_path: str, content: str) -> dict:

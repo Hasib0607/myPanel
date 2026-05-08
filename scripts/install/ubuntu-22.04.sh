@@ -117,6 +117,7 @@ PANEL_LOGIN_PORT=$PANEL_LOGIN_PORT
 DEPLOYMENT_PORT_START=$DEPLOYMENT_PORT_START
 DEPLOYMENT_PORT_END=$DEPLOYMENT_PORT_END
 DEPLOYMENT_RESERVED_PORTS=$DEPLOYMENT_RESERVED_PORTS
+DEPLOYMENT_LOG_ROOT=/var/log/vps-panel/deployments
 PANEL_UPDATE_WEBHOOK_SECRET=$WEBHOOK_SECRET
 PANEL_UPDATE_REPO_FULL_NAME=$PANEL_UPDATE_REPO_FULL_NAME
 PANEL_UPDATE_BRANCH=$APP_BRANCH
@@ -161,6 +162,7 @@ chown -h "$APP_USER:$APP_USER" "$APP_DIR/api/.env" "$APP_DIR/frontend/.env.produ
 
 log "Preparing runtime directories"
 install -d -m 0775 -o "$APP_USER" -g "$APP_USER" /var/log/vps-panel
+install -d -m 0775 -o root -g "$APP_USER" /var/log/vps-panel/deployments
 install -d -m 2775 -o "$APP_USER" -g www-data /var/www /var/www/deployments
 setfacl -m "u:$APP_USER:rwx,u:www-data:rwx" /var/www /var/www/deployments || true
 setfacl -d -m "u:$APP_USER:rwx,u:www-data:rwx" /var/www /var/www/deployments || true

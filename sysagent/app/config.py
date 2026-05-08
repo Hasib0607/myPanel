@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     allow_live_nginx: bool = True
     allow_live_ssl: bool = True
     deployment_command_timeout_seconds: int = 900
+    deployment_log_root: str = "/var/log/vps-panel/deployments"
     file_manager_root: str = "/var/www"
 
     class Config:
