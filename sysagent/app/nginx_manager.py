@@ -101,30 +101,31 @@ def _config_has_server_name(path: Path, server_name: str) -> bool:
         return False
 
 
-def remove_conflicting_configs(our_name: str, server_name: str, sites_enabled: str) -> list[str]:
+def remove_conflicting_configs(our_name: str, server_name: str, *scan_dirs: str) -> list[str]:
     """
-    Scan sites-enabled and remove any config that claims server_name, except our own.
-    Protects panel system configs by name. Intentionally scans all files, not just
-    managed-prefix ones, because the conflicting file may have any name.
+    Scan all provided directories and remove any config that claims server_name, except
+    our own config. Protects panel system configs by name. No prefix filter — the
+    conflicting file may have any name (e.g. certbot-created, manually placed, legacy).
     """
     removed: list[str] = []
-    enabled_dir = Path(sites_enabled)
     our_filename = f"{our_name}.conf"
-    if not enabled_dir.is_dir():
-        return removed
-    for conf_path in enabled_dir.iterdir():
-        if conf_path.name == our_filename:
+    for scan_dir in scan_dirs:
+        enabled_dir = Path(scan_dir)
+        if not enabled_dir.is_dir():
             continue
-        stem = conf_path.stem.lower()
-        if stem in PROTECTED_CONFIG_NAMES or "vps-panel" in stem:
-            continue
-        try:
-            target = conf_path.resolve() if conf_path.is_symlink() else conf_path
-            if _config_has_server_name(target, server_name):
-                conf_path.unlink()
-                removed.append(conf_path.name)
-        except OSError:
-            pass
+        for conf_path in enabled_dir.iterdir():
+            if conf_path.name == our_filename:
+                continue
+            stem = conf_path.stem.lower()
+            if stem in PROTECTED_CONFIG_NAMES or "vps-panel" in stem:
+                continue
+            try:
+                target = conf_path.resolve() if conf_path.is_symlink() else conf_path
+                if _config_has_server_name(target, server_name):
+                    conf_path.unlink()
+                    removed.append(conf_path.name)
+            except OSError:
+                pass
     return removed
 
 
@@ -198,9 +199,13 @@ def publish_nginx_config(name: str, config: str, sites_available: str, sites_ena
     run_live_step("prepare enabled directory", lambda: enabled.parent.mkdir(parents=True, exist_ok=True))
 
     if server_name:
+        scan_dirs = [sites_enabled]
+        conf_d = Path("/etc/nginx/conf.d")
+        if conf_d.is_dir():
+            scan_dirs.append(str(conf_d))
         removed = run_live_step(
             "remove conflicting configs",
-            lambda: remove_conflicting_configs(name, server_name, sites_enabled),
+            lambda: remove_conflicting_configs(name, server_name, *scan_dirs),
         )
     else:
         removed = []
@@ -218,9 +223,22 @@ def publish_nginx_config(name: str, config: str, sites_available: str, sites_ena
             run_live_step("rollback failed config", lambda: _restore(enabled, old_enabled))
             run_live_step("remove temp config", lambda: temp_available.unlink(missing_ok=True))
             if has_conflict_warn:
+                # Find which files still claim the server_name so the user knows what to remove
+                conflict_files: list[str] = []
+                for scan_d in ([sites_enabled, "/etc/nginx/conf.d"] if Path("/etc/nginx/conf.d").is_dir() else [sites_enabled]):
+                    for cp in Path(scan_d).iterdir() if Path(scan_d).is_dir() else []:
+                        if cp.name == f"{name}.conf":
+                            continue
+                        try:
+                            tgt = cp.resolve() if cp.is_symlink() else cp
+                            if _config_has_server_name(tgt, server_name):
+                                conflict_files.append(str(cp))
+                        except OSError:
+                            pass
+                files_hint = (", ".join(conflict_files) or "unknown") + ". Remove it and redeploy."
                 skip_msg = (
-                    f"Another config in /etc/nginx/sites-enabled/ already claims server_name "
-                    f'"{server_name}" — remove it manually, then redeploy. Previous config restored.'
+                    f'Another nginx config still claims server_name "{server_name}" '
+                    f"after cleanup. Conflicting file(s): {files_hint}"
                 )
             else:
                 skip_msg = "Skipped because nginx -t failed; previous site config was restored"
