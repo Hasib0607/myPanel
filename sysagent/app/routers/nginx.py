@@ -1,14 +1,12 @@
 from pathlib import Path
-from typing import Callable, TypeVar
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.command import run_command
 from app.config import settings
+from app.nginx_manager import publish_nginx_config, run_live_step, safe_nginx_path
 
 router = APIRouter()
-T = TypeVar("T")
 
 
 class VhostRequest(BaseModel):
@@ -39,14 +37,6 @@ class RedirectVhostRequest(BaseModel):
     sitesEnabled: str = "/etc/nginx/sites-enabled"
 
 
-def safe_nginx_path(root: str, name: str) -> Path:
-    directory = Path(root).resolve()
-    target = directory / f"{name}.conf"
-    if target.parent != directory:
-        raise ValueError("Nginx config path escapes target directory")
-    return target
-
-
 def safe_web_root(root_path: str) -> Path:
     root = Path(settings.file_manager_root).resolve()
     target = Path(root_path).resolve()
@@ -67,50 +57,8 @@ def safe_letsencrypt_path(path: str) -> Path:
     return target
 
 
-def run_live_step(action: str, fn: Callable[[], T]) -> T:
-    try:
-        return fn()
-    except PermissionError as error:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                f"Nginx {action} permission denied: {error}. "
-                "Run vps-panel-sysagent as root, then restart vps-panel-sysagent and vps-panel-api."
-            ),
-        ) from error
-    except OSError as error:
-        raise HTTPException(status_code=500, detail=f"Nginx {action} failed: {error}") from error
-
-
-def enable_site(available: Path, enabled: Path) -> None:
-    if enabled.is_symlink():
-        if enabled.resolve() == available:
-            return
-        enabled.unlink()
-    elif enabled.exists():
-        enabled.unlink()
-    enabled.symlink_to(available)
-
-
-def test_and_reload_or_rollback(enabled: Path) -> tuple[dict, dict]:
-    test = run_command(["nginx", "-t"], allow_live=settings.allow_live_nginx)
-    if test.get("returncode") != 0 and settings.allow_live_nginx:
-        run_live_step("vhost rollback", lambda: enabled.unlink(missing_ok=True))
-        return test, {
-            "dryRun": False,
-            "command": ["systemctl", "reload", "nginx"],
-            "stdout": "",
-            "stderr": "Skipped because nginx -t failed; site symlink was rolled back",
-            "returncode": 1,
-        }
-
-    return test, run_command(["systemctl", "reload", "nginx"], allow_live=settings.allow_live_nginx)
-
-
 @router.post("/vhost")
 def write_vhost(body: VhostRequest) -> dict:
-    available = safe_nginx_path(body.sitesAvailable, body.name)
-    enabled = safe_nginx_path(body.sitesEnabled, body.name)
     config = (
         "server {\n"
         "    listen 80;\n"
@@ -128,25 +76,13 @@ def write_vhost(body: VhostRequest) -> dict:
         "    }\n"
         "}\n"
     )
-    if settings.allow_live_nginx:
-        run_live_step("vhost write", lambda: available.parent.mkdir(parents=True, exist_ok=True))
-        run_live_step("vhost write", lambda: available.write_text(config, encoding="utf-8"))
-        run_live_step("vhost enable", lambda: enabled.parent.mkdir(parents=True, exist_ok=True))
-        run_live_step("vhost enable", lambda: enable_site(available, enabled))
-    test, reload = test_and_reload_or_rollback(enabled)
-    return {
-        "write": {"dryRun": not settings.allow_live_nginx, "command": ["write-file", str(available)], "returncode": 0},
-        "enable": {"dryRun": not settings.allow_live_nginx, "command": ["symlink", str(available), str(enabled)], "returncode": 0},
-        "test": test,
-        "reload": reload,
-        "configPath": str(available),
-    }
+    return publish_nginx_config(body.name, config, body.sitesAvailable, body.sitesEnabled)
 
 
 @router.post("/static-vhost")
 def write_static_vhost(body: StaticVhostRequest) -> dict:
-    available = safe_nginx_path(body.sitesAvailable, body.name)
-    enabled = safe_nginx_path(body.sitesEnabled, body.name)
+    safe_nginx_path(body.sitesAvailable, body.name)
+    safe_nginx_path(body.sitesEnabled, body.name)
     root_path = safe_web_root(body.rootPath)
     ssl_certificate = safe_letsencrypt_path(body.sslCertificate) if body.sslCertificate else None
     ssl_certificate_key = safe_letsencrypt_path(body.sslCertificateKey) if body.sslCertificateKey else None
@@ -201,19 +137,10 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
         )
 
     if settings.allow_live_nginx:
-        run_live_step("static vhost write", lambda: available.parent.mkdir(parents=True, exist_ok=True))
-        run_live_step("static vhost enable", lambda: enabled.parent.mkdir(parents=True, exist_ok=True))
         run_live_step("website root create", lambda: root_path.mkdir(parents=True, exist_ok=True))
-        run_live_step("static vhost write", lambda: available.write_text(config, encoding="utf-8"))
-        run_live_step("static vhost enable", lambda: enable_site(available, enabled))
-    test, reload = test_and_reload_or_rollback(enabled)
-
+    result = publish_nginx_config(body.name, config, body.sitesAvailable, body.sitesEnabled)
     return {
-        "write": {"dryRun": not settings.allow_live_nginx, "command": ["write-file", str(available)], "returncode": 0},
-        "enable": {"dryRun": not settings.allow_live_nginx, "command": ["symlink", str(available), str(enabled)], "returncode": 0},
-        "test": test,
-        "reload": reload,
-        "configPath": str(available),
+        **result,
         "rootPath": str(root_path),
         "sslEnabled": has_ssl,
         "forceHttps": body.forceHttps,
@@ -222,8 +149,6 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
 
 @router.post("/redirect-vhost")
 def write_redirect_vhost(body: RedirectVhostRequest) -> dict:
-    available = safe_nginx_path(body.sitesAvailable, body.name)
-    enabled = safe_nginx_path(body.sitesEnabled, body.name)
     if not body.redirectUrl.startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="Redirect URL must start with http:// or https://")
 
@@ -234,19 +159,8 @@ def write_redirect_vhost(body: RedirectVhostRequest) -> dict:
         f"    return 301 {body.redirectUrl}$request_uri;\n"
         "}\n"
     )
-
-    if settings.allow_live_nginx:
-        run_live_step("redirect vhost write", lambda: available.parent.mkdir(parents=True, exist_ok=True))
-        run_live_step("redirect vhost enable", lambda: enabled.parent.mkdir(parents=True, exist_ok=True))
-        run_live_step("redirect vhost write", lambda: available.write_text(config, encoding="utf-8"))
-        run_live_step("redirect vhost enable", lambda: enable_site(available, enabled))
-    test, reload = test_and_reload_or_rollback(enabled)
-
+    result = publish_nginx_config(body.name, config, body.sitesAvailable, body.sitesEnabled)
     return {
-        "write": {"dryRun": not settings.allow_live_nginx, "command": ["write-file", str(available)], "returncode": 0},
-        "enable": {"dryRun": not settings.allow_live_nginx, "command": ["symlink", str(available), str(enabled)], "returncode": 0},
-        "test": test,
-        "reload": reload,
-        "configPath": str(available),
+        **result,
         "redirectUrl": body.redirectUrl,
     }

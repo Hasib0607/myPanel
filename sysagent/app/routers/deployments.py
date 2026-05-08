@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from app.command import run_command
 from app.config import settings
+from app.nginx_manager import publish_nginx_config
 
 router = APIRouter()
 
@@ -356,8 +357,6 @@ def nginx(body: NginxRequest) -> dict:
 
     server_name = body.serverName
     config_name = nginx_config_name(body.deploymentId, server_name)
-    config_path = f"/etc/nginx/sites-available/{config_name}.conf"
-    enabled_path = f"/etc/nginx/sites-enabled/{config_name}.conf"
     config = f"""
 server {{
     listen 80;
@@ -375,33 +374,13 @@ server {{
     }}
 }}
 """.lstrip()
-    write = guarded_write_file(body.rootPath, config_path, config)
-    enable = {"dryRun": True, "command": ["symlink", config_path, enabled_path], "returncode": 0, "stdout": "", "stderr": ""}
-    if settings.allow_live_system_commands:
-        enabled = Path(enabled_path)
-        if enabled.exists() or enabled.is_symlink():
-            enabled.unlink()
-        enabled.symlink_to(config_path)
-        enable = {"dryRun": False, "command": ["symlink", config_path, enabled_path], "returncode": 0, "stdout": "", "stderr": ""}
-    test = run_command(["nginx", "-t"])
-    if test.get("returncode") != 0 and settings.allow_live_system_commands:
-        enabled = Path(enabled_path)
-        if enabled.exists() or enabled.is_symlink():
-            enabled.unlink()
-    reload = run_command(["systemctl", "reload", "nginx"]) if test.get("returncode") == 0 else {
-        "dryRun": False,
-        "command": ["systemctl", "reload", "nginx"],
-        "stdout": "",
-        "stderr": "Skipped because nginx -t failed",
-        "returncode": 1,
-    }
+    info = path_info(body.rootPath)
+    if not info["allowed"] and settings.allow_live_nginx:
+        return blocked_command("Path escapes configured file manager root", ["write-nginx", config_name], info)
+    result = publish_nginx_config(config_name, config, "/etc/nginx/sites-available", "/etc/nginx/sites-enabled")
     return {
-        "write": write,
-        "enable": enable,
-        "test": test,
-        "reload": reload,
-        "configPath": config_path,
-        "enabledPath": enabled_path,
+        **result,
+        "path": info,
         "serverName": server_name,
     }
 

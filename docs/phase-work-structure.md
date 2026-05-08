@@ -96,6 +96,11 @@ Tasks:
 Deliverables:
 - Bad app/domain config cannot take down Nginx or panel.
 
+Status:
+- Implemented shared safe Nginx publishing for static roots, redirects, and deployment proxies.
+- Panel configs are protected from domain/project writes; generated configs must be `domain-*` or `deployment-*`.
+- New configs are written to a temp file, test-enabled, checked with `nginx -t`, promoted only after a clean test, and rolled back if test or reload fails.
+
 ## Phase 6: Health And Truthful Status
 
 Status: implemented. Deploy/start/restart now assert live health checks before marking projects `RUNNING/HEALTHY`, stop marks health down, manual health checks call sysagent, and failed curl/port checks keep the project failed/down.
