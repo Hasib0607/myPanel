@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from app.command import run_command
 from app.config import settings
-from app.nginx_manager import publish_nginx_config
+from app.nginx_manager import acme_location, publish_nginx_config, safe_letsencrypt_path
 
 router = APIRouter()
 
@@ -65,6 +65,9 @@ class NginxRequest(BaseModel):
     upstreamPort: int = Field(ge=1, le=65535)
     rootPath: str
     forceSsl: bool = True
+    sslCertificate: str | None = None
+    sslCertificateKey: str | None = None
+    requireSsl: bool = False
 
 
 class HealthRequest(BaseModel):
@@ -357,12 +360,55 @@ def nginx(body: NginxRequest) -> dict:
 
     server_name = body.serverName
     config_name = nginx_config_name(body.deploymentId, server_name)
+    ssl_certificate = safe_letsencrypt_path(body.sslCertificate) if body.sslCertificate else None
+    ssl_certificate_key = safe_letsencrypt_path(body.sslCertificateKey) if body.sslCertificateKey else None
+    has_ssl = ssl_certificate is not None and ssl_certificate_key is not None
+
+    if has_ssl and settings.allow_live_nginx and (not ssl_certificate.exists() or not ssl_certificate_key.exists()):
+        if body.requireSsl:
+            return blocked_command("SSL certificate files do not exist yet", ["write-nginx", config_name], path_info(body.rootPath))
+        has_ssl = False
+
+    http_location = (
+        f"{acme_location(server_name)}"
+        "    location / {\n"
+        f"        proxy_pass http://127.0.0.1:{body.upstreamPort};\n"
+        "        proxy_http_version 1.1;\n"
+        "        proxy_set_header Host $host;\n"
+        "        proxy_set_header X-Real-IP $remote_addr;\n"
+        "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+        "        proxy_set_header X-Forwarded-Proto $scheme;\n"
+        "        proxy_set_header Upgrade $http_upgrade;\n"
+        "        proxy_set_header Connection \"upgrade\";\n"
+        "    }\n"
+    )
+    if body.forceSsl and has_ssl:
+        http_location = (
+            f"{acme_location(server_name)}"
+            "    location / {\n"
+            "        return 301 https://$host$request_uri;\n"
+            "    }\n"
+        )
+
     config = f"""
 server {{
     listen 80;
     server_name {server_name};
 
-    location / {{
+{http_location}}}
+""".lstrip()
+    if has_ssl:
+        config += f"""
+
+server {{
+    listen 443 ssl http2;
+    server_name {server_name};
+    ssl_certificate {ssl_certificate};
+    ssl_certificate_key {ssl_certificate_key};
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+
+{acme_location(server_name)}    location / {{
         proxy_pass http://127.0.0.1:{body.upstreamPort};
         proxy_http_version 1.1;
         proxy_set_header Host $host;
@@ -373,7 +419,7 @@ server {{
         proxy_set_header Connection "upgrade";
     }}
 }}
-""".lstrip()
+"""
     info = path_info(body.rootPath)
     if not info["allowed"] and settings.allow_live_nginx:
         return blocked_command("Path escapes configured file manager root", ["write-nginx", config_name], info)

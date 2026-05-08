@@ -41,6 +41,11 @@ type SslJobStatus = {
   finishedOn?: number;
 };
 
+type SslPreflight = {
+  webRoot: string;
+  dnsChecks: Array<{ host: string; records: string[] }>;
+};
+
 export function SslClient({ domainId }: { domainId: string }) {
   const queryClient = useQueryClient();
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
@@ -76,12 +81,10 @@ export function SslClient({ domainId }: { domainId: string }) {
       await queryClient.invalidateQueries({ queryKey: ["ssl-status", domainId] });
     }
   });
-  const markIssued = useMutation({
-    mutationFn: () => apiPost(`/ssl/domains/${domainId}/mark-issued`, {}),
+  const preflight = useMutation({
+    mutationFn: () => apiPost<SslPreflight>(`/ssl/domains/${domainId}/preflight`, {}),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["domain", domainId] });
       await queryClient.invalidateQueries({ queryKey: ["ssl-status", domainId] });
-      await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     }
   });
 
@@ -95,12 +98,12 @@ export function SslClient({ domainId }: { domainId: string }) {
 
   const status = ssl.data;
   const statusText = status?.state ?? "missing";
-  const actionError = issue.error ?? renew.error ?? update.error ?? markIssued.error ?? jobStatus.error;
+  const actionError = issue.error ?? renew.error ?? update.error ?? preflight.error ?? jobStatus.error;
   const actionErrorText = actionError instanceof Error ? actionError.message : null;
   const liveJobState = jobStatus.data?.state;
   const jobFailedReason = jobStatus.data?.failedReason;
   const jobIsRunning = Boolean(activeJobId && liveJobState && !["completed", "failed"].includes(liveJobState));
-  const isBusy = issue.isPending || renew.isPending || update.isPending || jobIsRunning;
+  const isBusy = issue.isPending || renew.isPending || update.isPending || preflight.isPending || jobIsRunning;
   const jobAgeSeconds = jobStatus.data ? Math.max(0, Math.round((Date.now() - jobStatus.data.timestamp) / 1000)) : 0;
 
   return (
@@ -134,6 +137,12 @@ export function SslClient({ domainId }: { domainId: string }) {
             </div>
           ) : null}
 
+          {preflight.data ? (
+            <div className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+              SSL readiness check passed for {preflight.data.dnsChecks.map((check) => check.host).join(", ")}.
+            </div>
+          ) : null}
+
           {status?.alert ? (
             <div className="flex items-center gap-3 rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
               <AlertTriangle size={18} />
@@ -163,15 +172,15 @@ export function SslClient({ domainId }: { domainId: string }) {
             <button className="rounded-md border border-panel-line px-3 py-2 text-sm font-semibold hover:bg-slate-50 disabled:opacity-60" disabled={isBusy} onClick={() => update.mutate(!domain.data?.forceSsl)} type="button">
               Toggle Force HTTPS
             </button>
+            <button className="rounded-md border border-panel-line px-3 py-2 text-sm font-semibold hover:bg-slate-50 disabled:opacity-60" disabled={isBusy} onClick={() => preflight.mutate()} type="button">
+              Check Readiness
+            </button>
             <button className="rounded-md bg-panel-accent px-3 py-2 text-sm font-semibold text-white disabled:opacity-60" disabled={isBusy} onClick={() => issue.mutate()} type="button">
               Issue Certificate
             </button>
             <button className="flex items-center gap-2 rounded-md border border-panel-line px-3 py-2 text-sm font-semibold hover:bg-slate-50 disabled:opacity-60" disabled={isBusy} onClick={() => renew.mutate()} type="button">
               <RefreshCw size={15} />
               Renew
-            </button>
-            <button className="rounded-md border border-panel-line px-3 py-2 text-sm text-panel-muted hover:bg-slate-50 disabled:opacity-60" disabled={markIssued.isPending} onClick={() => markIssued.mutate()} type="button">
-              Mark Issued Locally
             </button>
           </div>
 

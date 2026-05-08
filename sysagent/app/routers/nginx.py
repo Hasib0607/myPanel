@@ -1,10 +1,15 @@
-from pathlib import Path
-
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.config import settings
-from app.nginx_manager import publish_nginx_config, run_live_step, safe_nginx_path
+from app.nginx_manager import (
+    acme_location,
+    publish_nginx_config,
+    run_live_step,
+    safe_letsencrypt_path,
+    safe_nginx_path,
+    safe_web_root,
+)
 
 router = APIRouter()
 
@@ -33,28 +38,11 @@ class RedirectVhostRequest(BaseModel):
     name: str = Field(pattern=r"^[a-zA-Z0-9_.-]+$")
     serverName: str = Field(pattern=r"^[a-zA-Z0-9_. -]+$")
     redirectUrl: str
+    sslCertificate: str | None = None
+    sslCertificateKey: str | None = None
+    requireSsl: bool = False
     sitesAvailable: str = "/etc/nginx/sites-available"
     sitesEnabled: str = "/etc/nginx/sites-enabled"
-
-
-def safe_web_root(root_path: str) -> Path:
-    root = Path(settings.file_manager_root).resolve()
-    target = Path(root_path).resolve()
-    if target != root and root not in target.parents:
-        raise HTTPException(status_code=400, detail="Website root escapes file manager root")
-    return target
-
-
-def safe_letsencrypt_path(path: str) -> Path:
-    root = Path("/etc/letsencrypt/live")
-    target = Path(path)
-    if not target.is_absolute():
-        raise HTTPException(status_code=400, detail="SSL certificate path must be absolute")
-    try:
-        target.relative_to(root)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="SSL certificate path escapes /etc/letsencrypt/live")
-    return target
 
 
 @router.post("/vhost")
@@ -64,6 +52,7 @@ def write_vhost(body: VhostRequest) -> dict:
         "    listen 80;\n"
         f"    server_name {body.serverName};\n"
         "\n"
+        f"{acme_location(body.serverName)}"
         "    location / {\n"
         f"        proxy_pass http://127.0.0.1:{body.upstreamPort};\n"
         "        proxy_http_version 1.1;\n"
@@ -97,12 +86,18 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
         body.forceHttps = False
 
     http_location = (
+        f"{acme_location(body.serverName)}"
         "    location / {\n"
         "        try_files $uri $uri/ =404;\n"
         "    }\n"
     )
     if body.forceHttps and has_ssl:
-        http_location = "    return 301 https://$host$request_uri;\n"
+        http_location = (
+            f"{acme_location(body.serverName)}"
+            "    location / {\n"
+            "        return 301 https://$host$request_uri;\n"
+            "    }\n"
+        )
 
     config = (
         "server {\n"
@@ -130,6 +125,7 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
             "    ssl_protocols TLSv1.2 TLSv1.3;\n"
             "    ssl_prefer_server_ciphers off;\n"
             "\n"
+            f"{acme_location(body.serverName)}"
             "    location / {\n"
             "        try_files $uri $uri/ =404;\n"
             "    }\n"
@@ -151,16 +147,45 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
 def write_redirect_vhost(body: RedirectVhostRequest) -> dict:
     if not body.redirectUrl.startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="Redirect URL must start with http:// or https://")
+    ssl_certificate = safe_letsencrypt_path(body.sslCertificate) if body.sslCertificate else None
+    ssl_certificate_key = safe_letsencrypt_path(body.sslCertificateKey) if body.sslCertificateKey else None
+    has_ssl = ssl_certificate is not None and ssl_certificate_key is not None
+
+    if has_ssl and settings.allow_live_nginx and (not ssl_certificate.exists() or not ssl_certificate_key.exists()):
+        if body.requireSsl:
+            raise HTTPException(status_code=409, detail="SSL certificate files do not exist yet")
+        has_ssl = False
 
     config = (
         "server {\n"
         "    listen 80;\n"
         f"    server_name {body.serverName};\n"
-        f"    return 301 {body.redirectUrl}$request_uri;\n"
+        "\n"
+        f"{acme_location(body.serverName)}"
+        "    location / {\n"
+        f"        return 301 {body.redirectUrl}$request_uri;\n"
+        "    }\n"
         "}\n"
     )
+    if has_ssl:
+        config += (
+            "\n"
+            "server {\n"
+            "    listen 443 ssl http2;\n"
+            f"    server_name {body.serverName};\n"
+            f"    ssl_certificate {ssl_certificate};\n"
+            f"    ssl_certificate_key {ssl_certificate_key};\n"
+            "    ssl_protocols TLSv1.2 TLSv1.3;\n"
+            "    ssl_prefer_server_ciphers off;\n"
+            "\n"
+            "    location / {\n"
+            f"        return 301 {body.redirectUrl}$request_uri;\n"
+            "    }\n"
+            "}\n"
+        )
     result = publish_nginx_config(body.name, config, body.sitesAvailable, body.sitesEnabled)
     return {
         **result,
         "redirectUrl": body.redirectUrl,
+        "sslEnabled": has_ssl,
     }

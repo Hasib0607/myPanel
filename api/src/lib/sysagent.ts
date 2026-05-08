@@ -56,7 +56,7 @@ export const sysagent = {
   deploymentProcess: (body: unknown) =>
     request("/deployments/process", { method: "POST", body: JSON.stringify(body) }),
   deploymentNginx: (body: unknown) =>
-    request("/deployments/nginx", { method: "POST", body: JSON.stringify(body) }),
+    request<{ write: SysagentCommandResult; enable: SysagentCommandResult; test: SysagentCommandResult; reload: SysagentCommandResult; configPath: string; enabledPath?: string; serverName?: string }>("/deployments/nginx", { method: "POST", body: JSON.stringify(body) }),
   deploymentHealth: (body: unknown) =>
     request("/deployments/health", { method: "POST", body: JSON.stringify(body) }),
   applyDnsZone: (body: unknown) =>
@@ -80,7 +80,11 @@ export const sysagent = {
   writeStaticNginxVhost: (body: unknown) =>
     request<{ write: SysagentCommandResult; enable: SysagentCommandResult; test: SysagentCommandResult; reload: SysagentCommandResult; configPath: string; rootPath: string; sslEnabled?: boolean; forceHttps?: boolean }>("/nginx/static-vhost", { method: "POST", body: JSON.stringify(body) }),
   writeRedirectNginxVhost: (body: unknown) =>
-    request<{ write: SysagentCommandResult; enable: SysagentCommandResult; test: SysagentCommandResult; reload: SysagentCommandResult; configPath: string; redirectUrl: string }>("/nginx/redirect-vhost", { method: "POST", body: JSON.stringify(body) }),
+    request<{ write: SysagentCommandResult; enable: SysagentCommandResult; test: SysagentCommandResult; reload: SysagentCommandResult; configPath: string; redirectUrl: string; sslEnabled?: boolean }>("/nginx/redirect-vhost", { method: "POST", body: JSON.stringify(body) }),
+  certbotStatus: () =>
+    request<SysagentCommandResult>("/ssl/certbot"),
+  sslPreflight: (body: unknown) =>
+    request<{ certbot: SysagentCommandResult; write: SysagentCommandResult; checks: SysagentCommandResult[]; webRoot: string }>("/ssl/preflight", { method: "POST", body: JSON.stringify(body) }),
   issueCertificate: (body: unknown) =>
     request<SysagentCommandResult>("/ssl/issue", { method: "POST", body: JSON.stringify(body) }),
   renewCertificate: (domain: string) =>

@@ -22,15 +22,57 @@ function certificatePaths(domain: string) {
   };
 }
 
-async function writeHttpsVhost(domain: string, forceHttps: boolean) {
-  const result = await sysagent.writeStaticNginxVhost({
-    name: domain,
-    serverName: `${domain} www.${domain}`,
-    rootPath: `${env.FILE_MANAGER_ROOT}/${domain}/public_html`,
-    forceHttps,
-    requireSsl: true,
-    ...certificatePaths(domain)
-  });
+type NginxPublishResult = {
+  test: SysagentCommandResult;
+  reload: SysagentCommandResult;
+  [key: string]: unknown;
+};
+
+async function writeHttpsVhost(domainName: string, domainId: string | null | undefined, forceHttps: boolean) {
+  const domain = domainId
+    ? await prisma.domain.findUnique({
+        where: { id: domainId },
+        include: {
+          deployments: { orderBy: { createdAt: "desc" }, take: 1 },
+          deploymentBindings: { include: { deployment: true }, orderBy: [{ role: "asc" }, { createdAt: "asc" }] }
+        }
+      })
+    : null;
+
+  let result: NginxPublishResult;
+  if (domain?.hostingMode === "DEPLOYMENT_PROXY") {
+    const deployment = domain.hostingDeploymentId
+      ? await prisma.deployment.findUnique({ where: { id: domain.hostingDeploymentId } })
+      : domain.deploymentBindings[0]?.deployment ?? domain.deployments[0] ?? null;
+    if (!deployment) throw new Error(`No deployment selected for ${domainName} HTTPS proxy`);
+    result = await sysagent.deploymentNginx({
+      deploymentId: deployment.id,
+      serverName: `${domainName} www.${domainName}`,
+      upstreamPort: deployment.port,
+      rootPath: deployment.rootPath,
+      forceSsl: forceHttps,
+      requireSsl: true,
+      ...certificatePaths(domainName)
+    });
+  } else if (domain?.hostingMode === "REDIRECT") {
+    if (!domain.redirectUrl) throw new Error(`No redirect URL selected for ${domainName}`);
+    result = await sysagent.writeRedirectNginxVhost({
+      name: `domain-${domainName}`,
+      serverName: `${domainName} www.${domainName}`,
+      redirectUrl: domain.redirectUrl,
+      requireSsl: true,
+      ...certificatePaths(domainName)
+    });
+  } else {
+    result = await sysagent.writeStaticNginxVhost({
+      name: `domain-${domainName}`,
+      serverName: `${domainName} www.${domainName}`,
+      rootPath: `${env.FILE_MANAGER_ROOT}/${domainName}/${domain?.documentRoot || "public_html"}`,
+      forceHttps,
+      requireSsl: true,
+      ...certificatePaths(domainName)
+    });
+  }
 
   assertLiveCommandSucceeded("Nginx certificate vhost test", result.test);
   assertLiveCommandSucceeded("Nginx certificate vhost reload", result.reload);
@@ -54,7 +96,7 @@ export const sslWorker = new Worker(
       const domain = job.data.domainId
         ? await prisma.domain.findUnique({ where: { id: job.data.domainId }, select: { forceSsl: true } })
         : null;
-      const vhost = await writeHttpsVhost(job.data.domain, domain?.forceSsl ?? job.data.forceSsl ?? true);
+      const vhost = await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true);
 
       if (job.data.domainId) {
         await prisma.domain.update({
@@ -78,7 +120,7 @@ export const sslWorker = new Worker(
       const domain = job.data.domainId
         ? await prisma.domain.findUnique({ where: { id: job.data.domainId }, select: { forceSsl: true } })
         : null;
-      const vhost = await writeHttpsVhost(job.data.domain, domain?.forceSsl ?? job.data.forceSsl ?? true);
+      const vhost = await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true);
 
       if (job.data.domainId) {
         await prisma.domain.update({

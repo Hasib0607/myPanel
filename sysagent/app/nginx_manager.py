@@ -29,6 +29,49 @@ def safe_nginx_path(root: str, name: str) -> Path:
     return target
 
 
+def safe_web_root(root_path: str, detail: str = "Website root escapes file manager root") -> Path:
+    root = Path(settings.file_manager_root).resolve()
+    target = Path(root_path).resolve()
+    if target != root and root not in target.parents:
+        raise HTTPException(status_code=400, detail=detail)
+    return target
+
+
+def safe_letsencrypt_path(path: str) -> Path:
+    root = Path("/etc/letsencrypt/live")
+    target = Path(path)
+    if not target.is_absolute():
+        raise HTTPException(status_code=400, detail="SSL certificate path must be absolute")
+    try:
+        target.relative_to(root)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="SSL certificate path escapes /etc/letsencrypt/live")
+    return target
+
+
+def primary_server_name(server_name: str) -> str:
+    return server_name.split()[0].strip() if server_name else ""
+
+
+def acme_root_for_server_name(server_name: str) -> Path:
+    primary = primary_server_name(server_name)
+    if not primary:
+        raise HTTPException(status_code=400, detail="Server name is required for ACME challenge root")
+    return safe_web_root(str(Path(settings.file_manager_root) / primary / "public_html"))
+
+
+def acme_location(server_name: str) -> str:
+    acme_root = acme_root_for_server_name(server_name)
+    return (
+        "    location ^~ /.well-known/acme-challenge/ {\n"
+        f"        root {acme_root};\n"
+        "        default_type text/plain;\n"
+        "        try_files $uri =404;\n"
+        "    }\n"
+        "\n"
+    )
+
+
 def run_live_step(action: str, fn: Callable[[], T]) -> T:
     try:
         return fn()

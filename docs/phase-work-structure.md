@@ -128,6 +128,12 @@ Tasks:
 Deliverables:
 - `https://domain.com` works safely.
 
+Status:
+- Added SSL preflight checks for Certbot, public A records pointing to the VPS, and live HTTP ACME challenge reachability.
+- Nginx static, proxy, and redirect configs now preserve `/.well-known/acme-challenge/` so Certbot webroot validation works across hosting modes.
+- SSL jobs now re-publish HTTPS according to the domain hosting mode instead of overwriting app proxy domains with static hosting.
+- Force HTTPS is only applied after certificate files exist and the 443 Nginx config passes `nginx -t`.
+
 ## Phase 8: GitHub Import And Auto Deploy
 
 Goal: GitHub repo select to deploy.
