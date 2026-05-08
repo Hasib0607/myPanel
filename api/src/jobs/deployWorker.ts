@@ -110,9 +110,23 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
     })
   );
   assertLiveResult(result, `${action} process`);
-  const nextStatus = action === "stop" ? "STOPPED" : "RUNNING";
-  await prisma.deployment.update({ where: { id: deployment.id }, data: { status: nextStatus } });
-  return { result, status: nextStatus };
+
+  if (processAction === "stop") {
+    await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "STOPPED", healthStatus: "DOWN", lastHealthCheckAt: new Date() } });
+    return { result, status: "STOPPED", healthStatus: "DOWN" };
+  }
+
+  const health = await runStep(deployment.id, releaseId, "HEALTH_CHECK", `${action} health check`, () =>
+    sysagent.deploymentHealth({
+      deploymentId: deployment.id,
+      port: deployment.port,
+      healthUrl: deployment.healthUrl
+    })
+  );
+  assertLiveResult(health, `${action} health check`);
+
+  await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "RUNNING", healthStatus: "HEALTHY", lastHealthCheckAt: new Date() } });
+  return { result, health, status: "RUNNING", healthStatus: "HEALTHY" };
 }
 
 async function processDeploy(action: string, deploymentId: string, releaseId: string | undefined) {
@@ -236,13 +250,14 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     );
     assertLiveResult(startResult, "Process start");
 
-    await runStep(deployment.id, releaseId, "HEALTH_CHECK", "Health check", () =>
+    const health = await runStep(deployment.id, releaseId, "HEALTH_CHECK", "Health check", () =>
       sysagent.deploymentHealth({
         deploymentId: deployment.id,
         port: deployment.port,
         healthUrl: deployment.healthUrl
       })
     );
+    assertLiveResult(health, "Health check");
 
     await markRelease(releaseId, action === "rollback" ? "ROLLED_BACK" : "SUCCEEDED", startedAt);
     await prisma.deployment.update({
@@ -254,8 +269,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         lastDeployAt: new Date()
       }
     });
-    await writeLog(deployment.id, releaseId, action === "rollback" ? "ROLLBACK" : "SUCCEEDED", `${action} completed`, { dryRun: true });
-    return { dryRun: true, completed: true, status: "RUNNING" };
+    await writeLog(deployment.id, releaseId, action === "rollback" ? "ROLLBACK" : "SUCCEEDED", `${action} completed`, { dryRun: false });
+    return { dryRun: false, completed: true, status: "RUNNING", healthStatus: "HEALTHY" };
   } catch (error) {
     await markRelease(releaseId, "FAILED", startedAt);
     await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "FAILED", healthStatus: "DOWN" } });

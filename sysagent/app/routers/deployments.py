@@ -409,4 +409,15 @@ server {{
 @router.post("/health")
 def health(body: HealthRequest) -> dict:
     url = body.healthUrl or f"http://127.0.0.1:{body.port}/"
-    return run_command(["curl", "-fsS", "--max-time", "5", url])
+    return run_command([
+        "curl",
+        "-fsS",
+        "--retry",
+        "10",
+        "--retry-delay",
+        "2",
+        "--retry-connrefused",
+        "--max-time",
+        "5",
+        url,
+    ])

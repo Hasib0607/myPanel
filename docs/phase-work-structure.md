@@ -94,6 +94,8 @@ Deliverables:
 
 ## Phase 6: Health And Truthful Status
 
+Status: implemented. Deploy/start/restart now assert live health checks before marking projects `RUNNING/HEALTHY`, stop marks health down, manual health checks call sysagent, and failed curl/port checks keep the project failed/down.
+
 Goal: UI status reflects reality.
 
 Tasks:

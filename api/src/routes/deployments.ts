@@ -923,8 +923,15 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     app.post(`/:deploymentId/${action}`, async (request, reply) => {
       const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
       const deployment = await findDeployment(deploymentId);
-      const nextStatus = action === "stop" ? "STOPPED" : "RUNNING";
-      await prisma.deployment.update({ where: { id: deployment.id }, data: { status: nextStatus } });
+      const nextStatus = action === "stop" ? "STOPPED" : "DEPLOYING";
+      await prisma.deployment.update({
+        where: { id: deployment.id },
+        data: {
+          status: nextStatus,
+          healthStatus: action === "stop" ? "DOWN" : "UNKNOWN",
+          lastHealthCheckAt: action === "stop" ? new Date() : deployment.lastHealthCheckAt
+        }
+      });
       await addLog(deployment.id, "STARTING", `${action} requested in dry-run-safe mode`, undefined, { action });
       const queue = await enqueueDeployAction(deployment.id, action);
       return reply.code(202).send({ status: nextStatus, queue });
@@ -934,16 +941,22 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
   app.post("/:deploymentId/health", async (request) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const deployment = await findDeployment(deploymentId);
-    const healthy = deployment.status === "RUNNING";
+    const result = await sysagent.deploymentHealth({
+      deploymentId: deployment.id,
+      port: deployment.port,
+      healthUrl: deployment.healthUrl
+    });
+    const healthResult = result as { dryRun?: boolean; returncode?: number; stderr?: string; stdout?: string };
+    const healthy = !healthResult.dryRun && healthResult.returncode === 0;
     const updated = await prisma.deployment.update({
       where: { id: deployment.id },
       data: {
-        healthStatus: healthy ? "HEALTHY" : "UNKNOWN",
+        healthStatus: healthy ? "HEALTHY" : "DOWN",
         lastHealthCheckAt: new Date()
       }
     });
-    await addLog(deployment.id, "HEALTH_CHECK", healthy ? "Health check passed from metadata" : "Health check pending runtime integration", undefined, { dryRun: true });
-    return { healthStatus: updated.healthStatus, checkedAt: updated.lastHealthCheckAt, dryRun: true };
+    await addLog(deployment.id, "HEALTH_CHECK", healthy ? "Health check passed" : "Health check failed", undefined, { result: healthResult });
+    return { healthStatus: updated.healthStatus, checkedAt: updated.lastHealthCheckAt, result: healthResult };
   });
 
   app.post("/:deploymentId/database/provision", async (request, reply) => {
