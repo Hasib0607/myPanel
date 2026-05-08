@@ -56,7 +56,11 @@ function assertLiveResult(result: unknown, label: string) {
     throw new Error(`${label} did not run live. Set ALLOW_LIVE_SYSTEM_COMMANDS=true on vps-panel-sysagent, restart vps-panel-sysagent and vps-panel-workers, then retry.`);
   }
   if (typeof value?.returncode === "number" && value.returncode !== 0) {
-    throw new Error(`${label} failed with exit code ${value.returncode}${value.stderr ? `: ${value.stderr}` : ""}`);
+    const signal = "signal" in value && typeof value.signal === "string" ? value.signal : null;
+    const signalHint = value.returncode === -15 || signal === "SIGTERM"
+      ? " The command was terminated by SIGTERM, often because sysagent/workers were restarted during deploy or the server killed the build. Retry after panel update finishes; if it repeats, increase DEPLOYMENT_COMMAND_TIMEOUT_SECONDS or add swap."
+      : "";
+    throw new Error(`${label} failed with exit code ${value.returncode}${signal ? ` (${signal})` : ""}${value.stderr ? `: ${value.stderr}` : ""}${signalHint}`);
   }
 }
 
