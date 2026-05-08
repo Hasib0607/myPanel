@@ -45,7 +45,7 @@ write_file() {
 log "Installing Ubuntu packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y ca-certificates curl gnupg git nginx certbot python3-certbot-nginx postgresql postgresql-contrib redis-server bind9 bind9utils ufw python3 python3-venv python3-pip unzip zip openssl
+apt-get install -y ca-certificates curl gnupg git nginx certbot python3-certbot-nginx postgresql postgresql-contrib redis-server bind9 bind9utils dnsutils ufw python3 python3-venv python3-pip unzip zip openssl build-essential acl lsof psmisc
 
 if ! command -v node >/dev/null 2>&1 || [[ "$(node -p 'Number(process.versions.node.split(`.`)[0])')" -lt 20 ]]; then
   log "Installing Node.js 22"
@@ -74,9 +74,9 @@ fi
 
 log "Installing Node dependencies"
 runuser -u "$APP_USER" -- bash -lc "cd '$APP_DIR' && npm install"
-runuser -u "$APP_USER" -- bash -lc "cd '$APP_DIR/api' && npm install"
-runuser -u "$APP_USER" -- bash -lc "cd '$APP_DIR/frontend' && npm install"
 npm install -g pm2
+pm2 startup systemd -u root --hp /root >/dev/null 2>&1 || true
+pm2 save --force >/dev/null 2>&1 || true
 
 log "Installing sysagent Python dependencies"
 runuser -u "$APP_USER" -- bash -lc "cd '$APP_DIR/sysagent' && python3 -m venv .venv && . .venv/bin/activate && pip install --upgrade pip && pip install -r requirements.txt"
@@ -154,10 +154,15 @@ ALLOW_LIVE_SSL=true
 EOF
 chown "$APP_USER:$APP_USER" "$APP_DIR/.env"
 chmod 0640 "$APP_DIR/.env"
+ln -sfn ../.env "$APP_DIR/api/.env"
+ln -sfn ../.env "$APP_DIR/frontend/.env.production"
+chown -h "$APP_USER:$APP_USER" "$APP_DIR/api/.env" "$APP_DIR/frontend/.env.production"
 
 log "Preparing runtime directories"
 install -d -m 0775 -o "$APP_USER" -g "$APP_USER" /var/log/vps-panel
-install -d -m 0755 /var/www
+install -d -m 2775 -o "$APP_USER" -g www-data /var/www /var/www/deployments
+setfacl -m "u:$APP_USER:rwx,u:www-data:rwx" /var/www /var/www/deployments || true
+setfacl -d -m "u:$APP_USER:rwx,u:www-data:rwx" /var/www /var/www/deployments || true
 chmod +x "$APP_DIR/scripts/deploy/update-panel.sh"
 git config --global --add safe.directory "$APP_DIR" || true
 
@@ -213,7 +218,7 @@ User=$APP_USER
 WorkingDirectory=$APP_DIR/frontend
 EnvironmentFile=$APP_DIR/.env
 Environment=PORT=$FRONTEND_PORT
-ExecStart=/usr/bin/npm run start
+ExecStart=/usr/bin/npm run start -- -p $FRONTEND_PORT
 Restart=always
 RestartSec=3
 
@@ -303,6 +308,15 @@ systemctl daemon-reload
 systemctl enable --now vps-panel-sysagent vps-panel-api vps-panel-workers vps-panel-frontend nginx bind9 redis-server postgresql
 nginx -t
 systemctl reload nginx
+
+log "Running smoke tests"
+curl --fail --silent --show-error "http://127.0.0.1:$SYSAGENT_PORT/health" >/dev/null
+curl --fail --silent --show-error "http://127.0.0.1:$PANEL_PORT/health" >/dev/null
+curl --fail --silent --show-error --head "http://127.0.0.1:$FRONTEND_PORT/login" >/dev/null
+curl --fail --silent --show-error --head "http://127.0.0.1:$PANEL_LOGIN_PORT/login" >/dev/null
+redis-cli ping >/dev/null
+runuser -u postgres -- psql -d "$DB_NAME" -c "select 1" >/dev/null
+systemctl is-active --quiet vps-panel-sysagent vps-panel-api vps-panel-workers vps-panel-frontend nginx redis-server postgresql
 
 log "Install complete"
 cat <<EOF

@@ -167,6 +167,12 @@ Tasks:
 Deliverables:
 - New VPS setup is repeatable.
 
+Status:
+- Ubuntu installer installs Node.js, system packages, Certbot, PostgreSQL, Redis, BIND9, PM2, Python sysagent dependencies, and build tools.
+- Installer creates the panel user, `/opt/vps-panel`, `/var/www`, `/var/www/deployments`, app env plus API/frontend env links, database, systemd services, protected panel Nginx listener, sudoers, and PM2 startup.
+- Panel frontend is pinned to the configured panel frontend port, while projects use the managed deployment port pool.
+- Installer runs smoke tests for sysagent, API, frontend, panel proxy, Redis, PostgreSQL, Nginx, and required services before reporting success.
+
 ## Phase 10: UI Polish
 
 Goal: understandable production workflow.
