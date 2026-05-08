@@ -2,6 +2,8 @@
 set -Eeuo pipefail
 
 APP_DIR="${PANEL_UPDATE_WORKDIR:-/opt/vps-panel}"
+PANEL_NGINX_SITE="${PANEL_NGINX_SITE:-00-vps-panel}"
+NGINX_CONF="/etc/nginx/sites-available/$PANEL_NGINX_SITE"
 BRANCH="${PANEL_UPDATE_BRANCH:-main}"
 LOG_FILE="${PANEL_UPDATE_LOG_FILE:-/var/log/vps-panel/self-update.log}"
 STATUS_FILE="${PANEL_UPDATE_STATUS_FILE:-/var/log/vps-panel/self-update-status.json}"
@@ -217,6 +219,28 @@ printf '%s\n' "$$" > "$PID_FILE"
 log "starting panel self-update in $APP_DIR on branch $BRANCH"
 write_status "running" "panel self-update started" "$(current_commit)" "$(current_commit_subject)"
 
+patch_nginx_websocket() {
+  if [[ ! -f "$NGINX_CONF" ]]; then
+    log "Panel nginx config not found at $NGINX_CONF; skipping websocket patch"
+    return 0
+  fi
+  if grep -q 'proxy_set_header Upgrade' "$NGINX_CONF"; then
+    log "Panel nginx config already has WebSocket headers"
+    return 0
+  fi
+  log "Patching $NGINX_CONF: adding WebSocket proxy headers"
+  # Insert Upgrade + Connection headers after every proxy_set_header X-Forwarded-Port line
+  if command -v sed >/dev/null 2>&1; then
+    sed -i '/proxy_set_header X-Forwarded-Port/a\        proxy_set_header Upgrade $http_upgrade;\n        proxy_set_header Connection "upgrade";' "$NGINX_CONF"
+  fi
+  if nginx -t 2>&1 | tee -a "$LOG_FILE"; then
+    systemctl reload nginx 2>&1 | tee -a "$LOG_FILE" || true
+    log "nginx reloaded with WebSocket headers"
+  else
+    log "nginx config test failed after patch; skipping reload"
+  fi
+}
+
 run git fetch origin "$BRANCH"
 
 DIRTY_FILES="$(git status --porcelain)"
@@ -250,6 +274,8 @@ run "$NPM_BIN" --workspace api run prisma:generate
 )
 
 run "$NPM_BIN" --workspace frontend run build
+
+patch_nginx_websocket
 
 API_RESTART_NEEDED="false"
 for service in $SERVICES; do

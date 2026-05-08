@@ -273,6 +273,8 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_set_header X-Forwarded-Port $PANEL_LOGIN_PORT;
         proxy_set_header X-Panel-Login-Port $PANEL_LOGIN_PORT;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
     }
 
     location / {
@@ -284,6 +286,8 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_set_header X-Forwarded-Port $PANEL_LOGIN_PORT;
         proxy_set_header X-Panel-Login-Port $PANEL_LOGIN_PORT;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
     }
 }
 EOF
