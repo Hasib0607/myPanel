@@ -38,6 +38,8 @@ Deliverables:
 
 ## Phase 2: Runtime Detection
 
+Status: implemented. Runtime detection now runs during deploy after source sync, updates deployment commands from real source files, and injects the assigned port into generated start commands.
+
 Goal: Git projects automatically get the correct build/start commands.
 
 Tasks:

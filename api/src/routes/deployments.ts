@@ -7,6 +7,7 @@ import { z } from "zod";
 import { env } from "../config/env.js";
 import { deployQueue } from "../jobs/queues.js";
 import { audit } from "../lib/audit.js";
+import { detectDeploymentFiles, detectDeploymentSource } from "../lib/deploymentDetection.js";
 import { prisma } from "../lib/prisma.js";
 import { deleteSecret, getSecret, putSecret } from "../lib/secrets.js";
 import { sysagent } from "../lib/sysagent.js";
@@ -121,36 +122,20 @@ async function syncPrimaryDomainBinding(deploymentId: string, domainId: string |
   });
 }
 
-function commandSuggestions(framework: z.infer<typeof frameworkSchema>) {
-  const suggestions = {
-    LARAVEL: { runtime: "PHP", packageManager: "COMPOSER", installCommand: "composer install --no-dev --optimize-autoloader", buildCommand: "php artisan migrate --force", startCommand: "php-fpm", outputDirectory: "public", processManager: "SUPERVISOR" },
-    NEXTJS: { runtime: "NODE", packageManager: "NPM", installCommand: "npm install", buildCommand: "npm run build", startCommand: "npm run start", outputDirectory: ".next", processManager: "PM2" },
-    NODEJS: { runtime: "NODE", packageManager: "NPM", installCommand: "npm install", buildCommand: "npm run build", startCommand: "npm run start", outputDirectory: "dist", processManager: "PM2" },
-    PYTHON: { runtime: "PYTHON", packageManager: "PIP", installCommand: "pip install -r requirements.txt", buildCommand: null, startCommand: "uvicorn app.main:app --host 127.0.0.1", outputDirectory: null, processManager: "SUPERVISOR" },
-    GO: { runtime: "GO", packageManager: "GO", installCommand: "go mod download", buildCommand: "go build -o app", startCommand: "./app", outputDirectory: ".", processManager: "SUPERVISOR" },
-    STATIC: { runtime: "STATIC", packageManager: "NONE", installCommand: null, buildCommand: null, startCommand: null, outputDirectory: ".", processManager: "STATIC" }
-  } as const;
-  return suggestions[framework];
-}
-
 async function detectFramework(input: z.infer<typeof detectSchema>) {
-  let files = input.files ?? [];
   if (input.rootPath) {
     try {
-      files = await fs.readdir(input.rootPath);
-    } catch {
-      return { detected: "STATIC", confidence: 0.2, reason: "Path is not readable locally", suggestions: commandSuggestions("STATIC") };
+      return detectDeploymentSource(input.rootPath);
+    } catch (error) {
+      return {
+        detected: "STATIC",
+        confidence: 0.2,
+        reason: error instanceof Error ? `Path is not readable locally: ${error.message}` : "Path is not readable locally",
+        suggestions: detectDeploymentFiles([]).suggestions
+      };
     }
   }
-
-  const names = new Set(files.map((file) => file.toLowerCase()));
-  if (names.has("artisan") || names.has("composer.json")) return { detected: "LARAVEL", confidence: 0.85, reason: "Found PHP/Laravel markers", suggestions: commandSuggestions("LARAVEL") };
-  if (names.has("next.config.js") || names.has("next.config.mjs") || names.has("next.config.ts")) return { detected: "NEXTJS", confidence: 0.95, reason: "Found Next.js config", suggestions: commandSuggestions("NEXTJS") };
-  if (names.has("package.json")) return { detected: "NODEJS", confidence: 0.75, reason: "Found package.json", suggestions: commandSuggestions("NODEJS") };
-  if (names.has("requirements.txt") || names.has("pyproject.toml") || names.has("manage.py")) return { detected: "PYTHON", confidence: 0.8, reason: "Found Python markers", suggestions: commandSuggestions("PYTHON") };
-  if (names.has("go.mod")) return { detected: "GO", confidence: 0.9, reason: "Found go.mod", suggestions: commandSuggestions("GO") };
-  if (names.has("index.html")) return { detected: "STATIC", confidence: 0.85, reason: "Found index.html", suggestions: commandSuggestions("STATIC") };
-  return { detected: "STATIC", confidence: 0.35, reason: "No framework markers found", suggestions: commandSuggestions("STATIC") };
+  return detectDeploymentFiles(input.files ?? []);
 }
 
 function deploymentPortRange() {
@@ -520,10 +505,16 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     const contentsPath = `/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/contents/${requestedPath}?ref=${encodeURIComponent(query.branch)}`;
     const contents = await githubJson<Array<{ name: string; type: string }>>(contentsPath, token);
     const files = Array.isArray(contents) ? contents.map((item) => item.name) : [];
+    let packageJson: string | null = null;
+    if (files.some((file) => file.toLowerCase() === "package.json")) {
+      const packagePath = `/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/contents/${requestedPath ? `${requestedPath}/` : ""}package.json?ref=${encodeURIComponent(query.branch)}`;
+      const packageFile = await githubJson<{ content: string; encoding: string }>(packagePath, token);
+      if (packageFile.encoding === "base64") packageJson = Buffer.from(packageFile.content, "base64").toString("utf8");
+    }
     return {
       repository: `${params.owner}/${params.repo}`,
       dryRun: false,
-      ...(await detectFramework({ files }))
+      ...detectDeploymentFiles(files, packageJson)
     };
   });
 

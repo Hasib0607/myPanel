@@ -2,6 +2,7 @@ import { Worker } from "bullmq";
 import { DeploymentFramework, DeploymentProcessManager, Prisma } from "@prisma/client";
 import { redis } from "../lib/redis.js";
 import { logger } from "../lib/logger.js";
+import { detectDeploymentSource } from "../lib/deploymentDetection.js";
 import { prisma } from "../lib/prisma.js";
 import { sysagent } from "../lib/sysagent.js";
 import { sslQueue } from "./queues.js";
@@ -72,6 +73,10 @@ async function markRelease(releaseId: string | undefined, status: "RUNNING" | "S
   });
 }
 
+function renderDeploymentCommand(command: string | null | undefined, port: number) {
+  return command?.replaceAll("{PORT}", String(port)).replaceAll("$PORT", String(port)) ?? null;
+}
+
 async function processLifecycleAction(action: string, deploymentId: string, releaseId: string | undefined) {
   const deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: { domain: true } });
   const processAction = action === "redeploy" || action === "deploy" ? "start" : action;
@@ -100,7 +105,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
       rootPath: deployment.rootPath,
       action: processAction,
       processManager,
-      startCommand: deployment.startCommand,
+      startCommand: renderDeploymentCommand(deployment.startCommand, deployment.port),
       port: deployment.port
     })
   );
@@ -112,7 +117,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
 
 async function processDeploy(action: string, deploymentId: string, releaseId: string | undefined) {
   const startedAt = new Date();
-  const deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: { domain: true, env: true } });
+  let deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: { domain: true, env: true } });
   await markRelease(releaseId, "RUNNING", startedAt);
   await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "DEPLOYING" } });
 
@@ -137,12 +142,34 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       await writeLog(deployment.id, releaseId, "CLONING", "Source sync skipped for non-Git source", { sourceProvider: deployment.sourceProvider });
     }
 
+    const detection = await runStep(deployment.id, releaseId, "PREFLIGHT", "Runtime detection", () =>
+      detectDeploymentSource(deployment.rootPath, deployment.rootDirectory)
+    );
+    deployment = await prisma.deployment.update({
+      where: { id: deployment.id },
+      data: {
+        framework: detection.detected,
+        runtime: detection.suggestions.runtime,
+        packageManager: detection.suggestions.packageManager,
+        installCommand: detection.suggestions.installCommand,
+        buildCommand: detection.suggestions.buildCommand,
+        startCommand: detection.suggestions.startCommand,
+        outputDirectory: detection.suggestions.outputDirectory,
+        processManager: detection.suggestions.processManager
+      },
+      include: { domain: true, env: true }
+    });
+
+    if (deployment.processManager === "NONE" && deployment.framework !== "STATIC") {
+      throw new Error(`No runnable start command found for ${deployment.slug}. Add a package.json start script or set a manual start command.`);
+    }
+
     if (deployment.installCommand || deployment.packageManager) {
       await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "BUILDING" } });
       await runStep(deployment.id, releaseId, "INSTALLING", "Dependency install", () =>
         sysagent.deploymentInstall({
           rootPath: deployment.rootPath,
-          command: deployment.installCommand,
+          command: renderDeploymentCommand(deployment.installCommand, deployment.port),
           packageManager: deployment.packageManager
         })
       );
@@ -163,7 +190,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       await runStep(deployment.id, releaseId, "BUILDING", "Build", () =>
         sysagent.deploymentBuild({
           rootPath: deployment.rootPath,
-          command: deployment.buildCommand
+          command: renderDeploymentCommand(deployment.buildCommand, deployment.port)
         })
       );
     }
@@ -203,7 +230,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         rootPath: deployment.rootPath,
         action: "start",
         processManager,
-        startCommand: deployment.startCommand,
+        startCommand: renderDeploymentCommand(deployment.startCommand, deployment.port),
         port: deployment.port
       })
     );
