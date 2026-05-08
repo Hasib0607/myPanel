@@ -17,6 +17,7 @@ const sourceProviderSchema = z.enum(["MANUAL", "GIT_URL", "GITHUB", "FILE_MANAGE
 const runtimeSchema = z.enum(["NODE", "PHP", "PYTHON", "GO", "STATIC"]).nullable().optional();
 const packageManagerSchema = z.enum(["NPM", "PNPM", "YARN", "COMPOSER", "PIP", "UV", "GO", "NONE"]).nullable().optional();
 const processManagerSchema = z.enum(["PM2", "SUPERVISOR", "SYSTEMD", "STATIC", "NONE"]).nullable().optional();
+const deploymentPortSchema = z.number().int().min(1).max(65535);
 
 const baseDeploymentSchema = z.object({
   domainId: z.string().nullable().optional(),
@@ -44,7 +45,7 @@ const baseDeploymentSchema = z.object({
   runtimeVersion: z.string().nullable().optional(),
   processManager: processManagerSchema,
   healthUrl: z.string().url().nullable().optional(),
-  port: z.number().int().min(3001).max(9999),
+  port: deploymentPortSchema,
   envVars: z.record(z.string()).default({}),
   dbType: z.enum(["POSTGRESQL", "MYSQL"]).nullable().optional(),
   dbName: z.string().nullable().optional(),
@@ -80,7 +81,7 @@ const detectSchema = z.object({
 const preflightSchema = z.object({
   domainId: z.string().nullable().optional(),
   rootPath: z.string().min(1),
-  port: z.number().int().min(3001).max(9999),
+  port: deploymentPortSchema,
   dbType: z.enum(["POSTGRESQL", "MYSQL"]).nullable().optional(),
   gitUrl: z.string().url().nullable().optional()
 });
@@ -152,13 +153,72 @@ async function detectFramework(input: z.infer<typeof detectSchema>) {
   return { detected: "STATIC", confidence: 0.35, reason: "No framework markers found", suggestions: commandSuggestions("STATIC") };
 }
 
+function deploymentPortRange() {
+  const start = env.DEPLOYMENT_PORT_START;
+  const end = env.DEPLOYMENT_PORT_END;
+  if (start > end) {
+    throw new Error("DEPLOYMENT_PORT_START must be lower than or equal to DEPLOYMENT_PORT_END");
+  }
+  return { start, end };
+}
+
+function reservedDeploymentPorts() {
+  const ports = new Set<number>();
+  const rawPorts = env.DEPLOYMENT_RESERVED_PORTS.split(",");
+  for (const rawPort of rawPorts) {
+    const port = Number(rawPort.trim());
+    if (Number.isInteger(port) && port > 0 && port <= 65535) ports.add(port);
+  }
+
+  ports.add(env.PANEL_PORT);
+  const loginPort = Number(env.PANEL_LOGIN_PORT ?? 2083);
+  if (Number.isInteger(loginPort) && loginPort > 0 && loginPort <= 65535) ports.add(loginPort);
+  return ports;
+}
+
+function deploymentPortPolicyError(port: number) {
+  const { start, end } = deploymentPortRange();
+  if (port < start || port > end) {
+    return `Deployment port ${port} is outside the managed project range ${start}-${end}`;
+  }
+  if (reservedDeploymentPorts().has(port)) {
+    return `Deployment port ${port} is reserved for panel or system services`;
+  }
+  return null;
+}
+
+async function assertDeploymentPortAvailable(port: number, existingDeploymentId?: string) {
+  const policyError = deploymentPortPolicyError(port);
+  if (policyError) {
+    const error = new Error(policyError);
+    Object.assign(error, { statusCode: 400 });
+    throw error;
+  }
+
+  const owner = await prisma.deployment.findFirst({
+    where: {
+      port,
+      ...(existingDeploymentId ? { id: { not: existingDeploymentId } } : {})
+    },
+    select: { name: true }
+  });
+
+  if (owner) {
+    const error = new Error(`Deployment port ${port} is already used by ${owner.name}`);
+    Object.assign(error, { statusCode: 409 });
+    throw error;
+  }
+}
+
 async function nextAvailablePort() {
   const deployments = await prisma.deployment.findMany({ select: { port: true }, orderBy: { port: "asc" } });
   const used = new Set(deployments.map((deployment) => deployment.port));
-  for (let port = 3001; port <= 9999; port += 1) {
-    if (!used.has(port)) return port;
+  const reserved = reservedDeploymentPorts();
+  const { start, end } = deploymentPortRange();
+  for (let port = start; port <= end; port += 1) {
+    if (!used.has(port) && !reserved.has(port)) return port;
   }
-  throw new Error("No available deployment ports");
+  throw new Error(`No available deployment ports in ${start}-${end}`);
 }
 
 async function uniqueDeploymentSlug(base: string, existingDeploymentId?: string) {
@@ -183,7 +243,13 @@ async function preflight(body: z.infer<typeof preflightSchema>, deploymentId?: s
     },
     select: { id: true, name: true }
   });
-  checks.push({ key: "port", label: "Port", ok: !portOwner, detail: portOwner ? `Port used by ${portOwner.name}` : "Port is available in panel metadata" });
+  const policyError = deploymentPortPolicyError(body.port);
+  checks.push({
+    key: "port",
+    label: "Port",
+    ok: !policyError && !portOwner,
+    detail: policyError ?? (portOwner ? `Port used by ${portOwner.name}` : `Port is available in managed range ${env.DEPLOYMENT_PORT_START}-${env.DEPLOYMENT_PORT_END}`)
+  });
 
   const domain = body.domainId ? await prisma.domain.findUnique({ where: { id: body.domainId } }) : null;
   checks.push({ key: "domain", label: "Domain", ok: !body.domainId || Boolean(domain), detail: body.domainId ? (domain ? domain.name : "Domain not found") : "No domain selected yet" });
@@ -466,10 +532,10 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       githubOwner: z.string(),
       githubRepo: z.string(),
       rootPath: z.string().optional(),
-      port: z.number().int().min(3001).max(9999).optional()
+      port: deploymentPortSchema.optional()
     }).parse(request.body);
     const port = body.port ?? await nextAvailablePort();
-    const rootPath = body.rootPath ?? path.join("D:/Projects/Cpanel/.local-www", body.githubRepo);
+    const rootPath = body.rootPath ?? path.join(env.FILE_MANAGER_ROOT, "deployments", body.githubRepo);
     const existingDeployment = await prisma.deployment.findFirst({
       where: {
         sourceProvider: "GITHUB",
@@ -477,6 +543,8 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
         githubRepo: { equals: body.githubRepo, mode: "insensitive" }
       }
     });
+
+    await assertDeploymentPortAvailable(body.port ?? existingDeployment?.port ?? port, existingDeployment?.id);
 
     const deployment = existingDeployment
       ? await prisma.deployment.update({
@@ -516,6 +584,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
 
   app.post("/", async (request, reply) => {
     const body = baseDeploymentSchema.parse(request.body);
+    await assertDeploymentPortAvailable(body.port);
     const deployment = await prisma.deployment.create({
       data: {
         ...body,
@@ -541,6 +610,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const body = updateDeploymentSchema.parse(request.body);
     const deployment = await findDeployment(deploymentId);
+    if (body.port !== undefined) await assertDeploymentPortAvailable(body.port, deployment.id);
     await prisma.deployment.update({
       where: { id: deployment.id },
       data: {

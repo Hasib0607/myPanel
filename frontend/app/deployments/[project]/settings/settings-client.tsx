@@ -84,7 +84,7 @@ const emptyForm: SettingsForm = {
   processManager: "",
   rootDirectory: ".",
   rootPath: "",
-  port: "3001",
+  port: "10000",
   healthUrl: "",
   installCommand: "",
   buildCommand: "",
@@ -343,7 +343,7 @@ export function DeploymentSettingsClient({ project }: { project: string }) {
           <div className="grid grid-cols-3 gap-3">
             <TextInput label="Root directory" onChange={(value) => setField("rootDirectory", value)} required value={form.rootDirectory} />
             <TextInput label="Root path" onChange={(value) => setField("rootPath", value)} required value={form.rootPath} />
-            <TextInput label="Port" onChange={(value) => setField("port", value.replace(/\D/g, ""))} required value={form.port} />
+            <TextInput label="Port (auto)" onChange={(value) => setField("port", value.replace(/\D/g, ""))} readOnly required value={form.port} />
             <TextInput label="Health URL" onChange={(value) => setField("healthUrl", value)} value={form.healthUrl} />
             <TextInput label="Output directory" onChange={(value) => setField("outputDirectory", value)} value={form.outputDirectory} />
             <TextInput label="Public directory" onChange={(value) => setField("publicDirectory", value)} value={form.publicDirectory} />
@@ -398,11 +398,11 @@ function Section({ icon, title, children }: { icon: ReactNode; title: string; ch
   );
 }
 
-function TextInput({ label, value, onChange, required }: { label: string; value: string; onChange: (value: string) => void; required?: boolean }) {
+function TextInput({ label, value, onChange, required, readOnly }: { label: string; value: string; onChange: (value: string) => void; required?: boolean; readOnly?: boolean }) {
   return (
     <label className="block text-xs font-medium uppercase text-panel-muted">
       {label}
-      <input className="mt-2 h-10 w-full rounded-md border border-panel-line px-3 text-sm normal-case text-panel-ink" onChange={(event) => onChange(event.target.value)} required={required} value={value} />
+      <input className={`mt-2 h-10 w-full rounded-md border border-panel-line px-3 text-sm normal-case text-panel-ink ${readOnly ? "bg-slate-50 text-panel-muted" : ""}`} onChange={(event) => onChange(event.target.value)} readOnly={readOnly} required={required} value={value} />
     </label>
   );
 }

@@ -12,6 +12,7 @@
     "lint": "tsc --noEmit",
     "test": "npm run build && NODE_ENV=test node --test dist/lib/*.test.js",
     "verify:phase11": "tsx src/scripts/verifyPhase11.ts",
+    "migrate:deployment-ports": "tsx src/scripts/migrateDeploymentPorts.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:seed": "tsx prisma/seed.ts"

@@ -21,6 +21,8 @@ Deliverables:
 
 ## Phase 1: Port Reservation And Allocation
 
+Status: in progress. API allocation/validation and installer defaults are implemented; run `npm run migrate:deployment-ports --workspace api` once on the server after deploying this phase to move old unsafe deployment metadata.
+
 Goal: no project can ever use panel or infrastructure ports.
 
 Tasks:
