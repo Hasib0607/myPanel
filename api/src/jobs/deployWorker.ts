@@ -126,9 +126,29 @@ function deploymentAppPath(rootPath: string, rootDirectory: string | null | unde
   return cleanRootDirectory && cleanRootDirectory !== "." ? path.join(rootPath, cleanRootDirectory) : rootPath;
 }
 
+type BoundDomain = { id: string; name: string; forceSsl: boolean };
+
 function deploymentServerName(domain: { name: string } | null | undefined) {
   if (!domain?.name) return null;
   return `${domain.name} www.${domain.name}`;
+}
+
+function deploymentDomain(deployment: { domain?: BoundDomain | null; domainBindings?: Array<{ role: string; domain: BoundDomain }> }) {
+  return deployment.domainBindings?.find((binding) => binding.role === "primary")?.domain
+    ?? deployment.domainBindings?.[0]?.domain
+    ?? deployment.domain
+    ?? null;
+}
+
+async function ensureDeploymentDomainProxy(deploymentId: string, domain: BoundDomain | null) {
+  if (!domain) return;
+  await prisma.domain.update({
+    where: { id: domain.id },
+    data: {
+      hostingMode: "DEPLOYMENT_PROXY",
+      hostingDeploymentId: deploymentId
+    }
+  });
 }
 
 async function assertHealthResult(result: unknown, label: string, deployment: { slug: string }) {
@@ -210,21 +230,23 @@ function assertCommandTree(result: unknown, label: string) {
 }
 
 async function processLifecycleAction(action: string, deploymentId: string, releaseId: string | undefined) {
-  const deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: { domain: true, env: true } });
+  const deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: { domain: true, domainBindings: { include: { domain: true }, orderBy: [{ role: "asc" }, { createdAt: "asc" }] }, env: true } });
   const envVars = await resolveEnvVars(deployment.env);
   const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
   const processAction = action === "redeploy" || action === "deploy" ? "start" : action;
   const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
+  const domain = deploymentDomain(deployment);
 
-  if (processAction !== "stop" && deployment.domain) {
-    const serverName = deploymentServerName(deployment.domain);
+  if (processAction !== "stop" && domain) {
+    await ensureDeploymentDomainProxy(deployment.id, domain);
+    const serverName = deploymentServerName(domain);
     const nginxResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config", () =>
       sysagent.deploymentNginx({
         deploymentId: deployment.id,
         serverName,
         upstreamPort: deployment.port,
         rootPath: deployment.rootPath,
-        forceSsl: deployment.domain?.forceSsl ?? true
+        forceSsl: domain.forceSsl
       })
     );
     assertLiveResult((nginxResult as { write?: unknown }).write, "Nginx proxy config write");
@@ -264,11 +286,11 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
   );
   await assertHealthResult(health, `${action} health check`, deployment);
 
-  if (deployment.domain) {
+  if (domain) {
     const publicRoute = await runStep(deployment.id, releaseId, "HEALTH_CHECK", `${action} public website check`, () =>
-      sysagent.deploymentPublicRoute({ serverName: deploymentServerName(deployment) })
+      sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain) })
     );
-    await assertPublicRouteResult(publicRoute, `${action} public website check`, deployment);
+    await assertPublicRouteResult(publicRoute, `${action} public website check`, { ...deployment, domain });
   }
 
   await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "RUNNING", healthStatus: "HEALTHY", lastHealthCheckAt: new Date() } });
@@ -277,7 +299,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
 
 async function processDeploy(action: string, deploymentId: string, releaseId: string | undefined) {
   const startedAt = new Date();
-  let deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: { domain: true, env: true } });
+  let deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: { domain: true, domainBindings: { include: { domain: true }, orderBy: [{ role: "asc" }, { createdAt: "asc" }] }, env: true } });
   await resetBuildLogs(deployment.id);
   await markRelease(releaseId, "RUNNING", startedAt);
   await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "DEPLOYING" } });
@@ -321,7 +343,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         outputDirectory: detection.suggestions.outputDirectory,
         processManager: detection.suggestions.processManager
       },
-      include: { domain: true, env: true }
+      include: { domain: true, domainBindings: { include: { domain: true }, orderBy: [{ role: "asc" }, { createdAt: "asc" }] }, env: true }
     });
 
     if (deployment.processManager === "NONE" && deployment.framework !== "STATIC") {
@@ -368,14 +390,16 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       assertCommandTree(buildResult, "Build");
     }
 
-    const serverName = deploymentServerName(deployment.domain);
+    const domain = deploymentDomain(deployment);
+    await ensureDeploymentDomainProxy(deployment.id, domain);
+    const serverName = deploymentServerName(domain);
     const nginxResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config", () =>
       sysagent.deploymentNginx({
         deploymentId: deployment.id,
         serverName,
         upstreamPort: deployment.port,
         rootPath: deployment.rootPath,
-        forceSsl: deployment.domain?.forceSsl ?? true
+        forceSsl: domain?.forceSsl ?? false
       })
     );
     assertLiveResult((nginxResult as { write?: unknown }).write, "Nginx proxy config write");
@@ -383,17 +407,17 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     assertLiveResult((nginxResult as { test?: unknown }).test, "Nginx config test");
     assertLiveResult((nginxResult as { reload?: unknown }).reload, "Nginx reload");
 
-    if (deployment.domain?.forceSsl) {
+    if (domain?.forceSsl) {
       await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "SSL request", () =>
         sslQueue.add("issue", {
-          domainId: deployment.domain?.id,
-          domain: deployment.domain?.name,
-          email: `admin@${deployment.domain?.name}`,
+          domainId: domain.id,
+          domain: domain.name,
+          email: `admin@${domain.name}`,
           source: "deployment"
         })
       );
     } else {
-      await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "SSL request skipped", { reason: deployment.domain ? "Force SSL is disabled" : "No linked domain" });
+      await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "SSL request skipped", { reason: domain ? "Force SSL is disabled" : "No linked domain" });
     }
 
     const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
@@ -423,11 +447,11 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     );
     await assertHealthResult(health, "Health check", deployment);
 
-    if (deployment.domain) {
+    if (domain) {
       const publicRoute = await runStep(deployment.id, releaseId, "HEALTH_CHECK", "Public website check", () =>
-        sysagent.deploymentPublicRoute({ serverName: deploymentServerName(deployment) })
+        sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain) })
       );
-      await assertPublicRouteResult(publicRoute, "Public website check", deployment);
+      await assertPublicRouteResult(publicRoute, "Public website check", { ...deployment, domain });
     }
 
     await markRelease(releaseId, action === "rollback" ? "ROLLED_BACK" : "SUCCEEDED", startedAt);

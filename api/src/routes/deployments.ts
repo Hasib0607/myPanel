@@ -120,6 +120,10 @@ async function syncPrimaryDomainBinding(deploymentId: string, domainId: string |
     update: { role: "primary" },
     create: { deploymentId, domainId, role: "primary" }
   });
+  await prisma.domain.update({
+    where: { id: domainId },
+    data: { hostingMode: "DEPLOYMENT_PROXY", hostingDeploymentId: deploymentId }
+  });
 }
 
 async function detectFramework(input: z.infer<typeof detectSchema>) {
@@ -740,8 +744,13 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       include: { domain: true }
     });
     if (body.primary || !deployment.domainId) {
-      await prisma.deployment.update({ where: { id: deployment.id }, data: { domainId: body.domainId } });
-      await prisma.deploymentDomain.updateMany({ where: { deploymentId: deployment.id, domainId: { not: body.domainId }, role: "primary" }, data: { role: "alias" } });
+      await prisma.$transaction([
+        prisma.deployment.update({ where: { id: deployment.id }, data: { domainId: body.domainId } }),
+        prisma.deploymentDomain.updateMany({ where: { deploymentId: deployment.id, domainId: { not: body.domainId }, role: "primary" }, data: { role: "alias" } }),
+        prisma.domain.update({ where: { id: body.domainId }, data: { hostingMode: "DEPLOYMENT_PROXY", hostingDeploymentId: deployment.id } })
+      ]);
+    } else {
+      await prisma.domain.update({ where: { id: body.domainId }, data: { hostingMode: "DEPLOYMENT_PROXY", hostingDeploymentId: deployment.id } });
     }
     await audit(request, { action: "UPDATE", resource: "deployment", resourceId: deployment.id, description: `Bound domain ${binding.domain.name} to ${deployment.slug}` });
     return reply.code(201).send(binding);
@@ -757,7 +766,8 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     await prisma.$transaction([
       prisma.deployment.update({ where: { id: deployment.id }, data: { domainId } }),
       prisma.deploymentDomain.updateMany({ where: { deploymentId: deployment.id }, data: { role: "alias" } }),
-      prisma.deploymentDomain.update({ where: { id: binding.id }, data: { role: "primary" } })
+      prisma.deploymentDomain.update({ where: { id: binding.id }, data: { role: "primary" } }),
+      prisma.domain.update({ where: { id: domainId }, data: { hostingMode: "DEPLOYMENT_PROXY", hostingDeploymentId: deployment.id } })
     ]);
     await audit(request, { action: "UPDATE", resource: "deployment", resourceId: deployment.id, description: `Set primary domain ${binding.domain.name} for ${deployment.slug}` });
     return { ok: true };
@@ -769,8 +779,22 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     await prisma.deploymentDomain.delete({ where: { deploymentId_domainId: { deploymentId: deployment.id, domainId } } });
     if (deployment.domainId === domainId) {
       const next = await prisma.deploymentDomain.findFirst({ where: { deploymentId: deployment.id }, orderBy: { createdAt: "asc" } });
-      await prisma.deployment.update({ where: { id: deployment.id }, data: { domainId: next?.domainId ?? null } });
-      if (next) await prisma.deploymentDomain.update({ where: { id: next.id }, data: { role: "primary" } });
+      await prisma.$transaction([
+        prisma.deployment.update({ where: { id: deployment.id }, data: { domainId: next?.domainId ?? null } }),
+        prisma.domain.updateMany({
+          where: { id: domainId, hostingDeploymentId: deployment.id },
+          data: { hostingMode: "PUBLIC_HTML", hostingDeploymentId: null }
+        }),
+        ...(next ? [
+          prisma.deploymentDomain.update({ where: { id: next.id }, data: { role: "primary" } }),
+          prisma.domain.update({ where: { id: next.domainId }, data: { hostingMode: "DEPLOYMENT_PROXY", hostingDeploymentId: deployment.id } })
+        ] : [])
+      ]);
+    } else {
+      await prisma.domain.updateMany({
+        where: { id: domainId, hostingDeploymentId: deployment.id },
+        data: { hostingMode: "PUBLIC_HTML", hostingDeploymentId: null }
+      });
     }
     await audit(request, { action: "UPDATE", resource: "deployment", resourceId: deployment.id, description: `Removed a domain from ${deployment.slug}` });
     return { ok: true };
