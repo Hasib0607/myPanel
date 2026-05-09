@@ -202,6 +202,33 @@ def pm2_process_state(jlist: dict, name: str) -> str | None:
     return None
 
 
+def summarize_pm2_processes(jlist: dict, name: str) -> dict:
+    try:
+        processes = json.loads(jlist.get("stdout") or "[]")
+    except json.JSONDecodeError:
+        return jlist
+    matches = []
+    for process in processes:
+        if process.get("name") != name:
+            continue
+        pm2_env = process.get("pm2_env", {})
+        matches.append({
+            "name": process.get("name"),
+            "pid": process.get("pid"),
+            "pm_id": process.get("pm_id"),
+            "status": pm2_env.get("status"),
+            "cwd": pm2_env.get("pm_cwd") or pm2_env.get("cwd"),
+            "args": pm2_env.get("args"),
+            "restarts": pm2_env.get("restart_time", 0),
+            "outLog": pm2_env.get("pm_out_log_path"),
+            "errorLog": pm2_env.get("pm_err_log_path"),
+        })
+    return {
+        **jlist,
+        "stdout": json.dumps(matches, separators=(",", ":")),
+    }
+
+
 def safe_log_dir(name: str, log_dir: str | None = None) -> Path:
     root = Path(settings.deployment_log_root).resolve()
     if log_dir:
@@ -301,6 +328,7 @@ def pm2_start(body: ProcessRequest, start_command: list[str]) -> dict:
         "returncode": 1,
     }
     status = pm2_process_state(jlist, body.name)
+    jlist = summarize_pm2_processes(jlist, body.name)
     verify = {
         "dryRun": jlist.get("dryRun", False),
         "command": ["pm2", "verify-online", body.name],

@@ -1,5 +1,6 @@
 import { Worker } from "bullmq";
 import { DeploymentFramework, DeploymentProcessManager, Prisma } from "@prisma/client";
+import path from "node:path";
 import { redis } from "../lib/redis.js";
 import { logger } from "../lib/logger.js";
 import { detectDeploymentSource } from "../lib/deploymentDetection.js";
@@ -71,9 +72,14 @@ async function runStep<T>(deploymentId: string, releaseId: string | undefined, s
 }
 
 function assertLiveResult(result: unknown, label: string) {
+  const message = liveResultFailureMessage(result, label);
+  if (message) throw new Error(message);
+}
+
+function liveResultFailureMessage(result: unknown, label: string) {
   const value = result as { dryRun?: boolean; returncode?: number; stderr?: string; reason?: string };
   if (value?.dryRun) {
-    throw new Error(`${label} did not run live. Set ALLOW_LIVE_SYSTEM_COMMANDS=true on vps-panel-sysagent, restart vps-panel-sysagent and vps-panel-workers, then retry.`);
+    return `${label} did not run live. Set ALLOW_LIVE_SYSTEM_COMMANDS=true on vps-panel-sysagent, restart vps-panel-sysagent and vps-panel-workers, then retry.`;
   }
   if (typeof value?.returncode === "number" && value.returncode !== 0) {
     const signal = "signal" in value && typeof value.signal === "string" ? value.signal : null;
@@ -85,8 +91,9 @@ function assertLiveResult(result: unknown, label: string) {
       : sigtermKilled
         ? " The command was terminated by SIGTERM. This may be caused by the OS killing the process due to low memory — try adding swap or reducing build memory usage (e.g. NODE_OPTIONS=--max-old-space-size=512 in env vars). If it repeats, increase DEPLOYMENT_COMMAND_TIMEOUT_SECONDS."
         : "";
-    throw new Error(`${label} failed with exit code ${value.returncode}${signal ? ` (${signal})` : ""}${stderrText ? `: ${stderrText}` : ""}${signalHint}`);
+    return `${label} failed with exit code ${value.returncode}${signal ? ` (${signal})` : ""}${stderrText ? `: ${stderrText}` : ""}${signalHint}`;
   }
+  return null;
 }
 
 async function markRelease(releaseId: string | undefined, status: "RUNNING" | "SUCCEEDED" | "FAILED" | "ROLLED_BACK", startedAt?: Date) {
@@ -105,6 +112,37 @@ async function markRelease(releaseId: string | undefined, status: "RUNNING" | "S
 
 function renderDeploymentCommand(command: string | null | undefined, port: number) {
   return command?.replaceAll("{PORT}", String(port)).replaceAll("$PORT", String(port)) ?? null;
+}
+
+function renderStartCommand(deployment: { framework: DeploymentFramework; startCommand: string | null; port: number }) {
+  if (deployment.framework === "NEXTJS") {
+    return `npx next start -p ${deployment.port} -H 127.0.0.1`;
+  }
+  return renderDeploymentCommand(deployment.startCommand, deployment.port);
+}
+
+function deploymentAppPath(rootPath: string, rootDirectory: string | null | undefined) {
+  const cleanRootDirectory = (rootDirectory || ".").replace(/^\/+|\/+$/g, "");
+  return cleanRootDirectory && cleanRootDirectory !== "." ? path.join(rootPath, cleanRootDirectory) : rootPath;
+}
+
+async function assertHealthResult(result: unknown, label: string, deployment: { slug: string }) {
+  const message = liveResultFailureMessage(result, label);
+  if (!message) return;
+
+  let runtimeText = "";
+  try {
+    const logs = await sysagent.deploymentRuntimeLogs({
+      name: deployment.slug,
+      logDir: deploymentLogDir(deployment.slug),
+      lines: 120
+    });
+    runtimeText = logs.text ? `\n\nRunning log tail:\n${logs.text}` : "";
+  } catch (error) {
+    runtimeText = `\n\nCould not read running log: ${error instanceof Error ? error.message : "unknown error"}`;
+  }
+
+  throw new Error(`${message}${runtimeText}`);
 }
 
 function githubTokenSecretRef() {
@@ -147,6 +185,7 @@ function assertCommandTree(result: unknown, label: string) {
 async function processLifecycleAction(action: string, deploymentId: string, releaseId: string | undefined) {
   const deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: { domain: true, env: true } });
   const envVars = await resolveEnvVars(deployment.env);
+  const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
   const processAction = action === "redeploy" || action === "deploy" ? "start" : action;
   const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
 
@@ -170,10 +209,10 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
     sysagent.deploymentProcess({
       deploymentId: deployment.id,
       name: deployment.slug,
-      rootPath: deployment.rootPath,
+      rootPath: appPath,
       action: processAction,
       processManager,
-      startCommand: renderDeploymentCommand(deployment.startCommand, deployment.port),
+      startCommand: renderStartCommand(deployment),
       port: deployment.port,
       env: envVars,
       logDir: deploymentLogDir(deployment.slug)
@@ -195,7 +234,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
       processManager
     })
   );
-  assertLiveResult(health, `${action} health check`);
+  await assertHealthResult(health, `${action} health check`, deployment);
 
   await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "RUNNING", healthStatus: "HEALTHY", lastHealthCheckAt: new Date() } });
   return { result, health, status: "RUNNING", healthStatus: "HEALTHY" };
@@ -255,12 +294,13 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     }
 
     const envVars = await resolveEnvVars(deployment.env);
+    const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
 
     if (deployment.installCommand || deployment.packageManager) {
       await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "BUILDING" } });
       const installResult = await runStep(deployment.id, releaseId, "INSTALLING", "Dependency install", () =>
         sysagent.deploymentInstall({
-          rootPath: deployment.rootPath,
+          rootPath: appPath,
           command: renderDeploymentCommand(deployment.installCommand, deployment.port),
           packageManager: deployment.packageManager,
           env: envVars
@@ -272,7 +312,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     if (deployment.framework === "LARAVEL") {
       const migrateResult = await runStep(deployment.id, releaseId, "MIGRATING", "Database migration", () =>
         sysagent.deploymentMigrate({
-          rootPath: deployment.rootPath,
+          rootPath: appPath,
           command: "php artisan migrate --force",
           env: envVars
         })
@@ -285,7 +325,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     if (deployment.buildCommand) {
       const buildResult = await runStep(deployment.id, releaseId, "BUILDING", "Build", () =>
         sysagent.deploymentBuild({
-          rootPath: deployment.rootPath,
+          rootPath: appPath,
           command: renderDeploymentCommand(deployment.buildCommand, deployment.port),
           env: envVars
         })
@@ -325,10 +365,10 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       sysagent.deploymentProcess({
         deploymentId: deployment.id,
         name: deployment.slug,
-        rootPath: deployment.rootPath,
+        rootPath: appPath,
         action: "start",
         processManager,
-        startCommand: renderDeploymentCommand(deployment.startCommand, deployment.port),
+        startCommand: renderStartCommand(deployment),
         port: deployment.port,
         env: envVars,
         logDir: deploymentLogDir(deployment.slug)
@@ -345,7 +385,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         processManager
       })
     );
-    assertLiveResult(health, "Health check");
+    await assertHealthResult(health, "Health check", deployment);
 
     await markRelease(releaseId, action === "rollback" ? "ROLLED_BACK" : "SUCCEEDED", startedAt);
     await prisma.deployment.update({

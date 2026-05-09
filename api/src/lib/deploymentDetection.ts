@@ -119,7 +119,7 @@ export function detectDeploymentFiles(files: string[], packageJsonText?: string 
         packageManager,
         installCommand: packageInstall(packageManager),
         buildCommand: hasScript("build") ? packageRun(packageManager, "build") : null,
-        startCommand: hasScript("start") ? `${packageRun(packageManager, "start")} -- -p {PORT} -H 127.0.0.1` : "npx next start -p {PORT} -H 127.0.0.1",
+        startCommand: "npx next start -p {PORT} -H 127.0.0.1",
         outputDirectory: ".next",
         processManager: "PM2"
       }
