@@ -1,8 +1,37 @@
 # Incomplete Work Tracker
 
-Last updated: 2026-05-06
+Last updated: 2026-05-09
 
 This file keeps every known incomplete, deferred, or partially complete task in one place so the next planning pass does not need to hunt through all phase notes.
+
+## Deferred Feature: Server Guardian Bot
+
+Status: Parked for later planning
+
+Goal: Add a server autopilot/guardian agent that continuously monitors the VPS, diagnoses incidents, performs safe auto-healing, and suggests or applies security responses.
+
+Planned phases:
+
+- Phase 1: Read-only monitoring for systemd services, PM2 processes, ports, disk, RAM, CPU, load, Redis, PostgreSQL, Nginx, SSL expiry, deployment health, auth logs, and Fail2Ban/UFW status.
+- Phase 2: Safe auto-healing for known services: restart dead panel services, restart crashed PM2 apps, run `nginx -t` before reload, clear stale deployment logs/cache, and record incident logs.
+- Phase 3: Security response: detect SSH brute force, suspicious request floods, repeated 4xx/5xx patterns, abnormal login attempts, and dynamically block abusive IPs through UFW/Fail2Ban with allowlist support.
+- Phase 4: Deployment doctor: detect port conflicts, crash loops, env issues, wrong Nginx upstreams, bad SSL redirects, and show exact remediation.
+- Phase 5: Approval workflow: classify actions as safe-auto or approval-required, show suggested commands, and keep audit logs for every action.
+- Phase 6: AI-assisted diagnosis: summarize structured logs and recent incidents, generate explanation/fix suggestions, and only auto-run allowlisted safe commands.
+
+Safety rules:
+
+- Auto-run only low-risk actions such as restarting known services, reloading Nginx after a successful config test, cleaning old logs, and blocking clearly abusive IPs.
+- Require explicit admin approval for deleting files, resetting Git, dropping databases, opening public ports, rewriting Nginx configs, killing unknown processes, or changing SSH/firewall lockout-sensitive rules.
+- Keep an allowlist for trusted IP ranges and never block panel admin IPs or configured CDN ranges without confirmation.
+
+Suggested UI:
+
+- Add `/guardian` with live health, incidents, auto-fixed actions, blocked IPs, allowlist, rule settings, manual diagnosis, and approval queue.
+
+Suggested service:
+
+- Add `vps-panel-guardian.service` plus BullMQ repeat jobs for periodic checks.
 
 ## Current VPS Deployment Blockers
 
