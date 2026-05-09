@@ -59,6 +59,8 @@ export const sysagent = {
     request<{ write: SysagentCommandResult; enable: SysagentCommandResult; test: SysagentCommandResult; reload: SysagentCommandResult; configPath: string; enabledPath?: string; serverName?: string }>("/deployments/nginx", { method: "POST", body: JSON.stringify(body) }),
   deploymentHealth: (body: unknown) =>
     request("/deployments/health", { method: "POST", body: JSON.stringify(body) }),
+  deploymentPortStatus: (body: unknown) =>
+    request<SysagentCommandResult & { occupied?: boolean; reusable?: boolean; owner?: unknown }>("/deployments/port-status", { method: "POST", body: JSON.stringify(body) }),
   deploymentRuntimeLogs: (body: unknown) =>
     request<{ ok: boolean; logDir?: string; stdout: string; stderr: string; text: string; error?: string }>("/deployments/runtime-logs", { method: "POST", body: JSON.stringify(body) }),
   deploymentPublicRoute: (body: unknown) =>

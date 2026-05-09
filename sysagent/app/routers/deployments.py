@@ -86,6 +86,13 @@ class HealthRequest(BaseModel):
     rootPath: str | None = None
 
 
+class PortStatusRequest(BaseModel):
+    rootPath: str
+    port: int = Field(ge=1, le=65535)
+    processName: str | None = None
+    processManager: str | None = None
+
+
 class PublicRouteRequest(BaseModel):
     serverName: str
     path: str = "/"
@@ -673,6 +680,44 @@ def _pm2_process(process_name: str) -> dict | None:
     return None
 
 
+def _pm2_process_port(proc: dict) -> str | None:
+    pm2_env = proc.get("pm2_env", {})
+    env_port = (pm2_env.get("env") or {}).get("PORT") or pm2_env.get("PORT")
+    if env_port is not None:
+        return str(env_port)
+    args = pm2_env.get("args") or []
+    if not isinstance(args, list):
+        return None
+    for index, arg in enumerate(args):
+        if arg in {"-p", "--port"} and index + 1 < len(args):
+            return str(args[index + 1])
+        if isinstance(arg, str) and arg.startswith("--port="):
+            return arg.split("=", 1)[1]
+    return None
+
+
+def _pm2_owner_for_port(port: int) -> dict | None:
+    result = run_command(["pm2", "jlist"])
+    if result.get("returncode") != 0:
+        return None
+    try:
+        processes = json.loads(result.get("stdout") or "[]")
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    for proc in processes:
+        if _pm2_process_port(proc) == str(port):
+            pm2_env = proc.get("pm2_env", {})
+            return {
+                "name": proc.get("name"),
+                "pid": proc.get("pid"),
+                "pm_id": proc.get("pm_id"),
+                "status": pm2_env.get("status"),
+                "cwd": pm2_env.get("pm_cwd") or (pm2_env.get("env") or {}).get("PWD"),
+                "port": port,
+            }
+    return None
+
+
 def _pm2_process_mismatch(body: HealthRequest) -> str | None:
     if not body.processName or (body.processManager or "").upper() != "PM2":
         return None
@@ -696,6 +741,41 @@ def _pm2_process_mismatch(body: HealthRequest) -> str | None:
             return f"PM2 process '{body.processName}' cwd is {actual_raw}, expected {expected}."
 
     return None
+
+
+@router.post("/port-status")
+def port_status(body: PortStatusRequest) -> dict:
+    info = path_info(body.rootPath)
+    if not info["allowed"] and settings.allow_live_system_commands:
+        return blocked_command("Path escapes configured file manager root", ["port-status", str(body.port)], info)
+
+    pm2_owner = _pm2_owner_for_port(body.port) if (body.processManager or "").upper() == "PM2" else None
+    if pm2_owner:
+        same_process = pm2_owner.get("name") == body.processName
+        same_cwd = str(Path(str(pm2_owner.get("cwd") or "")).resolve()) == str(Path(body.rootPath).resolve()) if pm2_owner.get("cwd") else False
+        return {
+            "dryRun": False,
+            "command": ["pm2", "jlist"],
+            "cwd": None,
+            "stdout": json.dumps(pm2_owner, separators=(",", ":")),
+            "stderr": "",
+            "returncode": 0,
+            "path": info,
+            "occupied": not (same_process and same_cwd),
+            "reusable": same_process and same_cwd,
+            "owner": pm2_owner,
+        }
+
+    ss = run_command(["ss", "-ltnp", f"sport = :{body.port}"], allow_live=settings.allow_live_system_commands)
+    stdout = ss.get("stdout") or ""
+    occupied = f":{body.port}" in stdout
+    return {
+        **ss,
+        "path": info,
+        "occupied": occupied,
+        "reusable": False,
+        "owner": {"source": "ss", "detail": stdout.strip()} if occupied else None,
+    }
 
 
 @router.post("/health")

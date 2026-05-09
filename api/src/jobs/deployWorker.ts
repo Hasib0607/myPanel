@@ -85,7 +85,7 @@ function deploymentPortPolicyError(port: number) {
   return null;
 }
 
-async function nextAvailableDeploymentPort(excludeDeploymentId?: string) {
+async function nextAvailableDeploymentPort(excludeDeploymentId?: string, blockedPorts = new Set<number>()) {
   const deployments = await prisma.deployment.findMany({
     where: excludeDeploymentId ? { id: { not: excludeDeploymentId } } : undefined,
     select: { port: true },
@@ -95,37 +95,71 @@ async function nextAvailableDeploymentPort(excludeDeploymentId?: string) {
   const reserved = reservedDeploymentPorts();
   const { start, end } = deploymentPortRange();
   for (let port = start; port <= end; port += 1) {
-    if (!used.has(port) && !reserved.has(port)) return port;
+    if (!used.has(port) && !reserved.has(port) && !blockedPorts.has(port)) return port;
   }
   throw new Error(`No available deployment ports in ${start}-${end}`);
 }
 
-async function ensureManagedDeploymentPort(deployment: DeploymentWithWorkerRelations, releaseId: string | undefined) {
-  const policyError = deploymentPortPolicyError(deployment.port);
-  const owner = await prisma.deployment.findFirst({
+async function dbPortOwner(port: number, deploymentId: string) {
+  return prisma.deployment.findFirst({
     where: {
-      port: deployment.port,
-      id: { not: deployment.id }
+      port,
+      id: { not: deploymentId }
     },
     select: { id: true, name: true, slug: true, port: true }
   });
+}
 
-  if (!policyError && !owner) return deployment;
+async function livePortConflict(port: number, deployment: DeploymentWithWorkerRelations) {
+  const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
+  try {
+    const status = await sysagent.deploymentPortStatus({
+      rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
+      port,
+      processName: deployment.slug,
+      processManager
+    });
+    if (status.dryRun || status.reusable || !status.occupied) return null;
+    return status.owner ?? status.stderr ?? `port ${port} is already listening`;
+  } catch (error) {
+    return null;
+  }
+}
 
-  const previousPort = deployment.port;
-  const nextPort = await nextAvailableDeploymentPort(deployment.id);
-  const reason = policyError ?? `already used by ${owner?.name ?? owner?.slug ?? "another deployment"}`;
-  await writeLog(deployment.id, releaseId, "PREFLIGHT", `Port ${previousPort} is ${reason}; reassigned to ${nextPort}`, {
-    previousPort,
-    nextPort,
-    owner
-  }, "warn");
+async function ensureManagedDeploymentPort(deployment: DeploymentWithWorkerRelations, releaseId: string | undefined) {
+  let currentPort = deployment.port;
+  const blockedPorts = new Set<number>();
+  const { start, end } = deploymentPortRange();
 
-  return prisma.deployment.update({
-    where: { id: deployment.id },
-    data: { port: nextPort },
-    include: deploymentWorkerInclude
-  });
+  for (let attempt = 0; attempt <= end - start; attempt += 1) {
+    const policyError = deploymentPortPolicyError(currentPort);
+    const owner = policyError ? null : await dbPortOwner(currentPort, deployment.id);
+    const liveOwner = !policyError && !owner ? await livePortConflict(currentPort, deployment) : null;
+
+    if (!policyError && !owner && !liveOwner) {
+      if (currentPort === deployment.port) return deployment;
+      await writeLog(deployment.id, releaseId, "PREFLIGHT", `Deployment port reassigned to ${currentPort}`, {
+        previousPort: deployment.port,
+        nextPort: currentPort
+      }, "warn");
+      return prisma.deployment.update({
+        where: { id: deployment.id },
+        data: { port: currentPort },
+        include: deploymentWorkerInclude
+      });
+    }
+
+    blockedPorts.add(currentPort);
+    const reason = policyError
+      ?? (owner ? `already used by ${owner.name || owner.slug}` : `already used by a live process`);
+    await writeLog(deployment.id, releaseId, "PREFLIGHT", `Port ${currentPort} is ${reason}; searching for a free port`, {
+      port: currentPort,
+      owner: owner ?? liveOwner
+    }, "warn");
+    currentPort = await nextAvailableDeploymentPort(deployment.id, blockedPorts);
+  }
+
+  throw new Error(`No available deployment ports in ${start}-${end}`);
 }
 
 async function pruneBuildLogs(deploymentId: string) {
