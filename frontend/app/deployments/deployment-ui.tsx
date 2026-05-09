@@ -36,6 +36,16 @@ export function formatDate(value?: string | null) {
   return value ? new Date(value).toLocaleString() : "-";
 }
 
+export function formatLogTime(value?: string | null) {
+  if (!value) return "--:--:--";
+  const d = new Date(value);
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const ss = String(d.getSeconds()).padStart(2, "0");
+  const ms = String(d.getMilliseconds()).padStart(3, "0");
+  return `${hh}:${mm}:${ss}.${ms}`;
+}
+
 export function formatDuration(ms?: number | null) {
   if (!ms) return "-";
   if (ms < 1000) return `${ms}ms`;
@@ -130,8 +140,8 @@ export function actionIcon(action: "deploy" | "start" | "stop" | "restart" | "ro
 export function LogLine({ log }: { log: DeploymentLog }) {
   const hasError = log.step === "FAILED" || /fail|error/i.test(log.message);
   return (
-    <div className="grid grid-cols-[150px_150px_1fr] gap-3 border-b border-slate-800 px-4 py-2 font-mono text-xs">
-      <span className="text-slate-500">{formatDate(log.createdAt)}</span>
+    <div className="grid grid-cols-[110px_150px_1fr] gap-3 border-b border-slate-800 px-4 py-2 font-mono text-xs">
+      <span className="text-slate-400 tabular-nums">{formatLogTime(log.createdAt)}</span>
       <span className={hasError ? "text-red-300" : "text-cyan-300"}>{log.step}</span>
       <span className="text-slate-100">{log.message}</span>
     </div>
