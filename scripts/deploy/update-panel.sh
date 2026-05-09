@@ -90,6 +90,33 @@ run_timeout() {
   fi
 }
 
+npm_install_with_recovery() {
+  local output=""
+  log "+ $NPM_BIN install"
+  set +e
+  output="$("$NPM_BIN" install 2>&1)"
+  local status=$?
+  set -e
+  printf '%s\n' "$output" | tee -a "$LOG_FILE"
+  if [[ "$status" == "0" ]]; then
+    return 0
+  fi
+
+  if printf '%s' "$output" | grep -qiE "ENOTEMPTY|EEXIST|directory not empty|rename .*node_modules"; then
+    log "npm install hit a stale node_modules rename conflict; cleaning npm temp folders and retrying"
+    find "$APP_DIR/node_modules" -maxdepth 1 -type d -name ".*-*" -print -exec rm -rf {} + 2>&1 | tee -a "$LOG_FILE" || true
+    "$NPM_BIN" cache verify 2>&1 | tee -a "$LOG_FILE" || true
+    run "$NPM_BIN" install && return 0
+
+    log "npm install retry failed; rebuilding root node_modules once"
+    rm -rf "$APP_DIR/node_modules"
+    run "$NPM_BIN" install
+    return 0
+  fi
+
+  return "$status"
+}
+
 sudo_systemctl_output() {
   "$SUDO_BIN" -n "$SYSTEMCTL_BIN" "$@" 2>&1
 }
@@ -264,7 +291,7 @@ NEW_COMMIT_SUBJECT="$(current_commit_subject)"
 write_status "running" "source updated; building panel" "$NEW_COMMIT" "$NEW_COMMIT_SUBJECT"
 ensure_systemctl_permission
 
-run "$NPM_BIN" install
+npm_install_with_recovery
 run "$NPM_BIN" --workspace api run prisma:generate
 
 (
