@@ -83,6 +83,7 @@ class HealthRequest(BaseModel):
     healthUrl: str | None = None
     processName: str | None = None
     processManager: str | None = None
+    rootPath: str | None = None
 
 
 class PublicRouteRequest(BaseModel):
@@ -649,6 +650,16 @@ def _curl_public_route(server_name: str, path: str = "/") -> dict:
 
 def _pm2_restart_count(process_name: str) -> int | None:
     """Return the PM2 restart count for process_name, or None if not found / error."""
+    proc = _pm2_process(process_name)
+    if proc is None:
+        return None
+    try:
+        return int(proc.get("pm2_env", {}).get("restart_time", 0))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _pm2_process(process_name: str) -> dict | None:
     result = run_command(["pm2", "jlist"])
     if result.get("returncode") != 0:
         return None
@@ -656,15 +667,50 @@ def _pm2_restart_count(process_name: str) -> int | None:
         processes = json.loads(result.get("stdout") or "[]")
         for proc in processes:
             if proc.get("name") == process_name:
-                return int(proc.get("pm2_env", {}).get("restart_time", 0))
-    except (json.JSONDecodeError, ValueError, AttributeError):
+                return proc
+    except (json.JSONDecodeError, AttributeError):
         pass
+    return None
+
+
+def _pm2_process_mismatch(body: HealthRequest) -> str | None:
+    if not body.processName or (body.processManager or "").upper() != "PM2":
+        return None
+    proc = _pm2_process(body.processName)
+    if proc is None:
+        return f"PM2 process '{body.processName}' was not found after start."
+
+    pm2_env = proc.get("pm2_env", {})
+    status = pm2_env.get("status")
+    if status and status != "online":
+        return f"PM2 process '{body.processName}' is {status}, not online."
+
+    env_port = (pm2_env.get("env") or {}).get("PORT") or pm2_env.get("PORT")
+    if env_port is not None and str(env_port) != str(body.port):
+        return f"PM2 process '{body.processName}' is bound to PORT={env_port}, expected {body.port}."
+
+    if body.rootPath:
+        expected = str(Path(body.rootPath).resolve())
+        actual_raw = pm2_env.get("pm_cwd") or (pm2_env.get("env") or {}).get("PWD")
+        if actual_raw and str(Path(str(actual_raw)).resolve()) != expected:
+            return f"PM2 process '{body.processName}' cwd is {actual_raw}, expected {expected}."
+
     return None
 
 
 @router.post("/health")
 def health(body: HealthRequest) -> dict:
     url = body.healthUrl or f"http://127.0.0.1:{body.port}/"
+
+    mismatch = _pm2_process_mismatch(body)
+    if mismatch:
+        return {
+            "dryRun": False,
+            "command": ["pm2", "verify", body.processName or ""],
+            "returncode": 1,
+            "stdout": "",
+            "stderr": mismatch,
+        }
 
     # Phase 1: wait for the process to bind (with retries for connection refused).
     first = _curl_once(url)

@@ -17,6 +17,13 @@ type DeployJobData = {
 
 type DeployStep = "PREFLIGHT" | "CLONING" | "INSTALLING" | "MIGRATING" | "BUILDING" | "CONFIGURING_PROXY" | "STARTING" | "HEALTH_CHECK" | "SUCCEEDED" | "FAILED" | "ROLLBACK";
 const buildLogRetentionMs = 24 * 60 * 60 * 1000;
+const deploymentWorkerInclude = Prisma.validator<Prisma.DeploymentInclude>()({
+  domain: true,
+  domainBindings: { include: { domain: true }, orderBy: [{ role: "asc" }, { createdAt: "asc" }] },
+  env: true
+});
+
+type DeploymentWithWorkerRelations = Prisma.DeploymentGetPayload<{ include: typeof deploymentWorkerInclude }>;
 
 const defaultProcessManagerByFramework: Record<DeploymentFramework, DeploymentProcessManager> = {
   LARAVEL: "SUPERVISOR",
@@ -43,6 +50,82 @@ async function writeLog(deploymentId: string, releaseId: string | undefined, ste
 
 function deploymentLogDir(slug: string) {
   return `${env.DEPLOYMENT_LOG_ROOT.replace(/\/+$/, "")}/${slug}`;
+}
+
+function deploymentPortRange() {
+  const start = env.DEPLOYMENT_PORT_START;
+  const end = env.DEPLOYMENT_PORT_END;
+  if (start > end) {
+    throw new Error("DEPLOYMENT_PORT_START must be lower than or equal to DEPLOYMENT_PORT_END");
+  }
+  return { start, end };
+}
+
+function reservedDeploymentPorts() {
+  const ports = new Set<number>();
+  for (const rawPort of env.DEPLOYMENT_RESERVED_PORTS.split(",")) {
+    const port = Number(rawPort.trim());
+    if (Number.isInteger(port) && port > 0 && port <= 65535) ports.add(port);
+  }
+
+  ports.add(env.PANEL_PORT);
+  const loginPort = Number(env.PANEL_LOGIN_PORT ?? 2083);
+  if (Number.isInteger(loginPort) && loginPort > 0 && loginPort <= 65535) ports.add(loginPort);
+  return ports;
+}
+
+function deploymentPortPolicyError(port: number) {
+  const { start, end } = deploymentPortRange();
+  if (port < start || port > end) {
+    return `Deployment port ${port} is outside the managed project range ${start}-${end}`;
+  }
+  if (reservedDeploymentPorts().has(port)) {
+    return `Deployment port ${port} is reserved for panel or system services`;
+  }
+  return null;
+}
+
+async function nextAvailableDeploymentPort(excludeDeploymentId?: string) {
+  const deployments = await prisma.deployment.findMany({
+    where: excludeDeploymentId ? { id: { not: excludeDeploymentId } } : undefined,
+    select: { port: true },
+    orderBy: { port: "asc" }
+  });
+  const used = new Set(deployments.map((deployment) => deployment.port));
+  const reserved = reservedDeploymentPorts();
+  const { start, end } = deploymentPortRange();
+  for (let port = start; port <= end; port += 1) {
+    if (!used.has(port) && !reserved.has(port)) return port;
+  }
+  throw new Error(`No available deployment ports in ${start}-${end}`);
+}
+
+async function ensureManagedDeploymentPort(deployment: DeploymentWithWorkerRelations, releaseId: string | undefined) {
+  const policyError = deploymentPortPolicyError(deployment.port);
+  const owner = await prisma.deployment.findFirst({
+    where: {
+      port: deployment.port,
+      id: { not: deployment.id }
+    },
+    select: { id: true, name: true, slug: true, port: true }
+  });
+
+  if (!policyError && !owner) return deployment;
+
+  const previousPort = deployment.port;
+  const nextPort = await nextAvailableDeploymentPort(deployment.id);
+  const reason = policyError ?? `already used by ${owner?.name ?? owner?.slug ?? "another deployment"}`;
+  await writeLog(deployment.id, releaseId, "PREFLIGHT", `Port ${previousPort} is ${reason}; reassigned to ${nextPort}`, {
+    previousPort,
+    nextPort,
+    owner
+  }, "warn");
+
+  return prisma.deployment.update({
+    where: { id: deployment.id },
+    data: { port: nextPort },
+    include: deploymentWorkerInclude
+  });
 }
 
 async function pruneBuildLogs(deploymentId: string) {
@@ -261,7 +344,10 @@ function assertCommandTree(result: unknown, label: string) {
 }
 
 async function processLifecycleAction(action: string, deploymentId: string, releaseId: string | undefined) {
-  const deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: { domain: true, domainBindings: { include: { domain: true }, orderBy: [{ role: "asc" }, { createdAt: "asc" }] }, env: true } });
+  let deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: deploymentWorkerInclude });
+  if (action !== "stop") {
+    deployment = await ensureManagedDeploymentPort(deployment, releaseId);
+  }
   const envVars = await resolveEnvVars(deployment.env);
   const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
   const processAction = action === "redeploy" || action === "deploy" ? "start" : action;
@@ -309,13 +395,14 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
   }
 
   const health = await runStep(deployment.id, releaseId, "HEALTH_CHECK", `${action} health check`, () =>
-    sysagent.deploymentHealth({
-      deploymentId: deployment.id,
-      port: deployment.port,
-      healthUrl: deployment.healthUrl,
-      processName: deployment.slug,
-      processManager
-    })
+      sysagent.deploymentHealth({
+        deploymentId: deployment.id,
+        port: deployment.port,
+        healthUrl: deployment.healthUrl,
+        processName: deployment.slug,
+        processManager,
+        rootPath: appPath
+      })
   );
   await assertHealthResult(health, `${action} health check`, deployment);
 
@@ -332,12 +419,13 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
 
 async function processDeploy(action: string, deploymentId: string, releaseId: string | undefined) {
   const startedAt = new Date();
-  let deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: { domain: true, domainBindings: { include: { domain: true }, orderBy: [{ role: "asc" }, { createdAt: "asc" }] }, env: true } });
+  let deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: deploymentWorkerInclude });
   await resetBuildLogs(deployment.id);
   await markRelease(releaseId, "RUNNING", startedAt);
   await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "DEPLOYING" } });
 
   try {
+    deployment = await ensureManagedDeploymentPort(deployment, releaseId);
     await runStep(deployment.id, releaseId, "PREFLIGHT", "Preflight", async () => ({
       rootPath: deployment.rootPath,
       port: deployment.port,
@@ -376,7 +464,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         outputDirectory: detection.suggestions.outputDirectory,
         processManager: detection.suggestions.processManager
       },
-      include: { domain: true, domainBindings: { include: { domain: true }, orderBy: [{ role: "asc" }, { createdAt: "asc" }] }, env: true }
+      include: deploymentWorkerInclude
     });
 
     if (deployment.processManager === "NONE" && deployment.framework !== "STATIC") {
@@ -476,7 +564,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         port: deployment.port,
         healthUrl: deployment.healthUrl,
         processName: deployment.slug,
-        processManager
+        processManager,
+        rootPath: appPath
       })
     );
     await assertHealthResult(health, "Health check", deployment);
