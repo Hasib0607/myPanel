@@ -50,6 +50,7 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
       serverName: `${domainName} www.${domainName}`,
       upstreamPort: deployment.port,
       rootPath: deployment.rootPath,
+      fallbackRootPath: `${env.FILE_MANAGER_ROOT}/${domainName}/${domain.documentRoot || "public_html"}`,
       forceSsl: forceHttps,
       requireSsl: true,
       ...certificatePaths(domainName)

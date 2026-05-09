@@ -70,6 +70,7 @@ class NginxRequest(BaseModel):
     serverName: str | None = None
     upstreamPort: int = Field(ge=1, le=65535)
     rootPath: str
+    fallbackRootPath: str | None = None
     forceSsl: bool = True
     sslCertificate: str | None = None
     sslCertificateKey: str | None = None
@@ -497,6 +498,7 @@ def nginx(body: NginxRequest) -> dict:
 
     server_name = body.serverName
     config_name = nginx_config_name(body.deploymentId, server_name)
+    fallback_root = safe_web_root(body.fallbackRootPath) if body.fallbackRootPath else None
     ssl_certificate = safe_letsencrypt_path(body.sslCertificate) if body.sslCertificate else None
     ssl_certificate_key = safe_letsencrypt_path(body.sslCertificateKey) if body.sslCertificateKey else None
     has_ssl = ssl_certificate is not None and ssl_certificate_key is not None
@@ -505,6 +507,18 @@ def nginx(body: NginxRequest) -> dict:
         if body.requireSsl:
             return blocked_command("SSL certificate files do not exist yet", ["write-nginx", config_name], path_info(body.rootPath))
         has_ssl = False
+
+    fallback_location = ""
+    fallback_error_page = ""
+    if fallback_root:
+        fallback_error_page = "        proxy_intercept_errors on;\n        error_page 502 503 504 = @public_fallback;\n"
+        fallback_location = (
+            "\n"
+            "    location @public_fallback {\n"
+            f"        root {fallback_root};\n"
+            "        try_files $uri $uri/ /index.html =404;\n"
+            "    }\n"
+        )
 
     http_location = (
         f"{acme_location(server_name)}"
@@ -520,7 +534,9 @@ def nginx(body: NginxRequest) -> dict:
         "        proxy_connect_timeout 10s;\n"
         "        proxy_send_timeout 60s;\n"
         "        proxy_read_timeout 60s;\n"
+        f"{fallback_error_page}"
         "    }\n"
+        f"{fallback_location}"
     )
     if body.forceSsl and has_ssl:
         http_location = (
@@ -560,7 +576,9 @@ server {{
         proxy_connect_timeout 10s;
         proxy_send_timeout 60s;
         proxy_read_timeout 60s;
+{fallback_error_page.rstrip()}
     }}
+{fallback_location}
 }}
 """
     info = path_info(body.rootPath)

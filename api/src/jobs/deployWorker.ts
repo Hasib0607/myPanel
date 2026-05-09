@@ -126,7 +126,7 @@ function deploymentAppPath(rootPath: string, rootDirectory: string | null | unde
   return cleanRootDirectory && cleanRootDirectory !== "." ? path.join(rootPath, cleanRootDirectory) : rootPath;
 }
 
-type BoundDomain = { id: string; name: string; forceSsl: boolean };
+type BoundDomain = { id: string; name: string; forceSsl: boolean; documentRoot?: string | null };
 
 function deploymentServerName(domain: { name: string } | null | undefined) {
   if (!domain?.name) return null;
@@ -138,6 +138,12 @@ function deploymentDomain(deployment: { domain?: BoundDomain | null; domainBindi
     ?? deployment.domainBindings?.[0]?.domain
     ?? deployment.domain
     ?? null;
+}
+
+function deploymentFallbackRootPath(domain: BoundDomain | null) {
+  if (!domain?.name) return null;
+  const documentRoot = (domain.documentRoot || "public_html").replace(/^\/+|\/+$/g, "") || "public_html";
+  return path.join(env.FILE_MANAGER_ROOT, domain.name, documentRoot);
 }
 
 async function ensureDeploymentDomainProxy(deploymentId: string, domain: BoundDomain | null) {
@@ -246,6 +252,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
         serverName,
         upstreamPort: deployment.port,
         rootPath: deployment.rootPath,
+        fallbackRootPath: deploymentFallbackRootPath(domain),
         forceSsl: domain.forceSsl
       })
     );
@@ -399,6 +406,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         serverName,
         upstreamPort: deployment.port,
         rootPath: deployment.rootPath,
+        fallbackRootPath: deploymentFallbackRootPath(domain),
         forceSsl: domain?.forceSsl ?? false
       })
     );
