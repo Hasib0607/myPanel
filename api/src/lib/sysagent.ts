@@ -77,6 +77,10 @@ export const sysagent = {
     request("/database/grant", { method: "POST", body: JSON.stringify(body) }),
   databaseDelete: (body: unknown) =>
     request("/database/database", { method: "DELETE", body: JSON.stringify(body) }),
+  databaseExport: (body: unknown) =>
+    request<{ engine: string; database: string; dump: string; result: SysagentCommandResult }>("/database/export", { method: "POST", body: JSON.stringify(body) }),
+  databaseImport: (body: unknown) =>
+    request("/database/import", { method: "POST", body: JSON.stringify(body) }),
   deleteFiles: (body: unknown) =>
     request<{ ok: true; removed: string[]; dryRun?: boolean }>("/files/delete", { method: "DELETE", body: JSON.stringify(body) }),
   createFile: (body: unknown) =>

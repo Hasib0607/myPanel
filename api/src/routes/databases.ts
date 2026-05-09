@@ -31,6 +31,13 @@ const deleteSchema = z.object({
   database: identifierSchema
 });
 
+const exportSchema = deleteSchema;
+const importSchema = z.object({
+  engine: engineSchema,
+  database: identifierSchema,
+  sql: z.string().min(1).max(20_000_000)
+});
+
 function failedCommand(result: unknown) {
   const value = result as { returncode?: number; stderr?: string };
   return typeof value?.returncode === "number" && value.returncode !== 0 ? value.stderr || `exit ${value.returncode}` : null;
@@ -106,6 +113,36 @@ export const databaseRoutes: FastifyPluginAsync = async (app) => {
       resource: "database",
       resourceId: body.database,
       description: `Deleted ${body.engine} database ${body.database}`
+    });
+    return result;
+  });
+
+  app.post("/export", async (request) => {
+    const body = exportSchema.parse(request.body);
+    const result = await sysagent.databaseExport(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Database export");
+    await audit(request, {
+      action: "APPLY",
+      resource: "database",
+      resourceId: body.database,
+      description: `Exported ${body.engine} database ${body.database}`
+    });
+    return {
+      engine: result.engine,
+      database: result.database,
+      dump: result.dump
+    };
+  });
+
+  app.post("/import", async (request) => {
+    const body = importSchema.parse(request.body);
+    const result = await sysagent.databaseImport(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Database import");
+    await audit(request, {
+      action: "APPLY",
+      resource: "database",
+      resourceId: body.database,
+      description: `Imported SQL into ${body.engine} database ${body.database}`
     });
     return result;
   });

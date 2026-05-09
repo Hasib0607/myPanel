@@ -1,6 +1,8 @@
 import re
 import secrets
 import string
+import tempfile
+from pathlib import Path
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
@@ -40,6 +42,17 @@ class DatabaseDeleteRequest(BaseModel):
     database: str = Field(pattern=IDENTIFIER_PATTERN)
 
 
+class DatabaseDumpRequest(BaseModel):
+    engine: str = Field(pattern=ENGINE_PATTERN)
+    database: str = Field(pattern=IDENTIFIER_PATTERN)
+
+
+class DatabaseImportRequest(BaseModel):
+    engine: str = Field(pattern=ENGINE_PATTERN)
+    database: str = Field(pattern=IDENTIFIER_PATTERN)
+    sql: str = Field(min_length=1, max_length=20_000_000)
+
+
 def sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
@@ -67,6 +80,12 @@ def postgres_psql(sql: str) -> dict:
 
 def mysql_exec(sql: str) -> dict:
     return run_command(["mysql", "-NBe", sql])
+
+
+def write_temp_sql(sql: str) -> str:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".sql", prefix="vps-panel-db-", delete=False) as handle:
+        handle.write(sql)
+        return handle.name
 
 
 def postgres_overview() -> dict:
@@ -180,3 +199,25 @@ def delete_database(body: DatabaseDeleteRequest) -> dict:
     else:
         result = mysql_exec(f"DROP DATABASE IF EXISTS {mysql_identifier(body.database)};")
     return {"engine": body.engine, "database": body.database, "result": result}
+
+
+@router.post("/export")
+def export_database(body: DatabaseDumpRequest) -> dict:
+    if body.engine == "POSTGRESQL":
+        result = run_command(["sudo", "-u", "postgres", "pg_dump", "--clean", "--if-exists", "--no-owner", "--no-privileges", body.database], timeout=300)
+    else:
+        result = run_command(["mysqldump", "--single-transaction", "--routines", "--triggers", body.database], timeout=300)
+    return {"engine": body.engine, "database": body.database, "dump": result.get("stdout") or "", "result": result}
+
+
+@router.post("/import")
+def import_database(body: DatabaseImportRequest) -> dict:
+    path = write_temp_sql(body.sql)
+    try:
+        if body.engine == "POSTGRESQL":
+            result = run_command(["sudo", "-u", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-d", body.database, "-f", path], timeout=300)
+        else:
+            result = run_command(["mysql", body.database, "-e", f"source {path}"], timeout=300)
+        return {"engine": body.engine, "database": body.database, "result": result}
+    finally:
+        Path(path).unlink(missing_ok=True)
