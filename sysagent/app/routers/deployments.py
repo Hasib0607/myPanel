@@ -5,12 +5,12 @@ import base64
 import time
 from pathlib import Path
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.command import run_command
 from app.config import settings
-from app.nginx_manager import acme_location, publish_nginx_config, safe_letsencrypt_path
+from app.nginx_manager import acme_location, publish_nginx_config, safe_letsencrypt_path, safe_web_root
 
 router = APIRouter()
 
@@ -489,74 +489,75 @@ def process(body: ProcessRequest) -> dict:
 
 @router.post("/nginx")
 def nginx(body: NginxRequest) -> dict:
-    if not body.serverName:
-        return {
-            "skipped": True,
-            "reason": "No domain/serverName linked to deployment",
-            "serverName": None,
-        }
+    try:
+        if not body.serverName:
+            return {
+                "skipped": True,
+                "reason": "No domain/serverName linked to deployment",
+                "serverName": None,
+            }
 
-    server_name = body.serverName
-    config_name = nginx_config_name(body.deploymentId, server_name)
-    fallback_root = safe_web_root(body.fallbackRootPath) if body.fallbackRootPath else None
-    ssl_certificate = safe_letsencrypt_path(body.sslCertificate) if body.sslCertificate else None
-    ssl_certificate_key = safe_letsencrypt_path(body.sslCertificateKey) if body.sslCertificateKey else None
-    has_ssl = ssl_certificate is not None and ssl_certificate_key is not None
+        server_name = body.serverName
+        config_name = nginx_config_name(body.deploymentId, server_name)
+        fallback_root = safe_web_root(body.fallbackRootPath) if body.fallbackRootPath else None
+        ssl_certificate = safe_letsencrypt_path(body.sslCertificate) if body.sslCertificate else None
+        ssl_certificate_key = safe_letsencrypt_path(body.sslCertificateKey) if body.sslCertificateKey else None
+        has_ssl = ssl_certificate is not None and ssl_certificate_key is not None
 
-    if has_ssl and settings.allow_live_nginx and (not ssl_certificate.exists() or not ssl_certificate_key.exists()):
-        if body.requireSsl:
-            return blocked_command("SSL certificate files do not exist yet", ["write-nginx", config_name], path_info(body.rootPath))
-        has_ssl = False
+        if has_ssl and settings.allow_live_nginx and (not ssl_certificate.exists() or not ssl_certificate_key.exists()):
+            if body.requireSsl:
+                return blocked_command("SSL certificate files do not exist yet", ["write-nginx", config_name], path_info(body.rootPath))
+            has_ssl = False
 
-    fallback_location = ""
-    fallback_error_page = ""
-    if fallback_root:
-        fallback_error_page = "        proxy_intercept_errors on;\n        error_page 502 503 504 = @public_fallback;\n"
-        fallback_location = (
-            "\n"
-            "    location @public_fallback {\n"
-            f"        root {fallback_root};\n"
-            "        try_files $uri $uri/ /index.html =404;\n"
-            "    }\n"
-        )
+        fallback_location = ""
+        fallback_error_page = ""
+        if fallback_root:
+            fallback_error_page = "        proxy_intercept_errors on;\n        error_page 502 503 504 = @public_fallback;\n"
+            fallback_location = (
+                "\n"
+                "    location @public_fallback {\n"
+                f"        root {fallback_root};\n"
+                "        try_files $uri $uri/ /index.html =404;\n"
+                "    }\n"
+            )
 
-    http_location = (
-        f"{acme_location(server_name)}"
-        "    location / {\n"
-        f"        proxy_pass http://127.0.0.1:{body.upstreamPort};\n"
-        "        proxy_http_version 1.1;\n"
-        "        proxy_set_header Host $host;\n"
-        "        proxy_set_header X-Forwarded-Host $host;\n"
-        "        proxy_set_header X-Forwarded-Port $server_port;\n"
-        "        proxy_set_header X-Real-IP $remote_addr;\n"
-        "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
-        "        proxy_set_header X-Forwarded-Proto $scheme;\n"
-        "        proxy_set_header Upgrade $http_upgrade;\n"
-        "        proxy_set_header Connection \"upgrade\";\n"
-        "        proxy_connect_timeout 10s;\n"
-        "        proxy_send_timeout 60s;\n"
-        "        proxy_read_timeout 60s;\n"
-        f"{fallback_error_page}"
-        "    }\n"
-        f"{fallback_location}"
-    )
-    if body.forceSsl and has_ssl:
         http_location = (
             f"{acme_location(server_name)}"
             "    location / {\n"
-            "        return 301 https://$host$request_uri;\n"
+            f"        proxy_pass http://127.0.0.1:{body.upstreamPort};\n"
+            "        proxy_http_version 1.1;\n"
+            "        proxy_set_header Host $host;\n"
+            "        proxy_set_header X-Forwarded-Host $host;\n"
+            "        proxy_set_header X-Forwarded-Port $server_port;\n"
+            "        proxy_set_header X-Real-IP $remote_addr;\n"
+            "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+            "        proxy_set_header X-Forwarded-Proto $scheme;\n"
+            "        proxy_set_header Upgrade $http_upgrade;\n"
+            "        proxy_set_header Connection \"upgrade\";\n"
+            "        proxy_connect_timeout 10s;\n"
+            "        proxy_send_timeout 60s;\n"
+            "        proxy_read_timeout 60s;\n"
+            f"{fallback_error_page}"
             "    }\n"
+            f"{fallback_location}"
         )
+        if body.forceSsl and has_ssl:
+            http_location = (
+                f"{acme_location(server_name)}"
+                "    location / {\n"
+                "        return 301 https://$host$request_uri;\n"
+                "    }\n"
+            )
 
-    config = f"""
+        config = f"""
 server {{
     listen 80;
     server_name {server_name};
 
 {http_location}}}
 """.lstrip()
-    if has_ssl:
-        config += f"""
+        if has_ssl:
+            config += f"""
 
 server {{
     listen 443 ssl http2;
@@ -585,15 +586,19 @@ server {{
 {fallback_location}
 }}
 """
-    info = path_info(body.rootPath)
-    if not info["allowed"] and settings.allow_live_nginx:
-        return blocked_command("Path escapes configured file manager root", ["write-nginx", config_name], info)
-    result = publish_nginx_config(config_name, config, "/etc/nginx/sites-available", "/etc/nginx/sites-enabled", server_name=server_name)
-    return {
-        **result,
-        "path": info,
-        "serverName": server_name,
-    }
+        info = path_info(body.rootPath)
+        if not info["allowed"] and settings.allow_live_nginx:
+            return blocked_command("Path escapes configured file manager root", ["write-nginx", config_name], info)
+        result = publish_nginx_config(config_name, config, "/etc/nginx/sites-available", "/etc/nginx/sites-enabled", server_name=server_name)
+        return {
+            **result,
+            "path": info,
+            "serverName": server_name,
+        }
+    except HTTPException:
+        raise
+    except Exception as error:
+        return blocked_command(f"Nginx deployment vhost failed: {error}", ["write-nginx", body.serverName or body.deploymentId], path_info(body.rootPath))
 
 
 def _curl_once(url: str) -> dict:
