@@ -146,6 +146,31 @@ function deploymentFallbackRootPath(domain: BoundDomain | null) {
   return path.join(env.FILE_MANAGER_ROOT, domain.name, documentRoot);
 }
 
+function deploymentPublicEnv(domain: BoundDomain | null) {
+  if (!domain?.name) return {};
+  const url = `https://${domain.name}`;
+  return {
+    APP_URL: url,
+    AUTH_URL: url,
+    BASE_URL: url,
+    NEXTAUTH_URL: url,
+    NEXT_PUBLIC_APP_URL: url,
+    NEXT_PUBLIC_BASE_URL: url,
+    NEXT_PUBLIC_SITE_URL: url,
+    PUBLIC_URL: url,
+    SITE_URL: url,
+    URL: url,
+    VERCEL_URL: domain.name
+  };
+}
+
+function deploymentEnvWithPublicUrl(envVars: Record<string, string>, domain: BoundDomain | null) {
+  return {
+    ...deploymentPublicEnv(domain),
+    ...envVars
+  };
+}
+
 async function ensureDeploymentDomainProxy(deploymentId: string, domain: BoundDomain | null) {
   if (!domain) return;
   await prisma.domain.update({
@@ -242,6 +267,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
   const processAction = action === "redeploy" || action === "deploy" ? "start" : action;
   const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
   const domain = deploymentDomain(deployment);
+  const runtimeEnvVars = deploymentEnvWithPublicUrl(envVars, domain);
 
   if (processAction !== "stop" && domain) {
     await ensureDeploymentDomainProxy(deployment.id, domain);
@@ -271,7 +297,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
       processManager,
       startCommand: renderStartCommand(deployment),
       port: deployment.port,
-      env: envVars,
+      env: runtimeEnvVars,
       logDir: deploymentLogDir(deployment.slug)
     })
   );
@@ -357,8 +383,9 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       throw new Error(`No runnable start command found for ${deployment.slug}. Add a package.json start script or set a manual start command.`);
     }
 
-    const envVars = await resolveEnvVars(deployment.env);
     const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
+    const domain = deploymentDomain(deployment);
+    const envVars = deploymentEnvWithPublicUrl(await resolveEnvVars(deployment.env), domain);
 
     if (deployment.installCommand || deployment.packageManager) {
       await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "BUILDING" } });
@@ -397,7 +424,6 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       assertCommandTree(buildResult, "Build");
     }
 
-    const domain = deploymentDomain(deployment);
     await ensureDeploymentDomainProxy(deployment.id, domain);
     const serverName = deploymentServerName(domain);
     const nginxResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config", () =>
