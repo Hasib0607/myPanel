@@ -364,6 +364,24 @@ async function assertPublicRouteResult(result: unknown, label: string, deploymen
   throw new Error(`${message}${domainHint}${runtimeText}`);
 }
 
+async function optionalPublicRouteWarning(deploymentId: string, releaseId: string | undefined, label: string, deployment: { slug: string; domain?: BoundDomain | null }) {
+  const domain = deployment.domain;
+  if (!domain) return null;
+
+  const publicRoute = await runStep(deploymentId, releaseId, "HEALTH_CHECK", label, () =>
+    sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain) })
+  );
+
+  try {
+    await assertPublicRouteResult(publicRoute, label, deployment);
+    return null;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Public route check failed";
+    await writeLog(deploymentId, releaseId, "HEALTH_CHECK", `${label} warning`, { warning: message }, "warn");
+    return message;
+  }
+}
+
 function githubTokenSecretRef() {
   return "github:superadmin:token";
 }
@@ -464,15 +482,11 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
   );
   await assertHealthResult(health, `${action} health check`, deployment);
 
-  if (domain) {
-    const publicRoute = await runStep(deployment.id, releaseId, "HEALTH_CHECK", `${action} public website check`, () =>
-      sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain) })
-    );
-    await assertPublicRouteResult(publicRoute, `${action} public website check`, { ...deployment, domain });
-  }
+  const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, `${action} public website check`, { ...deployment, domain });
 
-  await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "RUNNING", healthStatus: "HEALTHY", lastHealthCheckAt: new Date() } });
-  return { result, health, status: "RUNNING", healthStatus: "HEALTHY" };
+  const healthStatus = publicRouteWarning ? "DEGRADED" : "HEALTHY";
+  await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "RUNNING", healthStatus, lastHealthCheckAt: new Date() } });
+  return { result, health, status: "RUNNING", healthStatus, publicRouteWarning };
 }
 
 async function processDeploy(action: string, deploymentId: string, releaseId: string | undefined) {
@@ -628,25 +642,21 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     );
     await assertHealthResult(health, "Health check", deployment);
 
-    if (domain) {
-      const publicRoute = await runStep(deployment.id, releaseId, "HEALTH_CHECK", "Public website check", () =>
-        sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain) })
-      );
-      await assertPublicRouteResult(publicRoute, "Public website check", { ...deployment, domain });
-    }
+    const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, "Public website check", { ...deployment, domain });
 
     await markRelease(releaseId, action === "rollback" ? "ROLLED_BACK" : "SUCCEEDED", startedAt);
+    const healthStatus = publicRouteWarning ? "DEGRADED" : "HEALTHY";
     await prisma.deployment.update({
       where: { id: deployment.id },
       data: {
         status: "RUNNING",
-        healthStatus: "HEALTHY",
+        healthStatus,
         lastHealthCheckAt: new Date(),
         lastDeployAt: new Date()
       }
     });
-    await writeLog(deployment.id, releaseId, action === "rollback" ? "ROLLBACK" : "SUCCEEDED", `${action} completed`, { dryRun: false });
-    return { dryRun: false, completed: true, status: "RUNNING", healthStatus: "HEALTHY" };
+    await writeLog(deployment.id, releaseId, action === "rollback" ? "ROLLBACK" : "SUCCEEDED", `${action} completed`, { dryRun: false, publicRouteWarning });
+    return { dryRun: false, completed: true, status: "RUNNING", healthStatus, publicRouteWarning };
   } catch (error) {
     await markRelease(releaseId, "FAILED", startedAt);
     await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "FAILED", healthStatus: "DOWN" } });
