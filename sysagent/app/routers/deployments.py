@@ -187,7 +187,7 @@ def guarded_deployment_command(root_path: str, command: str, env: dict[str, str]
 
 
 def pm2_env(port: int | None) -> dict[str, str]:
-    env = {"HOST": "127.0.0.1", "HOSTNAME": "127.0.0.1"}
+    env = {}
     if port:
         env["PORT"] = str(port)
     return env
@@ -526,6 +526,8 @@ def nginx(body: NginxRequest) -> dict:
         f"        proxy_pass http://127.0.0.1:{body.upstreamPort};\n"
         "        proxy_http_version 1.1;\n"
         "        proxy_set_header Host $host;\n"
+        "        proxy_set_header X-Forwarded-Host $host;\n"
+        "        proxy_set_header X-Forwarded-Port $server_port;\n"
         "        proxy_set_header X-Real-IP $remote_addr;\n"
         "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
         "        proxy_set_header X-Forwarded-Proto $scheme;\n"
@@ -568,6 +570,8 @@ server {{
         proxy_pass http://127.0.0.1:{body.upstreamPort};
         proxy_http_version 1.1;
         proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Port $server_port;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
@@ -612,17 +616,30 @@ def _curl_once(url: str) -> dict:
 def _curl_public_route(server_name: str, path: str = "/") -> dict:
     primary = server_name.split()[0].strip()
     clean_path = path if path.startswith("/") else f"/{path}"
-    return run_command([
+    result = run_command([
         "curl",
-        "-fsS",
+        "-fsSL",
         "--retry", "5",
         "--retry-delay", "2",
         "--retry-connrefused",
         "--connect-timeout", "5",
         "--max-time", "30",
-        "-H", f"Host: {primary}",
-        f"http://127.0.0.1{clean_path}",
+        "--resolve", f"{primary}:80:127.0.0.1",
+        "--resolve", f"{primary}:443:127.0.0.1",
+        "-w", "\n__effective_url=%{url_effective}",
+        f"http://{primary}{clean_path}",
     ])
+    stdout = result.get("stdout") or ""
+    marker = "\n__effective_url="
+    effective_url = stdout.rsplit(marker, 1)[1].strip() if marker in stdout else ""
+    if effective_url and re.search(r"https?://(localhost|127\.0\.0\.1)(:\d+)?(/|$)", effective_url):
+        result["returncode"] = 1
+        result["stderr"] = (
+            f"Public route resolved to internal URL {effective_url}. "
+            "The app is generating localhost redirects; redeploy after clearing HOST/HOSTNAME env or set the app public URL to the domain."
+        )
+    result["effectiveUrl"] = effective_url
+    return result
 
 
 def _pm2_restart_count(process_name: str) -> int | None:
