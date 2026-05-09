@@ -3,7 +3,7 @@
 import type React from "react";
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, Database, Download, KeyRound, Plus, RefreshCw, ShieldCheck, Trash2, Upload, UserRound } from "lucide-react";
+import { Columns3, Copy, Database, Download, Eye, KeyRound, Plus, RefreshCw, ShieldCheck, Table2, Trash2, Upload, UserRound } from "lucide-react";
 import { apiDeleteBody, apiGet, apiPost } from "@/lib/api";
 
 type Engine = "POSTGRESQL" | "MYSQL";
@@ -20,6 +20,11 @@ type EngineOverview = {
 type DatabaseOverview = { engines: EngineOverview[] };
 type CredentialResult = { engine: Engine; database?: string; username: string; password?: string; result: unknown };
 type ExportResult = { engine: Engine; database: string; dump: string };
+type TableListResult = { engine: Engine; database: string; tables: string[] };
+type ColumnListResult = { engine: Engine; database: string; table: string; columns: Array<{ name: string; type: string; nullable: string }> };
+type RowPreviewResult = { engine: Engine; database: string; table: string; format: string; rows: string };
+type TableExportResult = { engine: Engine; database: string; table: string; dump: string };
+type TableCsvExportResult = { engine: Engine; database: string; table: string; format: string; content: string };
 
 const engines: Engine[] = ["POSTGRESQL", "MYSQL"];
 const initialForm = { engine: "POSTGRESQL" as Engine, database: "", username: "", password: "" };
@@ -33,6 +38,20 @@ async function copyText(value: string, setNotice: (value: string) => void) {
   setNotice("Copied.");
 }
 
+function downloadText(filename: string, content: string, type: string) {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const [name, ...rest] = filename.split(".");
+  anchor.href = url;
+  anchor.download = `${name}-${stamp}${rest.length ? `.${rest.join(".")}` : ""}`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
 export function DatabasesClient() {
   const queryClient = useQueryClient();
   const [notice, setNotice] = useState("");
@@ -40,6 +59,10 @@ export function DatabasesClient() {
   const [grant, setGrant] = useState(initialForm);
   const [passwordForm, setPasswordForm] = useState({ engine: "POSTGRESQL" as Engine, username: "", password: "" });
   const [transfer, setTransfer] = useState({ engine: "POSTGRESQL" as Engine, database: "", sql: "" });
+  const [tableTools, setTableTools] = useState({ engine: "POSTGRESQL" as Engine, database: "", table: "", content: "", format: "SQL" as "SQL" | "CSV" });
+  const [tables, setTables] = useState<string[]>([]);
+  const [columns, setColumns] = useState<ColumnListResult["columns"]>([]);
+  const [rowPreview, setRowPreview] = useState("");
   const [lastSecret, setLastSecret] = useState<CredentialResult | null>(null);
 
   const overview = useQuery({
@@ -95,16 +118,7 @@ export function DatabasesClient() {
   const exportDatabase = useMutation({
     mutationFn: () => apiPost<ExportResult>("/databases/export", { engine: transfer.engine, database: transfer.database }),
     onSuccess: (result) => {
-      const blob = new Blob([result.dump], { type: "application/sql;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      anchor.href = url;
-      anchor.download = `${result.database}-${stamp}.sql`;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      URL.revokeObjectURL(url);
+      downloadText(`${result.database}.sql`, result.dump, "application/sql;charset=utf-8");
       setNotice(`${result.database} exported.`);
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not export database")
@@ -118,6 +132,63 @@ export function DatabasesClient() {
       await refresh();
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not import database")
+  });
+
+  const listTables = useMutation({
+    mutationFn: () => apiPost<TableListResult>("/databases/tables", { engine: tableTools.engine, database: tableTools.database }),
+    onSuccess: (result) => {
+      setTables(result.tables);
+      setColumns([]);
+      setRowPreview("");
+      setNotice(`${result.tables.length} tables loaded.`);
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not list tables")
+  });
+
+  const listColumns = useMutation({
+    mutationFn: () => apiPost<ColumnListResult>("/databases/columns", tableTools),
+    onSuccess: (result) => {
+      setColumns(result.columns);
+      setNotice(`${result.table} columns loaded.`);
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not list columns")
+  });
+
+  const previewRows = useMutation({
+    mutationFn: () => apiPost<RowPreviewResult>("/databases/rows", { ...tableTools, limit: 50, offset: 0 }),
+    onSuccess: (result) => {
+      setRowPreview(result.rows);
+      setNotice(`${result.table} row preview loaded.`);
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not preview rows")
+  });
+
+  const exportTableSql = useMutation({
+    mutationFn: () => apiPost<TableExportResult>("/databases/table/export", tableTools),
+    onSuccess: (result) => {
+      downloadText(`${result.database}.${result.table}.sql`, result.dump, "application/sql;charset=utf-8");
+      setNotice(`${result.table} SQL exported.`);
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not export table")
+  });
+
+  const exportTableCsv = useMutation({
+    mutationFn: () => apiPost<TableCsvExportResult>("/databases/table/export-csv", tableTools),
+    onSuccess: (result) => {
+      downloadText(`${result.database}.${result.table}.${result.format === "CSV" ? "csv" : "tsv"}`, result.content, "text/plain;charset=utf-8");
+      setNotice(`${result.table} ${result.format} exported.`);
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not export rows")
+  });
+
+  const importTable = useMutation({
+    mutationFn: () => apiPost("/databases/table/import", { ...tableTools, content: tableTools.content }),
+    onSuccess: async () => {
+      setNotice(`Imported ${tableTools.format} into ${tableTools.table}.`);
+      setTableTools({ ...tableTools, content: "" });
+      await refresh();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not import table data")
   });
 
   const engineMap = useMemo(() => new Map((overview.data?.engines ?? []).map((item) => [item.engine, item])), [overview.data]);
@@ -149,22 +220,27 @@ export function DatabasesClient() {
                   <div className="border-r border-panel-line">
                     <div className="border-b border-panel-line px-4 py-2 text-xs font-semibold uppercase text-panel-muted">Databases</div>
                     {(item?.databases ?? []).map((database) => (
-                      <div className="flex items-center justify-between border-b border-panel-line px-4 py-3 last:border-b-0" key={database.name}>
+                      <div className="flex items-center justify-between gap-3 border-b border-panel-line px-4 py-3 last:border-b-0" key={database.name}>
                         <div>
                           <div className="font-mono text-sm font-semibold">{database.name}</div>
                           <div className="text-xs text-panel-muted">{database.owner ? `owner ${database.owner}` : "owner unknown"}</div>
                         </div>
-                        <button className="rounded-md border border-panel-line p-2 text-panel-danger hover:bg-red-50" onClick={() => deleteDatabase.mutate({ engine, database: database.name })} type="button" title="Delete database">
-                          <Trash2 size={15} />
-                        </button>
-                        <button
-                          className="rounded-md border border-panel-line p-2 hover:bg-slate-50"
-                          onClick={() => setTransfer({ ...transfer, engine, database: database.name })}
-                          type="button"
-                          title="Use in import/export"
-                        >
-                          <Download size={15} />
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <button
+                            className="rounded-md border border-panel-line p-2 hover:bg-slate-50"
+                            onClick={() => {
+                              setTransfer({ ...transfer, engine, database: database.name });
+                              setTableTools({ ...tableTools, engine, database: database.name });
+                            }}
+                            type="button"
+                            title="Use in tools"
+                          >
+                            <Download size={15} />
+                          </button>
+                          <button className="rounded-md border border-panel-line p-2 text-panel-danger hover:bg-red-50" onClick={() => deleteDatabase.mutate({ engine, database: database.name })} type="button" title="Delete database">
+                            <Trash2 size={15} />
+                          </button>
+                        </div>
                       </div>
                     ))}
                     {item && item.databases.length === 0 ? <div className="p-6 text-sm text-panel-muted">No app databases found.</div> : null}
@@ -242,6 +318,56 @@ export function DatabasesClient() {
             </label>
             <button className="flex h-10 w-full items-center justify-center gap-2 rounded-md bg-panel-ink text-sm font-semibold text-white disabled:opacity-60" disabled={!transfer.database || !transfer.sql.trim() || importDatabase.isPending} onClick={() => importDatabase.mutate()} type="button">
               <Upload size={15} /> {importDatabase.isPending ? "Importing..." : "Import SQL"}
+            </button>
+          </ActionPanel>
+
+          <ActionPanel icon={<Table2 size={16} />} title="Table tools">
+            <EngineSelect value={tableTools.engine} onChange={(engine) => setTableTools({ ...tableTools, engine })} />
+            <Input label="Database" value={tableTools.database} onChange={(value) => setTableTools({ ...tableTools, database: cleanIdentifier(value) })} />
+            <div className="grid grid-cols-2 gap-2">
+              <button className="flex h-9 items-center justify-center gap-2 rounded-md border border-panel-line text-sm font-medium disabled:opacity-60" disabled={!tableTools.database || listTables.isPending} onClick={() => listTables.mutate()} type="button">
+                <Table2 size={14} /> Tables
+              </button>
+              <button className="flex h-9 items-center justify-center gap-2 rounded-md border border-panel-line text-sm font-medium disabled:opacity-60" disabled={!tableTools.table || listColumns.isPending} onClick={() => listColumns.mutate()} type="button">
+                <Columns3 size={14} /> Columns
+              </button>
+            </div>
+            {tables.length ? (
+              <select className="h-9 w-full rounded-md border border-panel-line px-2 text-sm text-panel-ink" onChange={(event) => setTableTools({ ...tableTools, table: event.target.value })} value={tableTools.table}>
+                <option value="">Select table</option>
+                {tables.map((table) => <option key={table} value={table}>{table}</option>)}
+              </select>
+            ) : (
+              <Input label="Table" value={tableTools.table} onChange={(value) => setTableTools({ ...tableTools, table: cleanIdentifier(value) })} />
+            )}
+            <div className="grid grid-cols-3 gap-2">
+              <button className="flex h-9 items-center justify-center gap-1 rounded-md border border-panel-line text-xs font-medium disabled:opacity-60" disabled={!tableTools.table || previewRows.isPending} onClick={() => previewRows.mutate()} type="button">
+                <Eye size={14} /> Rows
+              </button>
+              <button className="flex h-9 items-center justify-center gap-1 rounded-md border border-panel-line text-xs font-medium disabled:opacity-60" disabled={!tableTools.table || exportTableSql.isPending} onClick={() => exportTableSql.mutate()} type="button">
+                SQL
+              </button>
+              <button className="flex h-9 items-center justify-center gap-1 rounded-md border border-panel-line text-xs font-medium disabled:opacity-60" disabled={!tableTools.table || exportTableCsv.isPending} onClick={() => exportTableCsv.mutate()} type="button">
+                CSV
+              </button>
+            </div>
+            {columns.length ? <pre className="max-h-28 overflow-auto rounded-md bg-slate-50 p-2 font-mono text-xs">{columns.map((column) => `${column.name}  ${column.type}  ${column.nullable}`).join("\n")}</pre> : null}
+            {rowPreview ? <pre className="max-h-36 overflow-auto rounded-md bg-slate-50 p-2 font-mono text-xs">{rowPreview}</pre> : null}
+            <label className="space-y-1 text-xs font-medium text-panel-muted">
+              Import format
+              <select className="h-9 w-full rounded-md border border-panel-line px-2 text-sm text-panel-ink" onChange={(event) => setTableTools({ ...tableTools, format: event.target.value as "SQL" | "CSV" })} value={tableTools.format}>
+                <option value="SQL">SQL</option>
+                <option value="CSV">CSV rows with header</option>
+              </select>
+            </label>
+            <textarea
+              className="h-32 w-full rounded-md border border-panel-line p-3 font-mono text-xs text-panel-ink"
+              onChange={(event) => setTableTools({ ...tableTools, content: event.target.value })}
+              placeholder={tableTools.format === "CSV" ? "id,name,email\n1,Alice,alice@example.com" : "Paste table SQL here"}
+              value={tableTools.content}
+            />
+            <button className="flex h-10 w-full items-center justify-center gap-2 rounded-md bg-panel-ink text-sm font-semibold text-white disabled:opacity-60" disabled={!tableTools.table || !tableTools.content.trim() || importTable.isPending} onClick={() => importTable.mutate()} type="button">
+              <Upload size={15} /> {importTable.isPending ? "Importing..." : "Import table data"}
             </button>
           </ActionPanel>
 

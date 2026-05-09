@@ -38,6 +38,22 @@ const importSchema = z.object({
   sql: z.string().min(1).max(20_000_000)
 });
 
+const tableSchema = z.object({
+  engine: engineSchema,
+  database: identifierSchema,
+  table: identifierSchema
+});
+
+const rowsSchema = tableSchema.extend({
+  limit: z.number().int().min(1).max(500).default(50),
+  offset: z.number().int().min(0).default(0)
+});
+
+const tableImportSchema = tableSchema.extend({
+  format: z.enum(["SQL", "CSV"]),
+  content: z.string().min(1).max(20_000_000)
+});
+
 function failedCommand(result: unknown) {
   const value = result as { returncode?: number; stderr?: string };
   return typeof value?.returncode === "number" && value.returncode !== 0 ? value.stderr || `exit ${value.returncode}` : null;
@@ -143,6 +159,66 @@ export const databaseRoutes: FastifyPluginAsync = async (app) => {
       resource: "database",
       resourceId: body.database,
       description: `Imported SQL into ${body.engine} database ${body.database}`
+    });
+    return result;
+  });
+
+  app.post("/tables", async (request) => {
+    const body = exportSchema.parse(request.body);
+    const result = await sysagent.databaseTables(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Table list");
+    return result;
+  });
+
+  app.post("/columns", async (request) => {
+    const body = tableSchema.parse(request.body);
+    const result = await sysagent.databaseColumns(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Column list");
+    return result;
+  });
+
+  app.post("/rows", async (request) => {
+    const body = rowsSchema.parse(request.body);
+    const result = await sysagent.databaseRows(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Row preview");
+    return result;
+  });
+
+  app.post("/table/export", async (request) => {
+    const body = tableSchema.parse(request.body);
+    const result = await sysagent.databaseTableExport(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Table export");
+    await audit(request, {
+      action: "APPLY",
+      resource: "database-table",
+      resourceId: `${body.database}.${body.table}`,
+      description: `Exported ${body.engine} table ${body.database}.${body.table}`
+    });
+    return { engine: result.engine, database: result.database, table: result.table, dump: result.dump };
+  });
+
+  app.post("/table/export-csv", async (request) => {
+    const body = tableSchema.parse(request.body);
+    const result = await sysagent.databaseTableExportCsv(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Table CSV export");
+    await audit(request, {
+      action: "APPLY",
+      resource: "database-table",
+      resourceId: `${body.database}.${body.table}`,
+      description: `Exported ${body.engine} table ${body.database}.${body.table} as ${result.format}`
+    });
+    return { engine: result.engine, database: result.database, table: result.table, format: result.format, content: result.content };
+  });
+
+  app.post("/table/import", async (request) => {
+    const body = tableImportSchema.parse(request.body);
+    const result = await sysagent.databaseTableImport(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Table import");
+    await audit(request, {
+      action: "APPLY",
+      resource: "database-table",
+      resourceId: `${body.database}.${body.table}`,
+      description: `Imported ${body.format} into ${body.engine} table ${body.database}.${body.table}`
     });
     return result;
   });

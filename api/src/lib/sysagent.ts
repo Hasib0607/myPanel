@@ -81,6 +81,18 @@ export const sysagent = {
     request<{ engine: string; database: string; dump: string; result: SysagentCommandResult }>("/database/export", { method: "POST", body: JSON.stringify(body) }),
   databaseImport: (body: unknown) =>
     request("/database/import", { method: "POST", body: JSON.stringify(body) }),
+  databaseTables: (body: unknown) =>
+    request("/database/tables", { method: "POST", body: JSON.stringify(body) }),
+  databaseColumns: (body: unknown) =>
+    request("/database/columns", { method: "POST", body: JSON.stringify(body) }),
+  databaseRows: (body: unknown) =>
+    request("/database/rows", { method: "POST", body: JSON.stringify(body) }),
+  databaseTableExport: (body: unknown) =>
+    request<{ engine: string; database: string; table: string; dump: string; result: SysagentCommandResult }>("/database/table/export", { method: "POST", body: JSON.stringify(body) }),
+  databaseTableExportCsv: (body: unknown) =>
+    request<{ engine: string; database: string; table: string; format: string; content: string; result: SysagentCommandResult }>("/database/table/export-csv", { method: "POST", body: JSON.stringify(body) }),
+  databaseTableImport: (body: unknown) =>
+    request("/database/table/import", { method: "POST", body: JSON.stringify(body) }),
   deleteFiles: (body: unknown) =>
     request<{ ok: true; removed: string[]; dryRun?: boolean }>("/files/delete", { method: "DELETE", body: JSON.stringify(body) }),
   createFile: (body: unknown) =>

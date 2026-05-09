@@ -53,6 +53,22 @@ class DatabaseImportRequest(BaseModel):
     sql: str = Field(min_length=1, max_length=20_000_000)
 
 
+class DatabaseTableRequest(BaseModel):
+    engine: str = Field(pattern=ENGINE_PATTERN)
+    database: str = Field(pattern=IDENTIFIER_PATTERN)
+    table: str = Field(pattern=IDENTIFIER_PATTERN)
+
+
+class DatabaseRowsRequest(DatabaseTableRequest):
+    limit: int = Field(default=50, ge=1, le=500)
+    offset: int = Field(default=0, ge=0)
+
+
+class DatabaseTableImportRequest(DatabaseTableRequest):
+    format: str = Field(default="SQL", pattern="^(SQL|CSV)$")
+    content: str = Field(min_length=1, max_length=20_000_000)
+
+
 def sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
@@ -85,6 +101,12 @@ def mysql_exec(sql: str) -> dict:
 def write_temp_sql(sql: str) -> str:
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".sql", prefix="vps-panel-db-", delete=False) as handle:
         handle.write(sql)
+        return handle.name
+
+
+def write_temp_content(content: str, suffix: str) -> str:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=suffix, prefix="vps-panel-db-", delete=False) as handle:
+        handle.write(content)
         return handle.name
 
 
@@ -219,5 +241,107 @@ def import_database(body: DatabaseImportRequest) -> dict:
         else:
             result = run_command(["mysql", body.database, "-e", f"source {path}"], timeout=300)
         return {"engine": body.engine, "database": body.database, "result": result}
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+@router.post("/tables")
+def list_tables(body: DatabaseDumpRequest) -> dict:
+    if body.engine == "POSTGRESQL":
+        sql = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name;"
+        result = run_command(["sudo", "-u", "postgres", "psql", "-d", body.database, "-At", "-c", sql])
+    else:
+        result = run_command(["mysql", "-NBe", "SHOW FULL TABLES WHERE Table_type = 'BASE TABLE';", body.database])
+    tables = [line.split()[0] for line in parse_lines(result.get("stdout"))]
+    return {"engine": body.engine, "database": body.database, "tables": tables, "result": result}
+
+
+@router.post("/columns")
+def list_columns(body: DatabaseTableRequest) -> dict:
+    if body.engine == "POSTGRESQL":
+        sql = (
+            "SELECT column_name || '|' || data_type || '|' || is_nullable "
+            "FROM information_schema.columns "
+            f"WHERE table_schema = 'public' AND table_name = {sql_literal(body.table)} "
+            "ORDER BY ordinal_position;"
+        )
+        result = run_command(["sudo", "-u", "postgres", "psql", "-d", body.database, "-At", "-c", sql])
+    else:
+        sql = (
+            "SELECT CONCAT(COLUMN_NAME, '|', COLUMN_TYPE, '|', IS_NULLABLE) "
+            "FROM information_schema.COLUMNS "
+            f"WHERE TABLE_SCHEMA = {sql_literal(body.database)} AND TABLE_NAME = {sql_literal(body.table)} "
+            "ORDER BY ORDINAL_POSITION;"
+        )
+        result = mysql_exec(sql)
+    columns = []
+    for line in parse_lines(result.get("stdout")):
+        name, _, rest = line.partition("|")
+        data_type, _, nullable = rest.partition("|")
+        columns.append({"name": name, "type": data_type, "nullable": nullable})
+    return {"engine": body.engine, "database": body.database, "table": body.table, "columns": columns, "result": result}
+
+
+@router.post("/rows")
+def preview_rows(body: DatabaseRowsRequest) -> dict:
+    if body.engine == "POSTGRESQL":
+        result = run_command([
+            "sudo", "-u", "postgres", "psql", "-d", body.database, "--csv",
+            "-c", f"SELECT * FROM {postgres_identifier(body.table)} LIMIT {body.limit} OFFSET {body.offset};"
+        ])
+    else:
+        result = run_command([
+            "mysql", "--batch", "--raw", "-e",
+            f"SELECT * FROM {mysql_identifier(body.table)} LIMIT {body.limit} OFFSET {body.offset};",
+            body.database,
+        ])
+    return {"engine": body.engine, "database": body.database, "table": body.table, "format": "CSV" if body.engine == "POSTGRESQL" else "TSV", "rows": result.get("stdout") or "", "result": result}
+
+
+@router.post("/table/export")
+def export_table(body: DatabaseTableRequest) -> dict:
+    if body.engine == "POSTGRESQL":
+        result = run_command(["sudo", "-u", "postgres", "pg_dump", "--clean", "--if-exists", "--no-owner", "--no-privileges", "-t", body.table, body.database], timeout=300)
+    else:
+        result = run_command(["mysqldump", "--single-transaction", "--routines", "--triggers", body.database, body.table], timeout=300)
+    return {"engine": body.engine, "database": body.database, "table": body.table, "dump": result.get("stdout") or "", "result": result}
+
+
+@router.post("/table/export-csv")
+def export_table_csv(body: DatabaseTableRequest) -> dict:
+    if body.engine == "POSTGRESQL":
+        result = run_command([
+            "sudo", "-u", "postgres", "psql", "-d", body.database, "--csv",
+            "-c", f"SELECT * FROM {postgres_identifier(body.table)};"
+        ], timeout=300)
+        content = result.get("stdout") or ""
+    else:
+        result = run_command([
+            "mysql", "--batch", "--raw", "-e", f"SELECT * FROM {mysql_identifier(body.table)};", body.database
+        ], timeout=300)
+        content = result.get("stdout") or ""
+    return {"engine": body.engine, "database": body.database, "table": body.table, "format": "CSV" if body.engine == "POSTGRESQL" else "TSV", "content": content, "result": result}
+
+
+@router.post("/table/import")
+def import_table(body: DatabaseTableImportRequest) -> dict:
+    suffix = ".csv" if body.format == "CSV" else ".sql"
+    path = write_temp_content(body.content, suffix)
+    try:
+        if body.format == "CSV":
+            if body.engine == "POSTGRESQL":
+                sql = f"\\copy {postgres_identifier(body.table)} FROM {sql_literal(path)} WITH (FORMAT csv, HEADER true);"
+                result = run_command(["sudo", "-u", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-d", body.database, "-c", sql], timeout=300)
+            else:
+                sql = (
+                    f"LOAD DATA LOCAL INFILE {sql_literal(path)} INTO TABLE {mysql_identifier(body.table)} "
+                    "FIELDS TERMINATED BY ',' ENCLOSED BY '\"' LINES TERMINATED BY '\\n' IGNORE 1 LINES;"
+                )
+                result = run_command(["mysql", "--local-infile=1", body.database, "-e", sql], timeout=300)
+        elif body.engine == "POSTGRESQL":
+            result = run_command(["sudo", "-u", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-d", body.database, "-f", path], timeout=300)
+        else:
+            result = run_command(["mysql", body.database, "-e", f"source {path}"], timeout=300)
+        return {"engine": body.engine, "database": body.database, "table": body.table, "format": body.format, "result": result}
     finally:
         Path(path).unlink(missing_ok=True)
