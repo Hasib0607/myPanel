@@ -264,7 +264,7 @@ function deploymentFallbackRootPath(domain: BoundDomain | null) {
 }
 
 function deploymentPublicEnv(domain: BoundDomain | null) {
-  if (!domain?.name) return {};
+  if (!domain?.name) return {} as Record<string, string>;
   const url = `https://${domain.name}`;
   return {
     APP_URL: url,
@@ -292,11 +292,24 @@ function deploymentPublicEnv(domain: BoundDomain | null) {
   };
 }
 
+function isLocalhostValue(value: string | null | undefined) {
+  return Boolean(value && /(^|\/\/|\.)localhost(?::\d+)?(\/|$)|(^|\/\/)127\.0\.0\.1(?::\d+)?(\/|$)|(^|\/\/)0\.0\.0\.0(?::\d+)?(\/|$)/i.test(value));
+}
+
 function deploymentEnvWithPublicUrl(envVars: Record<string, string>, domain: BoundDomain | null) {
-  return {
-    ...deploymentPublicEnv(domain),
-    ...envVars
-  };
+  const publicEnv: Record<string, string> = deploymentPublicEnv(domain);
+  const merged: Record<string, string> = { ...publicEnv, ...envVars };
+
+  if (!domain?.name) return merged;
+
+  for (const [key, publicValue] of Object.entries(publicEnv)) {
+    const currentValue = merged[key];
+    if (!currentValue || isLocalhostValue(currentValue)) {
+      merged[key] = publicValue;
+    }
+  }
+
+  return merged;
 }
 
 async function ensureDeploymentDomainProxy(deploymentId: string, domain: BoundDomain | null) {
