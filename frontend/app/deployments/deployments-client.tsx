@@ -209,6 +209,10 @@ export function DeploymentsClient() {
   const invalidateDeployments = async () => {
     await queryClient.invalidateQueries({ queryKey: ["deployments"] });
     await queryClient.invalidateQueries({ queryKey: ["deployments-next-port"] });
+    if (selected?.slug) {
+      await queryClient.invalidateQueries({ queryKey: ["deployment", selected.slug] });
+      await queryClient.invalidateQueries({ queryKey: ["deployment-env", selected.slug] });
+    }
   };
 
   const createDeployment = useMutation({
@@ -354,10 +358,12 @@ export function DeploymentsClient() {
   const saveEnv = useMutation({
     mutationFn: () => {
       if (!selected) throw new Error("Select a project first");
-      return apiPut<DeploymentEnvVar>(`/deployments/${selected.slug}/env/${encodeURIComponent(envKey)}`, { value: envValue, isSecret: envSecret });
+      const key = envKey.trim().toUpperCase();
+      if (!key) throw new Error("Enter an environment key");
+      return apiPut<DeploymentEnvVar>(`/deployments/${selected.slug}/env/${encodeURIComponent(key)}`, { value: envValue, isSecret: envSecret });
     },
     onSuccess: async () => {
-      setNotice(`${envKey} saved.`);
+      setNotice(`${envKey.trim().toUpperCase()} saved.`);
       setEnvKey("");
       setEnvValue("");
       setEnvSecret(false);
@@ -481,7 +487,7 @@ export function DeploymentsClient() {
               <div className="min-h-0 flex-1 overflow-auto p-5">
                 {activeTab === "overview" ? <OverviewPanel deployment={selected} /> : null}
                 {activeTab === "domains" ? <DomainsPanel deployment={selected} domains={domains.data?.items ?? []} domainToAdd={domainToAdd} setDomainToAdd={setDomainToAdd} addDomain={() => addDomain.mutate()} setPrimary={(binding) => setPrimaryDomain.mutate(binding)} removeDomain={(binding) => removeDomain.mutate(binding)} /> : null}
-                {activeTab === "env" ? <EnvPanel deployment={selected} envKey={envKey} envValue={envValue} envSecret={envSecret} setEnvKey={setEnvKey} setEnvValue={setEnvValue} setEnvSecret={setEnvSecret} saveEnv={() => saveEnv.mutate()} removeEnv={(key) => removeEnv.mutate(key)} /> : null}
+                {activeTab === "env" ? <EnvPanel deployment={selected} envKey={envKey} envValue={envValue} envSecret={envSecret} setEnvKey={setEnvKey} setEnvValue={setEnvValue} setEnvSecret={setEnvSecret} saveEnv={() => saveEnv.mutate()} savingEnv={saveEnv.isPending} removeEnv={(key) => removeEnv.mutate(key)} /> : null}
                 {activeTab === "settings" ? <SettingsPanel deployment={selected} deleteText={deleteText} setDeleteText={setDeleteText} onEdit={openEdit} onDelete={() => deleteProject.mutate()} deleting={deleteProject.isPending} /> : null}
               </div>
             </div>
@@ -565,8 +571,8 @@ function DomainsPanel({ deployment, domains, domainToAdd, setDomainToAdd, addDom
   return <div className="space-y-4"><div className="flex gap-2"><select className="h-10 min-w-72 rounded-md border border-panel-line px-2 text-sm" onChange={(event) => setDomainToAdd(event.target.value)} value={domainToAdd}><option value="">Select domain</option>{domains.filter((domain) => !boundIds.has(domain.id)).map((domain) => <option key={domain.id} value={domain.id}>{domain.name}</option>)}</select><button className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={!domainToAdd} onClick={addDomain} type="button"><Plus size={15} />Add domain</button></div><div className="overflow-hidden rounded-md border border-panel-line">{(deployment.domainBindings ?? []).map((binding) => <div className="flex items-center justify-between border-b border-panel-line p-3 last:border-b-0" key={binding.id}><div><div className="font-semibold">{binding.domain.name}</div><div className="text-xs text-panel-muted">{binding.role}</div></div><div className="flex gap-2"><button className="h-8 rounded-md border border-panel-line px-2 text-xs" disabled={binding.role === "primary"} onClick={() => setPrimary(binding)} type="button">Make primary</button><button className="h-8 rounded-md border border-panel-line px-2 text-xs text-panel-danger" onClick={() => removeDomain(binding)} type="button">Remove</button></div></div>)}{(deployment.domainBindings ?? []).length === 0 ? <div className="p-8 text-center text-sm text-panel-muted">No domains attached.</div> : null}</div></div>;
 }
 
-function EnvPanel({ deployment, envKey, envValue, envSecret, setEnvKey, setEnvValue, setEnvSecret, saveEnv, removeEnv }: { deployment: Deployment; envKey: string; envValue: string; envSecret: boolean; setEnvKey: (value: string) => void; setEnvValue: (value: string) => void; setEnvSecret: (value: boolean) => void; saveEnv: () => void; removeEnv: (key: string) => void }) {
-  return <div className="grid grid-cols-[1fr_360px] gap-5"><div className="overflow-hidden rounded-md border border-panel-line">{(deployment.env ?? []).map((item) => <div className="flex items-center justify-between border-b border-panel-line p-3 last:border-b-0" key={item.key}><div><div className="font-mono text-sm font-semibold">{item.key}</div><div className="mt-1 max-w-xl truncate font-mono text-xs text-panel-muted">{item.isSecret ? item.secretRef ?? "[secret]" : item.value}</div></div><button className="h-8 rounded-md border border-panel-line px-2 text-xs text-panel-danger" onClick={() => removeEnv(item.key)} type="button"><Trash2 size={13} /></button></div>)}{(deployment.env ?? []).length === 0 ? <div className="p-8 text-center text-sm text-panel-muted">No environment variables.</div> : null}</div><div className="rounded-md border border-panel-line p-4"><div className="mb-3 flex items-center gap-2 text-sm font-semibold"><KeyRound size={16} />Add env</div><div className="space-y-3"><input className="h-9 w-full rounded-md border border-panel-line px-3 font-mono text-sm" onChange={(event) => setEnvKey(event.target.value.toUpperCase())} placeholder="KEY" value={envKey} /><textarea className="h-28 w-full rounded-md border border-panel-line p-3 font-mono text-sm" onChange={(event) => setEnvValue(event.target.value)} placeholder="value" value={envValue} /><label className="flex items-center gap-2 text-sm text-panel-muted"><input checked={envSecret} onChange={(event) => setEnvSecret(event.target.checked)} type="checkbox" /> Store as secret</label><button className="h-10 w-full rounded-md bg-panel-accent text-sm font-semibold text-white disabled:opacity-60" disabled={!envKey} onClick={saveEnv} type="button">Save variable</button></div></div></div>;
+function EnvPanel({ deployment, envKey, envValue, envSecret, setEnvKey, setEnvValue, setEnvSecret, saveEnv, savingEnv, removeEnv }: { deployment: Deployment; envKey: string; envValue: string; envSecret: boolean; setEnvKey: (value: string) => void; setEnvValue: (value: string) => void; setEnvSecret: (value: boolean) => void; saveEnv: () => void; savingEnv?: boolean; removeEnv: (key: string) => void }) {
+  return <div className="grid grid-cols-[1fr_360px] gap-5"><div className="overflow-hidden rounded-md border border-panel-line">{(deployment.env ?? []).map((item) => <div className="flex items-center justify-between border-b border-panel-line p-3 last:border-b-0" key={item.key}><div><div className="font-mono text-sm font-semibold">{item.key}</div><div className="mt-1 max-w-xl truncate font-mono text-xs text-panel-muted">{item.isSecret ? item.secretRef ?? "[secret]" : item.value}</div></div><button className="h-8 rounded-md border border-panel-line px-2 text-xs text-panel-danger" onClick={() => removeEnv(item.key)} type="button"><Trash2 size={13} /></button></div>)}{(deployment.env ?? []).length === 0 ? <div className="p-8 text-center text-sm text-panel-muted">No environment variables.</div> : null}</div><div className="rounded-md border border-panel-line p-4"><div className="mb-3 flex items-center gap-2 text-sm font-semibold"><KeyRound size={16} />Add env</div><div className="space-y-3"><input className="h-9 w-full rounded-md border border-panel-line px-3 font-mono text-sm" onChange={(event) => setEnvKey(event.target.value.toUpperCase())} placeholder="KEY" value={envKey} /><textarea className="h-28 w-full rounded-md border border-panel-line p-3 font-mono text-sm" onChange={(event) => setEnvValue(event.target.value)} placeholder="value" value={envValue} /><label className="flex items-center gap-2 text-sm text-panel-muted"><input checked={envSecret} onChange={(event) => setEnvSecret(event.target.checked)} type="checkbox" /> Store as secret</label><button className="h-10 w-full rounded-md bg-panel-accent text-sm font-semibold text-white disabled:opacity-60" disabled={!envKey.trim() || savingEnv} onClick={saveEnv} type="button">{savingEnv ? "Saving..." : "Save variable"}</button></div></div></div>;
 }
 
 function SettingsPanel({ deployment, deleteText, setDeleteText, onEdit, onDelete, deleting }: { deployment: Deployment; deleteText: string; setDeleteText: (value: string) => void; onEdit: () => void; onDelete: () => void; deleting?: boolean }) {

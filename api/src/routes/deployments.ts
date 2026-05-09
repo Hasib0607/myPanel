@@ -445,7 +445,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     const [items, total] = await Promise.all([
       prisma.deployment.findMany({
         where,
-        include: { domain: true, domainBindings: { include: { domain: true }, orderBy: [{ role: "asc" }, { createdAt: "asc" }] }, releases: { orderBy: { createdAt: "desc" }, take: 1 }, _count: { select: { releases: true, logs: true, env: true } } },
+        include: { domain: true, domainBindings: { include: { domain: true }, orderBy: [{ role: "asc" }, { createdAt: "asc" }] }, env: { orderBy: { key: "asc" } }, releases: { orderBy: { createdAt: "desc" }, take: 1 }, _count: { select: { releases: true, logs: true, env: true } } },
         orderBy: { createdAt: "desc" },
         skip: (query.page - 1) * query.pageSize,
         take: query.pageSize
