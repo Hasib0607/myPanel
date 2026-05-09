@@ -84,6 +84,11 @@ class HealthRequest(BaseModel):
     processManager: str | None = None
 
 
+class PublicRouteRequest(BaseModel):
+    serverName: str
+    path: str = "/"
+
+
 class RuntimeLogsRequest(BaseModel):
     name: str
     logDir: str | None = None
@@ -586,6 +591,22 @@ def _curl_once(url: str) -> dict:
     ])
 
 
+def _curl_public_route(server_name: str, path: str = "/") -> dict:
+    primary = server_name.split()[0].strip()
+    clean_path = path if path.startswith("/") else f"/{path}"
+    return run_command([
+        "curl",
+        "-fsS",
+        "--retry", "5",
+        "--retry-delay", "2",
+        "--retry-connrefused",
+        "--connect-timeout", "5",
+        "--max-time", "30",
+        "-H", f"Host: {primary}",
+        f"http://127.0.0.1{clean_path}",
+    ])
+
+
 def _pm2_restart_count(process_name: str) -> int | None:
     """Return the PM2 restart count for process_name, or None if not found / error."""
     result = run_command(["pm2", "jlist"])
@@ -634,3 +655,8 @@ def health(body: HealthRequest) -> dict:
             return second
 
     return second
+
+
+@router.post("/public-route")
+def public_route(body: PublicRouteRequest) -> dict:
+    return _curl_public_route(body.serverName, body.path)

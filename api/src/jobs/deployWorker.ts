@@ -126,6 +126,11 @@ function deploymentAppPath(rootPath: string, rootDirectory: string | null | unde
   return cleanRootDirectory && cleanRootDirectory !== "." ? path.join(rootPath, cleanRootDirectory) : rootPath;
 }
 
+function deploymentServerName(domain: { name: string } | null | undefined) {
+  if (!domain?.name) return null;
+  return `${domain.name} www.${domain.name}`;
+}
+
 async function assertHealthResult(result: unknown, label: string, deployment: { slug: string }) {
   const message = liveResultFailureMessage(result, label);
   if (!message) return;
@@ -143,6 +148,28 @@ async function assertHealthResult(result: unknown, label: string, deployment: { 
   }
 
   throw new Error(`${message}${runtimeText}`);
+}
+
+async function assertPublicRouteResult(result: unknown, label: string, deployment: { slug: string; domain?: { name: string } | null }) {
+  const message = liveResultFailureMessage(result, label);
+  if (!message) return;
+
+  let runtimeText = "";
+  try {
+    const logs = await sysagent.deploymentRuntimeLogs({
+      name: deployment.slug,
+      logDir: deploymentLogDir(deployment.slug),
+      lines: 80
+    });
+    runtimeText = logs.text ? `\n\nRunning log tail:\n${logs.text}` : "";
+  } catch {
+    runtimeText = "";
+  }
+
+  const domainHint = deployment.domain?.name
+    ? ` The app is healthy on localhost, but Nginx cannot serve http://${deployment.domain.name}/ yet. Check Nginx vhost, DNS A record, and whether another config still owns this server_name.`
+    : "";
+  throw new Error(`${message}${domainHint}${runtimeText}`);
 }
 
 function githubTokenSecretRef() {
@@ -190,10 +217,11 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
   const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
 
   if (processAction !== "stop" && deployment.domain) {
+    const serverName = deploymentServerName(deployment.domain);
     const nginxResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config", () =>
       sysagent.deploymentNginx({
         deploymentId: deployment.id,
-        serverName: deployment.domain?.name,
+        serverName,
         upstreamPort: deployment.port,
         rootPath: deployment.rootPath,
         forceSsl: deployment.domain?.forceSsl ?? true
@@ -235,6 +263,13 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
     })
   );
   await assertHealthResult(health, `${action} health check`, deployment);
+
+  if (deployment.domain) {
+    const publicRoute = await runStep(deployment.id, releaseId, "HEALTH_CHECK", `${action} public website check`, () =>
+      sysagent.deploymentPublicRoute({ serverName: deploymentServerName(deployment) })
+    );
+    await assertPublicRouteResult(publicRoute, `${action} public website check`, deployment);
+  }
 
   await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "RUNNING", healthStatus: "HEALTHY", lastHealthCheckAt: new Date() } });
   return { result, health, status: "RUNNING", healthStatus: "HEALTHY" };
@@ -333,10 +368,11 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       assertCommandTree(buildResult, "Build");
     }
 
+    const serverName = deploymentServerName(deployment.domain);
     const nginxResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config", () =>
       sysagent.deploymentNginx({
         deploymentId: deployment.id,
-        serverName: deployment.domain?.name,
+        serverName,
         upstreamPort: deployment.port,
         rootPath: deployment.rootPath,
         forceSsl: deployment.domain?.forceSsl ?? true
@@ -386,6 +422,13 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       })
     );
     await assertHealthResult(health, "Health check", deployment);
+
+    if (deployment.domain) {
+      const publicRoute = await runStep(deployment.id, releaseId, "HEALTH_CHECK", "Public website check", () =>
+        sysagent.deploymentPublicRoute({ serverName: deploymentServerName(deployment) })
+      );
+      await assertPublicRouteResult(publicRoute, "Public website check", deployment);
+    }
 
     await markRelease(releaseId, action === "rollback" ? "ROLLED_BACK" : "SUCCEEDED", startedAt);
     await prisma.deployment.update({

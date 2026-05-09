@@ -61,6 +61,8 @@ export const sysagent = {
     request("/deployments/health", { method: "POST", body: JSON.stringify(body) }),
   deploymentRuntimeLogs: (body: unknown) =>
     request<{ ok: boolean; logDir?: string; stdout: string; stderr: string; text: string; error?: string }>("/deployments/runtime-logs", { method: "POST", body: JSON.stringify(body) }),
+  deploymentPublicRoute: (body: unknown) =>
+    request<SysagentCommandResult>("/deployments/public-route", { method: "POST", body: JSON.stringify(body) }),
   applyDnsZone: (body: unknown) =>
     request("/dns/zone/apply", { method: "POST", body: JSON.stringify(body) }),
   provisionDatabase: (body: unknown) =>
