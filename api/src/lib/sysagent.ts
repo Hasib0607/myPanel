@@ -69,6 +69,14 @@ export const sysagent = {
     request("/dns/zone/apply", { method: "POST", body: JSON.stringify(body) }),
   provisionDatabase: (body: unknown) =>
     request("/database/provision", { method: "POST", body: JSON.stringify(body) }),
+  databaseOverview: () =>
+    request("/database/overview"),
+  databasePassword: (body: unknown) =>
+    request("/database/password", { method: "POST", body: JSON.stringify(body) }),
+  databaseGrant: (body: unknown) =>
+    request("/database/grant", { method: "POST", body: JSON.stringify(body) }),
+  databaseDelete: (body: unknown) =>
+    request("/database/database", { method: "DELETE", body: JSON.stringify(body) }),
   deleteFiles: (body: unknown) =>
     request<{ ok: true; removed: string[]; dryRun?: boolean }>("/files/delete", { method: "DELETE", body: JSON.stringify(body) }),
   createFile: (body: unknown) =>

@@ -1,0 +1,112 @@
+import type { FastifyPluginAsync } from "fastify";
+import { z } from "zod";
+import { audit } from "../lib/audit.js";
+import { sysagent } from "../lib/sysagent.js";
+
+const engineSchema = z.enum(["POSTGRESQL", "MYSQL"]);
+const identifierSchema = z.string().regex(/^[a-zA-Z0-9_]+$/, "Use only letters, numbers, and underscores");
+const passwordSchema = z.string().min(12).max(256).optional();
+
+const provisionSchema = z.object({
+  engine: engineSchema,
+  database: identifierSchema,
+  username: identifierSchema,
+  password: passwordSchema
+});
+
+const passwordChangeSchema = z.object({
+  engine: engineSchema,
+  username: identifierSchema,
+  password: passwordSchema
+});
+
+const grantSchema = z.object({
+  engine: engineSchema,
+  database: identifierSchema,
+  username: identifierSchema
+});
+
+const deleteSchema = z.object({
+  engine: engineSchema,
+  database: identifierSchema
+});
+
+function failedCommand(result: unknown) {
+  const value = result as { returncode?: number; stderr?: string };
+  return typeof value?.returncode === "number" && value.returncode !== 0 ? value.stderr || `exit ${value.returncode}` : null;
+}
+
+function commandTreeFailure(result: unknown): string | null {
+  if (!result || typeof result !== "object") return null;
+  const direct = failedCommand(result);
+  if (direct) return direct;
+  for (const [key, value] of Object.entries(result as Record<string, unknown>)) {
+    if (key === "checks") continue;
+    const nested = failedCommand(value);
+    if (nested) return `${key}: ${nested}`;
+  }
+  return null;
+}
+
+function assertDatabaseResult(result: unknown, label: string) {
+  const failure = commandTreeFailure(result);
+  if (failure) throw new Error(`${label} failed: ${failure}`);
+}
+
+export const databaseRoutes: FastifyPluginAsync = async (app) => {
+  app.addHook("preHandler", app.requireAuth);
+
+  app.get("/", async () => sysagent.databaseOverview());
+
+  app.post("/", async (request) => {
+    const body = provisionSchema.parse(request.body);
+    const result = await sysagent.provisionDatabase(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Database create");
+    await audit(request, {
+      action: "CREATE",
+      resource: "database",
+      resourceId: body.database,
+      description: `Created ${body.engine} database ${body.database} and user ${body.username}`
+    });
+    return result;
+  });
+
+  app.post("/password", async (request) => {
+    const body = passwordChangeSchema.parse(request.body);
+    const result = await sysagent.databasePassword(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Database password change");
+    await audit(request, {
+      action: "UPDATE",
+      resource: "database-user",
+      resourceId: body.username,
+      description: `Changed ${body.engine} password for ${body.username}`
+    });
+    return result;
+  });
+
+  app.post("/grant", async (request) => {
+    const body = grantSchema.parse(request.body);
+    const result = await sysagent.databaseGrant(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Database grant");
+    await audit(request, {
+      action: "UPDATE",
+      resource: "database",
+      resourceId: body.database,
+      description: `Granted ${body.username} access to ${body.engine} database ${body.database}`
+    });
+    return result;
+  });
+
+  app.delete("/", async (request) => {
+    const body = deleteSchema.parse(request.body);
+    const result = await sysagent.databaseDelete(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Database delete");
+    await audit(request, {
+      action: "DELETE",
+      resource: "database",
+      resourceId: body.database,
+      description: `Deleted ${body.engine} database ${body.database}`
+    });
+    return result;
+  });
+};

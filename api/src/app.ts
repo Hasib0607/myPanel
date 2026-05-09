@@ -11,6 +11,7 @@ import { csrfCookieName, csrfHeaderName, validCsrfPair } from "./lib/csrf.js";
 import { authRoutes } from "./routes/auth.js";
 import { auditRoutes } from "./routes/audit.js";
 import { dashboardRoutes } from "./routes/dashboard.js";
+import { databaseRoutes } from "./routes/databases.js";
 import { deploymentRoutes } from "./routes/deployments.js";
 import { deploymentWebhookRoutes } from "./routes/deploymentWebhooks.js";
 import { terminalRoutes } from "./routes/terminal.js";
@@ -95,6 +96,7 @@ export function buildApp() {
   app.register(auditRoutes, { prefix: "/api/v1/audit" });
   app.register(twoFactorRoutes, { prefix: "/api/v1/auth/2fa" });
   app.register(dashboardRoutes, { prefix: "/api/v1/dashboard" });
+  app.register(databaseRoutes, { prefix: "/api/v1/databases" });
   app.register(domainRoutes, { prefix: "/api/v1/domains" });
   app.register(dnsRoutes, { prefix: "/api/v1/dns" });
   app.register(mailRoutes, { prefix: "/api/v1/mail" });
