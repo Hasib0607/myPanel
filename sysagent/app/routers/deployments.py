@@ -642,6 +642,8 @@ def _curl_public_route(server_name: str, path: str = "/") -> dict:
     result = run_command([
         "curl",
         "-fsSL",
+        "-H", "Accept-Language: en-US,en;q=0.9,bn;q=0.8",
+        "-H", "User-Agent: VPS-Panel-Healthcheck/1.0",
         "--retry", "5",
         "--retry-delay", "2",
         "--retry-connrefused",

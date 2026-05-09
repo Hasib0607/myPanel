@@ -358,9 +358,12 @@ async function assertPublicRouteResult(result: unknown, label: string, deploymen
     runtimeText = "";
   }
 
-  const domainHint = deployment.domain?.name
-    ? ` The app is healthy on localhost, but Nginx cannot serve http://${deployment.domain.name}/ yet. Check Nginx vhost, DNS A record, and whether another config still owns this server_name.`
-    : "";
+  const localhostProxyMatch = runtimeText.match(/https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?[^\s)"]*/i);
+  const domainHint = localhostProxyMatch
+    ? ` The app is healthy on localhost, but it is generating an internal URL (${localhostProxyMatch[0]}). Fix the deployed app env/source so public URLs use ${deployment.domain?.name ? `https://${deployment.domain.name}` : "the domain"} instead of localhost.`
+    : deployment.domain?.name
+      ? ` The app is healthy on localhost, but the public domain returned an error. Check the Nginx vhost, SSL redirect, DNS A record, and whether the app is generating localhost URLs.`
+      : "";
   throw new Error(`${message}${domainHint}${runtimeText}`);
 }
 
