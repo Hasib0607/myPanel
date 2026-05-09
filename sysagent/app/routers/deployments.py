@@ -534,7 +534,7 @@ def nginx(body: NginxRequest) -> dict:
             "    location / {\n"
             f"        proxy_pass http://127.0.0.1:{body.upstreamPort};\n"
             "        proxy_http_version 1.1;\n"
-            "        proxy_set_header Host $host;\n"
+            "        proxy_set_header Host $http_host;\n"
             "        proxy_set_header X-Forwarded-Host $host;\n"
             "        proxy_set_header X-Forwarded-Port $server_port;\n"
             "        proxy_set_header X-Real-IP $remote_addr;\n"
@@ -578,7 +578,7 @@ server {{
 {acme_location(server_name)}    location / {{
         proxy_pass http://127.0.0.1:{body.upstreamPort};
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
+        proxy_set_header Host $http_host;
         proxy_set_header X-Forwarded-Host $host;
         proxy_set_header X-Forwarded-Port $server_port;
         proxy_set_header X-Real-IP $remote_addr;

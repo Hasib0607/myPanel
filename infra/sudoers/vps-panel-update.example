@@ -1,0 +1,3 @@
+# Replace /usr/bin/systemctl if `command -v systemctl` returns a different path.
+# Install with: sudo visudo -f /etc/sudoers.d/vps-panel-update
+panel ALL=(root) NOPASSWD: /usr/bin/systemctl --no-block restart vps-panel-sysagent, /usr/bin/systemctl is-active vps-panel-sysagent, /usr/bin/systemctl status vps-panel-sysagent, /usr/bin/systemctl --no-block restart vps-panel-workers, /usr/bin/systemctl is-active vps-panel-workers, /usr/bin/systemctl status vps-panel-workers, /usr/bin/systemctl --no-block restart vps-panel-frontend, /usr/bin/systemctl is-active vps-panel-frontend, /usr/bin/systemctl status vps-panel-frontend, /usr/bin/systemctl --no-block restart vps-panel-api, /usr/bin/systemctl is-active vps-panel-api, /usr/bin/systemctl status vps-panel-api

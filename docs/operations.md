@@ -22,6 +22,60 @@ DATABASE_URL="$DATABASE_URL" ./scripts/backup/restore-panel-db.sh /var/backups/v
 
 Keep `ALLOW_LIVE_SYSTEM_COMMANDS=false` until sudoers rules and sysagent command policies are reviewed on a disposable VPS. Enable live actions module by module: Nginx, DNS, mail, database, deployments.
 
+## Server Files vs Repo Files
+
+Keep real server state on the VPS only:
+
+- `/etc/nginx/sites-available/00-vps-panel`
+- `/etc/nginx/sites-available/domain-*.conf`
+- `/etc/systemd/system/vps-panel-*.service`
+- `/etc/sudoers.d/vps-panel-update`
+- `/opt/vps-panel/.env`
+- `/opt/vps-panel/api/.env`
+- `/opt/vps-panel/frontend/.env.production`
+
+Do not commit real secrets or generated production config. Commit templates instead:
+
+- `infra/nginx/00-vps-panel.conf.example`
+- `infra/nginx/domain-proxy.conf.template`
+- `infra/systemd/*.service.example`
+- `infra/sudoers/vps-panel-update.example`
+- `.env.example`
+
+Generated domain configs must never use `default_server`. Only the panel fallback config should claim `default_server`; domain configs should claim explicit `server_name` values and proxy to the deployment port assigned by the panel.
+
+## Ownership Rules
+
+Run Git and builds as the `panel` user so the checkout does not get root-owned files:
+
+```bash
+sudo -iu panel
+cd /opt/vps-panel
+git fetch origin main
+git reset --hard origin/main
+git clean -fd
+npm install
+npm run build --workspace api
+npm run build --workspace frontend
+```
+
+Run service management as root:
+
+```bash
+sudo systemctl restart vps-panel-sysagent vps-panel-workers vps-panel-frontend vps-panel-api
+sudo systemctl reload nginx
+```
+
+If `.next` permissions break after a root build:
+
+```bash
+sudo systemctl stop vps-panel-frontend
+sudo rm -rf /opt/vps-panel/frontend/.next
+sudo chown -R panel:panel /opt/vps-panel
+sudo -iu panel bash -lc 'cd /opt/vps-panel/frontend && npm run build'
+sudo systemctl restart vps-panel-frontend
+```
+
 ## Panel Self-Update Webhook
 
 Use this only for the panel repository itself. Project deployments use the per-project GitHub webhook in Deployment Settings.
@@ -59,13 +113,13 @@ sudo visudo -f /etc/sudoers.d/vps-panel-update
 Add:
 
 ```sudoers
-panel ALL=(root) NOPASSWD: /bin/systemctl --no-block restart vps-panel-sysagent, /bin/systemctl is-active vps-panel-sysagent, /bin/systemctl status vps-panel-sysagent, /bin/systemctl --no-block restart vps-panel-api, /bin/systemctl is-active vps-panel-api, /bin/systemctl status vps-panel-api, /bin/systemctl --no-block restart vps-panel-workers, /bin/systemctl is-active vps-panel-workers, /bin/systemctl status vps-panel-workers, /bin/systemctl --no-block restart vps-panel-frontend, /bin/systemctl is-active vps-panel-frontend, /bin/systemctl status vps-panel-frontend
+panel ALL=(root) NOPASSWD: /bin/systemctl --no-block restart vps-panel-sysagent, /bin/systemctl is-active vps-panel-sysagent, /bin/systemctl status vps-panel-sysagent, /bin/systemctl --no-block restart vps-panel-workers, /bin/systemctl is-active vps-panel-workers, /bin/systemctl status vps-panel-workers, /bin/systemctl --no-block restart vps-panel-frontend, /bin/systemctl is-active vps-panel-frontend, /bin/systemctl status vps-panel-frontend, /bin/systemctl --no-block restart vps-panel-api, /bin/systemctl is-active vps-panel-api, /bin/systemctl status vps-panel-api
 ```
 
 If `systemctl` is located somewhere else, use `which systemctl` and update the path. On many Ubuntu installs it is `/usr/bin/systemctl`, so the rule would be:
 
 ```sudoers
-panel ALL=(root) NOPASSWD: /usr/bin/systemctl --no-block restart vps-panel-sysagent, /usr/bin/systemctl is-active vps-panel-sysagent, /usr/bin/systemctl status vps-panel-sysagent, /usr/bin/systemctl --no-block restart vps-panel-api, /usr/bin/systemctl is-active vps-panel-api, /usr/bin/systemctl status vps-panel-api, /usr/bin/systemctl --no-block restart vps-panel-workers, /usr/bin/systemctl is-active vps-panel-workers, /usr/bin/systemctl status vps-panel-workers, /usr/bin/systemctl --no-block restart vps-panel-frontend, /usr/bin/systemctl is-active vps-panel-frontend, /usr/bin/systemctl status vps-panel-frontend
+panel ALL=(root) NOPASSWD: /usr/bin/systemctl --no-block restart vps-panel-sysagent, /usr/bin/systemctl is-active vps-panel-sysagent, /usr/bin/systemctl status vps-panel-sysagent, /usr/bin/systemctl --no-block restart vps-panel-workers, /usr/bin/systemctl is-active vps-panel-workers, /usr/bin/systemctl status vps-panel-workers, /usr/bin/systemctl --no-block restart vps-panel-frontend, /usr/bin/systemctl is-active vps-panel-frontend, /usr/bin/systemctl status vps-panel-frontend, /usr/bin/systemctl --no-block restart vps-panel-api, /usr/bin/systemctl is-active vps-panel-api, /usr/bin/systemctl status vps-panel-api
 ```
 
 The update script resolves `systemctl` to an absolute path and fails before building if the `panel` user cannot run these commands without a password.
