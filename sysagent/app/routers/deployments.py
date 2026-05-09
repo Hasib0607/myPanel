@@ -537,6 +537,7 @@ def nginx(body: NginxRequest) -> dict:
             "        proxy_set_header Host $http_host;\n"
             "        proxy_set_header X-Forwarded-Host $host;\n"
             "        proxy_set_header X-Forwarded-Port $server_port;\n"
+            "        proxy_set_header Forwarded \"proto=$scheme;host=$http_host\";\n"
             "        proxy_set_header X-Real-IP $remote_addr;\n"
             "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
             "        proxy_set_header X-Forwarded-Proto $scheme;\n"
@@ -545,6 +546,10 @@ def nginx(body: NginxRequest) -> dict:
             "        proxy_connect_timeout 10s;\n"
             "        proxy_send_timeout 60s;\n"
             "        proxy_read_timeout 60s;\n"
+            f"        proxy_redirect http://localhost:{body.upstreamPort}/ $scheme://$host/;\n"
+            f"        proxy_redirect https://localhost:{body.upstreamPort}/ https://$host/;\n"
+            f"        proxy_redirect http://127.0.0.1:{body.upstreamPort}/ $scheme://$host/;\n"
+            f"        proxy_redirect https://127.0.0.1:{body.upstreamPort}/ https://$host/;\n"
             f"{fallback_error_page}"
             "    }\n"
             f"{fallback_location}"
@@ -581,6 +586,7 @@ server {{
         proxy_set_header Host $http_host;
         proxy_set_header X-Forwarded-Host $host;
         proxy_set_header X-Forwarded-Port $server_port;
+        proxy_set_header Forwarded "proto=$scheme;host=$http_host";
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
@@ -589,6 +595,10 @@ server {{
         proxy_connect_timeout 10s;
         proxy_send_timeout 60s;
         proxy_read_timeout 60s;
+        proxy_redirect http://localhost:{body.upstreamPort}/ $scheme://$host/;
+        proxy_redirect https://localhost:{body.upstreamPort}/ https://$host/;
+        proxy_redirect http://127.0.0.1:{body.upstreamPort}/ $scheme://$host/;
+        proxy_redirect https://127.0.0.1:{body.upstreamPort}/ https://$host/;
 {fallback_error_page.rstrip()}
     }}
 {fallback_location}
