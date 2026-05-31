@@ -6,6 +6,7 @@ import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { env } from "../config/env.js";
 import { deployQueue } from "../jobs/queues.js";
+import { requiredRuntimeExecutables, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import { audit } from "../lib/audit.js";
 import { detectDeploymentFiles, detectDeploymentSource } from "../lib/deploymentDetection.js";
 import { prisma } from "../lib/prisma.js";
@@ -568,13 +569,16 @@ function commandDetail(value: unknown) {
   return result?.stderr || result?.reason || result?.stdout || (typeof result?.returncode === "number" ? `exit ${result.returncode}` : "");
 }
 
-function knownErrorHint(text: string): { message: string; repairAction: "set-node-memory" | "sync-public-env" | "redeploy" | "restart"; category: string } | null {
+function knownErrorHint(text: string): { message: string; repairAction: "set-node-memory" | "sync-public-env" | "redeploy" | "restart" | "request-approval"; category: string } | null {
   const lower = text.toLowerCase();
   if (lower.includes("eresolve") || lower.includes("unable to resolve dependency tree") || lower.includes("peer dep")) return { message: "NPM dependency resolution failed. Review peer dependencies or use a compatible lockfile before redeploying.", repairAction: "redeploy", category: "npm_peer_dependency" };
   if (lower.includes("package-lock.json") && lower.includes("yarn.lock")) return { message: "Multiple lockfiles detected. Keep one package manager lockfile to avoid inconsistent installs.", repairAction: "redeploy", category: "lockfile_conflict" };
   if (lower.includes("unsupported engine") || lower.includes("node version") || lower.includes("requires node")) return { message: "Node version mismatch. Set a compatible runtime version or update the app engines field.", repairAction: "redeploy", category: "node_version" };
   if (lower.includes("prisma") && (lower.includes("migration") || lower.includes("p100") || lower.includes("database"))) return { message: "Prisma/database migration failed. Check DATABASE_URL, database grants, and migration state.", repairAction: "redeploy", category: "prisma_migration" };
   if (lower.includes("composer") && (lower.includes("ext-") || lower.includes("requires php extension"))) return { message: "Composer is missing a required PHP extension. Install the extension on the VPS, then redeploy.", repairAction: "redeploy", category: "php_extension" };
+  if ((lower.includes("no such file or directory") || lower.includes("command not found") || lower.includes("unsupported deployment executable")) && (lower.includes("composer") || lower.includes("php") || lower.includes("node") || lower.includes("npm") || lower.includes("pnpm") || lower.includes("yarn") || lower.includes("pm2") || lower.includes("supervisor"))) {
+    return { message: "A required runtime tool is missing on the VPS. Use Deployment Doctor to request approval for the missing tool install, then redeploy.", repairAction: "request-approval", category: "missing_runtime_tool" };
+  }
   if (lower.includes("cannot find module") || lower.includes("module_not_found")) return { message: "Missing package or wrong build output. Run dependency install, verify package.json, then redeploy.", repairAction: "redeploy", category: "missing_module" };
   if (lower.includes("eaddrinuse") || lower.includes("address already in use")) return { message: "Port conflict. Let the doctor redeploy so the worker can move the app to a free managed port.", repairAction: "redeploy", category: "port_conflict" };
   if (lower.includes("heap out of memory") || lower.includes("javascript heap out of memory") || lower.includes("sigkill") || lower.includes("killed")) return { message: "Server memory pressure. Add a Node memory cap and redeploy; if it repeats, add swap on the VPS.", repairAction: "set-node-memory", category: "memory" };
@@ -582,26 +586,6 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
   if (lower.includes("env") && (lower.includes("missing") || lower.includes("required"))) return { message: "Missing environment variable. Add required env keys in the deployment Env tab, then redeploy.", repairAction: "redeploy", category: "missing_env" };
   if (lower.includes("localhost") || lower.includes("127.0.0.1")) return { message: "App may be generating internal localhost URLs. Sync public URL env values to the linked domain.", repairAction: "sync-public-env", category: "localhost_url" };
   return null;
-}
-
-function toolsForDeployment(deployment: Awaited<ReturnType<typeof findDeployment>>, detection: Awaited<ReturnType<typeof detectDeploymentSource>> | null) {
-  const tools = new Set<string>();
-  const packageManager = detection?.suggestions.packageManager ?? deployment.packageManager;
-  if (packageManager === "NPM") tools.add("npm");
-  if (packageManager === "PNPM") tools.add("pnpm");
-  if (packageManager === "YARN") tools.add("yarn");
-  if (packageManager === "COMPOSER") tools.add("composer");
-  if (packageManager === "PIP") tools.add("pip");
-  if (packageManager === "UV") tools.add("uv");
-  if (packageManager === "GO") tools.add("go");
-  const runtime = detection?.suggestions.runtime ?? deployment.runtime;
-  if (runtime === "NODE") tools.add("node");
-  if (runtime === "PHP") tools.add("php");
-  if (runtime === "PYTHON") tools.add("python3");
-  if (runtime === "GO") tools.add("go");
-  if ((deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework]) === "PM2") tools.add("pm2");
-  if ((deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework]) === "SUPERVISOR") tools.add("supervisorctl");
-  return [...tools];
 }
 
 function isLocalhostValue(value: string | null | undefined) {
@@ -687,7 +671,19 @@ async function createDoctorApprovals(deploymentId: string, actions: Array<{ key:
 
 async function executeDoctorApproval(deployment: Awaited<ReturnType<typeof findDeployment>>, approval: { actionKey: string }) {
   if (approval.actionKey.startsWith("install-")) {
-    const tool = approval.actionKey.replace(/^install-/, "");
+    const toolMap: Record<string, string> = {
+      "install-composer": "composer",
+      "install-php": "php",
+      "install-nodejs": "nodejs",
+      "install-pnpm": "pnpm",
+      "install-yarn": "yarn",
+      "install-uv": "uv",
+      "install-go": "go",
+      "install-supervisor": "supervisor",
+      "install-pm2": "pm2"
+    };
+    const tool = toolMap[approval.actionKey];
+    if (!tool) throw new Error(`Unsupported runtime tool approval: ${approval.actionKey}`);
     return sysagent.deploymentInstallRuntimeTool({ tool });
   }
   if (approval.actionKey === "repair-permissions") {
@@ -800,11 +796,19 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
     checks.push({ key: "start_command", label: "Start command", status: "pass", detail: deployment.startCommand || detection?.suggestions.startCommand || "Static deployment" });
   }
 
-  const requiredTools = toolsForDeployment(deployment, detection);
+  const runtimeTools = requiredRuntimeExecutables({
+    framework: detection?.detected ?? deployment.framework,
+    packageManager: detection?.suggestions.packageManager ?? deployment.packageManager,
+    runtime: detection?.suggestions.runtime ?? deployment.runtime,
+    processManager: deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework],
+    installCommand: deployment.installCommand ?? detection?.suggestions.installCommand,
+    buildCommand: deployment.buildCommand ?? detection?.suggestions.buildCommand,
+    startCommand: deployment.startCommand ?? detection?.suggestions.startCommand
+  });
   let toolsResult: Awaited<ReturnType<typeof sysagent.deploymentRuntimeTools>> | null = null;
-  if (requiredTools.length) {
+  if (runtimeTools.length) {
     try {
-      toolsResult = await sysagent.deploymentRuntimeTools({ tools: requiredTools });
+      toolsResult = await sysagent.deploymentRuntimeTools({ tools: runtimeTools });
       const missing = toolsResult.items.filter((tool) => !tool.installed);
       checks.push({
         key: "runtime_tools",
@@ -814,12 +818,12 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
         fix: missing.length ? "Install missing runtime tools on the VPS, then redeploy." : undefined,
         repairAction: missing.length ? "request-approval" : undefined
       });
-      for (const tool of missing) {
+      for (const target of runtimeInstallTargetsForMissingExecutables(missing.map((tool) => tool.name))) {
         riskyActions.push({
-          key: `install-${tool.name}`,
-          label: `Install ${tool.name}`,
-          command: tool.name === "pnpm" ? "npm install -g pnpm" : tool.name === "yarn" ? "npm install -g yarn" : `Install ${tool.name} via panel runtime-tools (dnf on AlmaLinux, apt on Ubuntu)`,
-          reason: `${tool.name} is required for this deployment but is not available on the server.`,
+          key: target.actionKey,
+          label: target.label,
+          command: target.command,
+          reason: target.reason,
           approvalRequired: true
         });
       }

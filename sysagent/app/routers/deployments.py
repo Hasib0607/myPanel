@@ -119,7 +119,7 @@ class NginxInspectRequest(BaseModel):
 
 
 class RuntimeInstallRequest(BaseModel):
-    tool: str = Field(pattern="^(pnpm|yarn|composer|uv|go|php)$")
+    tool: str = Field(pattern="^(pnpm|yarn|composer|uv|go|php|nodejs|supervisor|pm2)$")
 
 
 class PermissionRepairRequest(BaseModel):

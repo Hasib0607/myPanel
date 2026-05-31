@@ -1,9 +1,10 @@
 import { Worker } from "bullmq";
-import { DeploymentFramework, DeploymentProcessManager, Prisma } from "@prisma/client";
+import { DeploymentFramework, DeploymentPackageManager, DeploymentProcessManager, DeploymentRuntime, Prisma } from "@prisma/client";
 import path from "node:path";
 import { redis } from "../lib/redis.js";
 import { logger } from "../lib/logger.js";
 import { detectDeploymentSource } from "../lib/deploymentDetection.js";
+import { requiredRuntimeExecutables, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import { env } from "../config/env.js";
 import { prisma } from "../lib/prisma.js";
 import { getSecret } from "../lib/secrets.js";
@@ -406,6 +407,50 @@ function githubTokenSecretRef() {
   return "github:superadmin:token";
 }
 
+async function assertRuntimeToolsInstalled(deploymentId: string, releaseId: string | undefined, deployment: {
+  framework: DeploymentFramework;
+  packageManager: DeploymentPackageManager | null;
+  runtime: DeploymentRuntime | null;
+  processManager: DeploymentProcessManager | null;
+  installCommand?: string | null;
+  buildCommand?: string | null;
+  startCommand?: string | null;
+}) {
+  const requiredTools = requiredRuntimeExecutables(deployment);
+  if (requiredTools.length === 0) return;
+
+  const toolsResult = await runStep(deploymentId, releaseId, "PREFLIGHT", "Runtime tools check", () =>
+    sysagent.deploymentRuntimeTools({ tools: requiredTools })
+  );
+  const missing = toolsResult.items.filter((tool) => !tool.installed).map((tool) => tool.name);
+  if (missing.length === 0) return;
+
+  const approvalTargets = runtimeInstallTargetsForMissingExecutables(missing);
+  for (const target of approvalTargets) {
+    const existing = await prisma.deploymentDoctorApproval.findFirst({
+      where: {
+        deploymentId,
+        actionKey: target.actionKey,
+        status: { in: ["PENDING", "APPROVED"] }
+      }
+    });
+    if (existing) continue;
+    await prisma.deploymentDoctorApproval.create({
+      data: {
+        deploymentId,
+        actionKey: target.actionKey,
+        label: target.label,
+        command: target.command,
+        reason: target.reason
+      }
+    });
+  }
+
+  throw new Error(
+    `Missing runtime tools on the server: ${missing.join(", ")}. Pending repair approvals were created for installable tools. Open Deployment Doctor, approve the install, then redeploy.`
+  );
+}
+
 async function githubCloneToken(sourceProvider: string, gitUrl: string | null) {
   if (sourceProvider !== "GITHUB" || !gitUrl?.startsWith("https://github.com/")) return null;
   return getSecret(githubTokenSecretRef());
@@ -558,6 +603,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       },
       include: deploymentWorkerInclude
     });
+    await assertRuntimeToolsInstalled(deployment.id, releaseId, deployment);
 
     if (deployment.processManager === "NONE" && deployment.framework !== "STATIC") {
       throw new Error(`No runnable start command found for ${deployment.slug}. Add a package.json start script or set a manual start command.`);

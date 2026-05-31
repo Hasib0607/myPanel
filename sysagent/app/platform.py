@@ -245,6 +245,8 @@ PACKAGE_SETS: dict[OsFamily, dict[str, tuple[str, ...]]] = {
             "php-curl",
             "php-zip",
         ),
+        "nodejs_runtime": ("nodejs", "npm"),
+        "supervisor": ("supervisor",),
         "golang": ("golang-go",),
         "composer": ("composer",),
     },
@@ -294,13 +296,15 @@ PACKAGE_SETS: dict[OsFamily, dict[str, tuple[str, ...]]] = {
             "php-curl",
             "php-zip",
         ),
+        "nodejs_runtime": ("nodejs", "npm"),
+        "supervisor": ("supervisor",),
         "golang": ("golang",),
         "composer": RHEL_COMPOSER_PACKAGES,
     },
 }
 
 # Package keys that require EPEL on AlmaLinux/RHEL before dnf install.
-EPEL_PACKAGE_KEYS = frozenset({"certbot", "composer"})
+EPEL_PACKAGE_KEYS = frozenset({"certbot", "composer", "supervisor"})
 
 SERVICE_SPECS: dict[OsFamily, dict[str, ServiceSpec]] = {
     OsFamily.DEBIAN: {
@@ -354,7 +358,7 @@ PLATFORM_PATHS: dict[OsFamily, PlatformPaths] = {
     ),
 }
 
-RUNTIME_TOOL_KEYS = frozenset({"composer", "golang", "php_runtime", "pnpm", "yarn", "uv"})
+RUNTIME_TOOL_KEYS = frozenset({"composer", "golang", "php_runtime", "nodejs_runtime", "supervisor", "pnpm", "yarn", "uv", "pm2"})
 
 
 def _resolve_family(info: OsReleaseInfo | None = None) -> OsFamily:
@@ -527,6 +531,7 @@ def package_install_env(info: OsReleaseInfo | None = None) -> dict[str, str]:
 
 def runtime_tool_install_plan(tool: str, info: OsReleaseInfo | None = None) -> PackageInstallPlan:
     npm_global = {
+        "pm2": ("pm2", ("npm", "install", "-g", "pm2")),
         "pnpm": ("pnpm", ("npm", "install", "-g", "pnpm")),
         "yarn": ("yarn", ("npm", "install", "-g", "yarn")),
     }
@@ -546,7 +551,7 @@ def runtime_tool_install_plan(tool: str, info: OsReleaseInfo | None = None) -> P
     if tool == "composer":
         return composer_install_plan(info)
 
-    package_key = {"php": "php_runtime", "go": "golang"}.get(tool, tool)
+    package_key = {"php": "php_runtime", "go": "golang", "nodejs": "nodejs_runtime"}.get(tool, tool)
     if package_key not in PACKAGE_SETS[_resolve_family(info)]:
         raise KeyError(f"Unknown runtime tool '{tool}'")
     return install_plan_for(package_key, info)
