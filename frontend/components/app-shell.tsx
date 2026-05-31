@@ -5,10 +5,10 @@ import { LogoutButton } from "@/components/logout-button";
 const nav = [
   { href: "/dashboard", label: "Dashboard", icon: Gauge },
   { href: "/domains", label: "Domains", icon: Globe2 },
+  { href: "/guardian", label: "Guardian", icon: Radar },
   { href: "/dns", label: "DNS", icon: Network },
   { href: "/mail", label: "Mail", icon: Inbox },
   { href: "/firewall", label: "Firewall", icon: Shield },
-  { href: "/guardian", label: "Guardian", icon: Radar },
   { href: "/files", label: "Files", icon: HardDrive },
   { href: "/deployments", label: "Deployments", icon: Blocks },
   { href: "/databases", label: "Databases", icon: Database },
