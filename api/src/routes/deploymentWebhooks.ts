@@ -344,7 +344,12 @@ export const deploymentWebhookRoutes: FastifyPluginAsync = async (app) => {
       .catch(() => []);
     const apiRestartRequested = recentLog.some((line) => line.includes(`--no-block restart ${env.PANEL_UPDATE_API_SERVICE}`) || line.includes(`restart ${env.PANEL_UPDATE_API_SERVICE}`));
     const apiRestartStuck = status.state === "running" && typeof status.message === "string" && status.message.includes(`restarting ${env.PANEL_UPDATE_API_SERVICE}`);
-    if (apiRestartStuck && apiRestartRequested) {
+    const apiRestartHandoffKilled = status.state === "failed"
+      && typeof status.message === "string"
+      && status.message.includes("exit code 143")
+      && recentLog.some((line) => line.includes(`panel self-update completed; restarting ${env.PANEL_UPDATE_API_SERVICE}`))
+      && apiRestartRequested;
+    if ((apiRestartStuck || apiRestartHandoffKilled) && apiRestartRequested) {
       status.state = "succeeded";
       status.message = `panel self-update completed; ${env.PANEL_UPDATE_API_SERVICE} restart was requested`;
       status.recoveredApiRestartStatus = true;

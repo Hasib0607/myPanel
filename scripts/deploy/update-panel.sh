@@ -24,6 +24,9 @@ SYSTEMCTL_NO_BLOCK="${PANEL_UPDATE_SYSTEMCTL_NO_BLOCK:-true}"
 STALE_AFTER_SECONDS="${PANEL_UPDATE_STALE_AFTER_SECONDS:-1200}"
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")"
 SCRIPT_REEXECUTED="${PANEL_UPDATE_SCRIPT_REEXECUTED:-false}"
+FINAL_API_RESTART_REQUESTED="false"
+FINAL_COMMIT=""
+FINAL_COMMIT_SUBJECT=""
 
 mkdir -p "$(dirname "$LOG_FILE")"
 mkdir -p "$(dirname "$STATUS_FILE")"
@@ -72,13 +75,33 @@ current_commit_subject() {
 
 on_error() {
   local exit_code=$?
+  if [[ "$FINAL_API_RESTART_REQUESTED" == "true" && "$exit_code" == "143" ]]; then
+    write_status "succeeded" "panel self-update completed; $API_SERVICE restart was requested" "$FINAL_COMMIT" "$FINAL_COMMIT_SUBJECT"
+    log "panel self-update handoff exited with 143 after requesting $API_SERVICE restart; treating as success"
+    rm -f "$PID_FILE"
+    exit 0
+  fi
   write_status "failed" "panel self-update failed with exit code $exit_code" "$(current_commit)" "$(current_commit_subject)"
   log "panel self-update failed with exit code $exit_code"
   rm -f "$PID_FILE"
   exit "$exit_code"
 }
 
+on_term() {
+  if [[ "$FINAL_API_RESTART_REQUESTED" == "true" ]]; then
+    write_status "succeeded" "panel self-update completed; $API_SERVICE restart was requested" "$FINAL_COMMIT" "$FINAL_COMMIT_SUBJECT"
+    log "panel self-update received TERM after requesting $API_SERVICE restart; treating as success"
+    rm -f "$PID_FILE"
+    exit 0
+  fi
+  write_status "failed" "panel self-update interrupted by TERM" "$(current_commit)" "$(current_commit_subject)"
+  log "panel self-update interrupted by TERM"
+  rm -f "$PID_FILE"
+  exit 143
+}
+
 trap on_error ERR
+trap on_term TERM
 trap 'rm -f "$PID_FILE"' EXIT
 
 run() {
@@ -440,6 +463,9 @@ else
 fi
 
 if [[ "$API_RESTART_NEEDED" == "true" ]]; then
+  FINAL_API_RESTART_REQUESTED="true"
+  FINAL_COMMIT="$NEW_COMMIT"
+  FINAL_COMMIT_SUBJECT="$NEW_COMMIT_SUBJECT"
   write_status "succeeded" "panel self-update completed; restarting $API_SERVICE" "$NEW_COMMIT" "$NEW_COMMIT_SUBJECT"
   log "panel self-update completed; restarting $API_SERVICE"
   run_systemctl restart "$API_SERVICE"
