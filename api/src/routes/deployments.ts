@@ -575,6 +575,7 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
   if (lower.includes("package-lock.json") && lower.includes("yarn.lock")) return { message: "Multiple lockfiles detected. Keep one package manager lockfile to avoid inconsistent installs.", repairAction: "redeploy", category: "lockfile_conflict" };
   if (lower.includes("unsupported engine") || lower.includes("node version") || lower.includes("requires node")) return { message: "Node version mismatch. Set a compatible runtime version or update the app engines field.", repairAction: "redeploy", category: "node_version" };
   if (lower.includes("prisma") && (lower.includes("migration") || lower.includes("p100") || lower.includes("database"))) return { message: "Prisma/database migration failed. Check DATABASE_URL, database grants, and migration state.", repairAction: "redeploy", category: "prisma_migration" };
+  if (lower.includes("please provide a valid cache path") || lower.includes("bootstrap/cache") || lower.includes("storage/framework")) return { message: "Laravel writable/cache directories are missing or not writable. Repair the Laravel storage/bootstrap cache paths, then redeploy.", repairAction: "request-approval", category: "laravel_writable_paths" };
   if (lower.includes("artisan package:discover") || lower.includes("laravel package discovery")) return { message: "Laravel package discovery failed while bootstrapping the app. Check the deployment environment values and the package discovery error output, then redeploy.", repairAction: "request-approval", category: "laravel_package_discovery" };
   const composerPlatform = detectComposerPlatformIssue(text);
   const phpVersionMismatch = Boolean(
@@ -990,6 +991,15 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
       label: "Repair deployment ownership",
       command: `chown -R panel:panel ${deployment.rootPath} ${deploymentLogDir(deployment.slug)}`,
       reason: "Ownership/permission repairs affect files recursively and require explicit approval.",
+      approvalRequired: true
+    });
+  }
+  if (hint?.category === "laravel_writable_paths") {
+    riskyActions.push({
+      key: "repair-permissions",
+      label: "Repair Laravel writable paths",
+      command: `mkdir -p ${path.join(appPath, "bootstrap/cache")} ${path.join(appPath, "storage/framework/cache/data")} ${path.join(appPath, "storage/framework/sessions")} ${path.join(appPath, "storage/framework/views")} ${path.join(appPath, "storage/logs")} && chown -R panel:panel ${path.join(appPath, "storage")} ${path.join(appPath, "bootstrap/cache")} && chmod -R ug+rwX ${path.join(appPath, "storage")} ${path.join(appPath, "bootstrap/cache")}`,
+      reason: "Laravel needs writable storage and bootstrap cache directories before package discovery can run.",
       approvalRequired: true
     });
   }

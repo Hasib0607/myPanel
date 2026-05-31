@@ -135,6 +135,10 @@ class SupervisorRepairRequest(BaseModel):
     name: str
 
 
+class LaravelWritablePathsRequest(BaseModel):
+    rootPath: str
+
+
 def path_info(root_path: str) -> dict:
     root = Path(settings.file_manager_root).resolve()
     target = Path(root_path).resolve()
@@ -849,6 +853,41 @@ def repair_permissions(body: PermissionRepairRequest) -> dict:
         steps[target] = run_command(["chown", "-R", "panel:panel", target], timeout=120)
     failed = [target for target, result in steps.items() if result.get("returncode") != 0]
     return {"dryRun": any(result.get("dryRun") for result in steps.values()), "returncode": 1 if failed else 0, "steps": steps}
+
+
+@router.post("/laravel/repair-writable-paths")
+def repair_laravel_writable_paths(body: LaravelWritablePathsRequest) -> dict:
+    root = str(Path(body.rootPath).resolve())
+    info = path_info(root)
+    if not info["allowed"] and settings.allow_live_system_commands:
+        return blocked_command("Path escapes configured file manager root", ["laravel-repair", root], info)
+
+    paths = [
+        f"{root}/bootstrap/cache",
+        f"{root}/storage",
+        f"{root}/storage/app",
+        f"{root}/storage/app/public",
+        f"{root}/storage/framework",
+        f"{root}/storage/framework/cache",
+        f"{root}/storage/framework/cache/data",
+        f"{root}/storage/framework/sessions",
+        f"{root}/storage/framework/testing",
+        f"{root}/storage/framework/views",
+        f"{root}/storage/logs",
+    ]
+
+    mkdir = run_command(["mkdir", "-p", *paths], timeout=120)
+    chown = run_command(["chown", "-R", "panel:panel", f"{root}/storage", f"{root}/bootstrap/cache"], timeout=120) if mkdir.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because directory creation failed"}
+    chmod = run_command(["chmod", "-R", "ug+rwX", f"{root}/storage", f"{root}/bootstrap/cache"], timeout=120) if mkdir.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because directory creation failed"}
+    failed = any(step.get("returncode") != 0 for step in [mkdir, chown, chmod])
+    return {
+        "dryRun": any(step.get("dryRun") for step in [mkdir, chown, chmod]),
+        "returncode": 1 if failed else 0,
+        "paths": paths,
+        "mkdir": mkdir,
+        "chown": chown,
+        "chmod": chmod,
+    }
 
 
 @router.post("/supervisor/repair")

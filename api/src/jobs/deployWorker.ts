@@ -521,6 +521,27 @@ async function autoRepairComposerPlatformIssue(deploymentId: string, releaseId: 
   return autoInstalled.length > 0;
 }
 
+function isLaravelWritablePathIssue(text: string) {
+  const lower = text.toLowerCase();
+  return lower.includes("please provide a valid cache path")
+    || lower.includes("bootstrap/cache")
+    || lower.includes("storage/framework")
+    || lower.includes("laravel package discovery failed");
+}
+
+async function autoRepairLaravelWritablePaths(deploymentId: string, releaseId: string | undefined, appPath: string, errorText: string) {
+  if (!isLaravelWritablePathIssue(errorText)) return false;
+  await writeLog(deploymentId, releaseId, "PREFLIGHT", "Laravel writable path issue detected", {
+    rootPath: appPath,
+    evidence: errorText.slice(0, 4000)
+  }, "warn");
+  const repairResult = await runStep(deploymentId, releaseId, "PREFLIGHT", "Repair Laravel writable paths", () =>
+    sysagent.deploymentRepairLaravelWritablePaths({ rootPath: appPath })
+  );
+  assertLiveResult(repairResult, "Repair Laravel writable paths");
+  return true;
+}
+
 async function githubCloneToken(sourceProvider: string, gitUrl: string | null) {
   if (sourceProvider !== "GITHUB" || !gitUrl?.startsWith("https://github.com/")) return null;
   return getSecret(githubTokenSecretRef());
@@ -729,14 +750,23 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     }
 
     if (deployment.framework === "LARAVEL") {
-      const packageDiscoverResult = await runStep(deployment.id, releaseId, "INSTALLING", "Laravel package discovery", () =>
+      const runLaravelPackageDiscovery = () => runStep(deployment.id, releaseId, "INSTALLING", "Laravel package discovery", () =>
         sysagent.deploymentBuild({
           rootPath: appPath,
           command: "php artisan package:discover --ansi -vvv",
           env: envVars
         })
       );
-      assertCommandTree(packageDiscoverResult, "Laravel package discovery");
+      let packageDiscoverResult = await runLaravelPackageDiscovery();
+      try {
+        assertCommandTree(packageDiscoverResult, "Laravel package discovery");
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        const repaired = await autoRepairLaravelWritablePaths(deployment.id, releaseId, appPath, detail).catch(() => false);
+        if (!repaired) throw error;
+        packageDiscoverResult = await runLaravelPackageDiscovery();
+        assertCommandTree(packageDiscoverResult, "Laravel package discovery");
+      }
 
       const migrateResult = await runStep(deployment.id, releaseId, "MIGRATING", "Database migration", () =>
         sysagent.deploymentMigrate({

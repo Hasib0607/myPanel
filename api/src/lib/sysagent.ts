@@ -108,6 +108,8 @@ export const sysagent = {
     request<SysagentCommandResult>("/deployments/runtime-tools/install", { method: "POST", body: JSON.stringify(body) }),
   deploymentRepairPermissions: (body: unknown) =>
     request<SysagentCommandResult>("/deployments/repair-permissions", { method: "POST", body: JSON.stringify(body) }),
+  deploymentRepairLaravelWritablePaths: (body: unknown) =>
+    request<SysagentCommandResult>("/deployments/laravel/repair-writable-paths", { method: "POST", body: JSON.stringify(body) }),
   deploymentRepairSupervisor: (body: unknown) =>
     request<SysagentCommandResult>("/deployments/supervisor/repair", { method: "POST", body: JSON.stringify(body) }),
   deploymentNginxInspect: (body: unknown) =>
