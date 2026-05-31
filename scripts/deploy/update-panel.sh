@@ -240,6 +240,52 @@ npm_install_with_recovery() {
   return "$status"
 }
 
+set_env_value() {
+  local key="$1"
+  local value="$2"
+  local file="$APP_DIR/.env"
+  if [[ ! -f "$file" ]]; then
+    log "panel env file not found at $file; cannot set $key"
+    return 1
+  fi
+
+  if grep -qE "^${key}=" "$file"; then
+    sed -i "s|^${key}=.*|${key}=${value}|" "$file"
+  else
+    printf '\n%s=%s\n' "$key" "$value" >> "$file"
+  fi
+}
+
+ensure_live_sysagent_config() {
+  local file="$APP_DIR/.env"
+  local changed="false"
+  local current=""
+  if [[ ! -f "$file" ]]; then
+    log "panel env file not found at $file; skipping sysagent live command normalization"
+    return 0
+  fi
+
+  current="$(grep -E '^ALLOW_LIVE_SYSTEM_COMMANDS=' "$file" | tail -n 1 | cut -d= -f2- || true)"
+  if [[ "$current" != "true" ]]; then
+    log "enabling ALLOW_LIVE_SYSTEM_COMMANDS=true for deploy/start/repair commands"
+    set_env_value "ALLOW_LIVE_SYSTEM_COMMANDS" "true"
+    changed="true"
+  fi
+
+  for key in ALLOW_LIVE_FILE_MANAGER ALLOW_LIVE_NGINX ALLOW_LIVE_SSL; do
+    current="$(grep -E "^${key}=" "$file" | tail -n 1 | cut -d= -f2- || true)"
+    if [[ "$current" != "true" ]]; then
+      log "enabling ${key}=true for panel live operations"
+      set_env_value "$key" "true"
+      changed="true"
+    fi
+  done
+
+  if [[ "$changed" == "true" ]]; then
+    write_status "running" "enabled sysagent live command mode" "$(current_commit)" "$(current_commit_subject)"
+  fi
+}
+
 sudo_systemctl_output() {
   "$SUDO_BIN" -n "$SYSTEMCTL_BIN" "$@" 2>&1
 }
@@ -416,6 +462,7 @@ NEW_COMMIT_SUBJECT="$(current_commit_subject)"
 write_status "running" "source updated; building panel" "$NEW_COMMIT" "$NEW_COMMIT_SUBJECT"
 ensure_systemctl_permission
 ensure_node_runtime
+ensure_live_sysagent_config
 
 npm_install_with_recovery
 run "$NPM_BIN" --workspace api run prisma:generate

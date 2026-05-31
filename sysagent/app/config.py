@@ -2,7 +2,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    allow_live_system_commands: bool = False
+    allow_live_system_commands: bool = True
     allow_live_file_manager: bool = True
     allow_live_dns: bool = True
     allow_live_nginx: bool = True
