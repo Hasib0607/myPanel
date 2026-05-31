@@ -1,7 +1,10 @@
+import json
 import os
+import re
 import shutil
 import socket
 import subprocess
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -12,16 +15,18 @@ from fastapi import APIRouter
 router = APIRouter()
 
 WATCHED_SERVICES = [
-    {"key": "nginx", "name": "Nginx", "unit": "nginx", "port": 80},
-    {"key": "redis", "name": "Redis", "unit": "redis-server", "port": 6379},
-    {"key": "postgres", "name": "PostgreSQL", "unit": "postgresql", "port": 5432},
-    {"key": "panel-api", "name": "Panel API", "unit": "vps-panel-api", "port": 4000},
-    {"key": "panel-frontend", "name": "Panel Frontend", "unit": "vps-panel-frontend", "port": 3000},
-    {"key": "panel-workers", "name": "Panel Workers", "unit": "vps-panel-workers", "port": None},
-    {"key": "sysagent", "name": "System Agent", "unit": "vps-panel-sysagent", "port": 5000},
+    {"key": "nginx", "name": "Nginx", "unit": "nginx", "ports": [80]},
+    {"key": "redis", "name": "Redis", "unit": "redis-server", "ports": [6379]},
+    {"key": "postgres", "name": "PostgreSQL", "unit": "postgresql", "ports": [5432, 5433]},
+    {"key": "pgbouncer", "name": "PgBouncer", "unit": "pgbouncer", "ports": [6432], "optional": True},
+    {"key": "panel-api", "name": "Panel API", "unit": "vps-panel-api", "ports": [4000]},
+    {"key": "panel-frontend", "name": "Panel Frontend", "unit": "vps-panel-frontend", "ports": [3000]},
+    {"key": "panel-workers", "name": "Panel Workers", "unit": "vps-panel-workers", "ports": []},
+    {"key": "sysagent", "name": "System Agent", "unit": "vps-panel-sysagent", "ports": [5000]},
 ]
 
-WATCHED_PORTS = [80, 443, 2083, 3000, 4000, 5000, 6379, 5432]
+WATCHED_PORTS = [80, 443, 2083, 3000, 4000, 5000, 6379, 5432, 5433, 6432]
+NGINX_ACCESS_RE = re.compile(r'^(?P<ip>\S+) \S+ \S+ \[[^\]]+\] "(?P<method>\S+) (?P<path>[^"]*?) (?P<protocol>[^"]*?)" (?P<status>\d{3})')
 
 
 def command_output(command: list[str], timeout: int = 4) -> dict[str, Any]:
@@ -87,7 +92,67 @@ def pm2_status() -> dict[str, Any]:
     result = command_output(["pm2", "jlist"], timeout=5)
     if not result["available"] or result["returncode"] != 0:
         return {"available": result["available"], "items": [], "detail": result["stderr"] or "pm2 unavailable"}
-    return {"available": True, "items": [], "raw": result["stdout"]}
+    try:
+        processes = json.loads(result["stdout"] or "[]")
+    except json.JSONDecodeError:
+        return {"available": True, "items": [], "detail": "pm2 JSON could not be parsed", "raw": result["stdout"][-2000:]}
+
+    items = []
+    for process in processes:
+        env = process.get("pm2_env") or {}
+        monit = process.get("monit") or {}
+        status = env.get("status") or "unknown"
+        items.append({
+            "name": process.get("name") or env.get("name") or "unknown",
+            "pmId": process.get("pm_id"),
+            "pid": process.get("pid"),
+            "status": status,
+            "healthy": status == "online",
+            "restarts": env.get("restart_time", 0),
+            "unstableRestarts": env.get("unstable_restarts", 0),
+            "uptimeMs": max(0, int(datetime.now(timezone.utc).timestamp() * 1000) - int(env.get("pm_uptime") or 0)) if env.get("pm_uptime") else None,
+            "cpuPercent": monit.get("cpu"),
+            "memoryBytes": monit.get("memory"),
+        })
+
+    return {
+        "available": True,
+        "items": items,
+        "online": sum(1 for item in items if item["healthy"]),
+        "total": len(items),
+        "detail": f"{sum(1 for item in items if item['healthy'])}/{len(items)} online",
+    }
+
+
+def nginx_access_summary(lines: list[str]) -> dict[str, Any]:
+    status_counts: Counter[str] = Counter()
+    ip_counts: Counter[str] = Counter()
+    bad_ip_counts: Counter[str] = Counter()
+    path_counts: Counter[str] = Counter()
+    parsed = 0
+
+    for line in lines:
+        match = NGINX_ACCESS_RE.match(line)
+        if not match:
+            continue
+        parsed += 1
+        ip = match.group("ip")
+        path = match.group("path")
+        status = match.group("status")
+        status_counts[status] += 1
+        ip_counts[ip] += 1
+        if status.startswith(("4", "5")):
+            bad_ip_counts[ip] += 1
+            path_counts[path.split("?", 1)[0]] += 1
+
+    return {
+        "sampleSize": len(lines),
+        "parsed": parsed,
+        "statusCounts": [{"status": status, "count": count} for status, count in status_counts.most_common()],
+        "topIps": [{"ip": ip, "count": count} for ip, count in ip_counts.most_common(8)],
+        "topBadIps": [{"ip": ip, "count": count} for ip, count in bad_ip_counts.most_common(8)],
+        "topBadPaths": [{"path": path, "count": count} for path, count in path_counts.most_common(8)],
+    }
 
 
 @router.get("/diagnosis")
@@ -101,17 +166,19 @@ def diagnosis() -> dict[str, Any]:
     services = []
     for service in WATCHED_SERVICES:
         state = systemd_state(service["unit"])
-        port = service["port"]
-        port_info = ports.get(port) if port else None
-        port_listening = bool(port_info) if port else None
-        healthy = state["state"] == "active" and (port is None or port_listening)
+        service_ports = service["ports"]
+        port_details = [{"port": port, "listening": port in ports, "owner": ports.get(port)} for port in service_ports]
+        port_listening = any(item["listening"] for item in port_details) if service_ports else None
+        required = not service.get("optional", False)
+        healthy = state["state"] == "active" and (not service_ports or port_listening)
         services.append({
             **service,
             "status": "healthy" if healthy else "down",
             "systemdState": state["state"],
             "detail": state["detail"],
             "portListening": port_listening,
-            "portOwner": port_info,
+            "portDetails": port_details,
+            "optional": not required,
         })
 
     nginx_error_lines = tail_file("/var/log/nginx/error.log")
@@ -119,11 +186,13 @@ def diagnosis() -> dict[str, Any]:
     auth_lines = tail_file("/var/log/auth.log")
     nginx_errors = count_patterns(nginx_error_lines, ["error", "critical", "upstream", "connect() failed"])
     bad_http = count_patterns(nginx_access_lines, ['" 404 ', '" 500 ', '" 502 ', '" 503 ', '" 504 '])
+    nginx_summary = nginx_access_summary(nginx_access_lines)
     ssh_failures = count_patterns(auth_lines, ["failed password", "invalid user", "authentication failure"])
+    pm2 = pm2_status()
 
     incidents = []
     for service in services:
-        if service["status"] == "down":
+        if service["status"] == "down" and not service.get("optional"):
             incidents.append({
                 "severity": "critical",
                 "category": "service",
@@ -141,6 +210,9 @@ def diagnosis() -> dict[str, Any]:
         incidents.append({"severity": "warning", "category": "nginx", "title": "Nginx log anomalies detected", "detail": f"{nginx_errors} error lines, {bad_http} recent bad HTTP responses"})
     if ssh_failures >= 5:
         incidents.append({"severity": "warning", "category": "security", "title": "Repeated SSH failures detected", "detail": f"{ssh_failures} recent auth log matches"})
+    for process in pm2.get("items", []):
+        if not process.get("healthy"):
+            incidents.append({"severity": "warning", "category": "pm2", "title": f"PM2 app {process['name']} is not online", "detail": f"status={process['status']}, restarts={process['restarts']}"})
 
     return {
         "generatedAt": datetime.now(timezone.utc).isoformat(),
@@ -156,7 +228,7 @@ def diagnosis() -> dict[str, Any]:
         },
         "services": services,
         "ports": [{"port": port, "listening": port in ports, "owner": ports.get(port)} for port in WATCHED_PORTS],
-        "pm2": pm2_status(),
+        "pm2": pm2,
         "security": {
             "ufw": command_output(["ufw", "status", "verbose"]),
             "fail2ban": command_output(["fail2ban-client", "status"]),
@@ -165,6 +237,7 @@ def diagnosis() -> dict[str, Any]:
         "logs": {
             "nginxErrors": nginx_errors,
             "badHttpResponses": bad_http,
+            "nginxAccess": nginx_summary,
         },
         "incidents": incidents,
     }

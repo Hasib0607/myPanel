@@ -1,3 +1,4 @@
+import tls from "node:tls";
 import type { FastifyPluginAsync } from "fastify";
 import { prisma } from "../lib/prisma.js";
 import { sysagent } from "../lib/sysagent.js";
@@ -12,6 +13,41 @@ async function trySysagent<T>(fallback: T, fn: () => Promise<T>) {
 
 function daysUntil(date: Date) {
   return Math.ceil((date.getTime() - Date.now()) / 86_400_000);
+}
+
+function probeSsl(domain: string) {
+  return new Promise<{ ok: boolean; issuer?: string; validFrom?: string; validTo?: string; daysRemaining?: number; error?: string }>((resolve) => {
+    const socket = tls.connect({
+      host: domain,
+      port: 443,
+      servername: domain,
+      timeout: 5000,
+      rejectUnauthorized: false
+    }, () => {
+      const cert = socket.getPeerCertificate();
+      socket.end();
+      if (!cert || !cert.valid_to) {
+        resolve({ ok: false, error: "No certificate returned" });
+        return;
+      }
+      const expiresAt = new Date(cert.valid_to);
+      resolve({
+        ok: true,
+        issuer: typeof cert.issuer?.O === "string" ? cert.issuer.O : undefined,
+        validFrom: cert.valid_from,
+        validTo: cert.valid_to,
+        daysRemaining: Number.isNaN(expiresAt.getTime()) ? undefined : daysUntil(expiresAt)
+      });
+    });
+
+    socket.on("timeout", () => {
+      socket.destroy();
+      resolve({ ok: false, error: "TLS probe timed out" });
+    });
+    socket.on("error", (error) => {
+      resolve({ ok: false, error: error.message });
+    });
+  });
 }
 
 export const guardianRoutes: FastifyPluginAsync = async (app) => {
@@ -42,13 +78,23 @@ export const guardianRoutes: FastifyPluginAsync = async (app) => {
       })
     ]);
 
+    const sslProbes = await Promise.all(
+      sslDomains.map(async (domain) => ({
+        domainId: domain.id,
+        name: domain.name,
+        probe: await probeSsl(domain.name)
+      }))
+    );
+    const sslProbeByDomain = new Map(sslProbes.map((item) => [item.domainId, item.probe]));
+
     const sslIncidents = sslDomains
-      .filter((domain) => domain.sslExpiry && daysUntil(domain.sslExpiry) <= 14)
-      .map((domain) => ({
-        severity: daysUntil(domain.sslExpiry!) <= 3 ? "critical" : "warning",
+      .map((domain) => ({ domain, liveDays: sslProbeByDomain.get(domain.id)?.daysRemaining }))
+      .filter(({ domain, liveDays }) => (liveDays ?? (domain.sslExpiry ? daysUntil(domain.sslExpiry) : 9999)) <= 14)
+      .map(({ domain, liveDays }) => ({
+        severity: (liveDays ?? daysUntil(domain.sslExpiry!)) <= 3 ? "critical" : "warning",
         category: "ssl",
         title: `${domain.name} SSL expires soon`,
-        detail: `${daysUntil(domain.sslExpiry!)} days remaining`
+        detail: `${liveDays ?? daysUntil(domain.sslExpiry!)} days remaining${liveDays === undefined ? " from DB" : " from live probe"}`
       }));
 
     const deploymentIncidents = deployments
@@ -72,7 +118,8 @@ export const guardianRoutes: FastifyPluginAsync = async (app) => {
       deployments,
       sslDomains: sslDomains.map((domain) => ({
         ...domain,
-        daysRemaining: domain.sslExpiry ? daysUntil(domain.sslExpiry) : null
+        daysRemaining: domain.sslExpiry ? daysUntil(domain.sslExpiry) : null,
+        liveSsl: sslProbeByDomain.get(domain.id) ?? null
       })),
       generatedAt: new Date().toISOString()
     };

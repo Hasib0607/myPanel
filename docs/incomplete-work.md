@@ -39,6 +39,7 @@ Implemented Phase 1 foundation:
 - Added authenticated API `/api/v1/guardian/overview` with deployment and SSL expiry enrichment.
 - Added frontend `/guardian` page with live incidents, watched services, resource meters, security signals, watched ports, deployment watch, and SSL watch.
 - Added `vps-panel-guardian.service.example` and API `guardian` runner script for periodic read-only diagnosis logging.
+- Added parsed PM2 app health, Postgres/PgBouncer port awareness, live TLS certificate probing, and detailed Nginx access-log summaries for Phase 1 hardening.
 
 ## Current VPS Deployment Blockers
 

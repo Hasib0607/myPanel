@@ -29,21 +29,46 @@ type GuardianOverview = {
           key: string;
           name: string;
           unit: string;
-          port: number | null;
+          ports: number[];
           status: "healthy" | "down";
           systemdState: string;
           detail: string;
           portListening: boolean | null;
+          optional?: boolean;
         }>;
         ports: Array<{ port: number; listening: boolean; owner?: { process?: string; pid?: number } }>;
         security: { sshFailures: number; ufw?: CommandOutput; fail2ban?: CommandOutput };
-        logs: { nginxErrors: number; badHttpResponses: number };
-        pm2: { available: boolean; detail?: string; raw?: string };
+        logs: {
+          nginxErrors: number;
+          badHttpResponses: number;
+          nginxAccess?: {
+            sampleSize: number;
+            parsed: number;
+            statusCounts: Array<{ status: string; count: number }>;
+            topIps: Array<{ ip: string; count: number }>;
+            topBadIps: Array<{ ip: string; count: number }>;
+            topBadPaths: Array<{ path: string; count: number }>;
+          };
+        };
+        pm2: {
+          available: boolean;
+          detail?: string;
+          online?: number;
+          total?: number;
+          items: Array<{ name: string; pmId?: number; pid?: number; status: string; healthy: boolean; restarts: number; unstableRestarts: number; cpuPercent?: number; memoryBytes?: number }>;
+        };
       }
     | { unavailable: true; incidents: []; services: []; ports: [] };
   incidents: Incident[];
   deployments: Array<{ id: string; name: string; slug: string; status: string; healthStatus: string; port: number; lastHealthCheckAt: string | null }>;
-  sslDomains: Array<{ id: string; name: string; sslEnabled: boolean; sslExpiry: string | null; daysRemaining: number | null }>;
+  sslDomains: Array<{
+    id: string;
+    name: string;
+    sslEnabled: boolean;
+    sslExpiry: string | null;
+    daysRemaining: number | null;
+    liveSsl: { ok: boolean; issuer?: string; validFrom?: string; validTo?: string; daysRemaining?: number; error?: string } | null;
+  }>;
   generatedAt: string;
 };
 
@@ -210,7 +235,7 @@ export function GuardianClient() {
                     <tr className="border-t border-panel-line" key={service.key}>
                       <td className="px-4 py-3 font-medium">{service.name}</td>
                       <td className="px-4 py-3"><span className={`rounded-md px-2 py-1 text-xs font-semibold ${statusClass(service.status)}`}>{service.status}</span></td>
-                      <td className="px-4 py-3">{service.port ?? "-"}</td>
+                      <td className="px-4 py-3">{service.ports.length ? service.ports.join(", ") : "-"}</td>
                       <td className="px-4 py-3 text-panel-muted">{service.detail}</td>
                     </tr>
                   ))}
@@ -220,6 +245,52 @@ export function GuardianClient() {
           </div>
 
           <div className="space-y-6">
+            <div className="rounded-md border border-panel-line bg-white p-4">
+              <div className="mb-3 text-sm font-semibold">PM2 Apps</div>
+              <div className="space-y-2 text-sm">
+                {unavailable ? <div className="text-panel-muted">Sysagent unavailable</div> : null}
+                {!unavailable && diagnosis?.pm2.available === false ? <div className="text-panel-muted">{diagnosis.pm2.detail ?? "PM2 unavailable"}</div> : null}
+                {!unavailable && diagnosis?.pm2.available !== false && diagnosis?.pm2.items.length === 0 ? <div className="text-panel-muted">No PM2 apps found.</div> : null}
+                {!unavailable && diagnosis?.pm2.items.map((app) => (
+                  <div className="rounded-md border border-panel-line px-3 py-2" key={`${app.name}-${app.pmId ?? app.pid ?? "unknown"}`}>
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="truncate font-medium">{app.name}</span>
+                      <span className={app.healthy ? "text-emerald-700" : "text-panel-danger"}>{app.status}</span>
+                    </div>
+                    <div className="mt-1 text-xs text-panel-muted">
+                      restarts {app.restarts} / cpu {app.cpuPercent ?? 0}% / {app.memoryBytes ? formatBytes(app.memoryBytes) : "0 B"}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-md border border-panel-line bg-white p-4">
+              <div className="mb-3 text-sm font-semibold">Nginx Access Signals</div>
+              <div className="space-y-3 text-sm">
+                <div className="flex justify-between gap-3">
+                  <span className="text-panel-muted">Parsed sample</span>
+                  <span className="font-medium">{!unavailable ? `${diagnosis?.logs.nginxAccess?.parsed ?? 0}/${diagnosis?.logs.nginxAccess?.sampleSize ?? 0}` : "-"}</span>
+                </div>
+                <div>
+                  <div className="text-panel-muted">Status counts</div>
+                  <div className="mt-1 flex flex-wrap gap-2">
+                    {(!unavailable ? diagnosis?.logs.nginxAccess?.statusCounts ?? [] : []).slice(0, 8).map((item) => (
+                      <span className="rounded-md bg-slate-100 px-2 py-1 text-xs" key={item.status}>{item.status}: {item.count}</span>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-panel-muted">Top bad IPs</div>
+                  <div className="mt-1 space-y-1">
+                    {(!unavailable ? diagnosis?.logs.nginxAccess?.topBadIps ?? [] : []).slice(0, 5).map((item) => (
+                      <div className="flex justify-between gap-3 text-xs" key={item.ip}><span className="truncate">{item.ip}</span><span>{item.count}</span></div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <div className="rounded-md border border-panel-line bg-white p-4">
               <div className="mb-3 text-sm font-semibold">Security Signals</div>
               <div className="space-y-3 text-sm">
@@ -264,10 +335,16 @@ export function GuardianClient() {
               <div className="divide-y divide-panel-line">
                 {(overview.data?.sslDomains ?? []).map((domain) => (
                   <div className="flex items-center justify-between gap-3 px-4 py-3 text-sm" key={domain.id}>
-                    <span className="truncate font-medium">{domain.name}</span>
-                    <span className={domain.daysRemaining !== null && domain.daysRemaining <= 14 ? "text-amber-700" : "text-panel-muted"}>
-                      {domain.daysRemaining === null ? "unknown" : `${domain.daysRemaining}d`}
-                    </span>
+                    <div className="min-w-0">
+                      <div className="truncate font-medium">{domain.name}</div>
+                      <div className="truncate text-xs text-panel-muted">{domain.liveSsl?.ok ? `live ${domain.liveSsl.issuer ?? "certificate"}` : domain.liveSsl?.error ?? "DB expiry only"}</div>
+                    </div>
+                    <div className="text-right">
+                      <div className={domain.liveSsl?.daysRemaining !== undefined && domain.liveSsl.daysRemaining <= 14 ? "text-amber-700" : "text-panel-muted"}>
+                        {domain.liveSsl?.daysRemaining !== undefined ? `${domain.liveSsl.daysRemaining}d` : domain.daysRemaining === null ? "unknown" : `${domain.daysRemaining}d`}
+                      </div>
+                      <div className="text-xs text-panel-muted">{domain.liveSsl?.daysRemaining !== undefined ? "live" : "db"}</div>
+                    </div>
                   </div>
                 ))}
               </div>
