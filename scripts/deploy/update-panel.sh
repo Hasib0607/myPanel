@@ -10,6 +10,8 @@ STATUS_FILE="${PANEL_UPDATE_STATUS_FILE:-/var/log/vps-panel/self-update-status.j
 LOCK_FILE="${PANEL_UPDATE_LOCK_FILE:-/tmp/vps-panel-self-update.lock}"
 PID_FILE="${PANEL_UPDATE_PID_FILE:-/tmp/vps-panel-self-update.pid}"
 NPM_BIN="${NPM_BIN:-npm}"
+NODE_BIN="${NODE_BIN:-node}"
+REQUIRED_NODE_VERSION="${PANEL_UPDATE_REQUIRED_NODE_VERSION:-20.9.0}"
 SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-}"
 SUDO_BIN="${SUDO_BIN:-sudo}"
 SERVICES="${PANEL_UPDATE_SERVICES:-vps-panel-sysagent vps-panel-workers vps-panel-frontend vps-panel-api}"
@@ -90,17 +92,64 @@ run_timeout() {
   fi
 }
 
+version_at_least() {
+  local current="$1"
+  local required="$2"
+  local current_major current_minor current_patch required_major required_minor required_patch
+  IFS=. read -r current_major current_minor current_patch <<< "$current"
+  IFS=. read -r required_major required_minor required_patch <<< "$required"
+  current_minor="${current_minor:-0}"
+  current_patch="${current_patch:-0}"
+  required_minor="${required_minor:-0}"
+  required_patch="${required_patch:-0}"
+
+  if (( current_major > required_major )); then return 0; fi
+  if (( current_major < required_major )); then return 1; fi
+  if (( current_minor > required_minor )); then return 0; fi
+  if (( current_minor < required_minor )); then return 1; fi
+  (( current_patch >= required_patch ))
+}
+
+ensure_node_runtime() {
+  local node_path npm_path node_version npm_version
+  node_path="$(command -v "$NODE_BIN" || true)"
+  npm_path="$(command -v "$NPM_BIN" || true)"
+
+  if [[ -z "$node_path" || -z "$npm_path" ]]; then
+    log "Node.js or npm was not found. node=$node_path npm=$npm_path"
+    write_status "failed" "Node.js and npm are required for panel self-update" "$(current_commit)" "$(current_commit_subject)"
+    exit 71
+  fi
+
+  node_version="$("$NODE_BIN" -p 'process.versions.node' 2>/dev/null || true)"
+  npm_version="$("$NPM_BIN" --version 2>/dev/null || true)"
+  log "Using node $node_version at $node_path"
+  log "Using npm $npm_version at $npm_path"
+
+  if [[ -z "$node_version" ]] || ! version_at_least "$node_version" "$REQUIRED_NODE_VERSION"; then
+    log "Node.js $REQUIRED_NODE_VERSION or newer is required by the panel frontend build"
+    log "Install Node.js 22 on the VPS, then retry the panel update"
+    write_status "failed" "Node.js $REQUIRED_NODE_VERSION or newer required; found ${node_version:-unknown}" "$(current_commit)" "$(current_commit_subject)"
+    exit 71
+  fi
+}
+
 npm_install_with_recovery() {
   local output=""
+  local output_file=""
   log "+ $NPM_BIN install"
+  output_file="$(mktemp)"
   set +e
-  output="$("$NPM_BIN" install 2>&1)"
-  local status=$?
+  "$NPM_BIN" install 2>&1 | tee "$output_file" | tee -a "$LOG_FILE"
+  local status=${PIPESTATUS[0]}
   set -e
-  printf '%s\n' "$output" | tee -a "$LOG_FILE"
+  output="$(cat "$output_file")"
+  rm -f "$output_file"
   if [[ "$status" == "0" ]]; then
     return 0
   fi
+
+  log "npm install failed with exit code $status"
 
   if printf '%s' "$output" | grep -qiE "ENOTEMPTY|EEXIST|directory not empty|rename .*node_modules"; then
     log "npm install hit a stale node_modules rename conflict; cleaning npm temp folders and retrying"
@@ -290,6 +339,7 @@ NEW_COMMIT="$(current_commit)"
 NEW_COMMIT_SUBJECT="$(current_commit_subject)"
 write_status "running" "source updated; building panel" "$NEW_COMMIT" "$NEW_COMMIT_SUBJECT"
 ensure_systemctl_permission
+ensure_node_runtime
 
 npm_install_with_recovery
 run "$NPM_BIN" --workspace api run prisma:generate
