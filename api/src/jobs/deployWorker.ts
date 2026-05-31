@@ -201,6 +201,10 @@ function assertLiveResult(result: unknown, label: string) {
   if (message) throw new Error(message);
 }
 
+function isDryRunResult(result: unknown) {
+  return Boolean(result && typeof result === "object" && (result as { dryRun?: boolean }).dryRun);
+}
+
 const liveSystemCommandsFix = "Set ALLOW_LIVE_SYSTEM_COMMANDS=true on vps-panel-sysagent, restart vps-panel-sysagent and vps-panel-workers, then retry.";
 
 type SysagentLiveDiagnosis = {
@@ -265,6 +269,13 @@ async function repairSysagentLiveCommands() {
   };
 }
 
+async function repairSysagentLiveCommandsForDeployment(deploymentId: string, releaseId: string | undefined, reason: string) {
+  await writeLog(deploymentId, releaseId, "PREFLIGHT", "Sysagent live command auto-repair started", { reason });
+  const repair = await repairSysagentLiveCommands();
+  await writeLog(deploymentId, releaseId, "PREFLIGHT", "Sysagent live command auto-repair completed", repair as Prisma.InputJsonObject);
+  return repair;
+}
+
 async function assertSysagentLiveCommandsEnabled(deploymentId: string, releaseId: string | undefined) {
   let diagnosis = await sysagent.guardianDiagnosis() as SysagentLiveDiagnosis;
   if (!sysagentLiveCommandsDisabled(diagnosis)) return diagnosis;
@@ -275,8 +286,8 @@ async function assertSysagentLiveCommandsEnabled(deploymentId: string, releaseId
   }, "error");
 
   try {
-    const repair = await repairSysagentLiveCommands();
-    await writeLog(deploymentId, releaseId, "PREFLIGHT", "Sysagent live command mode repaired; rechecking", repair as Prisma.InputJsonObject);
+    await repairSysagentLiveCommandsForDeployment(deploymentId, releaseId, "diagnosis reported live commands disabled");
+    await writeLog(deploymentId, releaseId, "PREFLIGHT", "Sysagent live command mode repaired; rechecking");
     for (let attempt = 1; attempt <= 8; attempt += 1) {
       await sleep(1500);
       diagnosis = await sysagent.guardianDiagnosis() as SysagentLiveDiagnosis;
@@ -295,6 +306,31 @@ async function assertSysagentLiveCommandsEnabled(deploymentId: string, releaseId
   }
 
   throw new Error(`Sysagent live system commands are disabled. ${liveSystemCommandsFix}`);
+}
+
+async function runLiveDeploymentProcess(
+  deploymentId: string,
+  releaseId: string | undefined,
+  label: string,
+  body: Parameters<typeof sysagent.deploymentProcess>[0]
+) {
+  let result = await runStep(deploymentId, releaseId, "STARTING", label, () => sysagent.deploymentProcess(body));
+  if (!isDryRunResult(result)) return result;
+
+  await writeLog(deploymentId, releaseId, "STARTING", `${label} returned dry-run; repairing sysagent live mode and retrying`, {
+    result: result as Prisma.InputJsonValue
+  }, "warn");
+  try {
+    await repairSysagentLiveCommandsForDeployment(deploymentId, releaseId, `${label} returned dry-run`);
+    result = await runStep(deploymentId, releaseId, "STARTING", `${label} retry after sysagent live repair`, () =>
+      sysagent.deploymentProcess(body)
+    );
+  } catch (error) {
+    await writeLog(deploymentId, releaseId, "STARTING", `${label} live-mode repair failed`, {
+      error: error instanceof Error ? error.message : String(error)
+    }, "error");
+  }
+  return result;
 }
 
 function liveResultFailureMessage(result: unknown, label: string) {
@@ -977,8 +1013,11 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
       assertLiveResult((nginxResult as { reload?: unknown }).reload, "Nginx reload");
     }
 
-    const result = await runStep(deployment.id, releaseId, "STARTING", `${action} process`, () =>
-      sysagent.deploymentProcess({
+    const result = await runLiveDeploymentProcess(
+      deployment.id,
+      releaseId,
+      `${action} process`,
+      {
         deploymentId: deployment.id,
         name: deployment.slug,
         rootPath: appPath,
@@ -988,7 +1027,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
         port: deployment.port,
         env: runtimeEnvVars,
         logDir: deploymentLogDir(deployment.slug)
-      })
+      }
     );
     assertLiveResult(result, `${action} process`);
 
@@ -1234,8 +1273,11 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     }
 
     const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
-    const startResult = await runStep(deployment.id, releaseId, "STARTING", "Process start", () =>
-      sysagent.deploymentProcess({
+    const startResult = await runLiveDeploymentProcess(
+      deployment.id,
+      releaseId,
+      "Process start",
+      {
         deploymentId: deployment.id,
         name: deployment.slug,
         rootPath: appPath,
@@ -1245,7 +1287,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         port: deployment.port,
         env: envVars,
         logDir: deploymentLogDir(deployment.slug)
-      })
+      }
     );
     assertLiveResult(startResult, "Process start");
 
