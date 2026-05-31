@@ -571,9 +571,35 @@ async function ensureDeploymentDomainProxy(deploymentId: string, domain: BoundDo
   });
 }
 
-async function assertHealthResult(result: unknown, label: string, deployment: { slug: string }) {
+async function assertHealthResult(
+  result: unknown,
+  label: string,
+  deployment: { id: string; slug: string },
+  releaseId?: string
+) {
+  const value = result as { degraded?: boolean; httpCode?: number; stderr?: string };
+  if (value?.degraded) {
+    let runtimeText = "";
+    try {
+      const logs = await sysagent.deploymentRuntimeLogs({
+        name: deployment.slug,
+        logDir: deploymentLogDir(deployment.slug),
+        lines: 120
+      });
+      runtimeText = logs.text ? `\n\nRunning log tail:\n${logs.text}` : "";
+    } catch {
+      runtimeText = "";
+    }
+    await writeLog(deployment.id, releaseId, "HEALTH_CHECK", `${label} degraded`, {
+      httpCode: value.httpCode ?? null,
+      detail: value.stderr ?? null,
+      runtimeText: runtimeText || null
+    }, "warn");
+    return { degraded: true as const, httpCode: value.httpCode, message: value.stderr ?? `${label} returned HTTP ${value.httpCode ?? "error"}` };
+  }
+
   const message = liveResultFailureMessage(result, label);
-  if (!message) return;
+  if (!message) return { degraded: false as const };
 
   let runtimeText = "";
   try {
@@ -835,6 +861,35 @@ function isLaravelWritablePathIssue(text: string) {
     || lower.includes("bootstrap/cache")
     || lower.includes("storage/framework")
     || lower.includes("laravel package discovery failed");
+}
+
+async function prepareLaravelForStart(
+  deploymentId: string,
+  releaseId: string | undefined,
+  appPath: string,
+  envVars: Record<string, string>
+) {
+  await runStep(deploymentId, releaseId, "BUILDING", "Prepare Laravel runtime paths", () =>
+    sysagent.deploymentRepairLaravelWritablePaths({ rootPath: appPath })
+  );
+
+  if (!envVars.APP_KEY?.trim()) {
+    await runStep(deploymentId, releaseId, "BUILDING", "Generate Laravel APP_KEY", () =>
+      sysagent.deploymentBuild({
+        rootPath: appPath,
+        command: "php artisan key:generate --force",
+        env: envVars
+      })
+    );
+  }
+
+  await runStep(deploymentId, releaseId, "BUILDING", "Clear Laravel config cache", () =>
+    sysagent.deploymentBuild({
+      rootPath: appPath,
+      command: "php artisan config:clear",
+      env: envVars
+    })
+  );
 }
 
 async function autoRepairLaravelWritablePaths(deploymentId: string, releaseId: string | undefined, appPath: string, errorText: string) {
@@ -1102,14 +1157,15 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
           healthUrl: deployment.healthUrl,
           processName: deployment.slug,
           processManager,
-          rootPath: appPath
+          rootPath: appPath,
+          framework: deployment.framework
         })
     );
-    await assertHealthResult(health, `${action} health check`, deployment);
+    const healthOutcome = await assertHealthResult(health, `${action} health check`, deployment, releaseId);
 
     const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, `${action} public website check`, { ...deployment, domain });
 
-    const healthStatus = publicRouteWarning ? "DEGRADED" : "HEALTHY";
+    const healthStatus = publicRouteWarning || healthOutcome.degraded ? "DEGRADED" : "HEALTHY";
     await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "RUNNING", healthStatus, lastHealthCheckAt: new Date() } });
     return { result, health, status: "RUNNING", healthStatus, publicRouteWarning };
   } catch (error) {
@@ -1332,6 +1388,9 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     }
 
     const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
+    if (deployment.framework === "LARAVEL") {
+      await prepareLaravelForStart(deployment.id, releaseId, appPath, envVars);
+    }
     const startResult = await runLiveDeploymentProcess(
       deployment.id,
       releaseId,
@@ -1357,15 +1416,16 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         healthUrl: deployment.healthUrl,
         processName: deployment.slug,
         processManager,
-        rootPath: appPath
+        rootPath: appPath,
+        framework: deployment.framework
       })
     );
-    await assertHealthResult(health, "Health check", deployment);
+    const healthOutcome = await assertHealthResult(health, "Health check", deployment, releaseId);
 
     const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, "Public website check", { ...deployment, domain });
 
     await markRelease(releaseId, action === "rollback" ? "ROLLED_BACK" : "SUCCEEDED", startedAt);
-    const healthStatus = publicRouteWarning ? "DEGRADED" : "HEALTHY";
+    const healthStatus = publicRouteWarning || healthOutcome.degraded ? "DEGRADED" : "HEALTHY";
     await prisma.deployment.update({
       where: { id: deployment.id },
       data: {

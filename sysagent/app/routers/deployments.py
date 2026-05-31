@@ -65,6 +65,7 @@ class HealthRequest(BaseModel):
     processName: str | None = None
     processManager: str | None = None
     rootPath: str | None = None
+    framework: str | None = None
 
 
 class PortStatusRequest(BaseModel):
@@ -725,11 +726,42 @@ server {{
         return blocked_command(f"Nginx deployment vhost failed: {error}", ["write-nginx", body.serverName or body.deploymentId], path_info(body.rootPath))
 
 
-def _curl_once(url: str) -> dict:
+def _curl_once(url: str, *, accept_http_errors: bool = False) -> dict:
     # --connect-timeout: per-connection attempt limit (5 s)
     # --max-time: total wall-clock limit across all retries (90 s)
     # Without a large --max-time, curl exhausts the budget after 2-3 retries
     # even when --retry 10 is requested, because retry delays count against it.
+    if accept_http_errors:
+        result = run_command([
+            "curl",
+            "-sS",
+            "--retry", "10",
+            "--retry-delay", "3",
+            "--retry-connrefused",
+            "--connect-timeout", "5",
+            "--max-time", "90",
+            "-o", "/dev/null",
+            "-w", "%{http_code}",
+            url,
+        ], allow_live=DEPLOYMENT_COMMANDS_LIVE)
+        code_text = (result.get("stdout") or "").strip()
+        try:
+            http_code = int(code_text)
+        except ValueError:
+            http_code = 0
+        result["httpCode"] = http_code
+        if result.get("returncode") == 0 and http_code >= 400:
+            result["degraded"] = True
+            result["stderr"] = (
+                f"HTTP {http_code} from {url}. "
+                "The process is responding, but the app returned an error status."
+            )
+            if http_code >= 500:
+                result["stderr"] += (
+                    " Check APP_KEY, database connection env vars, and storage/bootstrap/cache permissions."
+                )
+        return result
+
     return run_command([
         "curl",
         "-fsS",
@@ -1025,6 +1057,7 @@ def port_status(body: PortStatusRequest) -> dict:
 @router.post("/health")
 def health(body: HealthRequest) -> dict:
     url = body.healthUrl or f"http://127.0.0.1:{body.port}/"
+    accept_http_errors = (body.framework or "").upper() == "LARAVEL"
 
     mismatch = _pm2_process_mismatch(body)
     if mismatch:
@@ -1046,13 +1079,13 @@ def health(body: HealthRequest) -> dict:
         }
 
     # Phase 1: wait for the process to bind (with retries for connection refused).
-    first = _curl_once(url)
+    first = _curl_once(url, accept_http_errors=accept_http_errors)
     if first.get("returncode") != 0:
         return first
 
     # Phase 2: wait 8 s then verify the process is still up (catches immediate crashes).
     time.sleep(8)
-    second = _curl_once(url)
+    second = _curl_once(url, accept_http_errors=accept_http_errors)
     if second.get("returncode") != 0:
         second["stderr"] = (
             "App responded on first check but crashed within 8 s. "
