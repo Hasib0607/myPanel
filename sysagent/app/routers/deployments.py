@@ -11,38 +11,12 @@ from pydantic import BaseModel, Field
 
 from app.command import run_command, run_install_plan
 from app.config import DEPLOYMENT_COMMANDS_LIVE, settings
+from app.deployment_commands import normalize_laravel_start_command, parse_deployment_command
 from app.platform import runtime_tool_install_plan
 from app.nginx_paths import nginx_sites_available, nginx_sites_enabled
 from app.nginx_manager import acme_location, publish_nginx_config, safe_letsencrypt_path, safe_web_root
 
 router = APIRouter()
-
-ALLOWED_DEPLOY_EXECUTABLES = {
-    "./app",
-    "composer",
-    "flask",
-    "go",
-    "gunicorn",
-    "node",
-    "next",
-    "npm",
-    "npx",
-    "php",
-    "pip",
-    "pip3",
-    "pnpm",
-    "python",
-    "python3",
-    "react-scripts",
-    "serve",
-    "true",
-    "uv",
-    "uvicorn",
-    "vite",
-    "yarn",
-}
-
-SHELL_METACHARS = {"|", "||", "&", "&&", ";", ">", ">>", "<", "$(", "`"}
 
 
 class GitSyncRequest(BaseModel):
@@ -139,10 +113,18 @@ class LaravelWritablePathsRequest(BaseModel):
     rootPath: str
 
 
+def path_is_within(root: Path, target: Path) -> bool:
+    try:
+        target.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 def path_info(root_path: str) -> dict:
     root = Path(settings.file_manager_root).resolve()
     target = Path(root_path).resolve()
-    allowed = target == root or root in target.parents
+    allowed = target == root or path_is_within(root, target)
     return {
         "root": str(root),
         "target": str(target),
@@ -199,20 +181,6 @@ def git_auth_env(token: str | None) -> dict[str, str] | None:
 
 def deployment_cwd(root_path: str) -> str:
     return str(Path(root_path).resolve())
-
-
-def parse_deployment_command(command: str) -> list[str]:
-    try:
-        parsed = shlex.split(command)
-    except ValueError as error:
-        raise ValueError(f"Invalid deployment command: {error}") from error
-    if not parsed:
-        raise ValueError("Deployment command cannot be empty")
-    if parsed[0] not in ALLOWED_DEPLOY_EXECUTABLES:
-        raise ValueError(f"Unsupported deployment executable: {parsed[0]}")
-    if any(token in SHELL_METACHARS or any(marker in token for marker in ("$(", "`")) for token in parsed):
-        raise ValueError("Shell operators are not allowed in deployment commands")
-    return parsed
 
 
 def nginx_config_name(deployment_id: str, server_name: str) -> str:
@@ -600,7 +568,9 @@ def process(body: ProcessRequest) -> dict:
     if manager == "PM2":
         if body.action in {"start", "restart"}:
             try:
-                start_command = parse_deployment_command(body.startCommand or "npm run start")
+                start_command = parse_deployment_command(
+                    normalize_laravel_start_command(body.startCommand, body.port) or "npm run start"
+                )
             except ValueError as error:
                 return blocked_command(str(error), [body.startCommand or "npm run start"], path_info(body.rootPath))
             return pm2_start(body, start_command)
@@ -611,7 +581,9 @@ def process(body: ProcessRequest) -> dict:
     elif manager == "SUPERVISOR":
         if body.action in {"start", "restart"}:
             try:
-                start_command = parse_deployment_command(body.startCommand or "true")
+                start_command = parse_deployment_command(
+                    normalize_laravel_start_command(body.startCommand, body.port) or "true"
+                )
             except ValueError as error:
                 return blocked_command(str(error), [body.startCommand or "true"], path_info(body.rootPath))
             return supervisor_start(body, start_command)

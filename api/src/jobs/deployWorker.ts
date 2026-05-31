@@ -371,7 +371,7 @@ function liveResultFailureMessage(result: unknown, label: string) {
     path?: { allowed?: boolean; target?: string; root?: string };
   };
   if (value?.blocked) {
-    const pathHint = value.path?.target && value.path?.root
+    const pathHint = value.path?.allowed === false && value.path?.target && value.path?.root
       ? ` Path ${value.path.target} is outside ${value.path.root}.`
       : "";
     return `${label} was blocked: ${value.reason ?? value.stderr ?? "policy restriction"}.${pathHint}`;
@@ -420,9 +420,21 @@ function renderDeploymentCommand(command: string | null | undefined, port: numbe
   return command?.replaceAll("{PORT}", String(port)).replaceAll("$PORT", String(port)) ?? null;
 }
 
+function laravelStartCommand(port: number) {
+  return `php artisan serve --host=127.0.0.1 --port ${port}`;
+}
+
+function isLegacyLaravelPhpFpmCommand(command: string | null | undefined) {
+  const normalized = command?.trim().toLowerCase() ?? "";
+  return !normalized || normalized === "php-fpm" || /^php\d*-fpm/.test(normalized) || /^php-fpm/.test(normalized);
+}
+
 function renderStartCommand(deployment: { framework: DeploymentFramework; startCommand: string | null; port: number }) {
   if (deployment.framework === "NEXTJS") {
     return `npx next start -p ${deployment.port} -H 127.0.0.1`;
+  }
+  if (deployment.framework === "LARAVEL" && isLegacyLaravelPhpFpmCommand(deployment.startCommand)) {
+    return laravelStartCommand(deployment.port);
   }
   return renderDeploymentCommand(deployment.startCommand, deployment.port);
 }

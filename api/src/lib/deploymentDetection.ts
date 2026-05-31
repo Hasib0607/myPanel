@@ -100,7 +100,7 @@ export function detectDeploymentFiles(files: string[], packageJsonText?: string 
         packageManager: "COMPOSER",
         installCommand: "composer install --no-dev --optimize-autoloader --no-interaction --no-scripts",
         buildCommand: null,
-        startCommand: "php-fpm",
+        startCommand: "php artisan serve --host=127.0.0.1 --port {PORT}",
         outputDirectory: "public",
         processManager: "SUPERVISOR"
       }
