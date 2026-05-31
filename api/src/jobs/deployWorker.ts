@@ -757,7 +757,8 @@ async function assertPublicRouteResult(result: unknown, label: string, deploymen
     runtimeText = "";
   }
 
-  const localhostProxyMatch = runtimeText.match(/https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?[^\s)"]*/i);
+  const diagnosticText = runtimeText.replace(/server running on \[[^\]]+\]/ig, "");
+  const localhostProxyMatch = diagnosticText.match(/https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?[^\s)"]*/i);
   const domainHint = localhostProxyMatch
     ? ` The app is healthy on localhost, but it is generating an internal URL (${localhostProxyMatch[0]}). Fix the deployed app env/source so public URLs use ${deployment.domain?.name ? `https://${deployment.domain.name}` : "the domain"} instead of localhost.`
     : deployment.domain?.name
@@ -766,16 +767,53 @@ async function assertPublicRouteResult(result: unknown, label: string, deploymen
   throw new Error(`${message}${domainHint}${runtimeText}`);
 }
 
-async function optionalPublicRouteWarning(deploymentId: string, releaseId: string | undefined, label: string, deployment: { slug: string; domain?: BoundDomain | null }) {
+async function optionalPublicRouteWarning(
+  deploymentId: string,
+  releaseId: string | undefined,
+  label: string,
+  deployment: { id: string; slug: string; framework: DeploymentFramework; port: number; startCommand: string | null; processManager: DeploymentProcessManager | null; domain?: BoundDomain | null },
+  appPath: string,
+  envVars: Record<string, string>,
+  processManager: DeploymentProcessManager
+) {
   const domain = deployment.domain;
   if (!domain) return null;
 
-  const publicRoute = await runStep(deploymentId, releaseId, "HEALTH_CHECK", label, () =>
+  let publicRoute = await runStep(deploymentId, releaseId, "HEALTH_CHECK", label, () =>
     sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain) })
   );
 
   try {
     await assertPublicRouteResult(publicRoute, label, deployment);
+    return null;
+  } catch (error) {
+    const firstMessage = error instanceof Error ? error.message : "Public route check failed";
+    await writeLog(deploymentId, releaseId, "HEALTH_CHECK", `${label} failed; running Guardian public-route repair`, { warning: firstMessage }, "warn");
+
+    await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Guardian public-route repair", () =>
+      runGuardianDeploymentRepair({ rootPath: appPath, framework: deployment.framework, envVars })
+    );
+    await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Guardian public-route process restart", () =>
+      restartDeploymentProcess({
+        deploymentId,
+        slug: deployment.slug,
+        appPath,
+        port: deployment.port,
+        processManager,
+        startCommand: renderStartCommand(deployment),
+        envVars,
+        logDir: deploymentLogDir(deployment.slug)
+      })
+    );
+    await guardianRepairSleep(5000);
+    publicRoute = await runStep(deploymentId, releaseId, "HEALTH_CHECK", `${label} retry after Guardian repair`, () =>
+      sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain) })
+    );
+  }
+
+  try {
+    await assertPublicRouteResult(publicRoute, label, deployment);
+    await writeLog(deploymentId, releaseId, "HEALTH_CHECK", `${label} recovered after Guardian repair`);
     return null;
   } catch (error) {
     const message = error instanceof Error ? error.message : "Public route check failed";
@@ -1284,7 +1322,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
       `${action} health check`
     );
 
-    const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, `${action} public website check`, { ...deployment, domain });
+    const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, `${action} public website check`, { ...deployment, domain }, appPath, envVars, processManager);
 
     const healthStatus = publicRouteWarning || healthOutcome.degraded ? "DEGRADED" : "HEALTHY";
     await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "RUNNING", healthStatus, lastHealthCheckAt: new Date() } });
@@ -1548,7 +1586,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       "Health check"
     );
 
-    const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, "Public website check", { ...deployment, domain });
+    const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, "Public website check", { ...deployment, domain }, appPath, envVars, processManager);
 
     await markRelease(releaseId, action === "rollback" ? "ROLLED_BACK" : "SUCCEEDED", startedAt);
     const healthStatus = publicRouteWarning || healthOutcome.degraded ? "DEGRADED" : "HEALTHY";

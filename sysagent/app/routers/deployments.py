@@ -1051,7 +1051,9 @@ def guardian_repair(body: GuardianRepairRequest) -> dict:
         if not env.get("APP_KEY", "").strip():
             steps["appKey"] = guarded_deployment_command(body.rootPath, "php artisan key:generate --force", env=env or None)
         steps["configClear"] = guarded_deployment_command(body.rootPath, "php artisan config:clear", env=env or None)
+        steps["cacheClear"] = guarded_deployment_command(body.rootPath, "php artisan cache:clear", env=env or None)
         steps["routeClear"] = guarded_deployment_command(body.rootPath, "php artisan route:clear", env=env or None)
+        steps["viewClear"] = guarded_deployment_command(body.rootPath, "php artisan view:clear", env=env or None)
 
     failed = [name for name, step in steps.items() if step.get("returncode", 0) != 0]
     return {
@@ -1148,7 +1150,7 @@ def port_status(body: PortStatusRequest) -> dict:
 @router.post("/health")
 def health(body: HealthRequest) -> dict:
     url = body.healthUrl or f"http://127.0.0.1:{body.port}/"
-    accept_http_errors = (body.framework or "").upper() == "LARAVEL"
+    accept_http_errors = False
 
     mismatch = _pm2_process_mismatch(body)
     if mismatch:
