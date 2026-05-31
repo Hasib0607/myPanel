@@ -5,14 +5,15 @@ APP_DIR="${APP_DIR:-/opt/vps-panel}"
 APP_USER="${APP_USER:-panel}"
 APP_BRANCH="${APP_BRANCH:-main}"
 REPO_URL="${REPO_URL:-}"
-PANEL_LOGIN_PORT="${PANEL_LOGIN_PORT:-2083}"
+PANEL_LOGIN_PORT="${PANEL_LOGIN_PORT:-8453}"
+CPANEL_LOGIN_PORT="${CPANEL_LOGIN_PORT:-3138}"
 PANEL_PORT="${PANEL_PORT:-4000}"
 FRONTEND_PORT="${FRONTEND_PORT:-3000}"
 SYSAGENT_PORT="${SYSAGENT_PORT:-5000}"
 PANEL_NGINX_SITE="${PANEL_NGINX_SITE:-00-vps-panel}"
 DEPLOYMENT_PORT_START="${DEPLOYMENT_PORT_START:-10000}"
 DEPLOYMENT_PORT_END="${DEPLOYMENT_PORT_END:-19999}"
-DEPLOYMENT_RESERVED_PORTS="${DEPLOYMENT_RESERVED_PORTS:-22,25,53,80,443,993,$PANEL_LOGIN_PORT,$FRONTEND_PORT,$PANEL_PORT,$SYSAGENT_PORT,5432,6379}"
+DEPLOYMENT_RESERVED_PORTS="${DEPLOYMENT_RESERVED_PORTS:-22,25,53,80,443,993,$CPANEL_LOGIN_PORT,$PANEL_LOGIN_PORT,$FRONTEND_PORT,$PANEL_PORT,$SYSAGENT_PORT,5432,6379}"
 DB_NAME="${DB_NAME:-panel_main}"
 DB_USER="${DB_USER:-panel_user}"
 DB_PASSWORD="${DB_PASSWORD:-$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-24)}"
@@ -114,6 +115,7 @@ TOTP_ISSUER=VPS Panel
 TOTP_ENCRYPTION_KEY=$TOTP_ENCRYPTION_KEY
 PANEL_PORT=$PANEL_PORT
 PANEL_LOGIN_PORT=$PANEL_LOGIN_PORT
+CPANEL_LOGIN_PORT=$CPANEL_LOGIN_PORT
 DEPLOYMENT_PORT_START=$DEPLOYMENT_PORT_START
 DEPLOYMENT_PORT_END=$DEPLOYMENT_PORT_END
 DEPLOYMENT_RESERVED_PORTS=$DEPLOYMENT_RESERVED_PORTS
@@ -136,6 +138,7 @@ PANEL_UPDATE_STALE_AFTER_SECONDS=1200
 FRONTEND_URL=http://$VPS_IP:$PANEL_LOGIN_PORT
 NEXT_PUBLIC_API_URL=http://$VPS_IP:$PANEL_LOGIN_PORT/api/v1
 NEXT_PUBLIC_PANEL_LOGIN_PORT=$PANEL_LOGIN_PORT
+NEXT_PUBLIC_CPANEL_LOGIN_PORT=$CPANEL_LOGIN_PORT
 DATABASE_URL=postgresql://$DB_USER:$DB_PASSWORD@localhost:5432/$DB_NAME
 DIRECT_DATABASE_URL=postgresql://$DB_USER:$DB_PASSWORD@localhost:5432/$DB_NAME
 REDIS_URL=redis://localhost:6379
@@ -292,6 +295,39 @@ server {
         proxy_set_header Connection "upgrade";
     }
 }
+
+server {
+    listen $CPANEL_LOGIN_PORT;
+    server_name $VPS_IP _;
+
+    client_max_body_size 100M;
+
+    location /api/v1/ {
+        proxy_pass http://127.0.0.1:$PANEL_PORT/api/v1/;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$http_host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Port $CPANEL_LOGIN_PORT;
+        proxy_set_header X-Panel-Mode account;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:$FRONTEND_PORT;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$http_host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Port $CPANEL_LOGIN_PORT;
+        proxy_set_header X-Panel-Mode account;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
 EOF
 ln -sf "/etc/nginx/sites-available/$PANEL_NGINX_SITE" "/etc/nginx/sites-enabled/$PANEL_NGINX_SITE"
 
@@ -305,6 +341,7 @@ visudo -c -f /etc/sudoers.d/vps-panel-update
 
 log "Opening firewall ports"
 ufw allow "$PANEL_LOGIN_PORT/tcp" || true
+ufw allow "$CPANEL_LOGIN_PORT/tcp" || true
 ufw allow 80/tcp || true
 ufw allow 443/tcp || true
 ufw allow 53/tcp || true
@@ -321,6 +358,7 @@ curl --fail --silent --show-error "http://127.0.0.1:$SYSAGENT_PORT/health" >/dev
 curl --fail --silent --show-error "http://127.0.0.1:$PANEL_PORT/health" >/dev/null
 curl --fail --silent --show-error --head "http://127.0.0.1:$FRONTEND_PORT/login" >/dev/null
 curl --fail --silent --show-error --head "http://127.0.0.1:$PANEL_LOGIN_PORT/login" >/dev/null
+curl --fail --silent --show-error --head "http://127.0.0.1:$CPANEL_LOGIN_PORT/login" >/dev/null
 redis-cli ping >/dev/null
 runuser -u postgres -- psql -d "$DB_NAME" -c "select 1" >/dev/null
 systemctl is-active --quiet vps-panel-sysagent vps-panel-api vps-panel-workers vps-panel-frontend nginx redis-server postgresql
@@ -329,6 +367,7 @@ log "Install complete"
 cat <<EOF
 
 Panel URL: http://$VPS_IP:$PANEL_LOGIN_PORT/login
+Account URL: http://$VPS_IP:$CPANEL_LOGIN_PORT/login
 Username:  $SUPERADMIN_USERNAME
 Password:  $SUPERADMIN_PASSWORD
 

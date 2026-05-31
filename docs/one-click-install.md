@@ -26,7 +26,8 @@ The installer sets up:
 - `/opt/vps-panel`
 - managed deployment ports `10000-19999`, keeping panel ports reserved
 - systemd services: `vps-panel-api`, `vps-panel-workers`, `vps-panel-frontend`, `vps-panel-sysagent`
-- panel listener on `:2083`
+- WHM-style admin listener on `:8453`
+- cPanel-style account listener on `:3138`
 - PM2 startup for deployed Node/Next.js projects
 - `/var/www` and `/var/www/deployments` permissions for managed hosting
 - file manager, DNS, and Nginx live sysagent permissions
@@ -39,7 +40,8 @@ Output includes the generated admin password and webhook secret. Save them immed
 Useful options:
 
 ```bash
-export PANEL_LOGIN_PORT=2083
+export PANEL_LOGIN_PORT=8453
+export CPANEL_LOGIN_PORT=3138
 export FRONTEND_PORT=3000
 export DEPLOYMENT_PORT_START=10000
 export DEPLOYMENT_PORT_END=19999

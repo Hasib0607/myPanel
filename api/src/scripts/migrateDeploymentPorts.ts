@@ -15,8 +15,10 @@ function reservedDeploymentPorts() {
     if (Number.isInteger(port) && port > 0 && port <= 65535) ports.add(port);
   }
   ports.add(env.PANEL_PORT);
-  const loginPort = Number(env.PANEL_LOGIN_PORT ?? 2083);
+  const loginPort = Number(env.PANEL_LOGIN_PORT ?? 8453);
   if (Number.isInteger(loginPort) && loginPort > 0 && loginPort <= 65535) ports.add(loginPort);
+  const accountPort = Number(env.CPANEL_LOGIN_PORT ?? 3138);
+  if (Number.isInteger(accountPort) && accountPort > 0 && accountPort <= 65535) ports.add(accountPort);
   return ports;
 }
 

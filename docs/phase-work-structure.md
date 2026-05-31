@@ -6,7 +6,8 @@ Goal: keep the panel and the currently live website stable while future deploy w
 
 Tasks:
 - Reserve the panel from hosted-project overwrites.
-- Keep the panel listener isolated on port 2083 through Nginx.
+- Keep the WHM-style admin listener isolated on port 8453 through Nginx.
+- Keep the cPanel-style account listener isolated on port 3138 through Nginx.
 - Keep panel frontend/API/sysagent/worker ports internal and documented.
 - Rename the panel Nginx file to a protected name such as `00-vps-panel.conf`.
 - Rename hosted site configs to domain-scoped names such as `domain-priceinbd.store.conf`.
@@ -15,7 +16,8 @@ Tasks:
 - Snapshot the current working `priceinbd.store` state.
 
 Deliverables:
-- Panel always opens on `http://IP:2083`.
+- Admin panel always opens on `http://IP:8453`.
+- Account panel always opens on `http://IP:3138`.
 - Website and panel no longer overwrite each other.
 - Broken hosted-site config cannot break the panel config.
 

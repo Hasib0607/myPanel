@@ -9,6 +9,7 @@ import { ZodError } from "zod";
 import { env } from "./config/env.js";
 import { csrfCookieName, csrfHeaderName, validCsrfPair } from "./lib/csrf.js";
 import { authRoutes } from "./routes/auth.js";
+import { accountRoutes } from "./routes/accounts.js";
 import { auditRoutes } from "./routes/audit.js";
 import { dashboardRoutes } from "./routes/dashboard.js";
 import { databaseRoutes } from "./routes/databases.js";
@@ -94,6 +95,7 @@ export function buildApp() {
   });
 
   app.register(authRoutes, { prefix: "/api/v1/auth" });
+  app.register(accountRoutes, { prefix: "/api/v1/accounts" });
   app.register(auditRoutes, { prefix: "/api/v1/audit" });
   app.register(twoFactorRoutes, { prefix: "/api/v1/auth/2fa" });
   app.register(dashboardRoutes, { prefix: "/api/v1/dashboard" });

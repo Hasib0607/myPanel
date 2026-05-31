@@ -49,6 +49,7 @@ Implemented Phase 1 foundation:
 - Phase 4 slice 2 added Doctor evidence snippets, env fix suggestions, safe NODE_OPTIONS memory-cap repair, and public URL env sync for apps that redirect/generate localhost URLs.
 - Phase 4 slice 3/4 added richer build-error parsing, missing runtime tool detection, database checks, Nginx upstream inspection, Supervisor health validation, rollback suggestions, approval-required risky fix previews, and scheduled deployment health watch jobs.
 - Deployment Doctor approval workflow added persistent approval records, approve/reject controls, and allowlisted execution for runtime package installs, permission repair, Supervisor repair, generated Nginx rewrite, and DB provision fixes.
+- Account foundation added cPanel-style account records, WHM account create/manage UI, account ownership hooks on domains/deployments/mailboxes, and split listener defaults: WHM/admin on `8453`, account/cPanel on `3138`.
 
 ## Current VPS Deployment Blockers
 

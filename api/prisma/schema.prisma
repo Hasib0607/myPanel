@@ -136,6 +136,11 @@ enum DeploymentDoctorApprovalStatus {
   FAILED
 }
 
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+}
+
 enum FirewallAction {
   ALLOW
   DENY
@@ -208,6 +213,7 @@ model Domain {
   documentRoot String        @default("public_html") @map("document_root")
   redirectUrl  String?       @map("redirect_url")
   hostingDeploymentId String? @map("hosting_deployment_id")
+  accountId    String?       @map("account_id")
   sslEnabled   Boolean       @default(false) @map("ssl_enabled")
   sslExpiry    DateTime?     @map("ssl_expiry")
   forceSsl     Boolean       @default(true) @map("force_ssl")
@@ -218,9 +224,32 @@ model Domain {
   mailAccounts MailAccount[]
   deployments  Deployment[]
   deploymentBindings DeploymentDomain[]
+  account      Account?      @relation(fields: [accountId], references: [id], onDelete: SetNull)
 
   @@index([name])
   @@map("domains")
+}
+
+model Account {
+  id           String        @id @default(cuid())
+  username     String        @unique
+  email        String?       @unique
+  ownerName    String?       @map("owner_name")
+  passwordHash String        @map("password_hash")
+  status       AccountStatus @default(ACTIVE)
+  homeRoot     String        @map("home_root")
+  packageName  String?       @map("package_name")
+  diskLimitMb  Int?          @map("disk_limit_mb")
+  domainLimit  Int?          @map("domain_limit")
+  metadata     Json          @default("{}")
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @updatedAt @map("updated_at")
+  domains      Domain[]
+  deployments  Deployment[]
+  mailAccounts MailAccount[]
+
+  @@index([status, createdAt])
+  @@map("accounts")
 }
 
 model Subdomain {
@@ -268,16 +297,19 @@ model NameServer {
 model MailAccount {
   id           String      @id @default(cuid())
   domainId     String      @map("domain_id")
+  accountId    String?     @map("account_id")
   username     String
   passwordHash String      @map("password_hash")
   quotaMb      Int         @default(1024) @map("quota_mb")
   enabled      Boolean     @default(true)
   createdAt    DateTime    @default(now()) @map("created_at")
   domain       Domain      @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  account      Account?    @relation(fields: [accountId], references: [id], onDelete: SetNull)
   mails        Mail[]
   aliases      MailAlias[]
 
   @@unique([domainId, username])
+  @@index([accountId])
   @@map("mail_accounts")
 }
 
@@ -314,6 +346,7 @@ model Mail {
 model Deployment {
   id                    String                    @id @default(cuid())
   domainId              String?                   @map("domain_id")
+  accountId             String?                   @map("account_id")
   name                  String
   slug                  String                    @unique
   framework             DeploymentFramework
@@ -355,6 +388,7 @@ model Deployment {
   createdAt             DateTime                  @default(now()) @map("created_at")
   updatedAt             DateTime                  @updatedAt @map("updated_at")
   domain                Domain?                   @relation(fields: [domainId], references: [id], onDelete: SetNull)
+  account               Account?                  @relation(fields: [accountId], references: [id], onDelete: SetNull)
   domainBindings        DeploymentDomain[]
   env                   DeploymentEnvVar[]
   releases              DeploymentRelease[]
@@ -362,6 +396,7 @@ model Deployment {
   doctorApprovals       DeploymentDoctorApproval[]
 
   @@index([domainId])
+  @@index([accountId])
   @@index([status])
   @@index([sourceProvider])
   @@index([githubOwner, githubRepo])
