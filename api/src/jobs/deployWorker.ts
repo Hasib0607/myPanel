@@ -622,6 +622,81 @@ async function resolveEnvVars(env: { key: string; value: string | null; secretRe
   return resolved;
 }
 
+async function buildDatabaseRuntimeEnv(
+  deployment: { id: string; dbType?: "POSTGRESQL" | "MYSQL" | null; dbName?: string | null; dbUser?: string | null; dbPasswordSecretRef?: string | null },
+  envVars: Record<string, string>
+) {
+  if (!deployment.dbType || !deployment.dbName || !deployment.dbUser) return { envVars, changed: false };
+
+  const password = deployment.dbPasswordSecretRef ? await getSecret(deployment.dbPasswordSecretRef) : null;
+  const host = envVars.DB_HOST || "127.0.0.1";
+  const nextEnv = { ...envVars };
+  let changed = false;
+
+  if (deployment.dbType === "MYSQL") {
+    const port = envVars.DB_PORT || "3306";
+    const desiredUrl = password !== null
+      ? `mysql://${encodeURIComponent(deployment.dbUser)}:${encodeURIComponent(password)}@${host}:${port}/${encodeURIComponent(deployment.dbName)}`
+      : null;
+    const updates: Record<string, string> = {
+      DB_CONNECTION: "mysql",
+      DB_HOST: host,
+      DB_PORT: port,
+      DB_DATABASE: deployment.dbName,
+      DB_USERNAME: deployment.dbUser,
+      DB_CHARSET: "utf8mb4",
+      DB_COLLATION: "utf8mb4_unicode_ci"
+    };
+    for (const [key, value] of Object.entries(updates)) {
+      if (nextEnv[key] !== value) {
+        nextEnv[key] = value;
+        changed = true;
+      }
+    }
+    if (desiredUrl && nextEnv.DATABASE_URL !== desiredUrl) {
+      nextEnv.DATABASE_URL = desiredUrl;
+      changed = true;
+    }
+    if (password !== null && nextEnv.DB_PASSWORD !== password) {
+      nextEnv.DB_PASSWORD = password;
+      changed = true;
+    }
+    return { envVars: nextEnv, changed };
+  }
+
+  const port = envVars.DB_PORT || "5432";
+  const desiredUrl = password !== null
+    ? `postgresql://${encodeURIComponent(deployment.dbUser)}:${encodeURIComponent(password)}@${host}:${port}/${encodeURIComponent(deployment.dbName)}`
+    : null;
+  const updates: Record<string, string> = {
+    DB_CONNECTION: "pgsql",
+    DB_HOST: host,
+    DB_PORT: port,
+    DB_DATABASE: deployment.dbName,
+    DB_USERNAME: deployment.dbUser,
+    DB_CHARSET: "utf8"
+  };
+  for (const [key, value] of Object.entries(updates)) {
+    if (nextEnv[key] !== value) {
+      nextEnv[key] = value;
+      changed = true;
+    }
+  }
+  if ((nextEnv.DB_COLLATION || "") !== "") {
+    nextEnv.DB_COLLATION = "";
+    changed = true;
+  }
+  if (desiredUrl && nextEnv.DATABASE_URL !== desiredUrl) {
+    nextEnv.DATABASE_URL = desiredUrl;
+    changed = true;
+  }
+  if (password !== null && nextEnv.DB_PASSWORD !== password) {
+    nextEnv.DB_PASSWORD = password;
+    changed = true;
+  }
+  return { envVars: nextEnv, changed };
+}
+
 function assertCommandTree(result: unknown, label: string) {
   if (!result || typeof result !== "object") return;
   const value = result as { dryRun?: boolean; returncode?: number; stderr?: string; reason?: string; command?: unknown };
@@ -786,6 +861,18 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
     const domain = deploymentDomain(deployment);
     let envVars = deploymentEnvWithPublicUrl(await resolveEnvVars(deployment.env), domain);
+    const databaseRuntime = await buildDatabaseRuntimeEnv(deployment, envVars);
+    envVars = databaseRuntime.envVars;
+    if (databaseRuntime.changed) {
+      await writeLog(deployment.id, releaseId, "PREFLIGHT", "Normalized deployment database runtime env", {
+        dbType: deployment.dbType,
+        DB_CONNECTION: envVars.DB_CONNECTION,
+        DB_HOST: envVars.DB_HOST,
+        DB_PORT: envVars.DB_PORT,
+        DB_DATABASE: envVars.DB_DATABASE,
+        hasDatabaseUrl: Boolean(envVars.DATABASE_URL)
+      }, "warn");
+    }
     if (isPostgresDeploymentEnvironment(deployment, envVars)) {
       const normalized = await normalizePostgresRuntimeEnv(deployment.id, envVars, true);
       envVars = normalized.envVars;
