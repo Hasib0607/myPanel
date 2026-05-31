@@ -116,6 +116,19 @@ class NginxInspectRequest(BaseModel):
     rootPath: str
 
 
+class RuntimeInstallRequest(BaseModel):
+    tool: str = Field(pattern="^(pnpm|yarn|composer|uv|go|php)$")
+
+
+class PermissionRepairRequest(BaseModel):
+    rootPath: str
+    logDir: str | None = None
+
+
+class SupervisorRepairRequest(BaseModel):
+    name: str
+
+
 def path_info(root_path: str) -> dict:
     root = Path(settings.file_manager_root).resolve()
     target = Path(root_path).resolve()
@@ -793,6 +806,45 @@ def runtime_tools(body: RuntimeToolsRequest) -> dict:
         path = shutil.which(name)
         items.append({"name": name, "installed": bool(path), "path": path})
     return {"items": items}
+
+
+@router.post("/runtime-tools/install")
+def install_runtime_tool(body: RuntimeInstallRequest) -> dict:
+    commands = {
+        "pnpm": ["npm", "install", "-g", "pnpm"],
+        "yarn": ["npm", "install", "-g", "yarn"],
+        "composer": ["apt-get", "install", "-y", "composer"],
+        "uv": ["pip3", "install", "uv"],
+        "go": ["apt-get", "install", "-y", "golang-go"],
+        "php": ["apt-get", "install", "-y", "php-cli", "php-fpm", "php-pgsql", "php-mysql", "php-xml", "php-mbstring", "php-curl", "php-zip"],
+    }
+    command = commands[body.tool]
+    return run_command(command, timeout=300)
+
+
+@router.post("/repair-permissions")
+def repair_permissions(body: PermissionRepairRequest) -> dict:
+    targets = [body.rootPath]
+    if body.logDir:
+        targets.append(body.logDir)
+    steps = {}
+    for target in targets:
+        info = path_info(target)
+        if not info["allowed"] and not str(Path(target).resolve()).startswith(str(Path(settings.deployment_log_root).resolve())):
+            steps[target] = blocked_command("Path escapes deployment roots", ["chown", "-R", "panel:panel", target], info)
+            continue
+        steps[target] = run_command(["chown", "-R", "panel:panel", target], timeout=120)
+    failed = [target for target, result in steps.items() if result.get("returncode") != 0]
+    return {"dryRun": any(result.get("dryRun") for result in steps.values()), "returncode": 1 if failed else 0, "steps": steps}
+
+
+@router.post("/supervisor/repair")
+def repair_supervisor(body: SupervisorRepairRequest) -> dict:
+    reread = run_command(["supervisorctl", "reread"], timeout=60)
+    update = run_command(["supervisorctl", "update"], timeout=60) if reread.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because reread failed"}
+    restart = run_command(["supervisorctl", "restart", body.name], timeout=60) if update.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because update failed"}
+    failed = any(step.get("returncode") != 0 for step in [reread, update, restart])
+    return {"dryRun": any(step.get("dryRun") for step in [reread, update, restart]), "returncode": 1 if failed else 0, "reread": reread, "update": update, "restart": restart}
 
 
 @router.post("/nginx-inspect")

@@ -128,6 +128,14 @@ enum DeploymentStep {
   ROLLBACK
 }
 
+enum DeploymentDoctorApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXECUTED
+  FAILED
+}
+
 enum FirewallAction {
   ALLOW
   DENY
@@ -351,12 +359,31 @@ model Deployment {
   env                   DeploymentEnvVar[]
   releases              DeploymentRelease[]
   logs                  DeploymentLog[]
+  doctorApprovals       DeploymentDoctorApproval[]
 
   @@index([domainId])
   @@index([status])
   @@index([sourceProvider])
   @@index([githubOwner, githubRepo])
   @@map("deployments")
+}
+
+model DeploymentDoctorApproval {
+  id           String                         @id @default(cuid())
+  deploymentId String                         @map("deployment_id")
+  actionKey    String                         @map("action_key")
+  label        String
+  command      String
+  reason       String
+  status       DeploymentDoctorApprovalStatus @default(PENDING)
+  result       Json                           @default("{}")
+  requestedAt  DateTime                       @default(now()) @map("requested_at")
+  decidedAt    DateTime?                      @map("decided_at")
+  executedAt   DateTime?                      @map("executed_at")
+  deployment   Deployment                     @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+
+  @@index([deploymentId, status, requestedAt])
+  @@map("deployment_doctor_approvals")
 }
 
 model DeploymentDomain {

@@ -150,5 +150,19 @@ export type DeploymentDoctorResponse = {
   generatedAt: string;
 };
 
+export type DeploymentDoctorApproval = {
+  id: string;
+  deploymentId: string;
+  actionKey: string;
+  label: string;
+  command: string;
+  reason: string;
+  status: "PENDING" | "APPROVED" | "REJECTED" | "EXECUTED" | "FAILED";
+  result: Record<string, unknown>;
+  requestedAt: string;
+  decidedAt: string | null;
+  executedAt: string | null;
+};
+
 export const frameworkOptions: DeploymentFramework[] = ["NEXTJS", "LARAVEL", "NODEJS", "PYTHON", "GO", "STATIC"];
 export const sourceOptions: DeploymentSourceProvider[] = ["GITHUB", "GIT_URL", "FILE_MANAGER", "MANUAL"];

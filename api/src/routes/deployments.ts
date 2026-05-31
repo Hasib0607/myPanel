@@ -81,6 +81,7 @@ const detectSchema = z.object({
 const doctorRepairSchema = z.object({
   action: z.enum(["auto", "sync-runtime", "health", "restart", "redeploy", "rollback", "set-node-memory", "sync-public-env", "request-approval"])
 });
+const approvalActionSchema = z.object({ approvalId: z.string().min(1) });
 
 const preflightSchema = z.object({
   domainId: z.string().nullable().optional(),
@@ -558,6 +559,60 @@ async function applyPublicUrlEnv(deployment: Awaited<ReturnType<typeof findDeplo
     }
   }
   return { domain: domain?.name ?? null, changed };
+}
+
+async function createDoctorApprovals(deploymentId: string, actions: Array<{ key: string; label: string; command: string; reason: string }>) {
+  const created = [];
+  for (const action of actions) {
+    created.push(await prisma.deploymentDoctorApproval.create({
+      data: {
+        deploymentId,
+        actionKey: action.key,
+        label: action.label,
+        command: action.command,
+        reason: action.reason
+      }
+    }));
+  }
+  return created;
+}
+
+async function executeDoctorApproval(deployment: Awaited<ReturnType<typeof findDeployment>>, approval: { actionKey: string }) {
+  if (approval.actionKey.startsWith("install-")) {
+    const tool = approval.actionKey.replace(/^install-/, "");
+    return sysagent.deploymentInstallRuntimeTool({ tool });
+  }
+  if (approval.actionKey === "repair-permissions") {
+    return sysagent.deploymentRepairPermissions({ rootPath: deployment.rootPath, logDir: deploymentLogDir(deployment.slug) });
+  }
+  if (approval.actionKey === "supervisor-config") {
+    return sysagent.deploymentRepairSupervisor({ name: deployment.slug });
+  }
+  if (approval.actionKey === "rewrite-nginx") {
+    const domain = deployment.domainBindings?.find((binding) => binding.role === "primary")?.domain ?? deployment.domainBindings?.[0]?.domain ?? deployment.domain;
+    return sysagent.deploymentNginx({
+      deploymentId: deployment.id,
+      serverName: deploymentServerName(domain),
+      upstreamPort: deployment.port,
+      rootPath: deployment.rootPath,
+      forceSsl: domain?.forceSsl ?? false
+    });
+  }
+  if (approval.actionKey === "database-provision") {
+    if (!deployment.dbType || !deployment.dbName || !deployment.dbUser) {
+      throw new Error("Deployment database metadata is incomplete");
+    }
+    return sysagent.provisionDatabase({
+      engine: deployment.dbType,
+      database: deployment.dbName,
+      username: deployment.dbUser,
+      passwordSecretRef: deployment.dbPasswordSecretRef
+    });
+  }
+  if (approval.actionKey === "install-php-extension") {
+    throw new Error("Exact PHP extension is unknown. Install the required extension manually after reviewing Composer output.");
+  }
+  throw new Error(`Unsupported approval action: ${approval.actionKey}`);
 }
 
 async function syncDeploymentRuntime(deployment: Awaited<ReturnType<typeof findDeployment>>) {
@@ -1507,9 +1562,10 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     }
 
     if (action === "request-approval") {
-      await addLog(deployment.id, "PREFLIGHT", "Deployment doctor risky fix needs approval", undefined, { riskyActions: doctor.riskyActions } as unknown as Prisma.InputJsonObject);
-      await audit(request, { action: "CREATE", resource: "deployment_doctor_approval", resourceId: deployment.id, description: `Deployment doctor approval requested for ${deployment.slug}`, metadata: { riskyActions: doctor.riskyActions } as unknown as Prisma.InputJsonObject });
-      return reply.code(202).send({ action, approvalRequired: true, riskyActions: doctor.riskyActions });
+      const approvals = await createDoctorApprovals(deployment.id, doctor.riskyActions);
+      await addLog(deployment.id, "PREFLIGHT", "Deployment doctor risky fix needs approval", undefined, { approvals, riskyActions: doctor.riskyActions } as unknown as Prisma.InputJsonObject);
+      await audit(request, { action: "CREATE", resource: "deployment_doctor_approval", resourceId: deployment.id, description: `Deployment doctor approval requested for ${deployment.slug}`, metadata: { approvals, riskyActions: doctor.riskyActions } as unknown as Prisma.InputJsonObject });
+      return reply.code(202).send({ action, approvalRequired: true, approvals, riskyActions: doctor.riskyActions });
     }
 
     if (action === "health") {
@@ -1562,6 +1618,61 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     }
 
     return reply.badRequest("Unsupported doctor repair action");
+  });
+
+  app.get("/:deploymentId/doctor/approvals", async (request) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const deployment = await findDeployment(deploymentId);
+    return prisma.deploymentDoctorApproval.findMany({
+      where: { deploymentId: deployment.id },
+      orderBy: { requestedAt: "desc" },
+      take: 50
+    });
+  });
+
+  app.post("/:deploymentId/doctor/approvals/:approvalId/reject", async (request) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const { approvalId } = approvalActionSchema.parse(request.params);
+    const deployment = await findDeployment(deploymentId);
+    const existing = await prisma.deploymentDoctorApproval.findFirstOrThrow({ where: { id: approvalId, deploymentId: deployment.id } });
+    const approval = await prisma.deploymentDoctorApproval.update({
+      where: { id: existing.id },
+      data: { status: "REJECTED", decidedAt: new Date() }
+    });
+    await audit(request, { action: "UPDATE", resource: "deployment_doctor_approval", resourceId: approval.id, description: `Rejected ${approval.label}` });
+    return approval;
+  });
+
+  app.post("/:deploymentId/doctor/approvals/:approvalId/approve", async (request, reply) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const { approvalId } = approvalActionSchema.parse(request.params);
+    const deployment = await findDeployment(deploymentId);
+    const pending = await prisma.deploymentDoctorApproval.findFirstOrThrow({ where: { id: approvalId, deploymentId: deployment.id } });
+    if (pending.status !== "PENDING" && pending.status !== "APPROVED") {
+      throw app.httpErrors.badRequest(`Approval is already ${pending.status}`);
+    }
+    const approved = await prisma.deploymentDoctorApproval.update({
+      where: { id: pending.id },
+      data: { status: "APPROVED", decidedAt: new Date() }
+    });
+    try {
+      const result = await executeDoctorApproval(deployment, approved);
+      const failed = commandFailed(result);
+      const updated = await prisma.deploymentDoctorApproval.update({
+        where: { id: approved.id },
+        data: { status: failed ? "FAILED" : "EXECUTED", executedAt: new Date(), result: result as Prisma.InputJsonValue }
+      });
+      await addLog(deployment.id, "PREFLIGHT", failed ? `Approved fix failed: ${approved.label}` : `Approved fix executed: ${approved.label}`, undefined, { approvalId: approved.id, result } as Prisma.InputJsonObject);
+      await audit(request, { action: "APPLY", resource: "deployment_doctor_approval", resourceId: approved.id, description: `Executed approved fix ${approved.label}`, metadata: { result } as Prisma.InputJsonObject });
+      return reply.code(202).send({ approval: updated, result });
+    } catch (error) {
+      const updated = await prisma.deploymentDoctorApproval.update({
+        where: { id: approved.id },
+        data: { status: "FAILED", executedAt: new Date(), result: { error: error instanceof Error ? error.message : String(error) } }
+      });
+      await addLog(deployment.id, "PREFLIGHT", `Approved fix errored: ${approved.label}`, undefined, { approvalId: approved.id, error: error instanceof Error ? error.message : String(error) });
+      return reply.code(500).send({ approval: updated, error: error instanceof Error ? error.message : "Approval execution failed" });
+    }
   });
 
   app.post("/:deploymentId/preflight", async (request) => {

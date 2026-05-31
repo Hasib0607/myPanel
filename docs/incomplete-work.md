@@ -48,6 +48,7 @@ Implemented Phase 1 foundation:
 - Phase 4 started with a Deployment Doctor that auto-detects runtime drift, source/root issues, port conflicts, PM2/start command health, recent build/runtime error patterns, and public Nginx route problems, then offers safe repairs such as sync runtime commands, health recheck, restart, or redeploy.
 - Phase 4 slice 2 added Doctor evidence snippets, env fix suggestions, safe NODE_OPTIONS memory-cap repair, and public URL env sync for apps that redirect/generate localhost URLs.
 - Phase 4 slice 3/4 added richer build-error parsing, missing runtime tool detection, database checks, Nginx upstream inspection, Supervisor health validation, rollback suggestions, approval-required risky fix previews, and scheduled deployment health watch jobs.
+- Deployment Doctor approval workflow added persistent approval records, approve/reject controls, and allowlisted execution for runtime package installs, permission repair, Supervisor repair, generated Nginx rewrite, and DB provision fixes.
 
 ## Current VPS Deployment Blockers
 

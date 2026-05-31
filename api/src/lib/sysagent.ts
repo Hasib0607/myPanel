@@ -88,6 +88,12 @@ export const sysagent = {
     request<{ ok: boolean; logDir?: string; stdout: string; stderr: string; text: string; error?: string }>("/deployments/runtime-logs", { method: "POST", body: JSON.stringify(body) }),
   deploymentRuntimeTools: (body: unknown) =>
     request<{ items: Array<{ name: string; installed: boolean; path?: string | null }> }>("/deployments/runtime-tools", { method: "POST", body: JSON.stringify(body) }),
+  deploymentInstallRuntimeTool: (body: unknown) =>
+    request<SysagentCommandResult>("/deployments/runtime-tools/install", { method: "POST", body: JSON.stringify(body) }),
+  deploymentRepairPermissions: (body: unknown) =>
+    request<SysagentCommandResult>("/deployments/repair-permissions", { method: "POST", body: JSON.stringify(body) }),
+  deploymentRepairSupervisor: (body: unknown) =>
+    request<SysagentCommandResult>("/deployments/supervisor/repair", { method: "POST", body: JSON.stringify(body) }),
   deploymentNginxInspect: (body: unknown) =>
     request<SysagentCommandResult & { exists: boolean; enabled: boolean; expectedUpstream: string; containsExpectedUpstream: boolean; availablePath: string; enabledPath: string }>("/deployments/nginx-inspect", { method: "POST", body: JSON.stringify(body) }),
   deploymentPublicRoute: (body: unknown) =>

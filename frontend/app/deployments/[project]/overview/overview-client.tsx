@@ -5,7 +5,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Database, FolderGit2, Globe2, HeartPulse, KeyRound, ListChecks, RefreshCw, TerminalSquare, Wrench } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
-import type { Deployment, DeploymentDoctorResponse, PreflightResponse, QueueResponse } from "../../deployment-types";
+import type { Deployment, DeploymentDoctorApproval, DeploymentDoctorResponse, PreflightResponse, QueueResponse } from "../../deployment-types";
 import { ActionButton, DeploymentSummary, EmptyState, Metric, ProjectTabs, ResultNotice, actionIcon, formatDate, formatDuration, statusBadge } from "../../deployment-ui";
 
 export function DeploymentOverviewClient({ project }: { project: string }) {
@@ -18,6 +18,12 @@ export function DeploymentOverviewClient({ project }: { project: string }) {
   const doctor = useQuery({
     queryKey: ["deployment-doctor", project],
     queryFn: () => apiGet<DeploymentDoctorResponse>(`/deployments/${project}/doctor`),
+    enabled: Boolean(detail.data),
+    refetchInterval: 20_000
+  });
+  const approvals = useQuery({
+    queryKey: ["deployment-doctor-approvals", project],
+    queryFn: () => apiGet<DeploymentDoctorApproval[]>(`/deployments/${project}/doctor/approvals`),
     enabled: Boolean(detail.data),
     refetchInterval: 20_000
   });
@@ -41,10 +47,23 @@ export function DeploymentOverviewClient({ project }: { project: string }) {
       setNotice(result?.approvalRequired ? "Risky fix added to approval log." : `Doctor ${name} repair requested.`);
       await Promise.all([
         invalidate(),
-        queryClient.invalidateQueries({ queryKey: ["deployment-doctor", project] })
+        queryClient.invalidateQueries({ queryKey: ["deployment-doctor", project] }),
+        queryClient.invalidateQueries({ queryKey: ["deployment-doctor-approvals", project] })
       ]);
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Doctor repair failed")
+  });
+  const approvalAction = useMutation({
+    mutationFn: ({ id, action }: { id: string; action: "approve" | "reject" }) => apiPost(`/deployments/${project}/doctor/approvals/${id}/${action}`, {}),
+    onSuccess: async (_result, input) => {
+      setNotice(`Approval ${input.action} requested.`);
+      await Promise.all([
+        invalidate(),
+        queryClient.invalidateQueries({ queryKey: ["deployment-doctor", project] }),
+        queryClient.invalidateQueries({ queryKey: ["deployment-doctor-approvals", project] })
+      ]);
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Approval action failed")
   });
 
   const deployment = detail.data;
@@ -171,6 +190,30 @@ export function DeploymentOverviewClient({ project }: { project: string }) {
                       </div>
                     </div>
                   ) : null}
+                  {(approvals.data ?? []).length ? (
+                    <div className="mt-4 rounded-md border border-panel-line bg-white p-3">
+                      <div className="text-xs font-semibold uppercase text-panel-muted">Approval History</div>
+                      <div className="mt-2 grid gap-2">
+                        {(approvals.data ?? []).slice(0, 8).map((item) => (
+                          <div className="rounded-md border border-panel-line bg-slate-50 p-2 text-xs" key={item.id}>
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="font-semibold">{item.label} <span className={`ml-2 rounded px-1.5 py-0.5 ${approvalBadge(item.status)}`}>{item.status}</span></div>
+                                <div className="mt-1 text-panel-muted">{item.reason}</div>
+                                <code className="mt-2 block break-words rounded bg-slate-950 p-2 font-mono text-slate-100">{item.command}</code>
+                              </div>
+                              {item.status === "PENDING" || item.status === "APPROVED" ? (
+                                <div className="flex shrink-0 gap-1">
+                                  <button className="rounded-md border border-panel-line bg-white px-2 py-1 font-medium hover:bg-slate-50 disabled:opacity-50" disabled={approvalAction.isPending} onClick={() => approvalAction.mutate({ id: item.id, action: "approve" })} type="button">Approve</button>
+                                  <button className="rounded-md border border-red-200 bg-white px-2 py-1 font-medium text-panel-danger hover:bg-red-50 disabled:opacity-50" disabled={approvalAction.isPending} onClick={() => approvalAction.mutate({ id: item.id, action: "reject" })} type="button">Reject</button>
+                                </div>
+                              ) : null}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                   {(doctor.data.evidence ?? []).length ? (
                     <div className="mt-4">
                       <div className="text-xs font-semibold uppercase text-panel-muted">Evidence</div>
@@ -248,6 +291,12 @@ function doctorBadge(status: "pass" | "warn" | "fail") {
   if (status === "pass") return "bg-emerald-50 text-emerald-700";
   if (status === "warn") return "bg-amber-50 text-amber-700";
   return "bg-red-50 text-panel-danger";
+}
+
+function approvalBadge(status: string) {
+  if (status === "EXECUTED") return "bg-emerald-50 text-emerald-700";
+  if (status === "FAILED" || status === "REJECTED") return "bg-red-50 text-panel-danger";
+  return "bg-amber-50 text-amber-700";
 }
 
 function useStateMessage() {
