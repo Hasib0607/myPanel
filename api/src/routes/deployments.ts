@@ -6,7 +6,7 @@ import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { env } from "../config/env.js";
 import { deployQueue } from "../jobs/queues.js";
-import { requiredRuntimeExecutables, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
+import { detectComposerPlatformIssue, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import { audit } from "../lib/audit.js";
 import { detectDeploymentFiles, detectDeploymentSource } from "../lib/deploymentDetection.js";
 import { prisma } from "../lib/prisma.js";
@@ -575,7 +575,22 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
   if (lower.includes("package-lock.json") && lower.includes("yarn.lock")) return { message: "Multiple lockfiles detected. Keep one package manager lockfile to avoid inconsistent installs.", repairAction: "redeploy", category: "lockfile_conflict" };
   if (lower.includes("unsupported engine") || lower.includes("node version") || lower.includes("requires node")) return { message: "Node version mismatch. Set a compatible runtime version or update the app engines field.", repairAction: "redeploy", category: "node_version" };
   if (lower.includes("prisma") && (lower.includes("migration") || lower.includes("p100") || lower.includes("database"))) return { message: "Prisma/database migration failed. Check DATABASE_URL, database grants, and migration state.", repairAction: "redeploy", category: "prisma_migration" };
-  if (lower.includes("composer") && (lower.includes("ext-") || lower.includes("requires php extension"))) return { message: "Composer is missing a required PHP extension. Install the extension on the VPS, then redeploy.", repairAction: "redeploy", category: "php_extension" };
+  const composerPlatform = detectComposerPlatformIssue(text);
+  const phpVersionMismatch = Boolean(
+    composerPlatform?.requiredPhpVersion
+    && (!composerPlatform.currentPhpVersion || Number((composerPlatform.currentPhpVersion.split(".")[0] ?? "0")) < Number((composerPlatform.requiredPhpVersion.split(".")[0] ?? "0"))
+      || (
+        Number((composerPlatform.currentPhpVersion.split(".")[0] ?? "0")) === Number((composerPlatform.requiredPhpVersion.split(".")[0] ?? "0"))
+        && Number((composerPlatform.currentPhpVersion.split(".")[1] ?? "0")) < Number((composerPlatform.requiredPhpVersion.split(".")[1] ?? "0"))
+      ))
+  );
+  if (phpVersionMismatch) {
+    const requiredPhpVersion = composerPlatform?.requiredPhpVersion ?? "unknown";
+    const currentPhpVersion = composerPlatform?.currentPhpVersion ?? "unknown";
+    return { message: `Composer lockfile requires PHP ${requiredPhpVersion}+ but the VPS CLI runtime is ${currentPhpVersion}. Upgrade PHP on the VPS, then redeploy.`, repairAction: "request-approval", category: "php_runtime_version" };
+  }
+  if (composerPlatform?.missingExtensions.includes("gd")) return { message: "Composer is missing the PHP GD extension. Install/enable GD on the VPS, then redeploy.", repairAction: "request-approval", category: "php_extension_gd" };
+  if (lower.includes("composer") && (lower.includes("ext-") || lower.includes("requires php extension"))) return { message: "Composer is missing a required PHP extension. Install the extension on the VPS, then redeploy.", repairAction: "request-approval", category: "php_extension" };
   if ((lower.includes("no such file or directory") || lower.includes("command not found") || lower.includes("unsupported deployment executable")) && (lower.includes("composer") || lower.includes("php") || lower.includes("python") || lower.includes("pip") || lower.includes("uv") || lower.includes("uvicorn") || lower.includes("gunicorn") || lower.includes("node") || lower.includes("npm") || lower.includes("pnpm") || lower.includes("yarn") || lower.includes("next") || lower.includes("vite") || lower.includes("pm2") || lower.includes("supervisor"))) {
     return { message: "A required runtime tool is missing on the VPS. Use Deployment Doctor to request approval for the missing tool install, then redeploy.", repairAction: "request-approval", category: "missing_runtime_tool" };
   }
@@ -674,6 +689,8 @@ async function executeDoctorApproval(deployment: Awaited<ReturnType<typeof findD
     const toolMap: Record<string, string> = {
       "install-composer": "composer",
       "install-php": "php",
+      "install-php82": "php82",
+      "install-php-gd": "php-gd",
       "install-python": "python",
       "install-nodejs": "nodejs",
       "install-pnpm": "pnpm",
@@ -975,7 +992,19 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
       approvalRequired: true
     });
   }
-  if (hint?.category === "php_extension") {
+  const composerRepairTargets = runtimeInstallTargetsForComposerPlatformIssue(recentErrors);
+  if (hint?.category === "php_extension" || hint?.category === "php_extension_gd" || hint?.category === "php_runtime_version") {
+    for (const target of composerRepairTargets) {
+      riskyActions.push({
+        key: target.actionKey,
+        label: target.label,
+        command: target.command,
+        reason: target.reason,
+        approvalRequired: true
+      });
+    }
+  }
+  if (hint?.category === "php_extension" && composerRepairTargets.length === 0) {
     riskyActions.push({
       key: "install-php-extension",
       label: "Install missing PHP extension",

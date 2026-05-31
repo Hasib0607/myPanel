@@ -12,11 +12,18 @@ type RuntimeToolInput = {
 
 export type RuntimeInstallTarget = {
   actionKey: string;
-  tool: "composer" | "php" | "python" | "nodejs" | "pnpm" | "yarn" | "uv" | "go" | "supervisor" | "pm2";
+  tool: "composer" | "php" | "php82" | "php-gd" | "python" | "nodejs" | "pnpm" | "yarn" | "uv" | "go" | "supervisor" | "pm2";
   label: string;
   command: string;
   reason: string;
   executables: string[];
+};
+
+export type ComposerPlatformIssue = {
+  requiredPhpVersion: string | null;
+  currentPhpVersion: string | null;
+  missingExtensions: string[];
+  composerRootWarning: boolean;
 };
 
 function firstExecutable(command: string | null | undefined) {
@@ -120,6 +127,22 @@ const installTargetCatalog: RuntimeInstallTarget[] = [
     executables: ["php"]
   },
   {
+    actionKey: "install-php82",
+    tool: "php82",
+    label: "Upgrade PHP runtime to 8.2",
+    command: "Install PHP 8.2 runtime, common Laravel extensions, and switch the CLI default to php8.2",
+    reason: "Composer reported that the project lockfile requires PHP 8.2 or newer.",
+    executables: ["php"]
+  },
+  {
+    actionKey: "install-php-gd",
+    tool: "php-gd",
+    label: "Install PHP GD extension",
+    command: "Install the PHP GD extension via panel runtime-tools",
+    reason: "Composer reported that the GD extension is required by this deployment.",
+    executables: ["php"]
+  },
+  {
     actionKey: "install-python",
     tool: "python",
     label: "Install Python runtime",
@@ -188,4 +211,51 @@ const installTargetCatalog: RuntimeInstallTarget[] = [
 export function runtimeInstallTargetsForMissingExecutables(missingExecutables: string[]) {
   const missing = new Set(missingExecutables);
   return installTargetCatalog.filter((target) => target.executables.some((executable) => missing.has(executable)));
+}
+
+function compareMajorMinorVersions(left: string, right: string) {
+  const [leftMajor = "0", leftMinor = "0"] = left.split(".");
+  const [rightMajor = "0", rightMinor = "0"] = right.split(".");
+  const majorDelta = Number(leftMajor) - Number(rightMajor);
+  if (majorDelta !== 0) return majorDelta;
+  return Number(leftMinor) - Number(rightMinor);
+}
+
+export function detectComposerPlatformIssue(text: string): ComposerPlatformIssue | null {
+  const requiredPhpVersion = text.match(/requires php(?:-[a-z0-9]+)?\s*(?:\^|>=|>|~)?\s*([0-9]+\.[0-9]+)/i)?.[1] ?? null;
+  const currentPhpVersion = text.match(/your php(?:-[a-z0-9]+)? version \(([\d.]+)\)/i)?.[1] ?? null;
+  const missingExtensions = [...text.matchAll(/requires ext-([a-z0-9_]+)/ig)].map((match) => match[1].toLowerCase());
+  const composerRootWarning = /do not run composer as root\/super user/i.test(text);
+
+  if (!requiredPhpVersion && !currentPhpVersion && missingExtensions.length === 0 && !composerRootWarning) return null;
+  return {
+    requiredPhpVersion,
+    currentPhpVersion,
+    missingExtensions: [...new Set(missingExtensions)],
+    composerRootWarning
+  };
+}
+
+export function runtimeInstallTargetsForComposerPlatformIssue(text: string) {
+  const issue = detectComposerPlatformIssue(text);
+  if (!issue) return [];
+
+  const targets: RuntimeInstallTarget[] = [];
+  const addTarget = (actionKey: RuntimeInstallTarget["actionKey"]) => {
+    const target = installTargetCatalog.find((item) => item.actionKey === actionKey);
+    if (target && !targets.some((item) => item.actionKey === target.actionKey)) targets.push(target);
+  };
+
+  if (issue.requiredPhpVersion) {
+    const needsUpgrade = !issue.currentPhpVersion || compareMajorMinorVersions(issue.currentPhpVersion, issue.requiredPhpVersion) < 0;
+    if (needsUpgrade && compareMajorMinorVersions(issue.requiredPhpVersion, "8.2") >= 0) {
+      addTarget("install-php82");
+    }
+  }
+
+  if (issue.missingExtensions.includes("gd")) {
+    addTarget(targets.some((item) => item.actionKey === "install-php82") ? "install-php82" : "install-php-gd");
+  }
+
+  return targets;
 }

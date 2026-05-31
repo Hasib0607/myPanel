@@ -4,7 +4,7 @@ import path from "node:path";
 import { redis } from "../lib/redis.js";
 import { logger } from "../lib/logger.js";
 import { detectDeploymentSource } from "../lib/deploymentDetection.js";
-import { requiredRuntimeExecutables, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
+import { requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import { env } from "../config/env.js";
 import { prisma } from "../lib/prisma.js";
 import { getSecret } from "../lib/secrets.js";
@@ -473,6 +473,52 @@ async function assertRuntimeToolsInstalled(deploymentId: string, releaseId: stri
   );
 }
 
+async function ensureDoctorApprovalExists(deploymentId: string, target: { actionKey: string; label: string; command: string; reason: string }) {
+  const existing = await prisma.deploymentDoctorApproval.findFirst({
+    where: {
+      deploymentId,
+      actionKey: target.actionKey,
+      status: { in: ["PENDING", "APPROVED"] }
+    }
+  });
+  if (existing) return existing;
+  return prisma.deploymentDoctorApproval.create({
+    data: {
+      deploymentId,
+      actionKey: target.actionKey,
+      label: target.label,
+      command: target.command,
+      reason: target.reason
+    }
+  });
+}
+
+async function autoRepairComposerPlatformIssue(deploymentId: string, releaseId: string | undefined, errorText: string) {
+  const targets = runtimeInstallTargetsForComposerPlatformIssue(errorText);
+  if (targets.length === 0) return false;
+
+  await writeLog(deploymentId, releaseId, "PREFLIGHT", "Composer platform mismatch detected", {
+    targets: targets.map((target) => target.actionKey),
+    evidence: errorText.slice(0, 4000)
+  }, "warn");
+
+  for (const target of targets) {
+    await ensureDoctorApprovalExists(deploymentId, target);
+  }
+
+  const autoInstalled: string[] = [];
+  for (const target of targets) {
+    const installResult = await runStep(deploymentId, releaseId, "PREFLIGHT", `Auto-repair ${target.tool}`, () =>
+      sysagent.deploymentInstallRuntimeTool({ tool: target.tool })
+    );
+    assertLiveResult(installResult, `Auto-repair ${target.tool}`);
+    autoInstalled.push(target.tool);
+  }
+
+  await writeLog(deploymentId, releaseId, "PREFLIGHT", "Composer platform repair applied", { tools: autoInstalled });
+  return autoInstalled.length > 0;
+}
+
 async function githubCloneToken(sourceProvider: string, gitUrl: string | null) {
   if (sourceProvider !== "GITHUB" || !gitUrl?.startsWith("https://github.com/")) return null;
   return getSecret(githubTokenSecretRef());
@@ -660,7 +706,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
 
     if (deployment.installCommand || deployment.packageManager) {
       await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "BUILDING" } });
-      const installResult = await runStep(deployment.id, releaseId, "INSTALLING", "Dependency install", () =>
+      const runDependencyInstall = () => runStep(deployment.id, releaseId, "INSTALLING", "Dependency install", () =>
         sysagent.deploymentInstall({
           rootPath: appPath,
           command: renderDeploymentCommand(deployment.installCommand, deployment.port),
@@ -668,7 +714,16 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           env: envVars
         })
       );
-      assertCommandTree(installResult, "Dependency install");
+      let installResult = await runDependencyInstall();
+      try {
+        assertCommandTree(installResult, "Dependency install");
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        const repaired = await autoRepairComposerPlatformIssue(deployment.id, releaseId, detail).catch(() => false);
+        if (!repaired) throw error;
+        installResult = await runDependencyInstall();
+        assertCommandTree(installResult, "Dependency install");
+      }
     }
 
     if (deployment.framework === "LARAVEL") {

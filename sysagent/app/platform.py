@@ -106,6 +106,42 @@ class PackageInstallPlan:
     notes: str = ""
 
 
+DEBIAN_PHP82_PACKAGES = (
+    "php8.2-cli",
+    "php8.2-fpm",
+    "php8.2-pgsql",
+    "php8.2-mysql",
+    "php8.2-xml",
+    "php8.2-mbstring",
+    "php8.2-curl",
+    "php8.2-zip",
+    "php8.2-gd",
+)
+DEBIAN_PHP82_REPO_PACKAGES = ("software-properties-common", "ca-certificates", "apt-transport-https")
+DEBIAN_PHP82_REPO_STEPS = (
+    InstallStep(
+        "Install APT helpers required for the Ondrej PHP repository",
+        ("apt-get", "install", "-y", *DEBIAN_PHP82_REPO_PACKAGES),
+        env={"DEBIAN_FRONTEND": "noninteractive"},
+    ),
+    InstallStep(
+        "Enable the Ondrej PHP repository for versioned PHP packages",
+        ("add-apt-repository", "-y", "ppa:ondrej/php"),
+        env={"DEBIAN_FRONTEND": "noninteractive"},
+    ),
+    InstallStep(
+        "Refresh APT package indexes after enabling the PHP repository",
+        ("apt-get", "update"),
+        env={"DEBIAN_FRONTEND": "noninteractive"},
+    ),
+)
+DEBIAN_PHP82_SWITCH_STEPS = (
+    InstallStep("Switch the CLI php binary to php8.2", ("update-alternatives", "--set", "php", "/usr/bin/php8.2")),
+    InstallStep("Switch the phar binary to php8.2", ("update-alternatives", "--set", "phar", "/usr/bin/phar8.2"), on_failure="continue"),
+    InstallStep("Switch the phar.phar binary to php8.2", ("update-alternatives", "--set", "phar.phar", "/usr/bin/phar.phar8.2"), on_failure="continue"),
+)
+
+
 def parse_os_release(content: str) -> dict[str, str]:
     values: dict[str, str] = {}
     for line in content.splitlines():
@@ -244,7 +280,10 @@ PACKAGE_SETS: dict[OsFamily, dict[str, tuple[str, ...]]] = {
             "php-mbstring",
             "php-curl",
             "php-zip",
+            "php-gd",
         ),
+        "php82_runtime": DEBIAN_PHP82_PACKAGES,
+        "php_gd": ("php-gd",),
         "python_runtime": ("python3", "python3-venv", "python3-pip"),
         "nodejs_runtime": ("nodejs", "npm"),
         "supervisor": ("supervisor",),
@@ -296,7 +335,9 @@ PACKAGE_SETS: dict[OsFamily, dict[str, tuple[str, ...]]] = {
             "php-mbstring",
             "php-curl",
             "php-zip",
+            "php-gd",
         ),
+        "php_gd": ("php-gd",),
         "python_runtime": ("python3", "python3-pip"),
         "nodejs_runtime": ("nodejs", "npm"),
         "supervisor": ("supervisor",),
@@ -360,7 +401,7 @@ PLATFORM_PATHS: dict[OsFamily, PlatformPaths] = {
     ),
 }
 
-RUNTIME_TOOL_KEYS = frozenset({"composer", "golang", "php_runtime", "python_runtime", "nodejs_runtime", "supervisor", "pnpm", "yarn", "uv", "pm2"})
+RUNTIME_TOOL_KEYS = frozenset({"composer", "golang", "php_runtime", "php82_runtime", "php_gd", "python_runtime", "nodejs_runtime", "supervisor", "pnpm", "yarn", "uv", "pm2"})
 
 
 def _resolve_family(info: OsReleaseInfo | None = None) -> OsFamily:
@@ -466,6 +507,30 @@ def composer_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPl
     )
 
 
+def php82_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
+    family = _resolve_family(info)
+    if family is not OsFamily.DEBIAN:
+        raise KeyError("PHP 8.2 auto-upgrade is currently supported on Debian/Ubuntu hosts only")
+
+    return PackageInstallPlan(
+        key="php82_runtime",
+        packages=DEBIAN_PHP82_PACKAGES,
+        steps=(
+            *DEBIAN_PHP82_REPO_STEPS,
+            InstallStep(
+                "Install PHP 8.2 runtime and common Laravel extensions",
+                tuple(package_install_command(list(DEBIAN_PHP82_PACKAGES), info)),
+                env=package_install_env(info),
+            ),
+            *DEBIAN_PHP82_SWITCH_STEPS,
+        ),
+        notes=(
+            "Uses the Ondrej PHP repository to install PHP 8.2 packages, then switches the CLI default "
+            "to php8.2 so Composer and artisan use the newer runtime."
+        ),
+    )
+
+
 def dovecot_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
     spec = service_spec("dovecot", info)
     return PackageInstallPlan(
@@ -481,6 +546,8 @@ def install_plan_for(key: str, info: OsReleaseInfo | None = None) -> PackageInst
         return certbot_install_plan(info)
     if key == "composer":
         return composer_install_plan(info)
+    if key == "php82_runtime":
+        return php82_install_plan(info)
     if key == "dovecot":
         return dovecot_install_plan(info)
 
@@ -552,8 +619,10 @@ def runtime_tool_install_plan(tool: str, info: OsReleaseInfo | None = None) -> P
         )
     if tool == "composer":
         return composer_install_plan(info)
+    if tool == "php82":
+        return php82_install_plan(info)
 
-    package_key = {"php": "php_runtime", "python": "python_runtime", "go": "golang", "nodejs": "nodejs_runtime"}.get(tool, tool)
+    package_key = {"php": "php_runtime", "php-gd": "php_gd", "python": "python_runtime", "go": "golang", "nodejs": "nodejs_runtime"}.get(tool, tool)
     if package_key not in PACKAGE_SETS[_resolve_family(info)]:
         raise KeyError(f"Unknown runtime tool '{tool}'")
     return install_plan_for(package_key, info)

@@ -123,7 +123,7 @@ class NginxInspectRequest(BaseModel):
 
 
 class RuntimeInstallRequest(BaseModel):
-    tool: str = Field(pattern="^(pnpm|yarn|composer|uv|go|php|python|nodejs|supervisor|pm2)$")
+    tool: str = Field(pattern="^(pnpm|yarn|composer|uv|go|php|php82|php-gd|python|nodejs|supervisor|pm2)$")
 
 
 class PermissionRepairRequest(BaseModel):
@@ -222,7 +222,10 @@ def guarded_deployment_command(root_path: str, command: str, env: dict[str, str]
         parsed = parse_deployment_command(command)
     except ValueError as error:
         return blocked_command(str(error), [command], info)
-    return guarded_command_with_env(root_path, parsed, cwd=deployment_cwd(root_path), env=env)
+    effective_env = dict(env or {})
+    if parsed and parsed[0] == "composer":
+        effective_env.setdefault("COMPOSER_ALLOW_SUPERUSER", "1")
+    return guarded_command_with_env(root_path, parsed, cwd=deployment_cwd(root_path), env=effective_env or None)
 
 
 def pm2_env(port: int | None) -> dict[str, str]:
@@ -488,7 +491,10 @@ def install(body: CommandRequest) -> dict:
         "GO": "go mod download",
         "NONE": "true",
     }.get((body.packageManager or "NONE").upper(), "true")
-    return guarded_deployment_command(body.rootPath, command, env=body.env)
+    env = dict(body.env or {})
+    if (body.packageManager or "").upper() == "COMPOSER":
+        env.setdefault("COMPOSER_ALLOW_SUPERUSER", "1")
+    return guarded_deployment_command(body.rootPath, command, env=env or None)
 
 
 @router.post("/build")
