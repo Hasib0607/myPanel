@@ -1,6 +1,9 @@
 import { Worker } from "bullmq";
 import { DeploymentFramework, DeploymentPackageManager, DeploymentProcessManager, DeploymentRuntime, Prisma } from "@prisma/client";
+import { execFile } from "node:child_process";
+import fs from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 import { redis } from "../lib/redis.js";
 import { logger } from "../lib/logger.js";
 import { detectDeploymentSource } from "../lib/deploymentDetection.js";
@@ -10,6 +13,8 @@ import { prisma } from "../lib/prisma.js";
 import { deleteSecret, getSecret } from "../lib/secrets.js";
 import { sysagent } from "../lib/sysagent.js";
 import { sslQueue } from "./queues.js";
+
+const execFileAsync = promisify(execFile);
 
 type DeployJobData = {
   deploymentId?: string;
@@ -198,22 +203,97 @@ function assertLiveResult(result: unknown, label: string) {
 
 const liveSystemCommandsFix = "Set ALLOW_LIVE_SYSTEM_COMMANDS=true on vps-panel-sysagent, restart vps-panel-sysagent and vps-panel-workers, then retry.";
 
-async function assertSysagentLiveCommandsEnabled(deploymentId: string, releaseId: string | undefined) {
-  const diagnosis = await sysagent.guardianDiagnosis() as {
-    config?: { liveSystemCommandsEnabled?: boolean };
-    incidents?: Array<{ category?: string; title?: string; detail?: string }>;
-  };
+type SysagentLiveDiagnosis = {
+  config?: { liveSystemCommandsEnabled?: boolean };
+  incidents?: Array<{ category?: string; title?: string; detail?: string }>;
+};
+
+function sysagentLiveCommandsDisabled(diagnosis: SysagentLiveDiagnosis) {
   const disabledByConfig = diagnosis.config?.liveSystemCommandsEnabled === false;
   const disabledByIncident = diagnosis.incidents?.some((incident) =>
     incident.category === "sysagent" && /live system commands/i.test(`${incident.title ?? ""} ${incident.detail ?? ""}`)
   );
+  return Boolean(disabledByConfig || disabledByIncident);
+}
 
-  if (!disabledByConfig && !disabledByIncident) return diagnosis;
+async function setPanelEnvValue(key: string, value: string) {
+  const envPath = path.join(env.PANEL_UPDATE_WORKDIR, ".env");
+  const current = await fs.readFile(envPath, "utf8");
+  const next = new RegExp(`^${key}=.*$`, "m").test(current)
+    ? current.replace(new RegExp(`^${key}=.*$`, "m"), `${key}=${value}`)
+    : `${current.replace(/\s*$/, "")}\n${key}=${value}\n`;
+  if (next !== current) {
+    await fs.writeFile(envPath, next, "utf8");
+  }
+  return { envPath, changed: next !== current };
+}
+
+async function systemctlRestart(service: string) {
+  const candidates = ["/usr/bin/systemctl", "/bin/systemctl", "systemctl"];
+  let lastError: unknown = null;
+  for (const systemctl of candidates) {
+    try {
+      return await execFileAsync("sudo", ["-n", systemctl, "--no-block", "restart", service], { timeout: 10_000 });
+    } catch (error) {
+      lastError = error;
+      const code = (error as { code?: string }).code;
+      if (code === "ENOENT") continue;
+      throw error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("systemctl not found");
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function repairSysagentLiveCommands() {
+  const envResults = [];
+  envResults.push(await setPanelEnvValue("ALLOW_LIVE_SYSTEM_COMMANDS", "true"));
+  envResults.push(await setPanelEnvValue("ALLOW_LIVE_FILE_MANAGER", "true"));
+  envResults.push(await setPanelEnvValue("ALLOW_LIVE_NGINX", "true"));
+  envResults.push(await setPanelEnvValue("ALLOW_LIVE_SSL", "true"));
+  const restart = await systemctlRestart("vps-panel-sysagent");
+  await sleep(3000);
+  return {
+    envResults,
+    restart: {
+      stdout: restart.stdout,
+      stderr: restart.stderr
+    }
+  };
+}
+
+async function assertSysagentLiveCommandsEnabled(deploymentId: string, releaseId: string | undefined) {
+  let diagnosis = await sysagent.guardianDiagnosis() as SysagentLiveDiagnosis;
+  if (!sysagentLiveCommandsDisabled(diagnosis)) return diagnosis;
 
   await writeLog(deploymentId, releaseId, "PREFLIGHT", "Sysagent live command preflight failed", {
     fix: liveSystemCommandsFix,
     config: diagnosis.config ?? null
   }, "error");
+
+  try {
+    const repair = await repairSysagentLiveCommands();
+    await writeLog(deploymentId, releaseId, "PREFLIGHT", "Sysagent live command mode repaired; rechecking", repair as Prisma.InputJsonObject);
+    for (let attempt = 1; attempt <= 8; attempt += 1) {
+      await sleep(1500);
+      diagnosis = await sysagent.guardianDiagnosis() as SysagentLiveDiagnosis;
+      if (!sysagentLiveCommandsDisabled(diagnosis)) {
+        await writeLog(deploymentId, releaseId, "PREFLIGHT", "Sysagent live command preflight passed after repair", {
+          attempt,
+          config: diagnosis.config ?? null
+        });
+        return diagnosis;
+      }
+    }
+  } catch (error) {
+    await writeLog(deploymentId, releaseId, "PREFLIGHT", "Sysagent live command auto-repair failed", {
+      error: error instanceof Error ? error.message : String(error)
+    }, "error");
+  }
+
   throw new Error(`Sysagent live system commands are disabled. ${liveSystemCommandsFix}`);
 }
 
