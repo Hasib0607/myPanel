@@ -518,14 +518,25 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
       pageSize: z.coerce.number().min(1).max(100).default(50)
     }).parse(request.query);
 
-    const where = query.search ? { name: { contains: query.search, mode: "insensitive" as const } } : {};
+    const subdomainSearch = query.search?.split(".")[0];
+    const where = query.search
+      ? {
+          OR: [
+            { name: { contains: query.search, mode: "insensitive" as const } },
+            ...(subdomainSearch ? [{ subdomains: { some: { name: { contains: subdomainSearch, mode: "insensitive" as const } } } }] : [])
+          ]
+        }
+      : {};
     const [items, total] = await Promise.all([
       prisma.domain.findMany({
         where,
         orderBy: { name: "asc" },
         skip: (query.page - 1) * query.pageSize,
         take: query.pageSize,
-        include: { _count: { select: { subdomains: true, dnsRecords: true, mailAccounts: true } } }
+        include: {
+          _count: { select: { subdomains: true, dnsRecords: true, mailAccounts: true } },
+          subdomains: { orderBy: { name: "asc" } }
+        }
       }),
       prisma.domain.count({ where })
     ]);

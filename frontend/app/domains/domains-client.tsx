@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useMemo, useState } from "react";
+import { Fragment, FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Eye, Globe2, ListPlus, Mail, Network, Plus, Search, Settings2, ShieldCheck, Split, Trash2, X } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
@@ -22,6 +22,7 @@ type Domain = {
   redirectUrl: string | null;
   hostingDeploymentId: string | null;
   createdAt: string;
+  subdomains: Array<{ id: string; name: string; target: string; sslEnabled: boolean }>;
   _count: {
     subdomains: number;
     dnsRecords: number;
@@ -367,83 +368,116 @@ export function DomainsClient() {
             </thead>
             <tbody>
               {(domains.data?.items ?? []).map((domain) => (
-                <tr key={domain.id} className="border-t border-panel-line">
-                  <td className="px-4 py-3 font-medium">{domain.name}</td>
-                  <td className="px-4 py-3">
-                    <select
-                      className={`h-8 rounded-md border border-transparent px-2 text-xs font-semibold ${statusClass(domain.status)}`}
-                      onChange={(event) => updateStatus.mutate({ id: domain.id, status: event.target.value as DomainStatus })}
-                      value={domain.status}
-                    >
-                      <option value="ACTIVE">ACTIVE</option>
-                      <option value="PENDING">PENDING</option>
-                      <option value="SUSPENDED">SUSPENDED</option>
-                    </select>
-                  </td>
-                  <td className="px-4 py-3">{domain._count.dnsRecords}</td>
-                  <td className="px-4 py-3">{domain._count.mailAccounts}</td>
-                  <td className="px-4 py-3">{domain._count.subdomains}</td>
-                  <td className="px-4 py-3">
-                    <div className="max-w-48">
-                      <div className="text-xs font-semibold text-slate-700">{domain.hostingMode.replace("_", " ")}</div>
-                      <div className="truncate text-xs text-panel-muted">{hostingLabel(domain)}</div>
-                    </div>
-                  </td>
-                  <td className="px-4 py-3">{domain.sslEnabled ? "enabled" : domain.forceSsl ? "pending" : "off"}</td>
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-2">
-                      <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`/domains/${domain.id}/overview`} title="View domain">
-                        <Eye size={15} />
-                      </Link>
-                      <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`/domains/${domain.id}/dns`} title="DNS records">
-                        <Network size={15} />
-                      </Link>
-                      <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`/domains/${domain.id}/subdomains`} title="Subdomains">
-                        <Split size={15} />
-                      </Link>
-                      <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`/domains/${domain.id}/ssl`} title="SSL">
-                        <ShieldCheck size={15} />
-                      </Link>
-                      <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`/domains/${domain.id}/mail/accounts`} title="Mail accounts">
-                        <Mail size={15} />
-                      </Link>
-                      <button
-                        className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100"
-                        onClick={() => openHosting(domain)}
-                        title="Hosting settings"
-                        type="button"
+                <Fragment key={domain.id}>
+                  <tr className="border-t border-panel-line">
+                    <td className="px-4 py-3 font-medium">{domain.name}</td>
+                    <td className="px-4 py-3">
+                      <select
+                        className={`h-8 rounded-md border border-transparent px-2 text-xs font-semibold ${statusClass(domain.status)}`}
+                        onChange={(event) => updateStatus.mutate({ id: domain.id, status: event.target.value as DomainStatus })}
+                        value={domain.status}
                       >
-                        <Settings2 size={15} />
-                      </button>
-                      <button
-                        className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100 disabled:opacity-60"
-                        disabled={publishDomain.isPending}
-                        onClick={() => {
-                          setNotice("");
-                          publishDomain.mutate(domain);
-                        }}
-                        title="Publish DNS and website"
-                        type="button"
-                      >
-                        <Globe2 size={15} />
-                      </button>
-                      <button
-                        className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line text-panel-danger hover:bg-red-50 disabled:opacity-60"
-                        disabled={deleteDomain.isPending}
-                        onClick={() => {
-                          if (window.confirm(`Delete ${domain.name}? This removes its DNS, mail accounts, and deployment metadata.`)) {
+                        <option value="ACTIVE">ACTIVE</option>
+                        <option value="PENDING">PENDING</option>
+                        <option value="SUSPENDED">SUSPENDED</option>
+                      </select>
+                    </td>
+                    <td className="px-4 py-3">{domain._count.dnsRecords}</td>
+                    <td className="px-4 py-3">{domain._count.mailAccounts}</td>
+                    <td className="px-4 py-3">{domain._count.subdomains}</td>
+                    <td className="px-4 py-3">
+                      <div className="max-w-48">
+                        <div className="text-xs font-semibold text-slate-700">{domain.hostingMode.replace("_", " ")}</div>
+                        <div className="truncate text-xs text-panel-muted">{hostingLabel(domain)}</div>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">{domain.sslEnabled ? "enabled" : domain.forceSsl ? "pending" : "off"}</td>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-2">
+                        <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`/domains/${domain.id}/overview`} title="View domain">
+                          <Eye size={15} />
+                        </Link>
+                        <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`/domains/${domain.id}/dns`} title="DNS records">
+                          <Network size={15} />
+                        </Link>
+                        <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`/domains/${domain.id}/subdomains`} title="Subdomains">
+                          <Split size={15} />
+                        </Link>
+                        <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`/domains/${domain.id}/ssl`} title="SSL">
+                          <ShieldCheck size={15} />
+                        </Link>
+                        <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`/domains/${domain.id}/mail/accounts`} title="Mail accounts">
+                          <Mail size={15} />
+                        </Link>
+                        <button
+                          className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100"
+                          onClick={() => openHosting(domain)}
+                          title="Hosting settings"
+                          type="button"
+                        >
+                          <Settings2 size={15} />
+                        </button>
+                        <button
+                          className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100 disabled:opacity-60"
+                          disabled={publishDomain.isPending}
+                          onClick={() => {
                             setNotice("");
-                            deleteDomain.mutate(domain);
-                          }
-                        }}
-                        title="Delete domain"
-                        type="button"
-                      >
-                        <Trash2 size={15} />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
+                            publishDomain.mutate(domain);
+                          }}
+                          title="Publish DNS and website"
+                          type="button"
+                        >
+                          <Globe2 size={15} />
+                        </button>
+                        <button
+                          className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line text-panel-danger hover:bg-red-50 disabled:opacity-60"
+                          disabled={deleteDomain.isPending}
+                          onClick={() => {
+                            if (window.confirm(`Delete ${domain.name}? This removes its DNS, mail accounts, and deployment metadata.`)) {
+                              setNotice("");
+                              deleteDomain.mutate(domain);
+                            }
+                          }}
+                          title="Delete domain"
+                          type="button"
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                  {domain.subdomains.map((subdomain) => (
+                    <tr key={subdomain.id} className="border-t border-panel-line bg-slate-50/60">
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-2 pl-4">
+                          <Split className="text-panel-muted" size={15} />
+                          <span className="font-medium">{subdomain.name}.{domain.name}</span>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3"><span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-semibold text-panel-muted">SUBDOMAIN</span></td>
+                      <td className="px-4 py-3">1</td>
+                      <td className="px-4 py-3">-</td>
+                      <td className="px-4 py-3">-</td>
+                      <td className="px-4 py-3">
+                        <div className="max-w-48">
+                          <div className="text-xs font-semibold text-slate-700">DNS TARGET</div>
+                          <div className="truncate text-xs text-panel-muted">{subdomain.target}</div>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3">{subdomain.sslEnabled ? "enabled" : "pending"}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-2">
+                          <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line bg-white hover:bg-slate-100" href={`/domains/${domain.id}/subdomains`} title="Manage subdomains">
+                            <Split size={15} />
+                          </Link>
+                          <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line bg-white hover:bg-slate-100" href={`/domains/${domain.id}/dns`} title="DNS records">
+                            <Network size={15} />
+                          </Link>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </Fragment>
               ))}
               {domains.data?.items.length === 0 ? (
                 <tr>
