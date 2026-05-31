@@ -1,4 +1,7 @@
+"use client";
+
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { Blocks, Database, Gauge, Globe2, HardDrive, Inbox, Lock, Network, Radar, Shield, SquareTerminal, Users } from "lucide-react";
 import { LogoutButton } from "@/components/logout-button";
 
@@ -18,9 +21,11 @@ const nav = [
 ];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
+
   return (
     <div className="min-h-screen grid grid-cols-[232px_1fr]">
-      <aside className="border-r border-panel-line bg-white px-3 py-4">
+      <aside className="sticky top-0 h-screen border-r border-panel-line bg-white px-3 py-4 overflow-y-auto">
         <div className="mb-6 px-3">
           <div className="flex items-start justify-between gap-3">
             <div>
@@ -37,7 +42,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <Link
                 key={item.href}
                 href={item.href}
-                className="flex h-10 items-center gap-3 rounded-md px-3 text-sm text-slate-700 hover:bg-slate-100"
+                className={`flex h-10 items-center gap-3 rounded-md px-3 text-sm transition-colors ${
+                  pathname === item.href || pathname.startsWith(item.href + "/")
+                    ? "bg-slate-900 text-white font-medium"
+                    : "text-slate-700 hover:bg-slate-100"
+                }`}
               >
                 <Icon size={17} />
                 {item.label}
