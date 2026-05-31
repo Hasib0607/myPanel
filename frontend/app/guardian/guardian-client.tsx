@@ -138,6 +138,12 @@ function statusClass(status: string) {
   return status === "healthy" ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-panel-danger";
 }
 
+const restartableServiceKeys = new Set(["nginx", "postgres", "pgbouncer", "panel-api", "panel-frontend", "panel-workers"]);
+
+function canRestartService(serviceKey: string) {
+  return restartableServiceKeys.has(serviceKey);
+}
+
 function actionStatusClass(status: string) {
   if (status === "SUCCEEDED") return "bg-emerald-50 text-emerald-700";
   if (status === "FAILED") return "bg-red-50 text-panel-danger";
@@ -182,6 +188,7 @@ function Meter({ label, value, detail, icon: Icon }: { label: string; value: num
 export function GuardianClient() {
   const [autoHealResult, setAutoHealResult] = useState<string | null>(null);
   const [autoHealBusy, setAutoHealBusy] = useState(false);
+  const [serviceBusy, setServiceBusy] = useState<string | null>(null);
   const [securityNotice, setSecurityNotice] = useState<string | null>(null);
   const [allowCidr, setAllowCidr] = useState("");
   const [blockDuration, setBlockDuration] = useState(60);
@@ -212,6 +219,34 @@ export function GuardianClient() {
       setAutoHealResult(error instanceof Error ? error.message : "Guardian auto-heal failed.");
     } finally {
       setAutoHealBusy(false);
+    }
+  }
+
+  async function restartService(serviceKey: string) {
+    setServiceBusy(serviceKey);
+    setAutoHealResult(null);
+    try {
+      await apiPost(`/guardian/services/${encodeURIComponent(serviceKey)}/restart`, {});
+      setAutoHealResult(`Restart requested for ${serviceKey}.`);
+      await overview.refetch();
+    } catch (error) {
+      setAutoHealResult(error instanceof Error ? error.message : `Could not restart ${serviceKey}.`);
+    } finally {
+      setServiceBusy(null);
+    }
+  }
+
+  async function reloadNginx() {
+    setServiceBusy("nginx-reload");
+    setAutoHealResult(null);
+    try {
+      await apiPost("/guardian/nginx/reload", {});
+      setAutoHealResult("Nginx config test and reload requested.");
+      await overview.refetch();
+    } catch (error) {
+      setAutoHealResult(error instanceof Error ? error.message : "Could not reload Nginx.");
+    } finally {
+      setServiceBusy(null);
     }
   }
 
@@ -415,6 +450,51 @@ export function GuardianClient() {
                         </div>
                         <div className="mt-1 text-sm text-panel-muted">{incident.detail}</div>
                         {incident.safeAction ? <div className="mt-1 text-xs text-panel-muted">Safe action candidate: {incident.safeAction}</div> : null}
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {(() => {
+                            const service = !unavailable ? diagnosis?.services.find((item) => incident.title.includes(item.name) || incident.detail.includes(`${item.key}:`)) : null;
+                            if (service && canRestartService(service.key)) {
+                              return (
+                                <button
+                                  className="inline-flex items-center gap-1 rounded-md border border-panel-line px-2 py-1 text-xs font-medium hover:bg-slate-50 disabled:opacity-50"
+                                  disabled={serviceBusy !== null}
+                                  onClick={() => restartService(service.key)}
+                                  type="button"
+                                >
+                                  <RefreshCw size={13} />
+                                  {serviceBusy === service.key ? "Restarting..." : `Restart ${service.name}`}
+                                </button>
+                              );
+                            }
+                            if (incident.category === "nginx") {
+                              return (
+                                <button
+                                  className="inline-flex items-center gap-1 rounded-md border border-panel-line px-2 py-1 text-xs font-medium hover:bg-slate-50 disabled:opacity-50"
+                                  disabled={serviceBusy !== null}
+                                  onClick={reloadNginx}
+                                  type="button"
+                                >
+                                  <RefreshCw size={13} />
+                                  {serviceBusy === "nginx-reload" ? "Reloading..." : "Test & reload Nginx"}
+                                </button>
+                              );
+                            }
+                            if (incident.safeAction) {
+                              return (
+                                <button
+                                  className="inline-flex items-center gap-1 rounded-md border border-panel-line px-2 py-1 text-xs font-medium hover:bg-slate-50 disabled:opacity-50"
+                                  disabled={autoHealBusy}
+                                  onClick={runAutoHeal}
+                                  type="button"
+                                >
+                                  <RefreshCw size={13} />
+                                  Run safe fix
+                                </button>
+                              );
+                            }
+                            return null;
+                          })()}
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -472,6 +552,7 @@ export function GuardianClient() {
                     <th className="px-4 py-3">Status</th>
                     <th className="px-4 py-3">Port</th>
                     <th className="px-4 py-3">Detail</th>
+                    <th className="px-4 py-3 text-right">Action</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -481,6 +562,21 @@ export function GuardianClient() {
                       <td className="px-4 py-3"><span className={`rounded-md px-2 py-1 text-xs font-semibold ${statusClass(service.status)}`}>{service.status}</span></td>
                       <td className="px-4 py-3">{service.ports.length ? service.ports.join(", ") : "-"}</td>
                       <td className="px-4 py-3 text-panel-muted">{service.detail}</td>
+                      <td className="px-4 py-3 text-right">
+                        {canRestartService(service.key) ? (
+                          <button
+                            className="inline-flex items-center gap-1 rounded-md border border-panel-line px-2 py-1 text-xs font-medium hover:bg-slate-50 disabled:opacity-50"
+                            disabled={serviceBusy !== null}
+                            onClick={() => restartService(service.key)}
+                            type="button"
+                          >
+                            <RefreshCw size={13} />
+                            {serviceBusy === service.key ? "Restarting" : "Restart"}
+                          </button>
+                        ) : (
+                          <span className="text-xs text-panel-muted">Monitor</span>
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

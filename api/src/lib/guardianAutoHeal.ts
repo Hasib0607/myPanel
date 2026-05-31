@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "./prisma.js";
 import { sysagent } from "./sysagent.js";
 
-const safeRestartServices = new Set(["nginx", "panel-api", "panel-frontend", "panel-workers"]);
+const safeRestartServices = new Set(["nginx", "postgres", "pgbouncer", "panel-api", "panel-frontend", "panel-workers"]);
 const cooldownMs = Number(process.env.GUARDIAN_ACTION_COOLDOWN_MS ?? 10 * 60_000);
 const maxRetries = Number(process.env.GUARDIAN_MAX_RETRIES ?? 3);
 

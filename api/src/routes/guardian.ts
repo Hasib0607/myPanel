@@ -20,6 +20,7 @@ const allowlistSchema = z.object({
   expiresAt: z.string().datetime().optional()
 });
 const fileActionSchema = z.object({ id: z.string().min(1) });
+const serviceActionSchema = z.object({ serviceKey: z.string().trim().min(1) });
 const settingsSchema = z.object({
   autoBlockMode: z.enum(["monitor", "suggest", "auto"]),
   blockDurationMinutes: z.number().int().min(5).max(43_200)
@@ -119,6 +120,14 @@ function ipMatchesCidr(ip: string, cidr: string) {
 
 function fileFingerprint(path: string, reason: string) {
   return createHash("sha256").update(`${path}:${reason}`).digest("hex").slice(0, 32);
+}
+
+function hasFailedReturncode(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  if ("returncode" in value && typeof (value as { returncode?: unknown }).returncode === "number") {
+    return (value as { returncode: number }).returncode !== 0;
+  }
+  return Object.values(value as Record<string, unknown>).some((item) => hasFailedReturncode(item));
 }
 
 async function syncFileFindings() {
@@ -419,6 +428,68 @@ export const guardianRoutes: FastifyPluginAsync = async (app) => {
     const result = await sysagent.guardianApplyRateLimit(body.mode);
     await audit(request, { action: "APPLY", resource: "guardian_rate_limit", resourceId: body.mode, description: `Applied Guardian ${body.mode} rate-limit template`, metadata: { result } as any });
     return reply.code(202).send(result);
+  });
+
+  app.post("/services/:serviceKey/restart", async (request, reply) => {
+    const { serviceKey } = serviceActionSchema.parse(request.params);
+    const restart = await sysagent.guardianRestartService(serviceKey);
+    const recheck = await trySysagent(null, () => sysagent.guardianDiagnosis());
+    const failed = hasFailedReturncode(restart);
+    const action = await prisma.guardianAction.create({
+      data: {
+        action: "manual-restart-service",
+        target: serviceKey,
+        status: failed ? "FAILED" : "SUCCEEDED",
+        reason: failed ? "service restart command failed" : null,
+        result: { restart, recheck } as any
+      }
+    });
+    await prisma.guardianNotification.create({
+      data: {
+        level: failed ? "CRITICAL" : "INFO",
+        title: failed ? `Restart failed: ${serviceKey}` : `Restart requested: ${serviceKey}`,
+        message: failed ? "Guardian could not restart the service." : "Guardian service restart completed.",
+        metadata: { actionId: action.id, restart } as any
+      }
+    });
+    await audit(request, {
+      action: "APPLY",
+      resource: "guardian_service",
+      resourceId: serviceKey,
+      description: `Guardian restart requested for ${serviceKey}`,
+      metadata: { actionId: action.id, restart } as any
+    });
+    return reply.code(202).send({ accepted: true, action, restart, recheck });
+  });
+
+  app.post("/nginx/reload", async (request, reply) => {
+    const result = await sysagent.guardianReloadNginx();
+    const failed = hasFailedReturncode(result);
+    const action = await prisma.guardianAction.create({
+      data: {
+        action: "manual-reload-nginx",
+        target: "nginx",
+        status: failed ? "FAILED" : "SUCCEEDED",
+        reason: failed ? "nginx config test or reload failed" : null,
+        result: result as any
+      }
+    });
+    await prisma.guardianNotification.create({
+      data: {
+        level: failed ? "CRITICAL" : "INFO",
+        title: failed ? "Nginx reload failed" : "Nginx reload completed",
+        message: failed ? "Guardian could not reload Nginx. Check action details for nginx -t output." : "Guardian tested and reloaded Nginx.",
+        metadata: { actionId: action.id, result } as any
+      }
+    });
+    await audit(request, {
+      action: "APPLY",
+      resource: "guardian_nginx",
+      resourceId: "reload",
+      description: "Guardian Nginx config test and reload",
+      metadata: { actionId: action.id, result } as any
+    });
+    return reply.code(202).send({ accepted: true, action, result });
   });
 
   app.post("/auto-heal", async (request, reply) => {

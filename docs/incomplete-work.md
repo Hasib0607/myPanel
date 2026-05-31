@@ -44,6 +44,7 @@ Implemented Phase 1 foundation:
 - Phase 3 started with security response foundation: suspicious IP scoring from SSH/Nginx signals, IP allowlist/block history, manual block/unblock controls, temporary auto-block expiry support, failed-login audit signals, and suspicious file watch findings for unusual files under configured roots.
 - Phase 3 slice 2 added trusted CIDR protection, failed-login anomaly grouping, Nginx rate-limit template planning/application, and expanded Guardian UI controls for allowlist, blocked IPs, suspicious IPs, file watch, and login anomalies.
 - Phase 3 completion pass added IPv6 CIDR matching, Cloudflare CIDR sync, RDAP IP context lookup, evidence lookup, file trust/quarantine workflow, notification records, auto-block mode/duration settings, and active Nginx `conf.d` rate-limit deployment.
+- Guardian critical actions now include manual safe restart controls for PostgreSQL, PgBouncer, Nginx, and panel services, direct Nginx config-test reload, action history records, notifications, audit logs, and post-action diagnosis rechecks.
 
 ## Current VPS Deployment Blockers
 

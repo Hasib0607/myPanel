@@ -34,6 +34,8 @@ WATCHED_PORTS = [80, 443, 2083, 3000, 4000, 5000, 6379, 5432, 5433, 6432]
 NGINX_ACCESS_RE = re.compile(r'^(?P<ip>\S+) \S+ \S+ \[[^\]]+\] "(?P<method>\S+) (?P<path>[^"]*?) (?P<protocol>[^"]*?)" (?P<status>\d{3})')
 SAFE_RESTART_UNITS = {
     "nginx": "nginx",
+    "postgres": "postgresql",
+    "pgbouncer": "pgbouncer",
     "panel-api": "vps-panel-api",
     "panel-frontend": "vps-panel-frontend",
     "panel-workers": "vps-panel-workers",
@@ -124,6 +126,11 @@ def tail_file(path: str, lines: int = 80) -> list[str]:
     file_path = Path(path)
     if not file_path.exists() or not file_path.is_file():
         return []
+    try:
+        with file_path.open("r", encoding="utf-8", errors="ignore") as handle:
+            return handle.readlines()[-lines:]
+    except OSError:
+        return []
 
 
 def matching_log_lines(ip: str) -> dict[str, Any]:
@@ -131,11 +138,6 @@ def matching_log_lines(ip: str) -> dict[str, Any]:
     error = [line.strip() for line in tail_file("/var/log/nginx/error.log", 120) if ip in line]
     auth = [line.strip() for line in tail_file("/var/log/auth.log", 200) if ip in line]
     return {"ip": ip, "access": access[-50:], "error": error[-30:], "auth": auth[-50:]}
-    try:
-        with file_path.open("r", encoding="utf-8", errors="ignore") as handle:
-            return handle.readlines()[-lines:]
-    except OSError:
-        return []
 
 
 def count_patterns(lines: list[str], patterns: list[str]) -> int:
