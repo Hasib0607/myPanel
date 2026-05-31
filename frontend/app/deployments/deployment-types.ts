@@ -132,5 +132,20 @@ export type QueueResponse = {
   reason?: string;
 };
 
+export type DeploymentDoctorResponse = {
+  status: "pass" | "warn" | "fail";
+  summary: string;
+  recommendedAction: "sync-runtime" | "health" | "restart" | "redeploy" | null;
+  checks: Array<{
+    key: string;
+    label: string;
+    status: "pass" | "warn" | "fail";
+    detail: string;
+    fix?: string;
+    repairAction?: string;
+  }>;
+  generatedAt: string;
+};
+
 export const frameworkOptions: DeploymentFramework[] = ["NEXTJS", "LARAVEL", "NODEJS", "PYTHON", "GO", "STATIC"];
 export const sourceOptions: DeploymentSourceProvider[] = ["GITHUB", "GIT_URL", "FILE_MANAGER", "MANUAL"];

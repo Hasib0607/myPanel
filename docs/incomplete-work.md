@@ -45,6 +45,7 @@ Implemented Phase 1 foundation:
 - Phase 3 slice 2 added trusted CIDR protection, failed-login anomaly grouping, Nginx rate-limit template planning/application, and expanded Guardian UI controls for allowlist, blocked IPs, suspicious IPs, file watch, and login anomalies.
 - Phase 3 completion pass added IPv6 CIDR matching, Cloudflare CIDR sync, RDAP IP context lookup, evidence lookup, file trust/quarantine workflow, notification records, auto-block mode/duration settings, and active Nginx `conf.d` rate-limit deployment.
 - Guardian critical actions now include manual safe restart controls for PostgreSQL, PgBouncer, Nginx, and panel services, direct Nginx config-test reload, action history records, notifications, audit logs, and post-action diagnosis rechecks.
+- Phase 4 started with a Deployment Doctor that auto-detects runtime drift, source/root issues, port conflicts, PM2/start command health, recent build/runtime error patterns, and public Nginx route problems, then offers safe repairs such as sync runtime commands, health recheck, restart, or redeploy.
 
 ## Current VPS Deployment Blockers
 

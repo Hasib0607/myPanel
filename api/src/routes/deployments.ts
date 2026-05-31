@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
 import path from "node:path";
-import { Prisma } from "@prisma/client";
+import { DeploymentFramework, DeploymentProcessManager, Prisma } from "@prisma/client";
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { env } from "../config/env.js";
@@ -78,6 +78,9 @@ const detectSchema = z.object({
   rootPath: z.string().optional(),
   files: z.array(z.string()).optional()
 });
+const doctorRepairSchema = z.object({
+  action: z.enum(["auto", "sync-runtime", "health", "restart", "redeploy"])
+});
 
 const preflightSchema = z.object({
   domainId: z.string().nullable().optional(),
@@ -86,6 +89,15 @@ const preflightSchema = z.object({
   dbType: z.enum(["POSTGRESQL", "MYSQL"]).nullable().optional(),
   gitUrl: z.string().url().nullable().optional()
 });
+
+const defaultProcessManagerByFramework: Record<DeploymentFramework, DeploymentProcessManager> = {
+  LARAVEL: "SUPERVISOR",
+  NEXTJS: "PM2",
+  NODEJS: "PM2",
+  PYTHON: "SUPERVISOR",
+  GO: "SUPERVISOR",
+  STATIC: "STATIC"
+};
 
 function slugify(value: string) {
   return value
@@ -424,6 +436,200 @@ function logMetadataText(metadata: Prisma.JsonValue | null) {
 
 function deploymentLogDir(slug: string) {
   return path.join(env.DEPLOYMENT_LOG_ROOT, slug);
+}
+
+function deploymentAppPath(rootPath: string, rootDirectory: string | null | undefined) {
+  const cleanRootDirectory = (rootDirectory || ".").replace(/^\/+|\/+$/g, "");
+  return cleanRootDirectory && cleanRootDirectory !== "." ? path.join(rootPath, cleanRootDirectory) : rootPath;
+}
+
+function deploymentServerName(domain: { name: string } | null | undefined) {
+  if (!domain?.name) return null;
+  return `${domain.name} www.${domain.name}`;
+}
+
+function commandFailed(value: unknown) {
+  const result = value as { dryRun?: boolean; returncode?: number };
+  return Boolean(result?.dryRun || (typeof result?.returncode === "number" && result.returncode !== 0));
+}
+
+function commandDetail(value: unknown) {
+  const result = value as { dryRun?: boolean; stdout?: string; stderr?: string; reason?: string; returncode?: number };
+  if (result?.dryRun) return "Command did not run live because sysagent live commands are disabled";
+  return result?.stderr || result?.reason || result?.stdout || (typeof result?.returncode === "number" ? `exit ${result.returncode}` : "");
+}
+
+function knownErrorHint(text: string) {
+  const lower = text.toLowerCase();
+  if (lower.includes("cannot find module") || lower.includes("module_not_found")) return "Missing package or wrong build output. Run dependency install, verify package.json, then redeploy.";
+  if (lower.includes("eaddrinuse") || lower.includes("address already in use")) return "Port conflict. Let the doctor redeploy so the worker can move the app to a free managed port.";
+  if (lower.includes("heap out of memory") || lower.includes("sigkill") || lower.includes("killed")) return "Server memory pressure. Add swap or set NODE_OPTIONS=--max-old-space-size=512, then redeploy.";
+  if (lower.includes("permission denied") || lower.includes("eacces")) return "File permission issue. Ensure the panel user owns the deployment directory and runtime log directory.";
+  if (lower.includes("env") && (lower.includes("missing") || lower.includes("required"))) return "Missing environment variable. Add required env keys in the deployment Env tab, then redeploy.";
+  if (lower.includes("localhost") || lower.includes("127.0.0.1")) return "App may be generating internal localhost URLs. Set public URL env values to the real domain.";
+  return null;
+}
+
+async function syncDeploymentRuntime(deployment: Awaited<ReturnType<typeof findDeployment>>) {
+  const detection = await detectDeploymentSource(deployment.rootPath, deployment.rootDirectory);
+  const updated = await prisma.deployment.update({
+    where: { id: deployment.id },
+    data: {
+      framework: detection.detected,
+      runtime: detection.suggestions.runtime,
+      packageManager: detection.suggestions.packageManager,
+      installCommand: detection.suggestions.installCommand,
+      buildCommand: detection.suggestions.buildCommand,
+      startCommand: detection.suggestions.startCommand,
+      outputDirectory: detection.suggestions.outputDirectory,
+      processManager: detection.suggestions.processManager
+    }
+  });
+  return { detection, updated };
+}
+
+async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeployment>>) {
+  const checks: Array<{ key: string; label: string; status: "pass" | "warn" | "fail"; detail: string; fix?: string; repairAction?: string }> = [];
+  const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
+  const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
+  const domain = deployment.domainBindings?.find((binding) => binding.role === "primary")?.domain ?? deployment.domainBindings?.[0]?.domain ?? deployment.domain;
+  const serverName = deploymentServerName(domain);
+
+  const rootExists = await fs.stat(appPath).then((stats) => stats.isDirectory()).catch(() => false);
+  checks.push({
+    key: "source",
+    label: "Source path",
+    status: rootExists ? "pass" : "fail",
+    detail: rootExists ? `Readable at ${appPath}` : `Source directory is not readable at ${appPath}`,
+    fix: rootExists ? undefined : "Run source sync/redeploy or correct the root directory.",
+    repairAction: rootExists ? undefined : "redeploy"
+  });
+
+  let detection: Awaited<ReturnType<typeof detectDeploymentSource>> | null = null;
+  if (rootExists) {
+    try {
+      detection = await detectDeploymentSource(deployment.rootPath, deployment.rootDirectory);
+      const commandMismatch = detection.suggestions.startCommand !== deployment.startCommand
+        || detection.suggestions.buildCommand !== deployment.buildCommand
+        || detection.suggestions.packageManager !== deployment.packageManager
+        || detection.detected !== deployment.framework;
+      checks.push({
+        key: "runtime",
+        label: "Runtime detection",
+        status: commandMismatch ? "warn" : "pass",
+        detail: `${detection.detected} (${Math.round(detection.confidence * 100)}%): ${detection.reason}`,
+        fix: commandMismatch ? "Sync detected runtime commands before the next deploy." : undefined,
+        repairAction: commandMismatch ? "sync-runtime" : undefined
+      });
+    } catch (error) {
+      checks.push({
+        key: "runtime",
+        label: "Runtime detection",
+        status: "fail",
+        detail: error instanceof Error ? error.message : "Could not inspect source files",
+        fix: "Check root directory and source permissions."
+      });
+    }
+  }
+
+  if (deployment.framework !== "STATIC" && processManager !== "STATIC" && !deployment.startCommand && !detection?.suggestions.startCommand) {
+    checks.push({
+      key: "start_command",
+      label: "Start command",
+      status: "fail",
+      detail: "No runnable start command was detected.",
+      fix: "Add a package.json start script or set a manual start command.",
+      repairAction: "sync-runtime"
+    });
+  } else {
+    checks.push({ key: "start_command", label: "Start command", status: "pass", detail: deployment.startCommand || detection?.suggestions.startCommand || "Static deployment" });
+  }
+
+  const policyError = deploymentPortPolicyError(deployment.port);
+  const dbOwner = await prisma.deployment.findFirst({ where: { port: deployment.port, id: { not: deployment.id } }, select: { name: true, slug: true } });
+  let livePort: unknown = null;
+  try {
+    livePort = await sysagent.deploymentPortStatus({ rootPath: appPath, port: deployment.port, processName: deployment.slug, processManager });
+  } catch (error) {
+    livePort = { returncode: 1, stderr: error instanceof Error ? error.message : "Port check failed" };
+  }
+  const portBlocked = Boolean(policyError || dbOwner || ((livePort as { occupied?: boolean; reusable?: boolean }).occupied && !(livePort as { reusable?: boolean }).reusable));
+  checks.push({
+    key: "port",
+    label: "Port",
+    status: portBlocked ? "fail" : "pass",
+    detail: policyError ?? (dbOwner ? `Port used by ${dbOwner.name || dbOwner.slug}` : commandDetail(livePort) || `Port ${deployment.port} is available/reusable`),
+    fix: portBlocked ? "Redeploy to let the worker move this app to a free managed port." : undefined,
+    repairAction: portBlocked ? "redeploy" : undefined
+  });
+
+  let health: unknown = null;
+  try {
+    health = await sysagent.deploymentHealth({ deploymentId: deployment.id, port: deployment.port, healthUrl: deployment.healthUrl, processName: deployment.slug, processManager, rootPath: appPath });
+  } catch (error) {
+    health = { returncode: 1, stderr: error instanceof Error ? error.message : "Health check failed" };
+  }
+  const healthDown = commandFailed(health);
+  checks.push({
+    key: "health",
+    label: "Runtime health",
+    status: healthDown ? "fail" : "pass",
+    detail: commandDetail(health) || "Local runtime health check passed",
+    fix: healthDown ? "Restart first; if it still fails, redeploy so install/build/start can be repaired." : undefined,
+    repairAction: healthDown ? "restart" : undefined
+  });
+
+  let runtimeLogs = "";
+  try {
+    const logs = await sysagent.deploymentRuntimeLogs({ name: deployment.slug, logDir: deploymentLogDir(deployment.slug), lines: 160 });
+    runtimeLogs = logs.text || "";
+  } catch {
+    runtimeLogs = "";
+  }
+  const recentErrors = [
+    ...deployment.logs.filter((log) => log.level === "error" || log.step === "FAILED").slice(0, 8).map((log) => `${log.message}${logMetadataText(log.metadata)}`),
+    runtimeLogs
+  ].join("\n");
+  const hint = knownErrorHint(recentErrors);
+  checks.push({
+    key: "error_hints",
+    label: "Error analysis",
+    status: hint ? "warn" : "pass",
+    detail: hint ?? "No known build/runtime error pattern found in recent logs.",
+    fix: hint ?? undefined,
+    repairAction: hint?.includes("Port conflict") ? "redeploy" : hint ? "redeploy" : undefined
+  });
+
+  if (serverName) {
+    let publicRoute: unknown = null;
+    try {
+      publicRoute = await sysagent.deploymentPublicRoute({ serverName });
+    } catch (error) {
+      publicRoute = { returncode: 1, stderr: error instanceof Error ? error.message : "Public route check failed" };
+    }
+    const publicFailed = commandFailed(publicRoute);
+    checks.push({
+      key: "public_route",
+      label: "Public website",
+      status: publicFailed ? "warn" : "pass",
+      detail: commandDetail(publicRoute) || "Public route resolved through Nginx",
+      fix: publicFailed ? "Redeploy/restart to rewrite Nginx proxy and verify app public URL env values." : undefined,
+      repairAction: publicFailed ? "redeploy" : undefined
+    });
+  } else {
+    checks.push({ key: "public_route", label: "Public website", status: "warn", detail: "No domain is linked yet.", fix: "Bind a domain to enable public route checks." });
+  }
+
+  const failed = checks.filter((check) => check.status === "fail").length;
+  const warnings = checks.filter((check) => check.status === "warn").length;
+  const recommendedAction = checks.find((check) => check.repairAction)?.repairAction ?? (failed || deployment.status === "FAILED" ? "redeploy" : healthDown ? "restart" : null);
+  return {
+    status: failed ? "fail" : warnings ? "warn" : "pass",
+    summary: failed ? `${failed} blocking issue(s) found` : warnings ? `${warnings} warning(s) found` : "Deployment looks healthy",
+    recommendedAction,
+    checks,
+    generatedAt: new Date().toISOString()
+  };
 }
 
 export const deploymentRoutes: FastifyPluginAsync = async (app) => {
@@ -1003,6 +1209,77 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       clearInterval(interval);
       reply.raw.end();
     });
+  });
+
+  app.get("/:deploymentId/doctor", async (request) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const deployment = await findDeployment(deploymentId);
+    const result = await deploymentDoctor(deployment);
+    await addLog(deployment.id, "HEALTH_CHECK", `Deployment doctor: ${result.summary}`, undefined, result as Prisma.InputJsonObject);
+    return result;
+  });
+
+  app.post("/:deploymentId/doctor/repair", async (request, reply) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const body = doctorRepairSchema.parse(request.body ?? {});
+    const deployment = await findDeployment(deploymentId);
+    const doctor = await deploymentDoctor(deployment);
+    const action = body.action === "auto" ? doctor.recommendedAction : body.action;
+
+    if (!action) {
+      await addLog(deployment.id, "HEALTH_CHECK", "Deployment doctor found no repair action to run", undefined, doctor as Prisma.InputJsonObject);
+      return { action: null, doctor, message: "No repair action needed." };
+    }
+
+    if (action === "sync-runtime") {
+      const result = await syncDeploymentRuntime(deployment);
+      await addLog(deployment.id, "PREFLIGHT", "Deployment doctor synced runtime commands", undefined, result as unknown as Prisma.InputJsonObject);
+      await audit(request, { action: "UPDATE", resource: "deployment", resourceId: deployment.id, description: `Deployment doctor synced runtime commands for ${deployment.slug}`, metadata: result as unknown as Prisma.InputJsonObject });
+      return reply.code(202).send({ action, result });
+    }
+
+    if (action === "health") {
+      const result = await sysagent.deploymentHealth({
+        deploymentId: deployment.id,
+        port: deployment.port,
+        healthUrl: deployment.healthUrl,
+        processName: deployment.slug,
+        processManager: deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework],
+        rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory)
+      });
+      const healthy = !commandFailed(result);
+      await prisma.deployment.update({ where: { id: deployment.id }, data: { healthStatus: healthy ? "HEALTHY" : "DOWN", lastHealthCheckAt: new Date() } });
+      await addLog(deployment.id, "HEALTH_CHECK", healthy ? "Deployment doctor health repair passed" : "Deployment doctor health repair failed", undefined, { result } as Prisma.InputJsonObject);
+      return reply.code(202).send({ action, result, healthStatus: healthy ? "HEALTHY" : "DOWN" });
+    }
+
+    if (action === "restart") {
+      await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "DEPLOYING", healthStatus: "UNKNOWN" } });
+      await addLog(deployment.id, "STARTING", "Deployment doctor queued restart", undefined, doctor as Prisma.InputJsonObject);
+      const queue = await enqueueDeployAction(deployment.id, "restart");
+      await audit(request, { action: "APPLY", resource: "deployment", resourceId: deployment.id, description: `Deployment doctor queued restart for ${deployment.slug}`, metadata: { queue, doctor } as Prisma.InputJsonObject });
+      return reply.code(202).send({ action, queue, doctor });
+    }
+
+    if (action === "redeploy") {
+      const release = await prisma.deploymentRelease.create({
+        data: {
+          deploymentId: deployment.id,
+          status: "QUEUED",
+          commitSha: deployment.commitSha,
+          sourcePath: deployment.rootPath,
+          envSnapshot: deployment.envVars === null ? {} : deployment.envVars as Prisma.InputJsonValue,
+          processConfig: { port: deployment.port, processManager: deployment.processManager, startCommand: deployment.startCommand }
+        }
+      });
+      await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "QUEUED", healthStatus: "UNKNOWN" } });
+      await addLog(deployment.id, "QUEUED", "Deployment doctor queued redeploy", release.id, doctor as Prisma.InputJsonObject);
+      const queue = await enqueueDeployAction(deployment.id, "deploy", release.id);
+      await audit(request, { action: "DEPLOY", resource: "deployment", resourceId: deployment.id, description: `Deployment doctor queued redeploy for ${deployment.slug}`, metadata: { releaseId: release.id, queue, doctor } as Prisma.InputJsonObject });
+      return reply.code(202).send({ action, release, queue, doctor });
+    }
+
+    return reply.badRequest("Unsupported doctor repair action");
   });
 
   app.post("/:deploymentId/preflight", async (request) => {
