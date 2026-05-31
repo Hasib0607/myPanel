@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Database, Download, FileText, Mail, Play, RefreshCw, RotateCcw, ServerCog, ShieldCheck } from "lucide-react";
+import { CheckCircle2, Database, Download, FileText, KeyRound, Mail, Play, RefreshCw, RotateCcw, ServerCog, ShieldCheck } from "lucide-react";
 import { useMemo, useState } from "react";
 import { apiGet, apiPost } from "@/lib/api";
 
@@ -37,6 +37,13 @@ type MigrationTask = {
   domain: string | null;
   status: string;
   command: string | null;
+  log?: string | null;
+  result?: Record<string, unknown>;
+};
+type Report = {
+  conflicts: Array<{ type: string; name: string; sourceAccount: string | null; existingId: string; action: string }>;
+  itemCounts: Array<{ type: string; status: string; _count: { _all: number } }>;
+  taskCounts: Array<{ type: string; status: string; _count: { _all: number } }>;
 };
 
 const emptyConnection = {
@@ -47,11 +54,21 @@ const emptyConnection = {
   token: "",
   verifySsl: true
 };
+const emptyCredentials = {
+  sshUser: "root",
+  sshHost: "",
+  sshPort: "22",
+  sshKeyPath: "",
+  imapHost: "",
+  imapPort: "993",
+  imapUseSsl: true
+};
 
 export function WhmMigrationClient() {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState(emptyConnection);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [credentials, setCredentials] = useState(emptyCredentials);
   const [notice, setNotice] = useState("");
   const migrations = useQuery({
     queryKey: ["whm-migrations"],
@@ -64,6 +81,11 @@ export function WhmMigrationClient() {
     queryFn: () => apiGet<{ migration: Migration; items: MigrationItem[]; tasks: MigrationTask[] }>(`/whm-migrations/${activeId}`)
   });
   const active = detail.data?.migration;
+  const report = useQuery({
+    queryKey: ["whm-migration-report", activeId],
+    enabled: !!activeId,
+    queryFn: () => apiGet<Report>(`/whm-migrations/${activeId}/report`)
+  });
   const counts = useMemo(() => groupCounts(detail.data?.items ?? []), [detail.data?.items]);
 
   const refresh = async () => {
@@ -167,6 +189,43 @@ export function WhmMigrationClient() {
                 </div>
               </div>
 
+              <div className="grid grid-cols-[360px_1fr] gap-6">
+                <div className="rounded-md border border-panel-line bg-white">
+                  <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Execution Credentials</div>
+                  <div className="space-y-3 p-4">
+                    <Input label="SSH User" value={credentials.sshUser} onChange={(sshUser) => setCredentials({ ...credentials, sshUser })} />
+                    <Input label="Old Server SSH Host" value={credentials.sshHost} onChange={(sshHost) => setCredentials({ ...credentials, sshHost })} />
+                    <div className="grid grid-cols-2 gap-3">
+                      <Input label="SSH Port" value={credentials.sshPort} onChange={(sshPort) => setCredentials({ ...credentials, sshPort: sshPort.replace(/\D/g, "") })} />
+                      <Input label="IMAP Port" value={credentials.imapPort} onChange={(imapPort) => setCredentials({ ...credentials, imapPort: imapPort.replace(/\D/g, "") })} />
+                    </div>
+                    <Input label="SSH Key Path" value={credentials.sshKeyPath} onChange={(sshKeyPath) => setCredentials({ ...credentials, sshKeyPath })} />
+                    <Input label="IMAP Host" value={credentials.imapHost} onChange={(imapHost) => setCredentials({ ...credentials, imapHost })} />
+                    <button className="flex h-10 w-full items-center justify-center gap-2 rounded-md border border-panel-line text-sm font-semibold hover:bg-slate-50" onClick={() => action.mutate({ path: `/whm-migrations/${active.id}/credentials`, body: { ...credentials, sshPort: Number(credentials.sshPort || 22), imapPort: Number(credentials.imapPort || 993) } })} type="button">
+                      <KeyRound size={15} />
+                      Save Credentials
+                    </button>
+                  </div>
+                </div>
+
+                <div className="rounded-md border border-panel-line bg-white">
+                  <div className="flex items-center justify-between border-b border-panel-line px-4 py-3">
+                    <div className="text-sm font-semibold">Conflict Report</div>
+                    <a className="text-sm font-semibold text-panel-accent" href={`/api/v1/whm-migrations/${active.id}/report.csv`}>CSV</a>
+                  </div>
+                  <div className="max-h-72 divide-y divide-panel-line overflow-auto">
+                    {(report.data?.conflicts ?? []).map((conflict) => (
+                      <div className="grid grid-cols-[100px_1fr_120px] gap-3 px-4 py-3 text-sm" key={`${conflict.type}:${conflict.name}`}>
+                        <span className="font-medium text-panel-muted">{conflict.type}</span>
+                        <span className="truncate font-semibold">{conflict.name}</span>
+                        <span className="text-amber-700">{conflict.action}</span>
+                      </div>
+                    ))}
+                    {!(report.data?.conflicts ?? []).length ? <div className="p-4 text-sm text-panel-muted">No conflicts detected yet.</div> : null}
+                  </div>
+                </div>
+              </div>
+
               <div className="rounded-md border border-panel-line bg-white">
                 <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Discovery Items</div>
                 <div className="max-h-[460px] divide-y divide-panel-line overflow-auto">
@@ -193,10 +252,14 @@ export function WhmMigrationClient() {
                           {task.type} {task.account ? `· ${task.account}` : ""}
                         </div>
                         <button className="rounded-md border border-panel-line px-3 py-1.5 text-xs font-semibold hover:bg-slate-50" onClick={() => action.mutate({ path: `/whm-migrations/${active.id}/tasks/${task.id}/run` })} type="button">
-                          Preview
+                          Run / Preview
+                        </button>
+                        <button className="rounded-md border border-panel-line px-3 py-1.5 text-xs font-semibold hover:bg-slate-50" onClick={() => action.mutate({ path: `/whm-migrations/${active.id}/tasks/${task.id}/approve` })} type="button">
+                          Approve
                         </button>
                       </div>
                       {task.command ? <pre className="overflow-auto rounded-md bg-slate-950 p-3 text-xs text-white">{task.command}</pre> : null}
+                      {task.log ? <pre className="overflow-auto rounded-md bg-slate-100 p-3 text-xs text-slate-800">{task.log}</pre> : null}
                     </div>
                   ))}
                   {!(detail.data?.tasks ?? []).length ? <div className="p-6 text-sm text-panel-muted">No migration tasks prepared yet.</div> : null}

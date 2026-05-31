@@ -2,7 +2,7 @@ CREATE TYPE "WhmMigrationStatus" AS ENUM ('DRAFT', 'CONNECTED', 'SCANNING', 'SCA
 
 CREATE TYPE "WhmMigrationItemType" AS ENUM ('ACCOUNT', 'DOMAIN', 'DNS_ZONE', 'DNS_RECORD', 'PACKAGE', 'MAILBOX', 'DATABASE', 'SSL', 'FILES');
 
-CREATE TYPE "WhmMigrationItemStatus" AS ENUM ('DISCOVERED', 'MAPPED', 'IMPORTED', 'QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'SKIPPED');
+CREATE TYPE "WhmMigrationItemStatus" AS ENUM ('DISCOVERED', 'MAPPED', 'IMPORTED', 'APPROVED', 'QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'SKIPPED');
 
 CREATE TYPE "WhmMigrationTaskType" AS ENUM ('FILE_SYNC', 'DATABASE_DUMP', 'MAIL_SYNC', 'DNS_CUTOVER', 'ROLLBACK');
 
@@ -51,6 +51,8 @@ CREATE TABLE "whm_migration_tasks" (
     "status" "WhmMigrationItemStatus" NOT NULL DEFAULT 'QUEUED',
     "command" TEXT,
     "result" JSONB NOT NULL DEFAULT '{}',
+    "log" TEXT,
+    "approved_at" TIMESTAMP(3),
     "started_at" TIMESTAMP(3),
     "finished_at" TIMESTAMP(3),
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,

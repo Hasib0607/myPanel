@@ -233,6 +233,7 @@ enum WhmMigrationItemStatus {
   DISCOVERED
   MAPPED
   IMPORTED
+  APPROVED
   QUEUED
   RUNNING
   SUCCEEDED
@@ -657,6 +658,8 @@ model WhmMigrationTask {
   status      WhmMigrationItemStatus @default(QUEUED)
   command     String?
   result      Json                   @default("{}")
+  log         String?
+  approvedAt  DateTime?              @map("approved_at")
   startedAt   DateTime?              @map("started_at")
   finishedAt  DateTime?              @map("finished_at")
   createdAt   DateTime               @default(now()) @map("created_at")
