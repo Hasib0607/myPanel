@@ -98,6 +98,13 @@ def parse_lines(stdout: str | None) -> list[str]:
     return [line.strip() for line in (stdout or "").splitlines() if line.strip()]
 
 
+def parse_int(value: str | None) -> int:
+    try:
+        return int(value or "0")
+    except ValueError:
+        return 0
+
+
 def postgres_psql(sql: str) -> dict:
     return run_command(["sudo", "-u", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-At", "-c", sql])
 
@@ -161,7 +168,23 @@ def postgres_overview() -> dict:
         name, _, owner = line.partition("|")
         if name in SYSTEM_POSTGRES_DATABASES:
             continue
-        databases.append({"name": name, "owner": owner or None})
+        stats_result = run_command([
+            "sudo", "-u", "postgres", "psql", "-d", name, "-At", "-c",
+            "SELECT "
+            "(SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE') || '|' || "
+            "COALESCE((SELECT SUM(GREATEST(c.reltuples, 0)::bigint) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'r'), 0) || '|' || "
+            f"pg_database_size({sql_literal(name)});"
+        ])
+        table_count, _, rest = (stats_result.get("stdout") or "0|0|0").strip().partition("|")
+        row_count, _, size_bytes = rest.partition("|")
+        databases.append({
+            "name": name,
+            "owner": owner or None,
+            "tableCount": parse_int(table_count),
+            "rowCount": parse_int(row_count),
+            "sizeBytes": parse_int(size_bytes),
+            "statsResult": stats_result,
+        })
     return {
         "engine": "POSTGRESQL",
         "installed": databases_result.get("returncode") == 0,
@@ -174,7 +197,27 @@ def postgres_overview() -> dict:
 def mysql_overview() -> dict:
     databases_result = mysql_exec("SHOW DATABASES;")
     users_result = mysql_exec("SELECT user, host FROM mysql.user ORDER BY user, host;")
-    databases = [{"name": name, "owner": None} for name in parse_lines(databases_result.get("stdout")) if name not in SYSTEM_MYSQL_DATABASES]
+    stats_result = mysql_exec(
+        "SELECT TABLE_SCHEMA, COUNT(*), COALESCE(SUM(TABLE_ROWS),0), COALESCE(SUM(DATA_LENGTH + INDEX_LENGTH),0) "
+        "FROM information_schema.TABLES "
+        "WHERE TABLE_SCHEMA NOT IN ('information_schema','mysql','performance_schema','sys') "
+        "GROUP BY TABLE_SCHEMA;"
+    )
+    stats_by_database = {}
+    for line in parse_lines(stats_result.get("stdout")):
+        parts = re.split(r"\s+", line)
+        if len(parts) >= 4:
+            stats_by_database[parts[0]] = {
+                "tableCount": parse_int(parts[1]),
+                "rowCount": parse_int(parts[2]),
+                "sizeBytes": parse_int(parts[3]),
+            }
+    databases = []
+    for name in parse_lines(databases_result.get("stdout")):
+        if name in SYSTEM_MYSQL_DATABASES:
+            continue
+        stats = stats_by_database.get(name, {"tableCount": 0, "rowCount": 0, "sizeBytes": 0})
+        databases.append({"name": name, "owner": None, **stats})
     users = []
     for line in parse_lines(users_result.get("stdout")):
         parts = re.split(r"\s+", line, maxsplit=1)
@@ -185,7 +228,7 @@ def mysql_overview() -> dict:
         "installed": databases_result.get("returncode") == 0,
         "databases": databases,
         "users": users,
-        "checks": {"databases": databases_result, "users": users_result},
+        "checks": {"databases": databases_result, "users": users_result, "stats": stats_result},
     }
 
 

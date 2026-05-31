@@ -146,6 +146,36 @@ export async function apiUpload<T>(path: string, body: BodyInit, contentType: st
   return fetchJson<T>(path, await uploadRequestInit(body, contentType, headers));
 }
 
+export async function apiUploadWithProgress<T>(path: string, body: XMLHttpRequestBodyInit | Document, contentType: string, onProgress: (percent: number) => void, headers?: Record<string, string>): Promise<T> {
+  const url = apiUrl(path);
+  const csrf = await csrfHeader();
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.withCredentials = true;
+    xhr.setRequestHeader("content-type", contentType);
+    for (const [key, value] of Object.entries({ ...csrf, ...(headers ?? {}) })) {
+      xhr.setRequestHeader(key, value);
+    }
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0) {
+        onProgress(Math.min(99, Math.round((event.loaded / event.total) * 100)));
+      }
+    };
+    xhr.onload = () => {
+      const data = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+      if (xhr.status >= 200 && xhr.status < 300) {
+        onProgress(100);
+        resolve(data as T);
+      } else {
+        reject(new Error(data?.error ?? `API request failed: ${xhr.status}`));
+      }
+    };
+    xhr.onerror = () => reject(new Error(`Could not reach API at ${url}. Check Nginx /api/v1 proxy and API service.`));
+    xhr.send(body);
+  });
+}
+
 export async function apiGetText(path: string): Promise<string> {
   const url = apiUrl(path);
   let response: Response;

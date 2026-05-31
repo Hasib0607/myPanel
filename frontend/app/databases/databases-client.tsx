@@ -4,11 +4,11 @@ import type React from "react";
 import { useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Columns3, Copy, Database, Download, Eye, KeyRound, Plus, RefreshCw, ShieldCheck, Table2, Trash2, Upload, UserRound } from "lucide-react";
-import { apiDeleteBody, apiGet, apiPost, apiUpload } from "@/lib/api";
+import { apiDeleteBody, apiGet, apiPost, apiUploadWithProgress } from "@/lib/api";
 
 type Engine = "POSTGRESQL" | "MYSQL";
 type CommandResult = { dryRun?: boolean; command?: string[]; stdout?: string; stderr?: string; returncode?: number };
-type DatabaseItem = { name: string; owner: string | null };
+type DatabaseItem = { name: string; owner: string | null; tableCount?: number; rowCount?: number; sizeBytes?: number };
 type DatabaseUser = { name: string; host: string | null };
 type EngineOverview = {
   engine: Engine;
@@ -35,6 +35,10 @@ function humanBytes(value: number) {
   if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
   if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
   return `${value} B`;
+}
+
+function compactNumber(value: number) {
+  return new Intl.NumberFormat(undefined, { notation: value >= 10000 ? "compact" : "standard", maximumFractionDigits: 1 }).format(value);
 }
 
 function cleanIdentifier(value: string) {
@@ -74,6 +78,7 @@ export function DatabasesClient() {
   const [rowPreview, setRowPreview] = useState("");
   const [lastSecret, setLastSecret] = useState<CredentialResult | null>(null);
   const [rowImportTarget, setRowImportTarget] = useState<{ engine: Engine; database: string } | null>(null);
+  const [importProgress, setImportProgress] = useState<{ database: string; file: string; percent: number; phase: "uploading" | "importing" | "done" } | null>(null);
   const rowImportInputRef = useRef<HTMLInputElement | null>(null);
 
   const overview = useQuery({
@@ -153,18 +158,26 @@ export function DatabasesClient() {
         database: input.database,
         filename: input.file.name
       });
-      return apiUpload(`/databases/import/upload?${params.toString()}`, input.file, "application/vnd.vps-panel.db-import");
+      setImportProgress({ database: input.database, file: input.file.name, percent: 0, phase: "uploading" });
+      return apiUploadWithProgress(`/databases/import/upload?${params.toString()}`, input.file, "application/vnd.vps-panel.db-import", (percent) => {
+        setImportProgress({ database: input.database, file: input.file.name, percent, phase: percent >= 100 ? "importing" : "uploading" });
+      });
     },
     onSuccess: async (_result, input) => {
       setNotice(`Imported ${input.file.name} into ${input.database}.`);
+      setImportProgress({ database: input.database, file: input.file.name, percent: 100, phase: "done" });
       if (rowImportTarget && rowImportTarget.engine === input.engine && rowImportTarget.database === input.database) {
         setRowImportTarget(null);
       } else {
         setTransferFile(null);
       }
       await refresh();
+      window.setTimeout(() => setImportProgress(null), 2500);
     },
-    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not upload SQL file")
+    onError: (error) => {
+      setImportProgress(null);
+      setNotice(error instanceof Error ? error.message : "Could not upload SQL file");
+    }
   });
 
   const listTables = useMutation({
@@ -267,9 +280,25 @@ export function DatabasesClient() {
                     <div className="border-b border-panel-line px-4 py-2 text-xs font-semibold uppercase text-panel-muted">Databases</div>
                     {(item?.databases ?? []).map((database) => (
                       <div className="flex items-center justify-between gap-3 border-b border-panel-line px-4 py-3 last:border-b-0" key={database.name}>
-                        <div>
+                        <div className="min-w-0 flex-1">
                           <div className="font-mono text-sm font-semibold">{database.name}</div>
                           <div className="text-xs text-panel-muted">{database.owner ? `owner ${database.owner}` : "owner unknown"}</div>
+                          <div className="mt-2 flex flex-wrap gap-2 text-xs text-panel-muted">
+                            <span className="rounded bg-slate-100 px-2 py-1">{compactNumber(database.tableCount ?? 0)} tables</span>
+                            <span className="rounded bg-slate-100 px-2 py-1">{compactNumber(database.rowCount ?? 0)} rows</span>
+                            <span className="rounded bg-slate-100 px-2 py-1">{humanBytes(database.sizeBytes ?? 0)}</span>
+                          </div>
+                          {importProgress?.database === database.name ? (
+                            <div className="mt-3">
+                              <div className="mb-1 flex items-center justify-between text-xs text-panel-muted">
+                                <span className="truncate">{importProgress.phase === "done" ? "Import complete" : importProgress.phase === "importing" ? "Importing into database" : `Uploading ${importProgress.file}`}</span>
+                                <span>{importProgress.percent}%</span>
+                              </div>
+                              <div className="h-2 overflow-hidden rounded-full bg-slate-100">
+                                <div className="h-full rounded-full bg-panel-accent transition-all" style={{ width: `${importProgress.percent}%` }} />
+                              </div>
+                            </div>
+                          ) : null}
                         </div>
                         <div className="flex items-center gap-2">
                           <button
