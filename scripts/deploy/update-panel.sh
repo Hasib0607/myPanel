@@ -162,11 +162,17 @@ ensure_node_runtime() {
 npm_install_with_recovery() {
   local output=""
   local output_file=""
+  local status=0
+  local retry_status=0
+  local conflict_paths=""
+  log "cleaning stale npm rename temp folders before install"
+  find "$APP_DIR/node_modules" -maxdepth 1 -type d -name ".*-*" -print -exec rm -rf {} + 2>&1 | tee -a "$LOG_FILE" || true
+
   log "+ $NPM_BIN install"
   output_file="$(mktemp)"
   set +e
   "$NPM_BIN" install 2>&1 | tee "$output_file" | tee -a "$LOG_FILE"
-  local status=${PIPESTATUS[0]}
+  status=${PIPESTATUS[0]}
   set -e
   output="$(cat "$output_file")"
   rm -f "$output_file"
@@ -178,9 +184,28 @@ npm_install_with_recovery() {
 
   if printf '%s' "$output" | grep -qiE "ENOTEMPTY|EEXIST|directory not empty|rename .*node_modules"; then
     log "npm install hit a stale node_modules rename conflict; cleaning npm temp folders and retrying"
+    conflict_paths="$(printf '%s\n' "$output" | awk '/^npm error (path|dest) / {print $4}' | sort -u)"
+    if [[ -n "$conflict_paths" ]]; then
+      while IFS= read -r conflict_path; do
+        if [[ "$conflict_path" == "$APP_DIR/node_modules/"* ]]; then
+          log "removing conflicted npm path $conflict_path"
+          rm -rf "$conflict_path"
+        fi
+      done <<< "$conflict_paths"
+    fi
     find "$APP_DIR/node_modules" -maxdepth 1 -type d -name ".*-*" -print -exec rm -rf {} + 2>&1 | tee -a "$LOG_FILE" || true
-    "$NPM_BIN" cache verify 2>&1 | tee -a "$LOG_FILE" || true
-    run "$NPM_BIN" install && return 0
+    "$NPM_BIN" cache clean --force 2>&1 | tee -a "$LOG_FILE" || true
+
+    output_file="$(mktemp)"
+    log "+ $NPM_BIN install"
+    set +e
+    "$NPM_BIN" install 2>&1 | tee "$output_file" | tee -a "$LOG_FILE"
+    retry_status=${PIPESTATUS[0]}
+    set -e
+    rm -f "$output_file"
+    if [[ "$retry_status" == "0" ]]; then
+      return 0
+    fi
 
     log "npm install retry failed; rebuilding root node_modules once"
     rm -rf "$APP_DIR/node_modules"
