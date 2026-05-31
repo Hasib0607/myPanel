@@ -4,7 +4,7 @@ import type React from "react";
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Columns3, Copy, Database, Download, Eye, KeyRound, Plus, RefreshCw, ShieldCheck, Table2, Trash2, Upload, UserRound } from "lucide-react";
-import { apiDeleteBody, apiGet, apiPost } from "@/lib/api";
+import { apiDeleteBody, apiGet, apiPost, apiUpload } from "@/lib/api";
 
 type Engine = "POSTGRESQL" | "MYSQL";
 type CommandResult = { dryRun?: boolean; command?: string[]; stdout?: string; stderr?: string; returncode?: number };
@@ -28,6 +28,14 @@ type TableCsvExportResult = { engine: Engine; database: string; table: string; f
 
 const engines: Engine[] = ["POSTGRESQL", "MYSQL"];
 const initialForm = { engine: "POSTGRESQL" as Engine, database: "", username: "", password: "" };
+const maxSqlUploadBytes = 3 * 1024 * 1024 * 1024;
+
+function humanBytes(value: number) {
+  if (value >= 1024 * 1024 * 1024) return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${value} B`;
+}
 
 function cleanIdentifier(value: string) {
   return value.replace(/[^a-zA-Z0-9_]/g, "_");
@@ -59,6 +67,7 @@ export function DatabasesClient() {
   const [grant, setGrant] = useState(initialForm);
   const [passwordForm, setPasswordForm] = useState({ engine: "POSTGRESQL" as Engine, username: "", password: "" });
   const [transfer, setTransfer] = useState({ engine: "POSTGRESQL" as Engine, database: "", sql: "" });
+  const [transferFile, setTransferFile] = useState<File | null>(null);
   const [tableTools, setTableTools] = useState({ engine: "POSTGRESQL" as Engine, database: "", table: "", content: "", format: "SQL" as "SQL" | "CSV" });
   const [tables, setTables] = useState<string[]>([]);
   const [columns, setColumns] = useState<ColumnListResult["columns"]>([]);
@@ -132,6 +141,25 @@ export function DatabasesClient() {
       await refresh();
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not import database")
+  });
+
+  const importDatabaseUpload = useMutation({
+    mutationFn: async () => {
+      if (!transferFile) throw new Error("Choose a SQL file first");
+      if (transferFile.size > maxSqlUploadBytes) throw new Error("SQL upload exceeds the 3GB limit");
+      const params = new URLSearchParams({
+        engine: transfer.engine,
+        database: transfer.database,
+        filename: transferFile.name
+      });
+      return apiUpload(`/databases/import/upload?${params.toString()}`, transferFile, "application/vnd.vps-panel.db-import");
+    },
+    onSuccess: async () => {
+      setNotice(`Imported ${transferFile?.name ?? "SQL file"} into ${transfer.database}.`);
+      setTransferFile(null);
+      await refresh();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not upload SQL file")
   });
 
   const listTables = useMutation({
@@ -306,6 +334,27 @@ export function DatabasesClient() {
             <Input label="Database" value={transfer.database} onChange={(value) => setTransfer({ ...transfer, database: cleanIdentifier(value) })} />
             <button className="flex h-10 w-full items-center justify-center gap-2 rounded-md border border-panel-line text-sm font-semibold disabled:opacity-60" disabled={!transfer.database || exportDatabase.isPending} onClick={() => exportDatabase.mutate()} type="button">
               <Download size={15} /> {exportDatabase.isPending ? "Exporting..." : "Export SQL"}
+            </button>
+            <label className="space-y-1 text-xs font-medium text-panel-muted">
+              SQL file upload
+              <input
+                accept=".sql,.txt,.dump"
+                className="block h-10 w-full rounded-md border border-panel-line px-3 py-2 text-sm text-panel-ink file:mr-3 file:rounded-md file:border-0 file:bg-slate-100 file:px-3 file:py-2 file:text-sm file:font-medium"
+                onChange={(event) => setTransferFile(event.target.files?.[0] ?? null)}
+                type="file"
+              />
+            </label>
+            <div className="rounded-md border border-panel-line bg-slate-50 px-3 py-2 text-xs text-panel-muted">
+              {transferFile ? `${transferFile.name} · ${humanBytes(transferFile.size)}` : "Upload a .sql dump directly from your browser."}
+              <div>Maximum file size: 3GB.</div>
+            </div>
+            <button
+              className="flex h-10 w-full items-center justify-center gap-2 rounded-md border border-panel-line text-sm font-semibold disabled:opacity-60"
+              disabled={!transfer.database || !transferFile || transferFile.size > maxSqlUploadBytes || importDatabaseUpload.isPending}
+              onClick={() => importDatabaseUpload.mutate()}
+              type="button"
+            >
+              <Upload size={15} /> {importDatabaseUpload.isPending ? "Uploading..." : "Upload and import SQL"}
             </button>
             <label className="space-y-1 text-xs font-medium text-panel-muted">
               SQL import

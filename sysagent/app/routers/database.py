@@ -55,6 +55,12 @@ class DatabaseImportRequest(BaseModel):
     sql: str = Field(min_length=1, max_length=20_000_000)
 
 
+class DatabaseImportFileRequest(BaseModel):
+    engine: str = Field(pattern=ENGINE_PATTERN)
+    database: str = Field(pattern=IDENTIFIER_PATTERN)
+    path: str = Field(min_length=1, max_length=4096)
+
+
 class DatabaseTableRequest(BaseModel):
     engine: str = Field(pattern=ENGINE_PATTERN)
     database: str = Field(pattern=IDENTIFIER_PATTERN)
@@ -136,6 +142,15 @@ def write_temp_content(content: str, suffix: str) -> str:
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=suffix, prefix="vps-panel-db-", delete=False) as handle:
         handle.write(content)
         return handle.name
+
+
+def import_sql_path(engine: str, database: str, path: str) -> dict:
+    if engine == "POSTGRESQL":
+        return run_command(["sudo", "-u", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-d", database, "-f", path], timeout=3600)
+    ensure = ensure_mysql_runtime()
+    if ensure is not None:
+        return ensure
+    return run_command(["mysql", database, "-e", f"source {path}"], timeout=3600)
 
 
 def postgres_overview() -> dict:
@@ -264,13 +279,29 @@ def export_database(body: DatabaseDumpRequest) -> dict:
 def import_database(body: DatabaseImportRequest) -> dict:
     path = write_temp_sql(body.sql)
     try:
-        if body.engine == "POSTGRESQL":
-            result = run_command(["sudo", "-u", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-d", body.database, "-f", path], timeout=300)
-        else:
-            result = run_command(["mysql", body.database, "-e", f"source {path}"], timeout=300)
+        result = import_sql_path(body.engine, body.database, path)
         return {"engine": body.engine, "database": body.database, "result": result}
     finally:
         Path(path).unlink(missing_ok=True)
+
+
+@router.post("/import-file")
+def import_database_file(body: DatabaseImportFileRequest) -> dict:
+    path = Path(body.path)
+    if not path.exists() or not path.is_file():
+        return {
+            "engine": body.engine,
+            "database": body.database,
+            "path": body.path,
+            "result": {
+                "command": [body.engine == "POSTGRESQL" and "psql" or "mysql", body.database],
+                "stdout": "",
+                "stderr": f"SQL import file does not exist: {body.path}",
+                "returncode": 2,
+            },
+        }
+    result = import_sql_path(body.engine, body.database, str(path))
+    return {"engine": body.engine, "database": body.database, "path": body.path, "result": result}
 
 
 @router.post("/tables")

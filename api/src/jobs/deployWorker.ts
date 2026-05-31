@@ -7,7 +7,7 @@ import { detectDeploymentSource } from "../lib/deploymentDetection.js";
 import { requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import { env } from "../config/env.js";
 import { prisma } from "../lib/prisma.js";
-import { getSecret } from "../lib/secrets.js";
+import { deleteSecret, getSecret } from "../lib/secrets.js";
 import { sysagent } from "../lib/sysagent.js";
 import { sslQueue } from "./queues.js";
 
@@ -535,6 +535,78 @@ async function upsertDeploymentEnvValue(deploymentId: string, key: string, value
   });
 }
 
+async function deleteDeploymentEnvValue(deploymentId: string, key: string) {
+  const existing = await prisma.deploymentEnvVar.findUnique({
+    where: { deploymentId_key: { deploymentId, key } },
+    select: { secretRef: true }
+  });
+  if (existing?.secretRef) {
+    await deleteSecret(existing.secretRef);
+  }
+  await prisma.deploymentEnvVar.delete({ where: { deploymentId_key: { deploymentId, key } } }).catch(() => undefined);
+}
+
+async function normalizeSelectedDatabaseEngineEnv(
+  deployment: { id: string; dbType?: "POSTGRESQL" | "MYSQL" | null },
+  envVars: Record<string, string>
+) {
+  if (!deployment.dbType) return { envVars, changed: false };
+
+  const nextEnv = { ...envVars };
+  let changed = false;
+  const desiredConnection = deployment.dbType === "MYSQL" ? "mysql" : "pgsql";
+  const oppositeUrlPrefixes = deployment.dbType === "MYSQL" ? ["postgres://", "postgresql://"] : ["mysql://", "mariadb://"];
+
+  if ((nextEnv.DB_CONNECTION || "").toLowerCase() !== desiredConnection) {
+    nextEnv.DB_CONNECTION = desiredConnection;
+    await upsertDeploymentEnvValue(deployment.id, "DB_CONNECTION", desiredConnection);
+    changed = true;
+  }
+
+  const databaseUrl = nextEnv.DATABASE_URL || "";
+  if (oppositeUrlPrefixes.some((prefix) => databaseUrl.startsWith(prefix))) {
+    delete nextEnv.DATABASE_URL;
+    await deleteDeploymentEnvValue(deployment.id, "DATABASE_URL");
+    changed = true;
+  }
+
+  if (deployment.dbType === "MYSQL") {
+    if (!nextEnv.DB_PORT || nextEnv.DB_PORT === "5432") {
+      nextEnv.DB_PORT = "3306";
+      await upsertDeploymentEnvValue(deployment.id, "DB_PORT", "3306");
+      changed = true;
+    }
+    if ((nextEnv.DB_CHARSET || "").toLowerCase() === "utf8") {
+      nextEnv.DB_CHARSET = "utf8mb4";
+      await upsertDeploymentEnvValue(deployment.id, "DB_CHARSET", "utf8mb4");
+      changed = true;
+    }
+    if ((nextEnv.DB_COLLATION || "") === "") {
+      nextEnv.DB_COLLATION = "utf8mb4_unicode_ci";
+      await upsertDeploymentEnvValue(deployment.id, "DB_COLLATION", "utf8mb4_unicode_ci");
+      changed = true;
+    }
+    return { envVars: nextEnv, changed };
+  }
+
+  if (!nextEnv.DB_PORT || nextEnv.DB_PORT === "3306") {
+    nextEnv.DB_PORT = "5432";
+    await upsertDeploymentEnvValue(deployment.id, "DB_PORT", "5432");
+    changed = true;
+  }
+  if ((nextEnv.DB_CHARSET || "").toLowerCase() !== "utf8") {
+    nextEnv.DB_CHARSET = "utf8";
+    await upsertDeploymentEnvValue(deployment.id, "DB_CHARSET", "utf8");
+    changed = true;
+  }
+  if ((nextEnv.DB_COLLATION || "") !== "") {
+    nextEnv.DB_COLLATION = "";
+    await upsertDeploymentEnvValue(deployment.id, "DB_COLLATION", "");
+    changed = true;
+  }
+  return { envVars: nextEnv, changed };
+}
+
 async function autoRepairComposerPlatformIssue(deploymentId: string, releaseId: string | undefined, errorText: string) {
   const targets = runtimeInstallTargetsForComposerPlatformIssue(errorText);
   if (targets.length === 0) return false;
@@ -626,15 +698,17 @@ async function buildDatabaseRuntimeEnv(
   deployment: { id: string; dbType?: "POSTGRESQL" | "MYSQL" | null; dbName?: string | null; dbUser?: string | null; dbPasswordSecretRef?: string | null },
   envVars: Record<string, string>
 ) {
-  if (!deployment.dbType || !deployment.dbName || !deployment.dbUser) return { envVars, changed: false };
+  const selectedEngine = await normalizeSelectedDatabaseEngineEnv(deployment, envVars);
+  const nextEnv = { ...selectedEngine.envVars };
+  let changed = selectedEngine.changed;
+
+  if (!deployment.dbType || !deployment.dbName || !deployment.dbUser) return { envVars: nextEnv, changed };
 
   const password = deployment.dbPasswordSecretRef ? await getSecret(deployment.dbPasswordSecretRef) : null;
-  const host = envVars.DB_HOST || "127.0.0.1";
-  const nextEnv = { ...envVars };
-  let changed = false;
+  const host = nextEnv.DB_HOST || "127.0.0.1";
 
   if (deployment.dbType === "MYSQL") {
-    const port = envVars.DB_PORT || "3306";
+    const port = nextEnv.DB_PORT || "3306";
     const desiredUrl = password !== null
       ? `mysql://${encodeURIComponent(deployment.dbUser)}:${encodeURIComponent(password)}@${host}:${port}/${encodeURIComponent(deployment.dbName)}`
       : null;
@@ -664,7 +738,7 @@ async function buildDatabaseRuntimeEnv(
     return { envVars: nextEnv, changed };
   }
 
-  const port = envVars.DB_PORT || "5432";
+  const port = nextEnv.DB_PORT || "5432";
   const desiredUrl = password !== null
     ? `postgresql://${encodeURIComponent(deployment.dbUser)}:${encodeURIComponent(password)}@${host}:${port}/${encodeURIComponent(deployment.dbName)}`
     : null;

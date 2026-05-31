@@ -88,6 +88,19 @@ async function jsonRequestInit(method: "POST" | "PATCH" | "PUT", body?: unknown)
   };
 }
 
+async function uploadRequestInit(body: BodyInit, contentType: string, headers?: Record<string, string>): Promise<RequestInit> {
+  return {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      "content-type": contentType,
+      ...(await csrfHeader()),
+      ...(headers ?? {})
+    },
+    body
+  };
+}
+
 export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
   return fetchJson<T>(path, await jsonRequestInit("POST", body));
 }
@@ -127,6 +140,10 @@ export async function apiGet<T>(path: string): Promise<T> {
     credentials: "include",
     cache: "no-store"
   });
+}
+
+export async function apiUpload<T>(path: string, body: BodyInit, contentType: string, headers?: Record<string, string>): Promise<T> {
+  return fetchJson<T>(path, await uploadRequestInit(body, contentType, headers));
 }
 
 export async function apiGetText(path: string): Promise<string> {

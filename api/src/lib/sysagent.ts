@@ -132,6 +132,8 @@ export const sysagent = {
     request<{ engine: string; database: string; dump: string; result: SysagentCommandResult }>("/database/export", { method: "POST", body: JSON.stringify(body) }),
   databaseImport: (body: unknown) =>
     request("/database/import", { method: "POST", body: JSON.stringify(body) }),
+  databaseImportFile: (body: unknown) =>
+    request("/database/import-file", { method: "POST", body: JSON.stringify(body) }),
   databaseTables: (body: unknown) =>
     request("/database/tables", { method: "POST", body: JSON.stringify(body) }),
   databaseColumns: (body: unknown) =>

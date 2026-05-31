@@ -1,4 +1,9 @@
-import type { FastifyPluginAsync } from "fastify";
+import fs from "node:fs";
+import fsp from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { pipeline } from "node:stream/promises";
+import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { audit } from "../lib/audit.js";
 import { sysagent } from "../lib/sysagent.js";
@@ -32,10 +37,17 @@ const deleteSchema = z.object({
 });
 
 const exportSchema = deleteSchema;
+const maxImportUploadBytes = 3 * 1024 * 1024 * 1024;
+const importUploadContentType = "application/vnd.vps-panel.db-import";
 const importSchema = z.object({
   engine: engineSchema,
   database: identifierSchema,
   sql: z.string().min(1).max(20_000_000)
+});
+const importUploadQuerySchema = z.object({
+  engine: engineSchema,
+  database: identifierSchema,
+  filename: z.string().trim().min(1).max(255).optional()
 });
 
 const tableSchema = z.object({
@@ -76,8 +88,38 @@ function assertDatabaseResult(result: unknown, label: string) {
   if (failure) throw new Error(`${label} failed: ${failure}`);
 }
 
+async function writeImportUploadToTemp(payload: NodeJS.ReadableStream, filename?: string) {
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "panel-db-import-"));
+  const safeName = (filename || "database.sql").replace(/[^a-zA-Z0-9._-]/g, "_");
+  const filePath = path.join(tmpDir, safeName.endsWith(".sql") ? safeName : `${safeName}.sql`);
+  const output = fs.createWriteStream(filePath);
+  let sizeBytes = 0;
+
+  payload.on("data", (chunk) => {
+    sizeBytes += Buffer.isBuffer(chunk) ? chunk.byteLength : Buffer.byteLength(String(chunk));
+    if (sizeBytes > maxImportUploadBytes) {
+      (payload as NodeJS.ReadableStream & { destroy?: (error?: Error) => void }).destroy?.(new Error("Database upload is too large. Maximum size is 3GB."));
+    }
+  });
+
+  try {
+    await pipeline(payload, output);
+    return { tmpDir, filePath, sizeBytes };
+  } catch (error) {
+    await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
 export const databaseRoutes: FastifyPluginAsync = async (app) => {
   app.addHook("preHandler", app.requireAuth);
+
+  if (!app.hasContentTypeParser(importUploadContentType)) {
+    app.addContentTypeParser(importUploadContentType, async (request: FastifyRequest, payload: NodeJS.ReadableStream) => {
+      const query = importUploadQuerySchema.parse(request.query);
+      return writeImportUploadToTemp(payload, query.filename);
+    });
+  }
 
   app.get("/", async () => sysagent.databaseOverview());
 
@@ -161,6 +203,32 @@ export const databaseRoutes: FastifyPluginAsync = async (app) => {
       description: `Imported SQL into ${body.engine} database ${body.database}`
     });
     return result;
+  });
+
+  app.post("/import/upload", { bodyLimit: maxImportUploadBytes }, async (request) => {
+    const query = importUploadQuerySchema.parse(request.query);
+    const upload = request.body as { tmpDir: string; filePath: string; sizeBytes: number };
+    try {
+      const result = await sysagent.databaseImportFile({
+        engine: query.engine,
+        database: query.database,
+        path: upload.filePath
+      });
+      assertDatabaseResult((result as { result?: unknown }).result, "Database import");
+      await audit(request, {
+        action: "APPLY",
+        resource: "database",
+        resourceId: query.database,
+        description: `Imported uploaded SQL into ${query.engine} database ${query.database}`,
+        metadata: { sizeBytes: upload.sizeBytes, filename: query.filename ?? path.basename(upload.filePath) }
+      });
+      return Object.assign({}, result as Record<string, unknown>, {
+        sizeBytes: upload.sizeBytes,
+        filename: query.filename ?? path.basename(upload.filePath)
+      });
+    } finally {
+      await fsp.rm(upload.tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    }
   });
 
   app.post("/tables", async (request) => {
