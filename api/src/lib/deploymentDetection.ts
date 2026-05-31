@@ -98,7 +98,7 @@ export function detectDeploymentFiles(files: string[], packageJsonText?: string 
       suggestions: {
         runtime: "PHP",
         packageManager: "COMPOSER",
-        installCommand: "composer install --no-dev --optimize-autoloader",
+        installCommand: "composer install --no-dev --optimize-autoloader --no-interaction --no-scripts",
         buildCommand: null,
         startCommand: "php-fpm",
         outputDirectory: "public",

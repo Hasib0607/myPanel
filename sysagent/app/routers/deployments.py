@@ -485,7 +485,7 @@ def install(body: CommandRequest) -> dict:
         "NPM": "npm install",
         "PNPM": "pnpm install",
         "YARN": "yarn install",
-        "COMPOSER": "composer install --no-dev --optimize-autoloader",
+        "COMPOSER": "composer install --no-dev --optimize-autoloader --no-interaction --no-scripts",
         "PIP": "pip3 install -r requirements.txt",
         "UV": "uv sync",
         "GO": "go mod download",

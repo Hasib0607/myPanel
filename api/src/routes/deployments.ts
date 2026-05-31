@@ -575,6 +575,7 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
   if (lower.includes("package-lock.json") && lower.includes("yarn.lock")) return { message: "Multiple lockfiles detected. Keep one package manager lockfile to avoid inconsistent installs.", repairAction: "redeploy", category: "lockfile_conflict" };
   if (lower.includes("unsupported engine") || lower.includes("node version") || lower.includes("requires node")) return { message: "Node version mismatch. Set a compatible runtime version or update the app engines field.", repairAction: "redeploy", category: "node_version" };
   if (lower.includes("prisma") && (lower.includes("migration") || lower.includes("p100") || lower.includes("database"))) return { message: "Prisma/database migration failed. Check DATABASE_URL, database grants, and migration state.", repairAction: "redeploy", category: "prisma_migration" };
+  if (lower.includes("artisan package:discover") || lower.includes("laravel package discovery")) return { message: "Laravel package discovery failed while bootstrapping the app. Check the deployment environment values and the package discovery error output, then redeploy.", repairAction: "request-approval", category: "laravel_package_discovery" };
   const composerPlatform = detectComposerPlatformIssue(text);
   const phpVersionMismatch = Boolean(
     composerPlatform?.requiredPhpVersion

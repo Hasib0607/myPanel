@@ -197,13 +197,15 @@ function assertLiveResult(result: unknown, label: string) {
 }
 
 function liveResultFailureMessage(result: unknown, label: string) {
-  const value = result as { dryRun?: boolean; returncode?: number; stderr?: string; reason?: string };
+  const value = result as { dryRun?: boolean; returncode?: number; stderr?: string; stdout?: string; reason?: string };
   if (value?.dryRun) {
     return `${label} did not run live. Set ALLOW_LIVE_SYSTEM_COMMANDS=true on vps-panel-sysagent, restart vps-panel-sysagent and vps-panel-workers, then retry.`;
   }
   if (typeof value?.returncode === "number" && value.returncode !== 0) {
     const signal = "signal" in value && typeof value.signal === "string" ? value.signal : null;
     const stderrText = value.stderr ?? "";
+    const stdoutText = value.stdout ?? "";
+    const detailText = stderrText || stdoutText;
     const oomKilled = value.returncode === -9 || signal === "SIGKILL" || stderrText.includes("SIGKILL");
     const sigtermKilled = !oomKilled && (value.returncode === -15 || signal === "SIGTERM");
     const signalHint = oomKilled
@@ -211,7 +213,7 @@ function liveResultFailureMessage(result: unknown, label: string) {
       : sigtermKilled
         ? " The command was terminated by SIGTERM. This may be caused by the OS killing the process due to low memory — try adding swap or reducing build memory usage (e.g. NODE_OPTIONS=--max-old-space-size=512 in env vars). If it repeats, increase DEPLOYMENT_COMMAND_TIMEOUT_SECONDS."
         : "";
-    return `${label} failed with exit code ${value.returncode}${signal ? ` (${signal})` : ""}${stderrText ? `: ${stderrText}` : ""}${signalHint}`;
+    return `${label} failed with exit code ${value.returncode}${signal ? ` (${signal})` : ""}${detailText ? `: ${detailText}` : ""}${signalHint}`;
   }
   return null;
 }
@@ -727,6 +729,15 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     }
 
     if (deployment.framework === "LARAVEL") {
+      const packageDiscoverResult = await runStep(deployment.id, releaseId, "INSTALLING", "Laravel package discovery", () =>
+        sysagent.deploymentBuild({
+          rootPath: appPath,
+          command: "php artisan package:discover --ansi -vvv",
+          env: envVars
+        })
+      );
+      assertCommandTree(packageDiscoverResult, "Laravel package discovery");
+
       const migrateResult = await runStep(deployment.id, releaseId, "MIGRATING", "Database migration", () =>
         sysagent.deploymentMigrate({
           rootPath: appPath,
