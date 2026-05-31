@@ -327,6 +327,102 @@ def combine_pm2_results(root_path: str, steps: dict[str, dict], required: list[s
     }
 
 
+def supervisor_config_dir() -> Path:
+    for candidate in (Path("/etc/supervisor/conf.d"), Path("/etc/supervisord.d")):
+        if candidate.exists():
+            return candidate
+    return Path("/etc/supervisor/conf.d")
+
+
+def supervisor_env_value(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def supervisor_program_config(body: ProcessRequest, start_command: list[str], log_dir: Path) -> str:
+    cwd = deployment_cwd(body.rootPath)
+    env = {**pm2_env(body.port), **(body.env or {})}
+    environment = ",".join(f'{key}="{supervisor_env_value(str(value))}"' for key, value in sorted(env.items()) if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key))
+    lines = [
+        f"[program:{body.name}]",
+        f"directory={cwd}",
+        f"command={shlex.join(start_command)}",
+        "autostart=true",
+        "autorestart=true",
+        "startsecs=3",
+        "startretries=3",
+        "stopasgroup=true",
+        "killasgroup=true",
+        f"stdout_logfile={log_dir / 'running-out.log'}",
+        f"stderr_logfile={log_dir / 'running-error.log'}",
+        "redirect_stderr=false",
+    ]
+    if environment:
+        lines.append(f"environment={environment}")
+    return "\n".join(lines) + "\n"
+
+
+def supervisor_start(body: ProcessRequest, start_command: list[str]) -> dict:
+    info = path_info(body.rootPath)
+    try:
+        log_dir = safe_log_dir(body.name, body.logDir)
+    except ValueError as error:
+        return blocked_command(str(error), ["supervisorctl", "start", body.name], info)
+
+    config_dir = supervisor_config_dir()
+    config_path = config_dir / f"{body.name}.conf"
+    if not settings.allow_live_system_commands:
+        return {
+            "dryRun": True,
+            "command": ["supervisorctl", "managed-lifecycle", body.name],
+            "cwd": deployment_cwd(body.rootPath),
+            "stdout": "",
+            "stderr": "",
+            "returncode": 0,
+            "path": info,
+            "configPath": str(config_path),
+        }
+
+    if not info["allowed"]:
+        return blocked_command("Path escapes configured file manager root", ["supervisorctl", "start", body.name], info)
+
+    reset_runtime_logs(log_dir)
+    config_dir.mkdir(parents=True, exist_ok=True)
+    write = {
+        "dryRun": False,
+        "command": ["write-file", str(config_path)],
+        "cwd": None,
+        "stdout": "",
+        "stderr": "",
+        "returncode": 0,
+    }
+    try:
+        config_path.write_text(supervisor_program_config(body, start_command, log_dir), encoding="utf-8")
+    except OSError as error:
+        write["stderr"] = str(error)
+        write["returncode"] = 1
+
+    reread = run_command(["supervisorctl", "reread"], timeout=60) if write["returncode"] == 0 else {"returncode": 1, "stderr": "Skipped because config write failed"}
+    update = run_command(["supervisorctl", "update"], timeout=60) if reread.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because reread failed"}
+    stop = run_command(["supervisorctl", "stop", body.name], timeout=60) if update.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because update failed"}
+    if "no such process" in (stop.get("stderr") or "").lower() or "not running" in (stop.get("stderr") or "").lower():
+        stop["returncode"] = 0
+    start = run_command(["supervisorctl", "start", body.name], timeout=60) if stop.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because stop failed"}
+    status = run_command(["supervisorctl", "status", body.name], timeout=60) if start.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because start failed"}
+    steps = {"write": write, "reread": reread, "update": update, "stop": stop, "start": start, "status": status}
+    failed = [name for name, step in steps.items() if step.get("returncode") != 0]
+    return {
+        "dryRun": any(step.get("dryRun") for step in steps.values()),
+        "command": ["supervisorctl", "managed-lifecycle", body.name],
+        "cwd": deployment_cwd(body.rootPath),
+        "stdout": status.get("stdout") or "",
+        "stderr": "; ".join(f"{name}: {steps[name].get('stderr') or 'failed'}" for name in failed),
+        "returncode": 1 if failed else 0,
+        "path": info,
+        "configPath": str(config_path),
+        **steps,
+    }
+
+
 def pm2_start(body: ProcessRequest, start_command: list[str]) -> dict:
     cwd = deployment_cwd(body.rootPath)
     try:
@@ -528,6 +624,12 @@ def process(body: ProcessRequest) -> dict:
         else:
             command = ["pm2", body.action, body.name]
     elif manager == "SUPERVISOR":
+        if body.action in {"start", "restart"}:
+            try:
+                start_command = parse_deployment_command(body.startCommand or "true")
+            except ValueError as error:
+                return blocked_command(str(error), [body.startCommand or "true"], path_info(body.rootPath))
+            return supervisor_start(body, start_command)
         command = ["supervisorctl", body.action, body.name]
     elif manager == "SYSTEMD":
         command = ["systemctl", body.action, body.name]
