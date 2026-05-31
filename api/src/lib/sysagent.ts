@@ -100,6 +100,11 @@ export const sysagent = {
     request<{ write: SysagentCommandResult; enable: SysagentCommandResult; test: SysagentCommandResult; reload: SysagentCommandResult; configPath: string; enabledPath?: string; serverName?: string }>("/deployments/nginx", { method: "POST", body: JSON.stringify(body) }),
   deploymentHealth: (body: unknown) =>
     request("/deployments/health", { method: "POST", body: JSON.stringify(body) }),
+  deploymentGuardianRepair: (body: { rootPath: string; framework?: string; env?: Record<string, string> }) =>
+    request<{ returncode: number; steps: Record<string, unknown>; failed?: string[] }>("/deployments/guardian-repair", {
+      method: "POST",
+      body: JSON.stringify(body)
+    }),
   deploymentPortStatus: (body: unknown) =>
     request<SysagentCommandResult & { occupied?: boolean; reusable?: boolean; owner?: unknown }>("/deployments/port-status", { method: "POST", body: JSON.stringify(body) }),
   deploymentRuntimeLogs: (body: unknown) =>

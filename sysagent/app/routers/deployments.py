@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from app.command import run_command, run_install_plan
 from app.config import DEPLOYMENT_COMMANDS_LIVE, settings
+from app.deployment_health import curl_health_probe
 from app.deployment_commands import normalize_laravel_start_command, parse_deployment_command
 from app.platform import runtime_tool_install_plan
 from app.nginx_paths import nginx_sites_available, nginx_sites_enabled
@@ -78,6 +79,12 @@ class PortStatusRequest(BaseModel):
 class PublicRouteRequest(BaseModel):
     serverName: str
     path: str = "/"
+
+
+class GuardianRepairRequest(BaseModel):
+    rootPath: str
+    framework: str | None = None
+    env: dict[str, str] | None = None
 
 
 class RuntimeLogsRequest(BaseModel):
@@ -727,51 +734,7 @@ server {{
 
 
 def _curl_once(url: str, *, accept_http_errors: bool = False) -> dict:
-    # --connect-timeout: per-connection attempt limit (5 s)
-    # --max-time: total wall-clock limit across all retries (90 s)
-    # Without a large --max-time, curl exhausts the budget after 2-3 retries
-    # even when --retry 10 is requested, because retry delays count against it.
-    if accept_http_errors:
-        result = run_command([
-            "curl",
-            "-sS",
-            "--retry", "10",
-            "--retry-delay", "3",
-            "--retry-connrefused",
-            "--connect-timeout", "5",
-            "--max-time", "90",
-            "-o", "/dev/null",
-            "-w", "%{http_code}",
-            url,
-        ], allow_live=DEPLOYMENT_COMMANDS_LIVE)
-        code_text = (result.get("stdout") or "").strip()
-        try:
-            http_code = int(code_text)
-        except ValueError:
-            http_code = 0
-        result["httpCode"] = http_code
-        if result.get("returncode") == 0 and http_code >= 400:
-            result["degraded"] = True
-            result["stderr"] = (
-                f"HTTP {http_code} from {url}. "
-                "The process is responding, but the app returned an error status."
-            )
-            if http_code >= 500:
-                result["stderr"] += (
-                    " Check APP_KEY, database connection env vars, and storage/bootstrap/cache permissions."
-                )
-        return result
-
-    return run_command([
-        "curl",
-        "-fsS",
-        "--retry", "10",
-        "--retry-delay", "3",
-        "--retry-connrefused",
-        "--connect-timeout", "5",
-        "--max-time", "90",
-        url,
-    ], allow_live=DEPLOYMENT_COMMANDS_LIVE)
+    return curl_health_probe(url, accept_http_errors=accept_http_errors)
 
 
 def _curl_public_route(server_name: str, path: str = "/") -> dict:
@@ -978,6 +941,29 @@ def repair_laravel_writable_paths(body: LaravelWritablePathsRequest) -> dict:
         "mkdir": mkdir,
         "chown": chown,
         "chmod": chmod,
+    }
+
+
+@router.post("/guardian-repair")
+def guardian_repair(body: GuardianRepairRequest) -> dict:
+    framework = (body.framework or "").upper()
+    steps: dict[str, dict] = {}
+
+    if framework == "LARAVEL":
+        steps["writablePaths"] = repair_laravel_writable_paths(LaravelWritablePathsRequest(rootPath=body.rootPath))
+        env = dict(body.env or {})
+        if not env.get("APP_KEY", "").strip():
+            steps["appKey"] = guarded_deployment_command(body.rootPath, "php artisan key:generate --force", env=env or None)
+        steps["configClear"] = guarded_deployment_command(body.rootPath, "php artisan config:clear", env=env or None)
+        steps["routeClear"] = guarded_deployment_command(body.rootPath, "php artisan route:clear", env=env or None)
+
+    failed = [name for name, step in steps.items() if step.get("returncode", 0) != 0]
+    return {
+        "framework": framework or None,
+        "dryRun": any(step.get("dryRun") for step in steps.values()),
+        "returncode": 1 if failed else 0,
+        "steps": steps,
+        "failed": failed,
     }
 
 

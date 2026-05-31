@@ -2,6 +2,7 @@ import { Worker } from "bullmq";
 import { redis } from "../lib/redis.js";
 import { logger } from "../lib/logger.js";
 import { expireGuardianIpBlocks, runGuardianAutoHeal, syncGuardianIncidentsOnly, type GuardianDiagnosis } from "../lib/guardianAutoHeal.js";
+import { restartDeploymentProcess, runGuardianDeploymentRepair } from "../lib/deploymentGuardianRepair.js";
 import { prisma } from "../lib/prisma.js";
 import { sysagent } from "../lib/sysagent.js";
 import { deployQueue } from "./queues.js";
@@ -98,6 +99,44 @@ async function queueGuardianDeployRepair(deployment: Awaited<ReturnType<typeof p
   return { queued: true, action, releaseId, jobId: job.id };
 }
 
+function renderStartCommand(deployment: { framework: string; startCommand: string | null; port: number }) {
+  if (deployment.framework === "NEXTJS") {
+    return `npx next start -p ${deployment.port} -H 127.0.0.1`;
+  }
+  const normalized = deployment.startCommand?.trim().toLowerCase() ?? "";
+  if (
+    deployment.framework === "LARAVEL"
+    && (!normalized || normalized === "php-fpm" || /^php(\d+(?:\.\d+)?)?-fpm$/.test(normalized))
+  ) {
+    return `php artisan serve --host=127.0.0.1 --port ${deployment.port}`;
+  }
+  return deployment.startCommand?.replaceAll("{PORT}", String(deployment.port)).replaceAll("$PORT", String(deployment.port)) ?? null;
+}
+
+async function guardianInlineDeploymentRepair(
+  deployment: Awaited<ReturnType<typeof prisma.deployment.findMany>>[number] & {
+    env?: Array<{ key: string; value: string | null; secretRef: string | null }>;
+  },
+  appPath: string
+) {
+  const envVars = Object.fromEntries(
+    (deployment.env ?? [])
+      .filter((item) => item.value)
+      .map((item) => [item.key, item.value as string])
+  );
+  await runGuardianDeploymentRepair({ rootPath: appPath, framework: deployment.framework, envVars });
+  await restartDeploymentProcess({
+    deploymentId: deployment.id,
+    slug: deployment.slug,
+    appPath,
+    port: deployment.port,
+    processManager: (deployment.processManager ?? defaultProcessManager(deployment.framework)) as any,
+    startCommand: renderStartCommand(deployment),
+    envVars,
+    logDir: `${process.env.DEPLOYMENT_LOG_ROOT ?? "/var/log/vps-panel/deployments"}/${deployment.slug}`
+  });
+}
+
 async function runDeploymentWatch() {
   const deployments = await prisma.deployment.findMany({
     where: {
@@ -107,27 +146,50 @@ async function runDeploymentWatch() {
         { status: { in: ["DEPLOYING", "BUILDING", "QUEUED"] }, updatedAt: { lte: new Date(Date.now() - staleDeploymentMs) } }
       ]
     },
+    include: { env: true },
     orderBy: { updatedAt: "desc" },
     take: 25
   });
   const results = [];
   for (const deployment of deployments) {
     try {
-      const result = await sysagent.deploymentHealth({
+      const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
+      let result = await sysagent.deploymentHealth({
         deploymentId: deployment.id,
         port: deployment.port,
         healthUrl: deployment.healthUrl,
         processName: deployment.slug,
         processManager: deployment.processManager ?? defaultProcessManager(deployment.framework),
-        rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory)
-      }) as { dryRun?: boolean; returncode?: number; stderr?: string; stdout?: string };
-      const healthy = !result.dryRun && result.returncode === 0;
+        rootPath: appPath,
+        framework: deployment.framework
+      }) as { dryRun?: boolean; returncode?: number; degraded?: boolean; stderr?: string; stdout?: string };
+      let healthy = !result.dryRun && (result.returncode === 0 || Boolean(result.degraded));
+      if (!healthy && (deployment.framework === "LARAVEL" || result.returncode === 23 || result.returncode === 22)) {
+        try {
+          await guardianInlineDeploymentRepair(deployment, appPath);
+          result = await sysagent.deploymentHealth({
+            deploymentId: deployment.id,
+            port: deployment.port,
+            healthUrl: deployment.healthUrl,
+            processName: deployment.slug,
+            processManager: deployment.processManager ?? defaultProcessManager(deployment.framework),
+            rootPath: appPath,
+            framework: deployment.framework
+          }) as typeof result;
+          healthy = !result.dryRun && (result.returncode === 0 || Boolean(result.degraded));
+        } catch (repairError) {
+          result = {
+            ...result,
+            stderr: `${result.stderr ?? ""} Guardian inline repair failed: ${repairError instanceof Error ? repairError.message : String(repairError)}`.trim()
+          };
+        }
+      }
       const stalePending = ["DEPLOYING", "BUILDING", "QUEUED"].includes(deployment.status) && Date.now() - deployment.updatedAt.getTime() >= staleDeploymentMs;
       await prisma.deployment.update({
         where: { id: deployment.id },
         data: {
           status: healthy ? "RUNNING" : stalePending ? "FAILED" : deployment.status,
-          healthStatus: healthy ? "HEALTHY" : "DOWN",
+          healthStatus: healthy ? (result.degraded ? "DEGRADED" : "HEALTHY") : "DOWN",
           lastHealthCheckAt: new Date()
         }
       });

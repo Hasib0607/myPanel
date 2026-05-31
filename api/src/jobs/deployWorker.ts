@@ -8,6 +8,13 @@ import { redis } from "../lib/redis.js";
 import { logger } from "../lib/logger.js";
 import { detectDeploymentSource } from "../lib/deploymentDetection.js";
 import { requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
+import {
+  deploymentRecoveryAttempts,
+  isRecoverableHealthFailure,
+  restartDeploymentProcess,
+  runGuardianDeploymentRepair,
+  sleep as guardianRepairSleep
+} from "../lib/deploymentGuardianRepair.js";
 import { env } from "../config/env.js";
 import { prisma } from "../lib/prisma.js";
 import { deleteSecret, getSecret } from "../lib/secrets.js";
@@ -616,6 +623,82 @@ async function assertHealthResult(
   throw new Error(`${message}${runtimeText}`);
 }
 
+async function runHealthCheckWithGuardianRecovery(
+  deployment: {
+    id: string;
+    slug: string;
+    framework: DeploymentFramework;
+    port: number;
+    healthUrl: string | null;
+    startCommand: string | null;
+    processManager: DeploymentProcessManager | null;
+  },
+  releaseId: string | undefined,
+  appPath: string,
+  envVars: Record<string, string>,
+  processManager: DeploymentProcessManager,
+  label: string
+) {
+  const attempts = deploymentRecoveryAttempts();
+  let lastError: Error | null = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const health = await runStep(
+      deployment.id,
+      releaseId,
+      "HEALTH_CHECK",
+      attempt === 1 ? label : `${label} retry ${attempt}`,
+      () =>
+        sysagent.deploymentHealth({
+          deploymentId: deployment.id,
+          port: deployment.port,
+          healthUrl: deployment.healthUrl,
+          processName: deployment.slug,
+          processManager,
+          rootPath: appPath,
+          framework: deployment.framework
+        })
+    );
+
+    try {
+      const outcome = await assertHealthResult(health, label, deployment, releaseId);
+      if (attempt > 1) {
+        await writeLog(deployment.id, releaseId, "HEALTH_CHECK", "Guardian recovery succeeded", { attempt });
+      }
+      return { health, outcome };
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      if (attempt >= attempts || !isRecoverableHealthFailure(health)) {
+        break;
+      }
+
+      await writeLog(deployment.id, releaseId, "HEALTH_CHECK", `Guardian recovery attempt ${attempt}/${attempts}`, {
+        error: lastError.message,
+        health: health as Prisma.InputJsonValue
+      }, "warn");
+
+      await runStep(deployment.id, releaseId, "HEALTH_CHECK", "Guardian deployment repair", () =>
+        runGuardianDeploymentRepair({ rootPath: appPath, framework: deployment.framework, envVars })
+      );
+      await runStep(deployment.id, releaseId, "HEALTH_CHECK", "Guardian process restart", () =>
+        restartDeploymentProcess({
+          deploymentId: deployment.id,
+          slug: deployment.slug,
+          appPath,
+          port: deployment.port,
+          processManager,
+          startCommand: renderStartCommand(deployment),
+          envVars,
+          logDir: deploymentLogDir(deployment.slug)
+        })
+      );
+      await guardianRepairSleep(5000);
+    }
+  }
+
+  throw lastError ?? new Error(`${label} failed`);
+}
+
 async function assertPublicRouteResult(result: unknown, label: string, deployment: { slug: string; domain?: { name: string } | null }) {
   const message = liveResultFailureMessage(result, label);
   if (!message) return;
@@ -1150,18 +1233,14 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
       return { result, status: "STOPPED", healthStatus: "DOWN" };
     }
 
-    const health = await runStep(deployment.id, releaseId, "HEALTH_CHECK", `${action} health check`, () =>
-        sysagent.deploymentHealth({
-          deploymentId: deployment.id,
-          port: deployment.port,
-          healthUrl: deployment.healthUrl,
-          processName: deployment.slug,
-          processManager,
-          rootPath: appPath,
-          framework: deployment.framework
-        })
+    const { health, outcome: healthOutcome } = await runHealthCheckWithGuardianRecovery(
+      deployment,
+      releaseId,
+      appPath,
+      envVars,
+      processManager,
+      `${action} health check`
     );
-    const healthOutcome = await assertHealthResult(health, `${action} health check`, deployment, releaseId);
 
     const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, `${action} public website check`, { ...deployment, domain });
 
@@ -1409,18 +1488,14 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     );
     assertLiveResult(startResult, "Process start");
 
-    const health = await runStep(deployment.id, releaseId, "HEALTH_CHECK", "Health check", () =>
-      sysagent.deploymentHealth({
-        deploymentId: deployment.id,
-        port: deployment.port,
-        healthUrl: deployment.healthUrl,
-        processName: deployment.slug,
-        processManager,
-        rootPath: appPath,
-        framework: deployment.framework
-      })
+    const { outcome: healthOutcome } = await runHealthCheckWithGuardianRecovery(
+      deployment,
+      releaseId,
+      appPath,
+      envVars,
+      processManager,
+      "Health check"
     );
-    const healthOutcome = await assertHealthResult(health, "Health check", deployment, releaseId);
 
     const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, "Public website check", { ...deployment, domain });
 
