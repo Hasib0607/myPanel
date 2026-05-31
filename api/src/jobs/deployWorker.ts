@@ -332,6 +332,38 @@ function deploymentEnvWithPublicUrl(envVars: Record<string, string>, domain: Bou
   return merged;
 }
 
+function isPostgresDeploymentEnvironment(deployment: { dbType?: string | null }, envVars: Record<string, string>) {
+  return deployment.dbType === "POSTGRESQL"
+    || envVars.DB_CONNECTION === "pgsql"
+    || envVars.DATABASE_URL?.startsWith("postgres://")
+    || envVars.DATABASE_URL?.startsWith("postgresql://");
+}
+
+async function normalizePostgresRuntimeEnv(deploymentId: string, envVars: Record<string, string>, persist = true) {
+  const normalized = { ...envVars };
+  let changed = false;
+
+  if ((normalized.DB_CHARSET || "").toLowerCase() !== "utf8") {
+    normalized.DB_CHARSET = "utf8";
+    changed = true;
+    if (persist) await upsertDeploymentEnvValue(deploymentId, "DB_CHARSET", "utf8");
+  }
+
+  if ((normalized.DB_COLLATION || "").length > 0) {
+    normalized.DB_COLLATION = "";
+    changed = true;
+    if (persist) await upsertDeploymentEnvValue(deploymentId, "DB_COLLATION", "");
+  }
+
+  if ((normalized.DB_CONNECTION || "").toLowerCase() !== "pgsql") {
+    normalized.DB_CONNECTION = "pgsql";
+    changed = true;
+    if (persist) await upsertDeploymentEnvValue(deploymentId, "DB_CONNECTION", "pgsql");
+  }
+
+  return { envVars: normalized, changed };
+}
+
 async function ensureDeploymentDomainProxy(deploymentId: string, domain: BoundDomain | null) {
   if (!domain || domain.id.startsWith("subdomain:")) return;
   await prisma.domain.update({
@@ -566,14 +598,8 @@ async function autoRepairPostgresEncoding(deploymentId: string, releaseId: strin
     previousCollation: envVars.DB_COLLATION ?? null
   }, "warn");
 
-  await upsertDeploymentEnvValue(deploymentId, "DB_CHARSET", "utf8");
-  await upsertDeploymentEnvValue(deploymentId, "DB_COLLATION", "");
-
-  return {
-    ...envVars,
-    DB_CHARSET: "utf8",
-    DB_COLLATION: ""
-  };
+  const normalized = await normalizePostgresRuntimeEnv(deploymentId, envVars, true);
+  return normalized.envVars;
 }
 
 async function githubCloneToken(sourceProvider: string, gitUrl: string | null) {
@@ -760,6 +786,17 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
     const domain = deploymentDomain(deployment);
     let envVars = deploymentEnvWithPublicUrl(await resolveEnvVars(deployment.env), domain);
+    if (isPostgresDeploymentEnvironment(deployment, envVars)) {
+      const normalized = await normalizePostgresRuntimeEnv(deployment.id, envVars, true);
+      envVars = normalized.envVars;
+      if (normalized.changed) {
+        await writeLog(deployment.id, releaseId, "PREFLIGHT", "Normalized PostgreSQL runtime env", {
+          DB_CONNECTION: envVars.DB_CONNECTION,
+          DB_CHARSET: envVars.DB_CHARSET,
+          DB_COLLATION: envVars.DB_COLLATION
+        }, "warn");
+      }
+    }
 
     if (deployment.installCommand || deployment.packageManager) {
       await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "BUILDING" } });
@@ -784,6 +821,21 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     }
 
     if (deployment.framework === "LARAVEL") {
+      const optimizeClearResult = await runStep(deployment.id, releaseId, "INSTALLING", "Laravel cache clear", () =>
+        sysagent.deploymentBuild({
+          rootPath: appPath,
+          command: "php artisan optimize:clear",
+          env: envVars
+        })
+      );
+      try {
+        assertCommandTree(optimizeClearResult, "Laravel cache clear");
+      } catch (error) {
+        await writeLog(deployment.id, releaseId, "INSTALLING", "Laravel cache clear warning", {
+          warning: error instanceof Error ? error.message : String(error)
+        }, "warn");
+      }
+
       const runLaravelPackageDiscovery = () => runStep(deployment.id, releaseId, "INSTALLING", "Laravel package discovery", () =>
         sysagent.deploymentBuild({
           rootPath: appPath,
