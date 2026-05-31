@@ -99,3 +99,19 @@ def run_supervisorctl(*args: str, timeout: int = 60) -> dict:
 def format_supervisor_step_error(step: dict) -> str:
     detail = (step.get("stderr") or step.get("stdout") or step.get("reason") or "failed").strip()
     return detail or "failed"
+
+
+def remove_stale_supervisor_program_configs(name: str, keep: Path) -> None:
+    safe_name = name.replace("/", "-").strip() or "deployment"
+    for directory in (Path("/etc/supervisord.d"), Path("/etc/supervisor/conf.d")):
+        if not directory.is_dir():
+            continue
+        for extension in ("ini", "conf"):
+            candidate = (directory / f"{safe_name}.{extension}").resolve()
+            if candidate == keep.resolve():
+                continue
+            if candidate.is_file():
+                try:
+                    candidate.unlink()
+                except OSError:
+                    pass

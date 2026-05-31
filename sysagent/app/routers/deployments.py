@@ -11,14 +11,16 @@ from pydantic import BaseModel, Field
 
 from app.command import run_command, run_install_plan
 from app.config import DEPLOYMENT_COMMANDS_LIVE, settings
-from app.deployment_health import curl_health_probe
+from app.deployment_env import prepare_supervisor_runtime
 from app.deployment_commands import normalize_laravel_start_command, parse_deployment_command
+from app.deployment_health import curl_health_probe
 from app.platform import runtime_tool_install_plan
 from app.nginx_paths import nginx_sites_available, nginx_sites_enabled
 from app.nginx_manager import acme_location, publish_nginx_config, safe_letsencrypt_path, safe_web_root
 from app.supervisor_utils import (
     ensure_supervisord_running,
     format_supervisor_step_error,
+    remove_stale_supervisor_program_configs,
     run_supervisorctl,
     supervisor_config_dir,
     supervisor_program_path,
@@ -316,19 +318,12 @@ def combine_pm2_results(root_path: str, steps: dict[str, dict], required: list[s
     }
 
 
-def supervisor_env_value(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', '\\"')
-
-
-
-def supervisor_program_config(body: ProcessRequest, start_command: list[str], log_dir: Path) -> str:
+def supervisor_program_config(body: ProcessRequest, wrapper_path: Path, log_dir: Path) -> str:
     cwd = deployment_cwd(body.rootPath)
-    env = {**pm2_env(body.port), **(body.env or {})}
-    environment = ",".join(f'{key}="{supervisor_env_value(str(value))}"' for key, value in sorted(env.items()) if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key))
     lines = [
         f"[program:{body.name}]",
         f"directory={cwd}",
-        f"command={shlex.join(start_command)}",
+        f"command={wrapper_path}",
         "user=panel",
         "autostart=true",
         "autorestart=true",
@@ -340,8 +335,6 @@ def supervisor_program_config(body: ProcessRequest, start_command: list[str], lo
         f"stderr_logfile={log_dir / 'running-error.log'}",
         "redirect_stderr=false",
     ]
-    if environment:
-        lines.append(f"environment={environment}")
     return "\n".join(lines) + "\n"
 
 
@@ -368,9 +361,20 @@ def supervisor_start(body: ProcessRequest, start_command: list[str]) -> dict:
         "stderr": "",
         "returncode": 0,
     }
+    wrapper_path: Path | None = None
     try:
-        config_path.write_text(supervisor_program_config(body, start_command, log_dir), encoding="utf-8")
-    except OSError as error:
+        wrapper_path, runtime_env_path, laravel_env_path = prepare_supervisor_runtime(
+            body.rootPath,
+            start_command,
+            body.port,
+            body.env,
+        )
+        remove_stale_supervisor_program_configs(body.name, config_path)
+        config_path.write_text(supervisor_program_config(body, wrapper_path, log_dir), encoding="utf-8")
+        write["stdout"] = f"runtimeEnv={runtime_env_path}"
+        if laravel_env_path is not None:
+            write["stdout"] += f", laravelEnv={laravel_env_path}"
+    except (OSError, ValueError) as error:
         write["stderr"] = str(error)
         write["returncode"] = 1
 
