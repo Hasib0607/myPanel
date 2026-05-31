@@ -196,10 +196,31 @@ function assertLiveResult(result: unknown, label: string) {
   if (message) throw new Error(message);
 }
 
+const liveSystemCommandsFix = "Set ALLOW_LIVE_SYSTEM_COMMANDS=true on vps-panel-sysagent, restart vps-panel-sysagent and vps-panel-workers, then retry.";
+
+async function assertSysagentLiveCommandsEnabled(deploymentId: string, releaseId: string | undefined) {
+  const diagnosis = await sysagent.guardianDiagnosis() as {
+    config?: { liveSystemCommandsEnabled?: boolean };
+    incidents?: Array<{ category?: string; title?: string; detail?: string }>;
+  };
+  const disabledByConfig = diagnosis.config?.liveSystemCommandsEnabled === false;
+  const disabledByIncident = diagnosis.incidents?.some((incident) =>
+    incident.category === "sysagent" && /live system commands/i.test(`${incident.title ?? ""} ${incident.detail ?? ""}`)
+  );
+
+  if (!disabledByConfig && !disabledByIncident) return diagnosis;
+
+  await writeLog(deploymentId, releaseId, "PREFLIGHT", "Sysagent live command preflight failed", {
+    fix: liveSystemCommandsFix,
+    config: diagnosis.config ?? null
+  }, "error");
+  throw new Error(`Sysagent live system commands are disabled. ${liveSystemCommandsFix}`);
+}
+
 function liveResultFailureMessage(result: unknown, label: string) {
   const value = result as { dryRun?: boolean; returncode?: number; stderr?: string; stdout?: string; reason?: string };
   if (value?.dryRun) {
-    return `${label} did not run live. Set ALLOW_LIVE_SYSTEM_COMMANDS=true on vps-panel-sysagent, restart vps-panel-sysagent and vps-panel-workers, then retry.`;
+    return `${label} did not run live. ${liveSystemCommandsFix}`;
   }
   if (typeof value?.returncode === "number" && value.returncode !== 0) {
     const signal = "signal" in value && typeof value.signal === "string" ? value.signal : null;
@@ -834,6 +855,10 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
   const processAction = action === "redeploy" || action === "deploy" ? "start" : action;
 
   try {
+    await runStep(deployment.id, releaseId, "PREFLIGHT", "Sysagent live command preflight", () =>
+      assertSysagentLiveCommandsEnabled(deployment.id, releaseId)
+    );
+
     if (action !== "stop") {
       deployment = await ensureManagedDeploymentPort(deployment, releaseId);
     }
@@ -937,6 +962,9 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       sourceProvider: deployment.sourceProvider,
       envCount: deployment.env.length
     }));
+    await runStep(deployment.id, releaseId, "PREFLIGHT", "Sysagent live command preflight", () =>
+      assertSysagentLiveCommandsEnabled(deployment.id, releaseId)
+    );
 
     if (deployment.gitUrl || action === "pull") {
       const gitToken = await githubCloneToken(deployment.sourceProvider, deployment.gitUrl);

@@ -533,6 +533,14 @@ def diagnosis() -> dict[str, Any]:
     for process in pm2.get("items", []):
         if not process.get("healthy"):
             incidents.append({"severity": "warning", "category": "pm2", "title": f"PM2 app {process['name']} is not online", "detail": f"status={process['status']}, restarts={process['restarts']}"})
+    if not settings.allow_live_system_commands:
+        incidents.append({
+            "severity": "critical",
+            "category": "sysagent",
+            "title": "Sysagent live system commands are disabled",
+            "detail": "ALLOW_LIVE_SYSTEM_COMMANDS=false. Deploy/start/repair commands will dry-run until it is set to true and vps-panel-sysagent plus vps-panel-workers are restarted.",
+            "safeAction": "enable-live-system-commands",
+        })
 
     return {
         "generatedAt": datetime.now(timezone.utc).isoformat(),
@@ -545,6 +553,12 @@ def diagnosis() -> dict[str, Any]:
             "loadAverage": load_average,
             "memory": {"total": memory.total, "used": memory.used, "percent": memory.percent},
             "disk": {"total": disk.total, "used": disk.used, "free": disk.free, "percent": disk.used / disk.total * 100},
+        },
+        "config": {
+            "liveSystemCommandsEnabled": settings.allow_live_system_commands,
+            "liveFileManagerEnabled": settings.allow_live_file_manager,
+            "liveNginxEnabled": settings.allow_live_nginx,
+            "liveSslEnabled": settings.allow_live_ssl,
         },
         "services": services,
         "ports": [{"port": port, "listening": port in ports, "owner": ports.get(port)} for port in WATCHED_PORTS],

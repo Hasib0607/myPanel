@@ -17,6 +17,12 @@ type GuardianIncidentInput = {
 
 export type GuardianDiagnosis = {
   unavailable?: true;
+  config?: {
+    liveSystemCommandsEnabled?: boolean;
+    liveFileManagerEnabled?: boolean;
+    liveNginxEnabled?: boolean;
+    liveSslEnabled?: boolean;
+  };
   incidents?: GuardianIncidentInput[];
   services?: Array<{ key: string; name: string; status: string; detail?: string; optional?: boolean }>;
   pm2?: { items?: Array<{ name: string; pmId?: number; status: string; healthy: boolean }> };
