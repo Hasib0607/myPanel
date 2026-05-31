@@ -270,6 +270,7 @@ PACKAGE_SETS: dict[OsFamily, dict[str, tuple[str, ...]]] = {
         "dovecot": DEBIAN_DOVECOT_PACKAGES,
         "redis": ("redis-server",),
         "postgresql": ("postgresql", "postgresql-contrib"),
+        "mysql_database": ("mariadb-server", "mariadb-client"),
         "certbot": ("certbot", "python3-certbot-nginx"),
         "php_runtime": (
             "php-cli",
@@ -325,6 +326,7 @@ PACKAGE_SETS: dict[OsFamily, dict[str, tuple[str, ...]]] = {
         "dovecot": RHEL_DOVECOT_PACKAGES,
         "redis": ("redis",),
         "postgresql": ("postgresql-server", "postgresql-contrib"),
+        "mysql_database": ("mariadb", "mariadb-server"),
         "certbot": RHEL_CERTBOT_PACKAGES,
         "php_runtime": (
             "php",
@@ -362,6 +364,7 @@ SERVICE_SPECS: dict[OsFamily, dict[str, ServiceSpec]] = {
         ),
         "redis": ServiceSpec(unit="redis-server", units=("redis-server", "redis"), packages=("redis-server",)),
         "postgresql": ServiceSpec(unit="postgresql", units=("postgresql",), packages=("postgresql", "postgresql-contrib")),
+        "mysql_database": ServiceSpec(unit="mariadb", units=("mariadb", "mysql"), packages=("mariadb-server", "mariadb-client")),
     },
     OsFamily.RHEL: {
         "nginx": ServiceSpec(unit="nginx", units=("nginx",), packages=("nginx",)),
@@ -379,6 +382,7 @@ SERVICE_SPECS: dict[OsFamily, dict[str, ServiceSpec]] = {
             units=("postgresql",),
             packages=("postgresql-server", "postgresql-contrib"),
         ),
+        "mysql_database": ServiceSpec(unit="mariadb", units=("mariadb", "mysqld", "mysql"), packages=("mariadb", "mariadb-server")),
     },
 }
 
@@ -531,6 +535,27 @@ def php82_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
     )
 
 
+def mysql_database_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
+    packages = tuple(packages_for("mysql_database", info))
+    service = service_spec("mysql_database", info)
+    return PackageInstallPlan(
+        key="mysql_database",
+        packages=packages,
+        steps=(
+            InstallStep(
+                "Install MySQL/MariaDB server and client packages",
+                tuple(package_install_command(list(packages), info)),
+                env=package_install_env(info),
+            ),
+            InstallStep(
+                f"Enable and start {service.unit}",
+                ("systemctl", "enable", "--now", service.unit),
+            ),
+        ),
+        notes="Installs the local MariaDB/MySQL server plus the mysql CLI required by the panel database tools.",
+    )
+
+
 def dovecot_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
     spec = service_spec("dovecot", info)
     return PackageInstallPlan(
@@ -546,6 +571,8 @@ def install_plan_for(key: str, info: OsReleaseInfo | None = None) -> PackageInst
         return certbot_install_plan(info)
     if key == "composer":
         return composer_install_plan(info)
+    if key == "mysql_database":
+        return mysql_database_install_plan(info)
     if key == "php82_runtime":
         return php82_install_plan(info)
     if key == "dovecot":

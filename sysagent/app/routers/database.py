@@ -1,5 +1,6 @@
 import re
 import secrets
+import shutil
 import string
 import tempfile
 from pathlib import Path
@@ -7,7 +8,8 @@ from pathlib import Path
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from app.command import run_command
+from app.command import run_command, run_install_plan
+from app.platform import current_os, install_plan_for, service_spec
 
 router = APIRouter()
 
@@ -94,7 +96,33 @@ def postgres_psql(sql: str) -> dict:
     return run_command(["sudo", "-u", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-At", "-c", sql])
 
 
+def ensure_mysql_runtime() -> dict | None:
+    if shutil.which("mysql"):
+        return None
+
+    install = run_install_plan(install_plan_for("mysql_database", current_os()), timeout=300)
+    if install.get("returncode") != 0:
+        return install
+
+    if not shutil.which("mysql"):
+        return {
+            "returncode": 127,
+            "stderr": "mysql CLI is still unavailable after MariaDB/MySQL install attempt",
+            "stdout": "",
+            "command": ["mysql", "-NBe", "SELECT 1"],
+        }
+
+    service = service_spec("mysql_database", current_os())
+    start = run_command(["systemctl", "enable", "--now", service.unit], timeout=120)
+    if start.get("returncode") != 0:
+        return start
+    return None
+
+
 def mysql_exec(sql: str) -> dict:
+    ensure = ensure_mysql_runtime()
+    if ensure is not None:
+        return ensure
     return run_command(["mysql", "-NBe", sql])
 
 
