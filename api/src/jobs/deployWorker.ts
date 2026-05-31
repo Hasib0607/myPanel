@@ -495,6 +495,14 @@ async function ensureDoctorApprovalExists(deploymentId: string, target: { action
   });
 }
 
+async function upsertDeploymentEnvValue(deploymentId: string, key: string, value: string) {
+  return prisma.deploymentEnvVar.upsert({
+    where: { deploymentId_key: { deploymentId, key } },
+    update: { value, isSecret: false, secretRef: null },
+    create: { deploymentId, key, value, isSecret: false, secretRef: null }
+  });
+}
+
 async function autoRepairComposerPlatformIssue(deploymentId: string, releaseId: string | undefined, errorText: string) {
   const targets = runtimeInstallTargetsForComposerPlatformIssue(errorText);
   if (targets.length === 0) return false;
@@ -540,6 +548,32 @@ async function autoRepairLaravelWritablePaths(deploymentId: string, releaseId: s
   );
   assertLiveResult(repairResult, "Repair Laravel writable paths");
   return true;
+}
+
+function isPostgresEncodingMismatch(text: string) {
+  const lower = text.toLowerCase();
+  return lower.includes("client_encoding")
+    && lower.includes("utf8mb4")
+    && (lower.includes("postgres") || lower.includes("pgsql") || lower.includes("postgresconnector"));
+}
+
+async function autoRepairPostgresEncoding(deploymentId: string, releaseId: string | undefined, errorText: string, envVars: Record<string, string>) {
+  if (!isPostgresEncodingMismatch(errorText)) return null;
+
+  await writeLog(deploymentId, releaseId, "PREFLIGHT", "PostgreSQL charset mismatch detected", {
+    evidence: errorText.slice(0, 4000),
+    previousCharset: envVars.DB_CHARSET ?? null,
+    previousCollation: envVars.DB_COLLATION ?? null
+  }, "warn");
+
+  await upsertDeploymentEnvValue(deploymentId, "DB_CHARSET", "utf8");
+  await upsertDeploymentEnvValue(deploymentId, "DB_COLLATION", "");
+
+  return {
+    ...envVars,
+    DB_CHARSET: "utf8",
+    DB_COLLATION: ""
+  };
 }
 
 async function githubCloneToken(sourceProvider: string, gitUrl: string | null) {
@@ -725,7 +759,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
 
     const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
     const domain = deploymentDomain(deployment);
-    const envVars = deploymentEnvWithPublicUrl(await resolveEnvVars(deployment.env), domain);
+    let envVars = deploymentEnvWithPublicUrl(await resolveEnvVars(deployment.env), domain);
 
     if (deployment.installCommand || deployment.packageManager) {
       await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "BUILDING" } });
@@ -768,14 +802,24 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         assertCommandTree(packageDiscoverResult, "Laravel package discovery");
       }
 
-      const migrateResult = await runStep(deployment.id, releaseId, "MIGRATING", "Database migration", () =>
+      const runDatabaseMigration = () => runStep(deployment.id, releaseId, "MIGRATING", "Database migration", () =>
         sysagent.deploymentMigrate({
           rootPath: appPath,
           command: "php artisan migrate --force",
           env: envVars
         })
       );
-      assertCommandTree(migrateResult, "Database migration");
+      let migrateResult = await runDatabaseMigration();
+      try {
+        assertCommandTree(migrateResult, "Database migration");
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        const repairedEnv = await autoRepairPostgresEncoding(deployment.id, releaseId, detail, envVars).catch(() => null);
+        if (!repairedEnv) throw error;
+        envVars = repairedEnv;
+        migrateResult = await runDatabaseMigration();
+        assertCommandTree(migrateResult, "Database migration");
+      }
     } else {
       await writeLog(deployment.id, releaseId, "MIGRATING", "Migration skipped for framework", { framework: deployment.framework });
     }
