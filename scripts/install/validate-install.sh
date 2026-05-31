@@ -12,6 +12,8 @@ source "$SCRIPT_DIR/lib/os.sh"
 : "${PANEL_LOGIN_PORT:=8453}"
 : "${CPANEL_LOGIN_PORT:=3138}"
 : "${SYSAGENT_PORT:=5000}"
+: "${DB_NAME:=panel_main}"
+: "${PANEL_PUBLIC_SCHEME:=http}"
 : "${NGINX_SITES_AVAILABLE:=$(default_nginx_sites_available)}"
 : "${NGINX_SITES_ENABLED:=$(default_nginx_sites_enabled)}"
 : "${REDIS_SERVICE:=$(detect_redis_service)}"
@@ -94,8 +96,8 @@ else
   fail "API health check failed"
 fi
 
-for url in "http://127.0.0.1:$FRONTEND_PORT/login" "http://127.0.0.1:$PANEL_LOGIN_PORT/login" "http://127.0.0.1:$CPANEL_LOGIN_PORT/login"; do
-  if curl --fail --silent --show-error --head "$url" >/dev/null; then
+for url in "http://127.0.0.1:$FRONTEND_PORT/login" "$PANEL_PUBLIC_SCHEME://127.0.0.1:$PANEL_LOGIN_PORT/login" "$PANEL_PUBLIC_SCHEME://127.0.0.1:$CPANEL_LOGIN_PORT/login"; do
+  if curl --fail --silent --show-error --insecure --head "$url" >/dev/null; then
     pass "HTTP reachable: $url"
   else
     fail "HTTP unreachable: $url"
@@ -108,10 +110,10 @@ else
   fail "Redis ping failed"
 fi
 
-if runuser -u postgres -- psql -d panel_main -c "select 1" >/dev/null 2>&1; then
-  pass "PostgreSQL panel_main query"
+if runuser -u postgres -- psql -d "$DB_NAME" -c "select 1" >/dev/null 2>&1; then
+  pass "PostgreSQL $DB_NAME query"
 else
-  fail "PostgreSQL panel_main query failed"
+  fail "PostgreSQL $DB_NAME query failed"
 fi
 
 if curl --fail --silent --show-error "http://127.0.0.1:$SYSAGENT_PORT/system/platform" >/dev/null; then

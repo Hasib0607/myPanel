@@ -45,6 +45,8 @@ curl -fsSL "https://raw.githubusercontent.com/YOUR_OWNER/YOUR_REPO/main/scripts/
   --admin-pass "change-this-admin-password"
 ```
 
+Use `--prompt-secrets` to avoid putting passwords in shell history, and add `--enable-ssl --ssl-email admin@example.com` when the panel domain already points to the server.
+
 See `docs/one-click-install.md` and `docs/almalinux-missing-tracker.md` for OS-specific notes and remaining live QA items.
 
 ## Service Ports

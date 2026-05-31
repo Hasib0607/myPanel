@@ -27,6 +27,28 @@ curl -fsSL "https://raw.githubusercontent.com/YOUR_OWNER/YOUR_REPO/main/scripts/
   --dry-run
 ```
 
+Use prompt mode to keep passwords out of shell history:
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/YOUR_OWNER/YOUR_REPO/main/scripts/install/bootstrap.sh" | sudo bash -s -- \
+  --repo "https://github.com/YOUR_OWNER/YOUR_REPO.git" \
+  --domain panel.example.com \
+  --prompt-secrets
+```
+
+Enable Let's Encrypt for the panel domain:
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/YOUR_OWNER/YOUR_REPO/main/scripts/install/bootstrap.sh" | sudo bash -s -- \
+  --repo "https://github.com/YOUR_OWNER/YOUR_REPO.git" \
+  --domain panel.example.com \
+  --enable-ssl \
+  --ssl-email admin@example.com \
+  --prompt-secrets
+```
+
+SSL mode uses HTTP-01 validation on port `80`, then serves WHM/cPanel panel listeners over HTTPS on `8453` and `3138`.
+
 For an external or already-created empty database, pass the full URL and skip local DB creation:
 
 ```bash
@@ -89,6 +111,8 @@ Uses `dnf`, CRB + EPEL, firewalld, `redis` + `named` services, and creates a Deb
 
 The database starts empty apart from Prisma migration metadata. Output includes the generated admin password and webhook secret when you do not pass them explicitly. Save them immediately.
 
+Installer output is saved to `/var/log/vps-panel/install.log`. Completed step markers are saved under `/var/log/vps-panel/install-state`, so a failed install can usually be rerun safely. Use `--no-resume` or `--force-step` when you intentionally want to rerun completed steps.
+
 Validate after install:
 
 ```bash
@@ -97,6 +121,14 @@ curl -fsS http://127.0.0.1:5000/system/platform
 ```
 
 Manual QA checklist: `docs/almalinux-qa-checklist.md`
+
+Rollback a failed fresh install:
+
+```bash
+sudo bash scripts/install/uninstall.sh --yes
+```
+
+Add `--purge-db`, `--purge-app`, or `--purge-logs` only when you explicitly want to delete those resources.
 
 ## Useful options
 

@@ -43,9 +43,23 @@ detect_vps_ip() {
 : "${NGINX_SITES_AVAILABLE:=/etc/nginx/sites-available}"
 : "${NGINX_SITES_ENABLED:=/etc/nginx/sites-enabled}"
 : "${DRY_RUN:=false}"
+: "${INSTALL_LOG_FILE:=/var/log/vps-panel/install.log}"
+: "${INSTALL_STATE_DIR:=/var/log/vps-panel/install-state}"
+: "${RESUME_INSTALL:=true}"
+: "${FORCE_STEP:=false}"
+: "${AUTO_SSL:=false}"
+: "${SSL_EMAIL:=}"
+: "${PANEL_PUBLIC_SCHEME:=http}"
+: "${MIN_DISK_GB:=8}"
+: "${MIN_MEM_MB:=900}"
 
 log() {
-  echo "[$(date -Is)] $*"
+  echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] $*"
+}
+
+mask_url_secret() {
+  local url="$1"
+  echo "$url" | sed -E 's#(://[^:/@]+:)[^@]+@#\1****@#'
 }
 
 write_file() {
@@ -67,6 +81,18 @@ require_repo_url() {
     echo "REPO_URL=https://github.com/owner/myPanel.git sudo -E bash $0"
     exit 2
   fi
+}
+
+setup_install_logging() {
+  if [[ -n "${INSTALL_LOGGING_READY:-}" ]]; then
+    return
+  fi
+  install -d -m 0755 "$(dirname "$INSTALL_LOG_FILE")"
+  touch "$INSTALL_LOG_FILE"
+  chmod 0600 "$INSTALL_LOG_FILE"
+  export INSTALL_LOGGING_READY=true
+  exec > >(tee -a "$INSTALL_LOG_FILE") 2>&1
+  log "Installer log file: $INSTALL_LOG_FILE"
 }
 
 require_db_identifier() {
@@ -92,6 +118,82 @@ validate_bootstrap_inputs() {
   done
 }
 
+is_ip_address() {
+  [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ || "$1" =~ : ]]
+}
+
+check_port_free() {
+  local port="$1"
+  if command -v ss >/dev/null 2>&1 && ss -ltn "( sport = :$port )" 2>/dev/null | awk 'NR>1 { found=1 } END { exit found ? 0 : 1 }'; then
+    echo "Port $port is already in use."
+    exit 2
+  fi
+  if command -v lsof >/dev/null 2>&1 && lsof -PiTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1; then
+    echo "Port $port is already in use."
+    exit 2
+  fi
+}
+
+run_preflight_checks() {
+  log "Running preflight checks"
+
+  local disk_kb disk_gb mem_mb
+  disk_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
+  disk_gb=$((disk_kb / 1024 / 1024))
+  if (( disk_gb < MIN_DISK_GB )); then
+    echo "At least ${MIN_DISK_GB}GB free disk is required on /. Found ${disk_gb}GB."
+    exit 2
+  fi
+
+  mem_mb="$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)"
+  if (( mem_mb > 0 && mem_mb < MIN_MEM_MB )); then
+    echo "At least ${MIN_MEM_MB}MB RAM is required. Found ${mem_mb}MB."
+    exit 2
+  fi
+
+  if [[ "$RESUME_INSTALL" == "true" && -d "$INSTALL_STATE_DIR" ]]; then
+    log "Existing installer state found; skipping strict port-free checks for resume mode"
+  else
+    for port in "$PANEL_LOGIN_PORT" "$CPANEL_LOGIN_PORT" "$PANEL_PORT" "$FRONTEND_PORT" "$SYSAGENT_PORT"; do
+      check_port_free "$port"
+    done
+  fi
+
+  if [[ -n "$PANEL_DOMAIN" ]] && ! is_ip_address "$PANEL_DOMAIN"; then
+    local resolved=""
+    resolved="$(getent ahostsv4 "$PANEL_DOMAIN" 2>/dev/null | awk '{print $1; exit}')" || true
+    if [[ -z "$resolved" ]]; then
+      echo "Warning: $PANEL_DOMAIN does not resolve yet. SSL issuance may fail until DNS points to this server."
+    elif [[ "$resolved" != "$VPS_IP" ]]; then
+      echo "Warning: $PANEL_DOMAIN resolves to $resolved, but this server IP looks like $VPS_IP."
+    fi
+  fi
+}
+
+validate_database_connection() {
+  log "Checking database connectivity"
+  if [[ "$DB_CREATE" == "true" && ( "$DB_HOST" == "localhost" || "$DB_HOST" == "127.0.0.1" ) ]]; then
+    runuser -u postgres -- psql -d "$DB_NAME" -c "select 1" >/dev/null
+  else
+    psql "$DATABASE_URL" -c "select 1" >/dev/null
+  fi
+}
+
+run_step() {
+  local name="$1"
+  shift
+  local marker="$INSTALL_STATE_DIR/$name.done"
+  install -d -m 0755 "$INSTALL_STATE_DIR"
+  if [[ "$RESUME_INSTALL" == "true" && "$FORCE_STEP" != "true" && -f "$marker" ]]; then
+    log "Skipping completed step: $name"
+    return
+  fi
+  log "Starting step: $name"
+  "$@"
+  touch "$marker"
+  log "Completed step: $name"
+}
+
 print_bootstrap_plan() {
   cat <<EOF
 VPS Panel bootstrap plan
@@ -107,7 +209,7 @@ cPanel port:       $CPANEL_LOGIN_PORT
 API port:          $PANEL_PORT
 Frontend port:     $FRONTEND_PORT
 Sysagent port:     $SYSAGENT_PORT
-Database URL:      $DATABASE_URL
+Database URL:      $(mask_url_secret "$DATABASE_URL")
 Create database:   $DB_CREATE
 Admin username:    $SUPERADMIN_USERNAME
 
@@ -192,8 +294,8 @@ PANEL_UPDATE_COMMAND_TIMEOUT=30
 PANEL_UPDATE_SYSTEMCTL_NO_BLOCK=true
 PANEL_UPDATE_SERVICE_ACTIVE_ATTEMPTS=20
 PANEL_UPDATE_STALE_AFTER_SECONDS=1200
-FRONTEND_URL=http://$PANEL_PUBLIC_HOST:$PANEL_LOGIN_PORT
-NEXT_PUBLIC_API_URL=http://$PANEL_PUBLIC_HOST:$PANEL_LOGIN_PORT/api/v1
+FRONTEND_URL=$PANEL_PUBLIC_SCHEME://$PANEL_PUBLIC_HOST:$PANEL_LOGIN_PORT
+NEXT_PUBLIC_API_URL=$PANEL_PUBLIC_SCHEME://$PANEL_PUBLIC_HOST:$PANEL_LOGIN_PORT/api/v1
 NEXT_PUBLIC_PANEL_LOGIN_PORT=$PANEL_LOGIN_PORT
 NEXT_PUBLIC_CPANEL_LOGIN_PORT=$CPANEL_LOGIN_PORT
 DATABASE_URL=$DATABASE_URL
@@ -324,10 +426,15 @@ write_panel_nginx_config() {
   write_file "$NGINX_SITES_AVAILABLE/$PANEL_NGINX_SITE" <<EOF
 # Protected panel listener. Domain/project publishing must never overwrite this file.
 server {
-    listen $PANEL_LOGIN_PORT;
+    listen $PANEL_LOGIN_PORT$(if [[ "$PANEL_PUBLIC_SCHEME" == "https" && -n "$PANEL_DOMAIN" ]]; then printf " ssl"; fi);
     server_name $PANEL_PUBLIC_HOST $VPS_IP _;
 
     client_max_body_size 100M;
+$(if [[ "$PANEL_PUBLIC_SCHEME" == "https" && -n "$PANEL_DOMAIN" ]]; then cat <<SSL
+    ssl_certificate /etc/letsencrypt/live/$PANEL_DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$PANEL_DOMAIN/privkey.pem;
+SSL
+fi)
 
     location = /health {
         proxy_pass http://127.0.0.1:$PANEL_PORT/health;
@@ -365,10 +472,15 @@ server {
 }
 
 server {
-    listen $CPANEL_LOGIN_PORT;
+    listen $CPANEL_LOGIN_PORT$(if [[ "$PANEL_PUBLIC_SCHEME" == "https" && -n "$PANEL_DOMAIN" ]]; then printf " ssl"; fi);
     server_name $PANEL_PUBLIC_HOST $VPS_IP _;
 
     client_max_body_size 100M;
+$(if [[ "$PANEL_PUBLIC_SCHEME" == "https" && -n "$PANEL_DOMAIN" ]]; then cat <<SSL
+    ssl_certificate /etc/letsencrypt/live/$PANEL_DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$PANEL_DOMAIN/privkey.pem;
+SSL
+fi)
 
     location /api/v1/ {
         proxy_pass http://127.0.0.1:$PANEL_PORT/api/v1/;
@@ -398,6 +510,25 @@ server {
 }
 EOF
   ln -sf "$NGINX_SITES_AVAILABLE/$PANEL_NGINX_SITE" "$NGINX_SITES_ENABLED/$PANEL_NGINX_SITE"
+}
+
+issue_panel_ssl_certificate() {
+  if [[ "$AUTO_SSL" != "true" ]]; then
+    return
+  fi
+  if [[ -z "$PANEL_DOMAIN" ]] || is_ip_address "$PANEL_DOMAIN"; then
+    log "Skipping SSL: --domain must be a DNS name, not an IP address"
+    return
+  fi
+  log "Issuing Let's Encrypt certificate for $PANEL_DOMAIN"
+  local email_args=(--register-unsafely-without-email)
+  if [[ -n "$SSL_EMAIL" ]]; then
+    email_args=(-m "$SSL_EMAIL")
+  fi
+  systemctl stop nginx >/dev/null 2>&1 || true
+  certbot certonly --standalone --non-interactive --agree-tos "${email_args[@]}" -d "$PANEL_DOMAIN"
+  PANEL_PUBLIC_SCHEME=https
+  export PANEL_PUBLIC_SCHEME
 }
 
 write_update_sudoers() {
@@ -452,8 +583,8 @@ run_smoke_tests() {
   curl --fail --silent --show-error "http://127.0.0.1:$SYSAGENT_PORT/health" >/dev/null
   curl --fail --silent --show-error "http://127.0.0.1:$PANEL_PORT/health" >/dev/null
   curl --fail --silent --show-error --head "http://127.0.0.1:$FRONTEND_PORT/login" >/dev/null
-  curl --fail --silent --show-error --head "http://127.0.0.1:$PANEL_LOGIN_PORT/login" >/dev/null
-  curl --fail --silent --show-error --head "http://127.0.0.1:$CPANEL_LOGIN_PORT/login" >/dev/null
+  curl --fail --silent --show-error --insecure --head "$PANEL_PUBLIC_SCHEME://127.0.0.1:$PANEL_LOGIN_PORT/login" >/dev/null
+  curl --fail --silent --show-error --insecure --head "$PANEL_PUBLIC_SCHEME://127.0.0.1:$CPANEL_LOGIN_PORT/login" >/dev/null
   redis-cli ping >/dev/null
   if [[ "$DB_CREATE" == "true" && ( "$DB_HOST" == "localhost" || "$DB_HOST" == "127.0.0.1" ) ]]; then
     runuser -u postgres -- psql -d "$DB_NAME" -c "select 1" >/dev/null
@@ -467,13 +598,12 @@ print_install_summary() {
   log "Install complete"
   cat <<EOF
 
-Panel URL: http://$VPS_IP:$PANEL_LOGIN_PORT/login
-Account URL: http://$VPS_IP:$CPANEL_LOGIN_PORT/login
-Public host: $PANEL_PUBLIC_HOST
+Panel URL: $PANEL_PUBLIC_SCHEME://$PANEL_PUBLIC_HOST:$PANEL_LOGIN_PORT/login
+Account URL: $PANEL_PUBLIC_SCHEME://$PANEL_PUBLIC_HOST:$CPANEL_LOGIN_PORT/login
 Username:  $SUPERADMIN_USERNAME
 Password:  $SUPERADMIN_PASSWORD
 
-Webhook URL: http://$VPS_IP:$PANEL_LOGIN_PORT/api/v1/webhooks/panel-update
+Webhook URL: $PANEL_PUBLIC_SCHEME://$PANEL_PUBLIC_HOST:$PANEL_LOGIN_PORT/api/v1/webhooks/panel-update
 Webhook secret: $WEBHOOK_SECRET
 
 Save these credentials now. The password is not stored in plaintext.

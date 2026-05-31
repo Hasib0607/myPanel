@@ -27,6 +27,11 @@ Common options:
   --db-port PORT             PostgreSQL port. Default: 5432.
   --database-url URL         Full DATABASE_URL. Overrides DB pieces in .env.
   --skip-db-create           Do not create local PostgreSQL database/user.
+  --enable-ssl               Issue Let's Encrypt cert and serve panel ports over HTTPS.
+  --ssl-email EMAIL          Email for Let's Encrypt registration.
+  --prompt-secrets           Prompt for DB/admin passwords without putting them in shell history.
+  --no-resume                Re-run completed installer steps instead of using step markers.
+  --force-step               Re-run completed steps for this invocation.
   --raw-base URL             Raw install script base URL for non-GitHub repositories.
   --whm-port PORT            WHM/Admin public port. Default: 8453.
   --cpanel-port PORT         cPanel/Account public port. Default: 3138.
@@ -127,6 +132,27 @@ while [[ $# -gt 0 ]]; do
       export DB_CREATE=false
       shift
       ;;
+    --enable-ssl)
+      export AUTO_SSL=true
+      shift
+      ;;
+    --ssl-email)
+      require_value "$1" "${2:-}"
+      export SSL_EMAIL="$2"
+      shift 2
+      ;;
+    --prompt-secrets)
+      export PROMPT_SECRETS=true
+      shift
+      ;;
+    --no-resume)
+      export RESUME_INSTALL=false
+      shift
+      ;;
+    --force-step)
+      export FORCE_STEP=true
+      shift
+      ;;
     --raw-base)
       require_value "$1" "${2:-}"
       export BOOTSTRAP_RAW_BASE="${2%/}"
@@ -157,6 +183,27 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+prompt_secret_if_missing() {
+  local env_name="$1"
+  local prompt="$2"
+  if [[ -n "${!env_name:-}" ]]; then
+    return
+  fi
+  local value=""
+  read -r -s -p "$prompt: " value
+  echo
+  if [[ -z "$value" ]]; then
+    echo "$env_name cannot be empty when --prompt-secrets is used."
+    exit 2
+  fi
+  export "$env_name=$value"
+}
+
+if [[ "${PROMPT_SECRETS:-false}" == "true" ]]; then
+  prompt_secret_if_missing DB_PASSWORD "Database password"
+  prompt_secret_if_missing SUPERADMIN_PASSWORD "Admin password"
+fi
 
 derive_raw_base() {
   if [[ -n "${BOOTSTRAP_RAW_BASE:-}" ]]; then
