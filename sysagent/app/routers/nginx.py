@@ -1,7 +1,10 @@
+from __future__ import annotations
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.nginx_paths import nginx_sites_available, nginx_sites_enabled
 from app.nginx_manager import (
     acme_location,
     publish_nginx_config,
@@ -18,8 +21,15 @@ class VhostRequest(BaseModel):
     name: str = Field(pattern=r"^[a-zA-Z0-9_.-]+$")
     serverName: str
     upstreamPort: int = Field(ge=1, le=65535)
-    sitesAvailable: str = "/etc/nginx/sites-available"
-    sitesEnabled: str = "/etc/nginx/sites-enabled"
+    sitesAvailable: str = ""
+    sitesEnabled: str = ""
+
+
+def _resolve_sites(body: VhostRequest | StaticVhostRequest | RedirectVhostRequest) -> tuple[str, str]:
+    return (
+        body.sitesAvailable or nginx_sites_available(),
+        body.sitesEnabled or nginx_sites_enabled(),
+    )
 
 
 class StaticVhostRequest(BaseModel):
@@ -30,8 +40,8 @@ class StaticVhostRequest(BaseModel):
     sslCertificate: str | None = None
     sslCertificateKey: str | None = None
     requireSsl: bool = False
-    sitesAvailable: str = "/etc/nginx/sites-available"
-    sitesEnabled: str = "/etc/nginx/sites-enabled"
+    sitesAvailable: str = ""
+    sitesEnabled: str = ""
 
 
 class RedirectVhostRequest(BaseModel):
@@ -41,8 +51,8 @@ class RedirectVhostRequest(BaseModel):
     sslCertificate: str | None = None
     sslCertificateKey: str | None = None
     requireSsl: bool = False
-    sitesAvailable: str = "/etc/nginx/sites-available"
-    sitesEnabled: str = "/etc/nginx/sites-enabled"
+    sitesAvailable: str = ""
+    sitesEnabled: str = ""
 
 
 @router.post("/vhost")
@@ -65,13 +75,14 @@ def write_vhost(body: VhostRequest) -> dict:
         "    }\n"
         "}\n"
     )
-    return publish_nginx_config(body.name, config, body.sitesAvailable, body.sitesEnabled)
+    return publish_nginx_config(body.name, config, *_resolve_sites(body))
 
 
 @router.post("/static-vhost")
 def write_static_vhost(body: StaticVhostRequest) -> dict:
-    safe_nginx_path(body.sitesAvailable, body.name)
-    safe_nginx_path(body.sitesEnabled, body.name)
+    sites_available, sites_enabled = _resolve_sites(body)
+    safe_nginx_path(sites_available, body.name)
+    safe_nginx_path(sites_enabled, body.name)
     root_path = safe_web_root(body.rootPath)
     ssl_certificate = safe_letsencrypt_path(body.sslCertificate) if body.sslCertificate else None
     ssl_certificate_key = safe_letsencrypt_path(body.sslCertificateKey) if body.sslCertificateKey else None
@@ -134,7 +145,7 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
 
     if settings.allow_live_nginx:
         run_live_step("website root create", lambda: root_path.mkdir(parents=True, exist_ok=True))
-    result = publish_nginx_config(body.name, config, body.sitesAvailable, body.sitesEnabled)
+    result = publish_nginx_config(body.name, config, sites_available, sites_enabled)
     return {
         **result,
         "rootPath": str(root_path),
@@ -183,7 +194,7 @@ def write_redirect_vhost(body: RedirectVhostRequest) -> dict:
             "    }\n"
             "}\n"
         )
-    result = publish_nginx_config(body.name, config, body.sitesAvailable, body.sitesEnabled)
+    result = publish_nginx_config(body.name, config, sites_available, sites_enabled)
     return {
         **result,
         "redirectUrl": body.redirectUrl,

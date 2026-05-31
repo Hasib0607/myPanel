@@ -40,6 +40,8 @@ type FirewallOverview = {
   localRules: FirewallRule[];
   liveRules: CommandResult | { unavailable: true };
   status: {
+    firewall?: CommandResult;
+    firewallDetails?: CommandResult;
     ufw?: CommandResult;
     fail2ban?: CommandResult;
     liveCommandsEnabled?: boolean;
@@ -139,7 +141,7 @@ export function FirewallClient() {
       setLastResult(commandText(result));
       await invalidate();
     },
-    onError: (err) => setLastResult(err instanceof Error ? err.message : "Could not change UFW status")
+    onError: (err) => setLastResult(err instanceof Error ? err.message : "Could not change firewall status")
   });
 
   const hardenSsh = useMutation({
@@ -176,7 +178,7 @@ export function FirewallClient() {
           <div className="mt-1 text-2xl font-semibold">{overview.data?.localRules.length ?? 0}</div>
         </div>
         <div className="rounded-md border border-panel-line bg-white p-4">
-          <div className="text-xs text-panel-muted">UFW Mode</div>
+          <div className="text-xs text-panel-muted">Firewall Mode</div>
           <div className="mt-1 text-sm font-semibold">{liveCommands ? "Live commands enabled" : "Dry-run protected"}</div>
         </div>
         <div className="rounded-md border border-panel-line bg-white p-4">
@@ -237,7 +239,7 @@ export function FirewallClient() {
             <div className="rounded-md border border-panel-line bg-white p-4">
               <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
                 <Shield size={16} />
-                Live UFW Status
+                Live Firewall Status
               </div>
               <pre className="max-h-60 overflow-auto whitespace-pre-wrap rounded-md bg-slate-950 p-3 text-xs text-slate-100">{commandText(overview.data?.liveRules)}</pre>
               <div className="mt-3 flex gap-2">

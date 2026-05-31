@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 import subprocess
 import os
 import signal
 from typing import Sequence
 
 from app.config import settings
+from app.platform import PackageInstallPlan
 
 
 def signal_name(returncode: int) -> str | None:
@@ -83,3 +86,51 @@ def run_command(command: Sequence[str], cwd: str | None = None, env: dict[str, s
         "returncode": process.returncode,
         **({"signal": detail} if detail else {}),
     }
+
+
+def run_install_plan(plan: PackageInstallPlan, *, timeout: int | None = None) -> dict:
+    step_results: list[dict] = []
+    success = True
+
+    for step in plan.steps:
+        result = run_command(list(step.command), env=step.env or None, timeout=timeout)
+        entry = {
+            "description": step.description,
+            "onFailure": step.on_failure,
+            **result,
+        }
+        step_results.append(entry)
+        if result.get("returncode") != 0 and step.on_failure != "continue":
+            success = False
+            break
+
+    if not success and plan.fallback_steps:
+        for step in plan.fallback_steps:
+            result = run_command(list(step.command), env=step.env or None, timeout=timeout)
+            entry = {
+                "description": step.description,
+                "onFailure": step.on_failure,
+                "fallback": True,
+                **result,
+            }
+            step_results.append(entry)
+            if result.get("returncode") == 0:
+                success = True
+                break
+
+    payload: dict = {
+        "dryRun": any(step.get("dryRun") for step in step_results),
+        "returncode": 0 if success else 1,
+        "planKey": plan.key,
+        "packages": list(plan.packages),
+        "notes": plan.notes,
+        "steps": step_results,
+    }
+    if step_results:
+        last = step_results[-1]
+        payload.update({
+            "command": last.get("command"),
+            "stdout": last.get("stdout", ""),
+            "stderr": last.get("stderr", ""),
+        })
+    return payload

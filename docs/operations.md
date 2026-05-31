@@ -159,6 +159,18 @@ The update script writes `/var/log/vps-panel/self-update-status.json` with one o
 
 The script restarts services with `systemctl --no-block restart`, verifies each service with `systemctl is-active`, and checks `http://127.0.0.1:4000/health` when `curl` is installed. The API service restarts last so the status endpoint stays reachable for as long as possible.
 
+## AlmaLinux 9 operations notes
+
+- **Install:** `bash scripts/install/install.sh` or `bash scripts/install/alma-linux-9.sh`
+- **Firewall:** firewalld (not UFW). Panel sysagent uses `firewall-cmd` for live rules.
+- **Services:** Redis unit is `redis`, BIND is `named`, web user is `nginx`
+- **Auth logs:** `/var/log/secure` (not `/var/log/auth.log`)
+- **Nginx:** installer creates `/etc/nginx/sites-available` and `sites-enabled`; env vars `NGINX_SITES_AVAILABLE` / `NGINX_SITES_ENABLED` are written to `.env`
+- **SELinux:** installer runs `setsebool -P httpd_can_network_connect 1`; if panel ports fail to bind, check `semanage port -l | grep http_port_t`
+- **Optional:** install fail2ban from EPEL if you want parity with Ubuntu guardian fail2ban signals
+
+Live QA checklist: `docs/almalinux-missing-tracker.md`
+
 The updater writes a PID file and treats a running update as stale after `PANEL_UPDATE_STALE_AFTER_SECONDS` seconds. Future webhook runs and direct script runs can recover a stale update process instead of leaving the dashboard permanently stuck on `running`.
 
 The API service is special because the webhook starts the updater from inside the API service. The script writes `succeeded` before requesting the final API restart, so systemd cannot leave the dashboard stuck on `restarting vps-panel-api` if it kills child processes during the API restart.

@@ -3,7 +3,11 @@ set -euo pipefail
 
 DOMAIN="${1:?domain required}"
 PORT="${2:-3000}"
-cat > "/etc/nginx/sites-available/$DOMAIN" <<NGINX
+SITES_AVAILABLE="${NGINX_SITES_AVAILABLE:-/etc/nginx/sites-available}"
+SITES_ENABLED="${NGINX_SITES_ENABLED:-/etc/nginx/sites-enabled}"
+
+install -d -m 0755 "$SITES_AVAILABLE" "$SITES_ENABLED"
+cat > "$SITES_AVAILABLE/$DOMAIN" <<NGINX
 server {
     listen 80;
     server_name $DOMAIN www.$DOMAIN;
@@ -17,6 +21,6 @@ server {
     }
 }
 NGINX
-ln -sf "/etc/nginx/sites-available/$DOMAIN" "/etc/nginx/sites-enabled/$DOMAIN"
+ln -sf "$SITES_AVAILABLE/$DOMAIN" "$SITES_ENABLED/$DOMAIN"
 nginx -t
 systemctl reload nginx

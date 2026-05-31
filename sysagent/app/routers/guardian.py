@@ -16,12 +16,14 @@ from pydantic import BaseModel, Field
 
 from app.command import run_command
 from app.config import settings
+from app.firewall_backend import auth_log_path, block_ip_command, firewall_status_command, unblock_ip_command
+from app.platform import current_os, service_unit
 
 router = APIRouter()
 
-WATCHED_SERVICES = [
+WATCHED_SERVICE_DEFS = [
     {"key": "nginx", "name": "Nginx", "unit": "nginx", "ports": [80]},
-    {"key": "redis", "name": "Redis", "unit": "redis-server", "ports": [6379]},
+    {"key": "redis", "name": "Redis", "serviceKey": "redis", "ports": [6379]},
     {"key": "postgres", "name": "PostgreSQL", "unit": "postgresql", "ports": [5432, 5433]},
     {"key": "pgbouncer", "name": "PgBouncer", "unit": "pgbouncer", "ports": [6432], "optional": True},
     {"key": "panel-api", "name": "Panel API", "unit": "vps-panel-api", "ports": [4000]},
@@ -29,6 +31,17 @@ WATCHED_SERVICES = [
     {"key": "panel-workers", "name": "Panel Workers", "unit": "vps-panel-workers", "ports": []},
     {"key": "sysagent", "name": "System Agent", "unit": "vps-panel-sysagent", "ports": [5000]},
 ]
+
+
+def watched_services() -> list[dict[str, Any]]:
+    info = current_os()
+    services: list[dict[str, Any]] = []
+    for item in WATCHED_SERVICE_DEFS:
+        entry = {**item}
+        if "serviceKey" in entry:
+            entry["unit"] = service_unit(entry.pop("serviceKey"), info)
+        services.append(entry)
+    return services
 
 WATCHED_PORTS = [80, 443, 2083, 3000, 4000, 5000, 6379, 5432, 5433, 6432]
 NGINX_ACCESS_RE = re.compile(r'^(?P<ip>\S+) \S+ \S+ \[[^\]]+\] "(?P<method>\S+) (?P<path>[^"]*?) (?P<protocol>[^"]*?)" (?P<status>\d{3})')
@@ -136,7 +149,7 @@ def tail_file(path: str, lines: int = 80) -> list[str]:
 def matching_log_lines(ip: str) -> dict[str, Any]:
     access = [line.strip() for line in tail_file("/var/log/nginx/access.log", 300) if ip in line]
     error = [line.strip() for line in tail_file("/var/log/nginx/error.log", 120) if ip in line]
-    auth = [line.strip() for line in tail_file("/var/log/auth.log", 200) if ip in line]
+    auth = [line.strip() for line in tail_file(auth_log_path(), 200) if ip in line]
     return {"ip": ip, "access": access[-50:], "error": error[-30:], "auth": auth[-50:]}
 
 
@@ -400,7 +413,7 @@ def block_ip(body: IpActionRequest) -> dict[str, Any]:
         "action": "block-ip",
         "ip": body.ip,
         "reason": body.reason,
-        "result": run_command(["ufw", "deny", "from", body.ip], timeout=30),
+        "result": run_command(block_ip_command(body.ip), timeout=30),
     }
 
 
@@ -411,7 +424,7 @@ def unblock_ip(body: IpActionRequest) -> dict[str, Any]:
     return {
         "action": "unblock-ip",
         "ip": body.ip,
-        "result": run_command(["ufw", "--force", "delete", "deny", "from", body.ip], timeout=30),
+        "result": run_command(unblock_ip_command(body.ip), timeout=30),
     }
 
 
@@ -470,7 +483,7 @@ def diagnosis() -> dict[str, Any]:
     ports = listening_ports()
 
     services = []
-    for service in WATCHED_SERVICES:
+    for service in watched_services():
         state = systemd_state(service["unit"])
         service_ports = service["ports"]
         port_details = [{"port": port, "listening": port in ports, "owner": ports.get(port)} for port in service_ports]
@@ -489,7 +502,7 @@ def diagnosis() -> dict[str, Any]:
 
     nginx_error_lines = tail_file("/var/log/nginx/error.log")
     nginx_access_lines = tail_file("/var/log/nginx/access.log")
-    auth_lines = tail_file("/var/log/auth.log")
+    auth_lines = tail_file(auth_log_path())
     nginx_errors = count_patterns(nginx_error_lines, ["error", "critical", "upstream", "connect() failed"])
     bad_http = count_patterns(nginx_access_lines, ['" 404 ', '" 500 ', '" 502 ', '" 503 ', '" 504 '])
     nginx_summary = nginx_access_summary(nginx_access_lines)
@@ -537,7 +550,8 @@ def diagnosis() -> dict[str, Any]:
         "ports": [{"port": port, "listening": port in ports, "owner": ports.get(port)} for port in WATCHED_PORTS],
         "pm2": pm2,
         "security": {
-            "ufw": command_output(["ufw", "status", "verbose"]),
+            "firewall": command_output(firewall_status_command()),
+            "ufw": command_output(firewall_status_command()),
             "fail2ban": command_output(["fail2ban-client", "status"]),
             "fail2banSshd": command_output(["fail2ban-client", "status", "sshd"]),
             "sshFailures": ssh_failures,

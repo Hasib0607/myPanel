@@ -9,8 +9,10 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.command import run_command
+from app.command import run_command, run_install_plan
 from app.config import settings
+from app.platform import runtime_tool_install_plan
+from app.nginx_paths import nginx_sites_available, nginx_sites_enabled
 from app.nginx_manager import acme_location, publish_nginx_config, safe_letsencrypt_path, safe_web_root
 
 router = APIRouter()
@@ -632,7 +634,13 @@ server {{
         info = path_info(body.rootPath)
         if not info["allowed"] and settings.allow_live_nginx:
             return blocked_command("Path escapes configured file manager root", ["write-nginx", config_name], info)
-        result = publish_nginx_config(config_name, config, "/etc/nginx/sites-available", "/etc/nginx/sites-enabled", server_name=server_name)
+        result = publish_nginx_config(
+            config_name,
+            config,
+            nginx_sites_available(),
+            nginx_sites_enabled(),
+            server_name=server_name,
+        )
         return {
             **result,
             "path": info,
@@ -810,16 +818,11 @@ def runtime_tools(body: RuntimeToolsRequest) -> dict:
 
 @router.post("/runtime-tools/install")
 def install_runtime_tool(body: RuntimeInstallRequest) -> dict:
-    commands = {
-        "pnpm": ["npm", "install", "-g", "pnpm"],
-        "yarn": ["npm", "install", "-g", "yarn"],
-        "composer": ["apt-get", "install", "-y", "composer"],
-        "uv": ["pip3", "install", "uv"],
-        "go": ["apt-get", "install", "-y", "golang-go"],
-        "php": ["apt-get", "install", "-y", "php-cli", "php-fpm", "php-pgsql", "php-mysql", "php-xml", "php-mbstring", "php-curl", "php-zip"],
-    }
-    command = commands[body.tool]
-    return run_command(command, timeout=300)
+    try:
+        plan = runtime_tool_install_plan(body.tool)
+    except KeyError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return run_install_plan(plan, timeout=300)
 
 
 @router.post("/repair-permissions")
@@ -852,8 +855,8 @@ def nginx_inspect(body: NginxInspectRequest) -> dict:
     info = path_info(body.rootPath)
     server_name = body.serverName or body.deploymentId
     config_name = nginx_config_name(body.deploymentId, server_name)
-    available = safe_nginx_path("/etc/nginx/sites-available", config_name)
-    enabled = safe_nginx_path("/etc/nginx/sites-enabled", config_name)
+    available = safe_nginx_path(nginx_sites_available(), config_name)
+    enabled = safe_nginx_path(nginx_sites_enabled(), config_name)
     content = ""
     if available.exists():
         content = available.read_text(encoding="utf-8", errors="ignore")

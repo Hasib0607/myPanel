@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../install/lib/os.sh
+source "$SCRIPT_DIR/../install/lib/os.sh"
+
 PANEL_LOGIN_PORT="${PANEL_LOGIN_PORT:-2083}"
 PANEL_API_PORT="${PANEL_API_PORT:-4000}"
 PANEL_FRONTEND_PORT="${PANEL_FRONTEND_PORT:-3000}"
 VPS_IP="${VPS_IP:-$(hostname -I | awk '{print $1}')}"
 PANEL_SITE="${PANEL_SITE:-00-vps-panel}"
+NGINX_SITES_AVAILABLE="${NGINX_SITES_AVAILABLE:-$(default_nginx_sites_available)}"
+NGINX_SITES_ENABLED="${NGINX_SITES_ENABLED:-$(default_nginx_sites_enabled)}"
+REDIS_SERVICE="${REDIS_SERVICE:-$(detect_redis_service)}"
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/vps-panel/nginx-phase0-$(date +%Y%m%d%H%M%S)}"
 
 if [[ "$(id -u)" != "0" ]]; then
@@ -17,13 +24,15 @@ log() {
   echo "[$(date -Is)] $*"
 }
 
+install -d -m 0755 "$NGINX_SITES_AVAILABLE" "$NGINX_SITES_ENABLED"
+
 log "Backing up Nginx site configs to $BACKUP_DIR"
 install -d -m 0755 "$BACKUP_DIR"
-cp -a /etc/nginx/sites-available "$BACKUP_DIR/" 2>/dev/null || true
-cp -a /etc/nginx/sites-enabled "$BACKUP_DIR/" 2>/dev/null || true
+cp -a "$NGINX_SITES_AVAILABLE" "$BACKUP_DIR/" 2>/dev/null || true
+cp -a "$NGINX_SITES_ENABLED" "$BACKUP_DIR/" 2>/dev/null || true
 
 log "Writing protected panel listener $PANEL_SITE"
-cat > "/etc/nginx/sites-available/$PANEL_SITE" <<EOF
+cat > "$NGINX_SITES_AVAILABLE/$PANEL_SITE" <<EOF
 # Protected panel listener. Domain/project publishing must never overwrite this file.
 server {
     listen $PANEL_LOGIN_PORT;
@@ -64,12 +73,12 @@ server {
 EOF
 
 log "Replacing old panel Nginx aliases with protected site"
-rm -f /etc/nginx/sites-enabled/vps-panel /etc/nginx/sites-enabled/vps-panel-2083
-ln -sfn "/etc/nginx/sites-available/$PANEL_SITE" "/etc/nginx/sites-enabled/$PANEL_SITE"
+rm -f "$NGINX_SITES_ENABLED/vps-panel" "$NGINX_SITES_ENABLED/vps-panel-2083"
+ln -sfn "$NGINX_SITES_AVAILABLE/$PANEL_SITE" "$NGINX_SITES_ENABLED/$PANEL_SITE"
 
-log "Restarting core panel dependencies"
-systemctl enable --now redis-server postgresql nginx >/dev/null 2>&1 || true
-systemctl restart redis-server vps-panel-api vps-panel-workers vps-panel-frontend >/dev/null 2>&1 || true
+log "Restarting core panel dependencies (redis=$REDIS_SERVICE)"
+systemctl enable --now "$REDIS_SERVICE" postgresql nginx >/dev/null 2>&1 || true
+systemctl restart "$REDIS_SERVICE" vps-panel-api vps-panel-workers vps-panel-frontend >/dev/null 2>&1 || true
 
 log "Testing Nginx"
 nginx -t

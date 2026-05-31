@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     deployment_log_root: str = "/var/log/vps-panel/deployments"
     file_manager_root: str = "/var/www"
     guardian_file_watch_roots: str = "/var/www"
+    nginx_sites_available: str = ""
+    nginx_sites_enabled: str = ""
 
     class Config:
         env_prefix = ""

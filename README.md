@@ -27,6 +27,22 @@ cd ../frontend; npm install; npm run dev
 
 On a production VPS, run `sysagent` bound to `127.0.0.1` only and place Nginx in front of the frontend and API as described in the architecture document.
 
+## Supported production OS
+
+- Ubuntu 22.04 LTS
+- AlmaLinux 9.x
+
+One-command install:
+
+```bash
+export REPO_URL="https://github.com/YOUR_OWNER/YOUR_REPO.git"
+export APP_BRANCH="main"
+export VPS_IP="YOUR_SERVER_IP"
+bash scripts/install/install.sh
+```
+
+See `docs/one-click-install.md` and `docs/almalinux-missing-tracker.md` for OS-specific notes and remaining live QA items.
+
 ## Service Ports
 
 - Frontend: `3000`

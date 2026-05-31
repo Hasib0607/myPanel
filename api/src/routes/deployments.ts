@@ -712,7 +712,7 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
         riskyActions.push({
           key: `install-${tool.name}`,
           label: `Install ${tool.name}`,
-          command: tool.name === "pnpm" ? "npm install -g pnpm" : tool.name === "yarn" ? "npm install -g yarn" : `apt install ${tool.name}`,
+          command: tool.name === "pnpm" ? "npm install -g pnpm" : tool.name === "yarn" ? "npm install -g yarn" : `Install ${tool.name} via panel runtime-tools (dnf on AlmaLinux, apt on Ubuntu)`,
           reason: `${tool.name} is required for this deployment but is not available on the server.`,
           approvalRequired: true
         });
@@ -854,7 +854,7 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
     riskyActions.push({
       key: "install-php-extension",
       label: "Install missing PHP extension",
-      command: "apt install php-<extension-name>",
+      command: "Install missing PHP extension via system packages (Ubuntu: apt install php-<ext>; AlmaLinux: dnf install php-<ext>)",
       reason: "Composer reported a missing PHP extension. Admin should confirm exact extension before installing.",
       approvalRequired: true
     });

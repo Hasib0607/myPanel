@@ -3,7 +3,8 @@ set -Eeuo pipefail
 
 APP_DIR="${PANEL_UPDATE_WORKDIR:-/opt/vps-panel}"
 PANEL_NGINX_SITE="${PANEL_NGINX_SITE:-00-vps-panel}"
-NGINX_CONF="/etc/nginx/sites-available/$PANEL_NGINX_SITE"
+NGINX_SITES_AVAILABLE="${NGINX_SITES_AVAILABLE:-/etc/nginx/sites-available}"
+NGINX_CONF="${NGINX_SITES_AVAILABLE}/${PANEL_NGINX_SITE}"
 BRANCH="${PANEL_UPDATE_BRANCH:-main}"
 LOG_FILE="${PANEL_UPDATE_LOG_FILE:-/var/log/vps-panel/self-update.log}"
 STATUS_FILE="${PANEL_UPDATE_STATUS_FILE:-/var/log/vps-panel/self-update-status.json}"

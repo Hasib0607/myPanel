@@ -5,11 +5,11 @@ import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
 import { sysagent } from "../lib/sysagent.js";
 
-const manageableServices: Record<string, { key: "nginx" | "bind9" | "postfix" | "dovecot"; fallbackPackages: string[] }> = {
-  Nginx: { key: "nginx", fallbackPackages: ["nginx"] },
-  BIND9: { key: "bind9", fallbackPackages: ["bind9", "bind9utils", "bind9-doc"] },
-  Postfix: { key: "postfix", fallbackPackages: ["postfix"] },
-  Dovecot: { key: "dovecot", fallbackPackages: ["dovecot-core", "dovecot-imapd", "dovecot-lmtpd"] }
+const manageableServices: Record<string, { key: "nginx" | "bind9" | "postfix" | "dovecot" }> = {
+  Nginx: { key: "nginx" },
+  BIND9: { key: "bind9" },
+  Postfix: { key: "postfix" },
+  Dovecot: { key: "dovecot" }
 };
 
 type DashboardService = {

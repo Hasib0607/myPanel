@@ -5,20 +5,20 @@ import psutil
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.command import run_command
+from app.command import run_command, run_install_plan
+from app.platform import current_os, install_plan_for, platform_summary, service_unit
+from app.service_registry import service_checks
 
 router = APIRouter()
-
-SERVICE_CHECKS = {
-    "nginx": {"name": "Nginx", "port": 80, "unit": "nginx", "units": ["nginx"], "packages": ["nginx"]},
-    "bind9": {"name": "BIND9", "port": 53, "unit": "bind9", "units": ["bind9", "named"], "packages": ["bind9", "bind9utils", "bind9-doc"]},
-    "postfix": {"name": "Postfix", "port": 25, "unit": "postfix", "units": ["postfix"], "packages": ["postfix"]},
-    "dovecot": {"name": "Dovecot", "port": 993, "unit": "dovecot", "units": ["dovecot"], "packages": ["dovecot-core", "dovecot-imapd", "dovecot-lmtpd"]},
-}
 
 
 class ServiceActionRequest(BaseModel):
     action: str
+
+
+@router.get("/platform")
+def platform() -> dict:
+    return platform_summary(current_os())
 
 
 @router.get("/stats")
@@ -88,7 +88,7 @@ def unit_installed(units: list[str]) -> bool:
 def services() -> dict:
     ports = listening_ports()
     items = []
-    for key, service in SERVICE_CHECKS.items():
+    for key, service in service_checks().items():
         state, detail = systemd_state(service["units"])
         installed = unit_installed(service["units"])
         port_open = service["port"] in ports
@@ -121,18 +121,17 @@ def services() -> dict:
 
 @router.post("/services/{service_key}/action")
 def service_action(service_key: str, body: ServiceActionRequest) -> dict:
-    service = SERVICE_CHECKS.get(service_key)
+    checks = service_checks()
+    service = checks.get(service_key)
     if not service:
         raise HTTPException(status_code=404, detail="Unknown service")
 
     action = body.action
     if action == "install":
-        return run_command(
-            ["apt-get", "install", "-y", *service["packages"]],
-            env={"DEBIAN_FRONTEND": "noninteractive"},
-        )
+        plan = install_plan_for(service_key, current_os())
+        return run_install_plan(plan)
 
     if action not in {"start", "stop", "restart", "enable", "disable"}:
         raise HTTPException(status_code=400, detail="Unsupported service action")
 
-    return run_command(["systemctl", action, service["unit"]])
+    return run_command(["systemctl", action, service_unit(service_key, current_os())])

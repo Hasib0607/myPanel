@@ -38,7 +38,7 @@ type GuardianOverview = {
           optional?: boolean;
         }>;
         ports: Array<{ port: number; listening: boolean; owner?: { process?: string; pid?: number } }>;
-        security: { sshFailures: number; ufw?: CommandOutput; fail2ban?: CommandOutput; fail2banSshd?: CommandOutput; suspiciousIps?: SuspiciousIp[] };
+        security: { sshFailures: number; firewall?: CommandOutput; ufw?: CommandOutput; fail2ban?: CommandOutput; fail2banSshd?: CommandOutput; suspiciousIps?: SuspiciousIp[] };
         logs: {
           nginxErrors: number;
           badHttpResponses: number;
@@ -804,7 +804,7 @@ export function GuardianClient() {
               <div className="mb-3 text-sm font-semibold">Security Signals</div>
               <div className="space-y-3 text-sm">
                 <div className="flex justify-between gap-3"><span className="text-panel-muted">SSH failures</span><span className="font-medium">{!unavailable ? diagnosis?.security.sshFailures ?? 0 : "-"}</span></div>
-                <div><div className="text-panel-muted">UFW</div><pre className="mt-1 max-h-24 overflow-auto rounded-md bg-slate-950 p-3 text-xs text-slate-100">{!unavailable ? firstLine(diagnosis?.security.ufw) : "Sysagent unavailable"}</pre></div>
+                <div><div className="text-panel-muted">Firewall</div><pre className="mt-1 max-h-24 overflow-auto rounded-md bg-slate-950 p-3 text-xs text-slate-100">{!unavailable ? firstLine(diagnosis?.security.firewall ?? diagnosis?.security.ufw) : "Sysagent unavailable"}</pre></div>
                 <div><div className="text-panel-muted">Fail2Ban</div><pre className="mt-1 max-h-24 overflow-auto rounded-md bg-slate-950 p-3 text-xs text-slate-100">{!unavailable ? firstLine(diagnosis?.security.fail2ban) : "Sysagent unavailable"}</pre></div>
               </div>
             </div>
