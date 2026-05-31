@@ -28,12 +28,22 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const sysagent = {
   stats: () => request("/system/stats"),
-  backupPlan: () => request<{ backupRoot: string; liveEnabled: boolean; includes: string[] }>("/backup/plan"),
+  backupPlan: () => request<{ backupRoot: string; liveEnabled: boolean; freeBytes: number; includes: string[] }>("/backup/plan"),
   backupArchives: () => request<{ items: Array<{ path: string; name: string; sizeBytes: number; modifiedAt: string; checksumPath: string }> }>("/backup/archives"),
   createBackup: (body: unknown) =>
     request<{ archivePath: string; stagingDir: string; includes: string[]; sizeBytes?: number | null; result: SysagentCommandResult }>("/backup/create", { method: "POST", body: JSON.stringify(body) }),
   restorePreview: (path: string) =>
     request<{ archivePath: string; commands: string[]; note: string }>(`/backup/restore-preview?path=${encodeURIComponent(path)}`, { method: "POST" }),
+  restoreBackup: (body: unknown) =>
+    request<{ archivePath: string; commands: string[]; result: SysagentCommandResult }>("/backup/restore", { method: "POST", body: JSON.stringify(body) }),
+  verifyBackup: (path: string) =>
+    request<{ ok: boolean; archivePath: string; result?: SysagentCommandResult; error?: string }>(`/backup/verify?path=${encodeURIComponent(path)}`, { method: "POST" }),
+  backupManifest: (path: string) =>
+    request<{ archivePath: string; result: SysagentCommandResult; entries: string[] }>(`/backup/manifest?path=${encodeURIComponent(path)}`, { method: "POST" }),
+  deleteBackupArchive: (path: string) =>
+    request<{ archivePath: string; result: SysagentCommandResult }>(`/backup/archive?path=${encodeURIComponent(path)}`, { method: "DELETE" }),
+  pruneBackups: (body: unknown) =>
+    request<{ kept: number; removed: string[]; result: SysagentCommandResult }>("/backup/prune", { method: "POST", body: JSON.stringify(body) }),
   guardianDiagnosis: () => request("/guardian/diagnosis"),
   guardianRestartService: (serviceKey: string) =>
     request("/guardian/actions/restart-service", { method: "POST", body: JSON.stringify({ serviceKey }) }),
