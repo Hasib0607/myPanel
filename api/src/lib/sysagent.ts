@@ -47,6 +47,10 @@ export const sysagent = {
     request<{ templates: Array<{ mode: string; content: string }> }>("/guardian/nginx-rate-limit/templates"),
   guardianApplyRateLimit: (mode: "balanced" | "strict") =>
     request("/guardian/nginx-rate-limit/apply", { method: "POST", body: JSON.stringify({ mode }) }),
+  guardianIpEvidence: (ip: string) =>
+    request<{ ip: string; access: string[]; error: string[]; auth: string[] }>(`/guardian/security/evidence/${encodeURIComponent(ip)}`),
+  guardianQuarantineFile: (path: string) =>
+    request("/guardian/file-watch/quarantine", { method: "POST", body: JSON.stringify({ path }) }),
   services: () => request<{ items: Array<{ key: string; name: string; port: number; status: "healthy" | "down"; detail: string; installed: boolean; manageable: boolean; availableActions: string[] }> }>("/system/services"),
   serviceAction: (serviceKey: string, action: string) =>
     request(`/system/services/${encodeURIComponent(serviceKey)}/action`, { method: "POST", body: JSON.stringify({ action }) }),

@@ -87,6 +87,7 @@ type GuardianOverview = {
     allowlist: Array<{ id: string; cidr: string; label: string | null; expiresAt: string | null }>;
     trustedCidrs: string[];
     loginAnomalies: Array<{ ip: string; failures: number; usernames: number; risk: string }>;
+    settings: { autoBlockMode: "monitor" | "suggest" | "auto"; blockDurationMinutes: number };
     activeBlocks: Array<{ id: string; ip: string; reason: string; score: number; status: string; expiresAt: string | null }>;
   };
   fileFindings: Array<{ id: string; path: string; reason: string; risk: string; status: string; sizeBytes: number; mode: string | null; owner: string | null; modifiedAt: string | null }>;
@@ -183,6 +184,8 @@ export function GuardianClient() {
   const [autoHealBusy, setAutoHealBusy] = useState(false);
   const [securityNotice, setSecurityNotice] = useState<string | null>(null);
   const [allowCidr, setAllowCidr] = useState("");
+  const [blockDuration, setBlockDuration] = useState(60);
+  const [evidenceText, setEvidenceText] = useState<string | null>(null);
   const overview = useQuery({
     queryKey: ["guardian-overview"],
     queryFn: () => apiGet<GuardianOverview>("/guardian/overview"),
@@ -215,7 +218,7 @@ export function GuardianClient() {
   async function blockIp(ip: string) {
     setSecurityNotice(null);
     try {
-      await apiPost("/guardian/block-ip", { ip, reason: "Guardian suspicious IP" });
+      await apiPost("/guardian/block-ip", { ip, reason: "Guardian suspicious IP", durationMinutes: blockDuration });
       setSecurityNotice(`Block requested for ${ip}.`);
       await overview.refetch();
     } catch (error) {
@@ -243,6 +246,42 @@ export function GuardianClient() {
     } catch (error) {
       setSecurityNotice(error instanceof Error ? error.message : "File watch scan failed.");
     }
+  }
+
+  async function syncCloudflare() {
+    setSecurityNotice(null);
+    try {
+      const result = await apiPost<{ count: number }>("/guardian/cloudflare/sync", {});
+      setSecurityNotice(`Synced ${result.count} Cloudflare CIDRs.`);
+      await overview.refetch();
+    } catch (error) {
+      setSecurityNotice(error instanceof Error ? error.message : "Cloudflare sync failed.");
+    }
+  }
+
+  async function showEvidence(ip: string) {
+    try {
+      const result = await apiGet<{ access: string[]; error: string[]; auth: string[] }>(`/guardian/ip/${encodeURIComponent(ip)}/evidence`);
+      setEvidenceText([...result.auth, ...result.access, ...result.error].slice(-12).join("\n") || "No recent evidence lines found.");
+    } catch (error) {
+      setEvidenceText(error instanceof Error ? error.message : "Evidence lookup failed.");
+    }
+  }
+
+  async function updateSecurityMode(autoBlockMode: "monitor" | "suggest" | "auto") {
+    const duration = overview.data?.security.settings.blockDurationMinutes ?? blockDuration;
+    await apiPost("/guardian/settings/security", { autoBlockMode, blockDurationMinutes: duration });
+    await overview.refetch();
+  }
+
+  async function trustFile(id: string) {
+    await apiPost(`/guardian/file-watch/${id}/trust`, {});
+    await overview.refetch();
+  }
+
+  async function quarantineFile(id: string) {
+    await apiPost(`/guardian/file-watch/${id}/quarantine`, {});
+    await overview.refetch();
   }
 
   async function applyRateLimit(mode: "balanced" | "strict") {
@@ -313,6 +352,9 @@ export function GuardianClient() {
         ) : null}
         {securityNotice ? (
           <div className="rounded-md border border-panel-line bg-white px-4 py-3 text-sm text-slate-700">{securityNotice}</div>
+        ) : null}
+        {evidenceText ? (
+          <pre className="max-h-64 overflow-auto rounded-md bg-slate-950 p-4 text-xs text-slate-100">{evidenceText}</pre>
         ) : null}
 
         {overview.isError ? (
@@ -465,9 +507,12 @@ export function GuardianClient() {
                       {item.blocked ? (
                         <button className="rounded-md border border-panel-line px-2 py-1 text-xs hover:bg-slate-50" onClick={() => unblockIp(item.ip)} type="button">Unblock</button>
                       ) : (
-                        <button className="rounded-md border border-panel-line px-2 py-1 text-xs hover:bg-slate-50 disabled:opacity-50" disabled={item.allowlisted} onClick={() => blockIp(item.ip)} type="button">
-                          {item.allowlisted ? "Allowed" : "Block"}
-                        </button>
+                        <div className="flex gap-1">
+                          <button className="rounded-md border border-panel-line px-2 py-1 text-xs hover:bg-slate-50" onClick={() => showEvidence(item.ip)} type="button">Evidence</button>
+                          <button className="rounded-md border border-panel-line px-2 py-1 text-xs hover:bg-slate-50 disabled:opacity-50" disabled={item.allowlisted} onClick={() => blockIp(item.ip)} type="button">
+                            {item.allowlisted ? "Allowed" : "Block"}
+                          </button>
+                        </div>
                       )}
                     </div>
                   </div>
@@ -491,7 +536,11 @@ export function GuardianClient() {
                         <div className="truncate text-xs text-panel-muted">{finding.reason}</div>
                         <div className="mt-1 text-xs text-panel-muted">{formatBytes(finding.sizeBytes)} / {finding.mode ?? "-"}</div>
                       </div>
-                      <span className={`rounded-md px-2 py-1 text-xs font-semibold ${finding.risk === "CRITICAL" ? "bg-red-50 text-panel-danger" : "bg-amber-50 text-amber-700"}`}>{finding.risk}</span>
+                      <div className="flex flex-col gap-1 text-right">
+                        <span className={`rounded-md px-2 py-1 text-xs font-semibold ${finding.risk === "CRITICAL" ? "bg-red-50 text-panel-danger" : "bg-amber-50 text-amber-700"}`}>{finding.risk}</span>
+                        <button className="rounded-md border border-panel-line px-2 py-1 text-xs hover:bg-slate-50" onClick={() => trustFile(finding.id)} type="button">Trust</button>
+                        <button className="rounded-md border border-panel-line px-2 py-1 text-xs text-panel-danger hover:bg-red-50" onClick={() => quarantineFile(finding.id)} type="button">Quarantine</button>
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -538,7 +587,27 @@ export function GuardianClient() {
                 <button className="rounded-md border border-panel-line px-3 py-2 text-sm hover:bg-slate-50" onClick={() => applyRateLimit("balanced")} type="button">Balanced</button>
                 <button className="rounded-md border border-panel-line px-3 py-2 text-sm hover:bg-slate-50" onClick={() => applyRateLimit("strict")} type="button">Strict</button>
               </div>
-              <div className="mt-2 text-xs text-panel-muted">Writes `/etc/nginx/snippets/vps-panel-guardian-rate-limit.conf` only when live Nginx commands are enabled.</div>
+              <div className="mt-2 text-xs text-panel-muted">Writes `/etc/nginx/conf.d/vps-panel-guardian-rate-limit.conf` only when live Nginx commands are enabled.</div>
+            </div>
+
+            <div className="rounded-md border border-panel-line bg-white p-4">
+              <div className="mb-3 text-sm font-semibold">Security Mode</div>
+              <div className="flex flex-wrap gap-2">
+                {(["monitor", "suggest", "auto"] as const).map((mode) => (
+                  <button
+                    className={`rounded-md border px-3 py-2 text-sm hover:bg-slate-50 ${overview.data?.security.settings.autoBlockMode === mode ? "border-panel-accent text-panel-accent" : "border-panel-line"}`}
+                    key={mode}
+                    onClick={() => updateSecurityMode(mode)}
+                    type="button"
+                  >
+                    {mode}
+                  </button>
+                ))}
+              </div>
+              <div className="mt-3 flex items-center gap-2">
+                <span className="text-xs text-panel-muted">Block minutes</span>
+                <input className="h-8 w-24 rounded-md border border-panel-line px-2 text-sm" min={5} onChange={(event) => setBlockDuration(Number(event.target.value))} type="number" value={blockDuration} />
+              </div>
             </div>
 
             <div className="rounded-md border border-panel-line bg-white p-4">
@@ -551,6 +620,7 @@ export function GuardianClient() {
                   value={allowCidr}
                 />
                 <button className="rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50" onClick={addAllowlist} type="button">Add</button>
+                <button className="rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50" onClick={syncCloudflare} type="button">Cloudflare</button>
               </div>
               <div className="mt-3 space-y-2">
                 {(overview.data?.security.trustedCidrs ?? []).slice(0, 4).map((cidr) => (

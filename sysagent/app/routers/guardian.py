@@ -64,6 +64,10 @@ class RateLimitTemplateRequest(BaseModel):
     mode: str = Field(default="balanced", pattern="^(balanced|strict)$")
 
 
+class FileQuarantineRequest(BaseModel):
+    path: str
+
+
 SUSPICIOUS_FILE_EXTENSIONS = {".php", ".phtml", ".phar", ".cgi", ".pl", ".py", ".sh"}
 SUSPICIOUS_FILE_PATTERNS = ["base64_decode", "shell_exec", "passthru", "eval(", "assert($_", "preg_replace", "system("]
 IGNORED_DIR_NAMES = {".git", "node_modules", "vendor", ".next", "__pycache__", "cache", "logs"}
@@ -120,6 +124,13 @@ def tail_file(path: str, lines: int = 80) -> list[str]:
     file_path = Path(path)
     if not file_path.exists() or not file_path.is_file():
         return []
+
+
+def matching_log_lines(ip: str) -> dict[str, Any]:
+    access = [line.strip() for line in tail_file("/var/log/nginx/access.log", 300) if ip in line]
+    error = [line.strip() for line in tail_file("/var/log/nginx/error.log", 120) if ip in line]
+    auth = [line.strip() for line in tail_file("/var/log/auth.log", 200) if ip in line]
+    return {"ip": ip, "access": access[-50:], "error": error[-30:], "auth": auth[-50:]}
     try:
         with file_path.open("r", encoding="utf-8", errors="ignore") as handle:
             return handle.readlines()[-lines:]
@@ -407,6 +418,30 @@ def file_watch() -> dict[str, Any]:
     return file_watch_scan()
 
 
+@router.get("/security/evidence/{ip}")
+def security_evidence(ip: str) -> dict[str, Any]:
+    if not safe_ip(ip):
+        raise HTTPException(status_code=400, detail="Invalid public IP")
+    return matching_log_lines(ip)
+
+
+@router.post("/file-watch/quarantine")
+def quarantine_file(body: FileQuarantineRequest) -> dict[str, Any]:
+    source = Path(body.path).resolve()
+    roots = [Path(root).resolve() for root in settings.guardian_file_watch_roots.split(",") if root.strip()]
+    if not any(str(source).startswith(str(root)) for root in roots):
+        raise HTTPException(status_code=400, detail="File is outside Guardian watch roots")
+    if not source.exists() or not source.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    quarantine_root = Path("/var/quarantine/vps-panel")
+    destination = quarantine_root / source.as_posix().lstrip("/")
+    if not settings.allow_live_file_manager:
+        return {"dryRun": True, "source": str(source), "destination": str(destination)}
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(source), str(destination))
+    return {"dryRun": False, "source": str(source), "destination": str(destination)}
+
+
 @router.get("/nginx-rate-limit/templates")
 def nginx_rate_limit_templates() -> dict[str, Any]:
     return {"templates": [{"mode": key, "content": value} for key, value in RATE_LIMIT_TEMPLATES.items()]}
@@ -415,7 +450,7 @@ def nginx_rate_limit_templates() -> dict[str, Any]:
 @router.post("/nginx-rate-limit/apply")
 def nginx_rate_limit_apply(body: RateLimitTemplateRequest) -> dict[str, Any]:
     content = RATE_LIMIT_TEMPLATES[body.mode]
-    path = Path("/etc/nginx/snippets/vps-panel-guardian-rate-limit.conf")
+    path = Path("/etc/nginx/conf.d/vps-panel-guardian-rate-limit.conf")
     if not settings.allow_live_nginx:
         return {"dryRun": True, "path": str(path), "content": content}
     path.parent.mkdir(parents=True, exist_ok=True)

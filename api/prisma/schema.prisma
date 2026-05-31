@@ -558,6 +558,27 @@ model GuardianFileFinding {
   @@map("guardian_file_findings")
 }
 
+model GuardianNotification {
+  id        String   @id @default(cuid())
+  level     GuardianSeverity @default(INFO)
+  title     String
+  message   String
+  read      Boolean  @default(false)
+  metadata  Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([read, createdAt])
+  @@map("guardian_notifications")
+}
+
+model GuardianSetting {
+  key       String   @id
+  value     Json     @default("{}")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("guardian_settings")
+}
+
 model FirewallRule {
   id        String            @id @default(cuid())
   port      Int

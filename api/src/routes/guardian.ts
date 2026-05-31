@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import net from "node:net";
 import tls from "node:tls";
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
@@ -17,6 +18,11 @@ const allowlistSchema = z.object({
   cidr: z.string().trim().min(3),
   label: z.string().trim().optional(),
   expiresAt: z.string().datetime().optional()
+});
+const fileActionSchema = z.object({ id: z.string().min(1) });
+const settingsSchema = z.object({
+  autoBlockMode: z.enum(["monitor", "suggest", "auto"]),
+  blockDurationMinutes: z.number().int().min(5).max(43_200)
 });
 
 const trustedCidrs = env.GUARDIAN_TRUSTED_CIDRS.split(",").map((item) => item.trim()).filter(Boolean);
@@ -78,16 +84,37 @@ function ipv4ToInt(ip: string) {
   return (((parts[0] << 24) >>> 0) + (parts[1] << 16) + (parts[2] << 8) + parts[3]) >>> 0;
 }
 
+function ipv6ToBigInt(ip: string) {
+  if (net.isIP(ip) !== 6) return null;
+  const [headText, tailText = ""] = ip.split("::");
+  const head = headText ? headText.split(":") : [];
+  const tail = tailText ? tailText.split(":") : [];
+  const fill = new Array(8 - head.length - tail.length).fill("0");
+  const parts = [...head, ...fill, ...tail].map((part) => Number.parseInt(part || "0", 16));
+  if (parts.length !== 8 || parts.some((part) => !Number.isFinite(part) || part < 0 || part > 0xffff)) return null;
+  return parts.reduce((acc, part) => (acc << 16n) + BigInt(part), 0n);
+}
+
 function ipMatchesCidr(ip: string, cidr: string) {
   if (cidr === ip) return true;
   const [range, bitsText] = cidr.split("/");
   if (!range || !bitsText) return false;
   const bits = Number(bitsText);
-  const ipInt = ipv4ToInt(ip);
-  const rangeInt = ipv4ToInt(range);
-  if (ipInt === null || rangeInt === null || !Number.isInteger(bits) || bits < 0 || bits > 32) return false;
-  const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
-  return (ipInt & mask) === (rangeInt & mask);
+  if (net.isIP(ip) === 4 && net.isIP(range) === 4) {
+    const ipInt = ipv4ToInt(ip);
+    const rangeInt = ipv4ToInt(range);
+    if (ipInt === null || rangeInt === null || !Number.isInteger(bits) || bits < 0 || bits > 32) return false;
+    const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+    return (ipInt & mask) === (rangeInt & mask);
+  }
+  if (net.isIP(ip) === 6 && net.isIP(range) === 6) {
+    const ipInt = ipv6ToBigInt(ip);
+    const rangeInt = ipv6ToBigInt(range);
+    if (ipInt === null || rangeInt === null || !Number.isInteger(bits) || bits < 0 || bits > 128) return false;
+    const shift = BigInt(128 - bits);
+    return (ipInt >> shift) === (rangeInt >> shift);
+  }
+  return false;
 }
 
 function fileFingerprint(path: string, reason: string) {
@@ -154,11 +181,46 @@ async function loginAnomalies() {
     .slice(0, 20);
 }
 
+async function syncCloudflareCidrs() {
+  const [v4, v6] = await Promise.all([
+    fetch("https://www.cloudflare.com/ips-v4").then((response) => response.text()),
+    fetch("https://www.cloudflare.com/ips-v6").then((response) => response.text())
+  ]);
+  const cidrs = [...v4.split(/\s+/), ...v6.split(/\s+/)].map((item) => item.trim()).filter(Boolean);
+  for (const cidr of cidrs) {
+    await prisma.guardianIpAllowlist.upsert({
+      where: { cidr },
+      update: { label: "Cloudflare CDN" },
+      create: { cidr, label: "Cloudflare CDN" }
+    });
+  }
+  return { count: cidrs.length, cidrs };
+}
+
+async function ipContext(ip: string) {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2500);
+    const response = await fetch(`https://rdap.org/ip/${encodeURIComponent(ip)}`, { signal: controller.signal });
+    clearTimeout(timer);
+    if (!response.ok) return null;
+    const data = await response.json() as any;
+    return {
+      name: data.name ?? null,
+      country: data.country ?? null,
+      handle: data.handle ?? null,
+      type: data.type ?? null
+    };
+  } catch {
+    return null;
+  }
+}
+
 export const guardianRoutes: FastifyPluginAsync = async (app) => {
   app.addHook("preHandler", app.requireAuth);
 
   app.get("/overview", async () => {
-    const [diagnosis, deployments, sslDomains, recentActions, storedIncidents, allowlist, activeBlocks, fileFindings, anomalies] = await Promise.all([
+    const [diagnosis, deployments, sslDomains, recentActions, storedIncidents, allowlist, activeBlocks, fileFindings, anomalies, securitySetting] = await Promise.all([
       trySysagent({ unavailable: true, incidents: [], services: [], ports: [] }, () => sysagent.guardianDiagnosis()),
       prisma.deployment.findMany({
         orderBy: { updatedAt: "desc" },
@@ -193,7 +255,8 @@ export const guardianRoutes: FastifyPluginAsync = async (app) => {
       prisma.guardianIpAllowlist.findMany({ orderBy: { createdAt: "desc" } }),
       prisma.guardianIpBlock.findMany({ where: { status: "ACTIVE" }, orderBy: { createdAt: "desc" }, take: 50 }),
       prisma.guardianFileFinding.findMany({ where: { status: "OPEN" }, orderBy: [{ risk: "desc" }, { lastSeenAt: "desc" }], take: 50 }),
-      loginAnomalies()
+      loginAnomalies(),
+      prisma.guardianSetting.findUnique({ where: { key: "security" } })
     ]);
 
     const sslProbes = await Promise.all(
@@ -246,15 +309,38 @@ export const guardianRoutes: FastifyPluginAsync = async (app) => {
         trustedCidrs,
         activeBlocks,
         loginAnomalies: anomalies,
-        suspiciousIps: ((diagnosis as any).security?.suspiciousIps ?? []).map((item: any) => ({
+        settings: (securitySetting?.value as any) ?? { autoBlockMode: "suggest", blockDurationMinutes: 60 },
+        suspiciousIps: await Promise.all(((diagnosis as any).security?.suspiciousIps ?? []).map(async (item: any) => ({
           ...item,
+          context: await ipContext(item.ip),
           allowlisted: isAllowlisted(item.ip, allowlist),
           blocked: activeBlocks.some((block) => block.ip === item.ip)
-        }))
+        })))
       },
       fileFindings,
+      notifications: await prisma.guardianNotification.findMany({ where: { read: false }, orderBy: { createdAt: "desc" }, take: 20 }),
       generatedAt: new Date().toISOString()
     };
+  });
+
+  app.post("/settings/security", async (request) => {
+    const body = settingsSchema.parse(request.body);
+    return prisma.guardianSetting.upsert({
+      where: { key: "security" },
+      update: { value: body },
+      create: { key: "security", value: body }
+    });
+  });
+
+  app.post("/cloudflare/sync", async (request) => {
+    const result = await syncCloudflareCidrs();
+    await audit(request, { action: "APPLY", resource: "guardian_allowlist", description: `Synced ${result.count} Cloudflare CIDRs` });
+    return result;
+  });
+
+  app.get("/ip/:ip/evidence", async (request) => {
+    const { ip } = z.object({ ip: z.string() }).parse(request.params);
+    return sysagent.guardianIpEvidence(ip);
   });
 
   app.get("/file-watch/scan", async () => {
@@ -296,6 +382,7 @@ export const guardianRoutes: FastifyPluginAsync = async (app) => {
       }
     });
     await audit(request, { action: "APPLY", resource: "guardian_ip_block", resourceId: block.id, description: `Blocked ${body.ip}`, metadata: { result } as any });
+    await prisma.guardianNotification.create({ data: { level: "WARNING", title: `Blocked ${body.ip}`, message: body.reason ?? "Guardian IP block", metadata: { blockId: block.id } as any } });
     return reply.code(202).send({ block, result });
   });
 
@@ -305,6 +392,24 @@ export const guardianRoutes: FastifyPluginAsync = async (app) => {
     await prisma.guardianIpBlock.updateMany({ where: { ip: body.ip, status: "ACTIVE" }, data: { status: "REMOVED", removedAt: new Date() } });
     await audit(request, { action: "APPLY", resource: "guardian_ip_block", description: `Unblocked ${body.ip}`, metadata: { result } as any });
     return reply.code(202).send({ ip: body.ip, result });
+  });
+
+  app.post("/file-watch/:id/trust", async (request) => {
+    const { id } = fileActionSchema.parse(request.params);
+    const finding = await prisma.guardianFileFinding.update({ where: { id }, data: { status: "TRUSTED" } });
+    await audit(request, { action: "APPLY", resource: "guardian_file_finding", resourceId: id, description: `Trusted ${finding.path}` });
+    return finding;
+  });
+
+  app.post("/file-watch/:id/quarantine", async (request, reply) => {
+    const { id } = fileActionSchema.parse(request.params);
+    const finding = await prisma.guardianFileFinding.findUnique({ where: { id } });
+    if (!finding) return reply.notFound("File finding not found");
+    const result = await sysagent.guardianQuarantineFile(finding.path);
+    const updated = await prisma.guardianFileFinding.update({ where: { id }, data: { status: "RESOLVED", metadata: { quarantine: result } as any } });
+    await prisma.guardianNotification.create({ data: { level: "CRITICAL", title: "File quarantined", message: finding.path, metadata: { result } as any } });
+    await audit(request, { action: "APPLY", resource: "guardian_file_finding", resourceId: id, description: `Quarantined ${finding.path}`, metadata: { result } as any });
+    return reply.code(202).send({ finding: updated, result });
   });
 
   app.get("/rate-limit/templates", async () => sysagent.guardianRateLimitTemplates());

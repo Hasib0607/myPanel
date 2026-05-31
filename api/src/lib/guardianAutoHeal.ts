@@ -149,6 +149,9 @@ function incidentFor(records: Map<string, { id: string }>, input: GuardianIncide
 export async function runGuardianAutoHeal(diagnosis: GuardianDiagnosis) {
   const records = await syncIncidents(diagnosis);
   const actions = [];
+  const setting = await prisma.guardianSetting.findUnique({ where: { key: "security" } });
+  const autoBlockMode = ((setting?.value as any)?.autoBlockMode ?? process.env.GUARDIAN_AUTO_BLOCK_MODE ?? "suggest") as string;
+  const blockDurationMinutes = Number((setting?.value as any)?.blockDurationMinutes ?? process.env.GUARDIAN_BLOCK_DURATION_MINUTES ?? 60);
   const allowlist = await prisma.guardianIpAllowlist.findMany({
     where: { OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }
   });
@@ -185,7 +188,7 @@ export async function runGuardianAutoHeal(diagnosis: GuardianDiagnosis) {
   }
 
   for (const item of diagnosis.security?.suspiciousIps ?? []) {
-    if (item.recommendation !== "auto-block" || isAllowed(item.ip)) continue;
+    if (autoBlockMode !== "auto" || item.recommendation !== "auto-block" || isAllowed(item.ip)) continue;
     actions.push(await guardedAction("block-ip", item.ip, null, async () => {
       const result = await sysagent.guardianBlockIp({ ip: item.ip, reason: item.reasons?.join(", ") ?? "Guardian high-confidence suspicious IP" });
       const block = await prisma.guardianIpBlock.create({
@@ -193,7 +196,7 @@ export async function runGuardianAutoHeal(diagnosis: GuardianDiagnosis) {
           ip: item.ip,
           reason: item.reasons?.join(", ") ?? "Guardian high-confidence suspicious IP",
           score: item.score,
-          expiresAt: new Date(Date.now() + 60 * 60_000),
+          expiresAt: new Date(Date.now() + blockDurationMinutes * 60_000),
           result: result as any
         }
       });
