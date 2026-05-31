@@ -21,6 +21,14 @@ Deliverables:
 - Website and panel no longer overwrite each other.
 - Broken hosted-site config cannot break the panel config.
 
+Account split status:
+- WHM/admin APIs require `superadmin` JWT role and use the `panel_session` cookie.
+- cPanel/account APIs require `account` JWT role and use the separate `account_session` cookie.
+- WHM account management includes create/edit/detail pages, search/filter, package limits, assignment/unassignment for domains/deployments/mailboxes, activity history, suspend behavior, and delete policy for linked resources.
+- Account creation scaffolds `/var/www/accounts/<username>/public_html` plus default hosting folders through sysagent.
+- Account dashboard on `/account` is scoped to the signed-in account and exposes only account-owned domains, files, mailboxes, deployments, usage, and profile/password controls.
+- Account file APIs are locked to the account home root and reject path traversal.
+
 ## Phase 1: Port Reservation And Allocation
 
 Status: in progress. API allocation/validation and installer defaults are implemented; run `npm run migrate:deployment-ports --workspace api` once on the server after deploying this phase to move old unsafe deployment metadata.
@@ -174,6 +182,7 @@ Status:
 - Installer creates the panel user, `/opt/vps-panel`, `/var/www`, `/var/www/deployments`, app env plus API/frontend env links, database, systemd services, protected panel Nginx listener, sudoers, and PM2 startup.
 - Panel frontend is pinned to the configured panel frontend port, while projects use the managed deployment port pool.
 - Installer runs smoke tests for sysagent, API, frontend, panel proxy, Redis, PostgreSQL, Nginx, and required services before reporting success.
+- AlmaLinux 9 support is tracked separately in `docs/almalinux-support-plan.md` (Phase 2 includes `panel_nginx_layout`: create `sites-available` / `sites-enabled` on Alma because native Nginx uses `conf.d/` only).
 
 ## Phase 10: UI Polish
 

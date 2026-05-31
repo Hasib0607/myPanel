@@ -22,9 +22,11 @@ export async function audit(request: FastifyRequest | null, input: {
   description?: string | null;
   metadata?: Prisma.InputJsonValue;
 }) {
+  const user = (request as any)?.user;
+  const actor = user?.role === "account" ? `account:${user.accountId ?? user.sub ?? "unknown"}` : "superadmin";
   await prisma.auditLog.create({
     data: {
-      actor: "superadmin",
+      actor,
       action: input.action,
       resource: input.resource,
       resourceId: input.resourceId ?? null,

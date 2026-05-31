@@ -43,6 +43,10 @@ class DomainScaffoldRequest(BaseModel):
     domain: str = Field(pattern=r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
 
 
+class AccountScaffoldRequest(BaseModel):
+    username: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{2,31}$")
+
+
 DEFAULT_DOMAIN_FOLDERS = [
     "public_html",
     "public_ftp",
@@ -119,6 +123,24 @@ def create_domain_scaffold(body: DomainScaffoldRequest) -> dict:
         "relativeRoot": domain,
         "folders": DEFAULT_DOMAIN_FOLDERS,
     }
+
+
+@router.post("/account-scaffold")
+def create_account_scaffold(body: AccountScaffoldRequest) -> dict:
+    username = body.username.strip().lower()
+    account_root = safe_path(f"accounts/{username}")
+    folders = ["public_html", "logs", "mail", "tmp", "ssl", "backups", "private"]
+    if not settings.allow_live_file_manager:
+        return dry_run(["account-scaffold", str(account_root)], account_root)
+
+    account_root.mkdir(parents=True, exist_ok=True)
+    for folder in folders:
+        (account_root / folder).mkdir(parents=True, exist_ok=True)
+    (account_root / "public_html" / ".well-known" / "acme-challenge").mkdir(parents=True, exist_ok=True)
+    index_path = account_root / "public_html" / "index.html"
+    if not index_path.exists():
+        index_path.write_text("<!doctype html><title>Account ready</title><h1>Account ready</h1>\n", encoding="utf-8")
+    return {"ok": True, "username": username, "root": str(account_root), "relativeRoot": f"accounts/{username}", "folders": folders}
 
 
 @router.post("/files")

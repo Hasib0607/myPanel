@@ -8,8 +8,10 @@ import Fastify from "fastify";
 import { ZodError } from "zod";
 import { env } from "./config/env.js";
 import { csrfCookieName, csrfHeaderName, validCsrfPair } from "./lib/csrf.js";
+import { prisma } from "./lib/prisma.js";
 import { authRoutes } from "./routes/auth.js";
 import { accountRoutes } from "./routes/accounts.js";
+import { accountPanelRoutes } from "./routes/accountPanel.js";
 import { auditRoutes } from "./routes/audit.js";
 import { dashboardRoutes } from "./routes/dashboard.js";
 import { databaseRoutes } from "./routes/databases.js";
@@ -57,7 +59,7 @@ export function buildApp() {
 
   app.addHook("preHandler", async (request, reply) => {
     const unsafe = !["GET", "HEAD", "OPTIONS"].includes(request.method);
-    if (!unsafe || request.url.startsWith("/api/v1/auth/login") || request.url.startsWith("/api/v1/webhooks/")) return;
+    if (!unsafe || request.url.startsWith("/api/v1/auth/login") || request.url.startsWith("/api/v1/auth/account/login") || request.url.startsWith("/api/v1/webhooks/")) return;
 
     if (!validCsrfPair(request.cookies[csrfCookieName], request.headers[csrfHeaderName])) {
       return reply.code(403).send({ error: "Invalid CSRF token" });
@@ -67,8 +69,28 @@ export function buildApp() {
   app.decorate("requireAuth", async (request: any, reply: any) => {
     try {
       await request.jwtVerify();
+      if (request.user?.role !== "superadmin") {
+        return reply.code(403).send({ error: "Superadmin access required" });
+      }
     } catch {
-      reply.code(401).send({ error: "Unauthorized" });
+      return reply.code(401).send({ error: "Unauthorized" });
+    }
+  });
+
+  app.decorate("requireAccount", async (request: any, reply: any) => {
+    try {
+      const token = request.cookies.account_session;
+      if (!token) return reply.code(401).send({ error: "Unauthorized" });
+      request.user = app.jwt.verify(token);
+      if (request.user?.role !== "account" || !request.user?.accountId) {
+        return reply.code(403).send({ error: "Account access required" });
+      }
+      const account = await prisma.account.findUnique({ where: { id: request.user.accountId }, select: { status: true } });
+      if (!account || account.status !== "ACTIVE") {
+        return reply.code(403).send({ error: "Account is suspended or unavailable" });
+      }
+    } catch {
+      return reply.code(401).send({ error: "Unauthorized" });
     }
   });
 
@@ -96,6 +118,7 @@ export function buildApp() {
 
   app.register(authRoutes, { prefix: "/api/v1/auth" });
   app.register(accountRoutes, { prefix: "/api/v1/accounts" });
+  app.register(accountPanelRoutes, { prefix: "/api/v1/account" });
   app.register(auditRoutes, { prefix: "/api/v1/audit" });
   app.register(twoFactorRoutes, { prefix: "/api/v1/auth/2fa" });
   app.register(dashboardRoutes, { prefix: "/api/v1/dashboard" });

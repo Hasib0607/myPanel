@@ -13,7 +13,8 @@ type LoginResponse = {
 
 export function LoginForm() {
   const router = useRouter();
-  const [username, setUsername] = useState("admin");
+  const isAccountPortal = typeof window !== "undefined" && window.location.port === (process.env.NEXT_PUBLIC_CPANEL_LOGIN_PORT ?? "3138");
+  const [username, setUsername] = useState(isAccountPortal ? "" : "admin");
   const [password, setPassword] = useState("");
   const [totp, setTotp] = useState("");
   const [challengeToken, setChallengeToken] = useState<string | null>(null);
@@ -32,13 +33,13 @@ export function LoginForm() {
         return;
       }
 
-      const response = await apiPost<LoginResponse>("/auth/login", { username, password });
+      const response = await apiPost<LoginResponse>(isAccountPortal ? "/auth/account/login" : "/auth/login", { username, password });
       if (response.requiresTwoFactor && response.challengeToken) {
         setChallengeToken(response.challengeToken);
         return;
       }
 
-      router.replace("/dashboard");
+      router.replace(isAccountPortal ? "/account" : "/dashboard");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed");
     } finally {
@@ -51,8 +52,8 @@ export function LoginForm() {
       <div className="mb-6 flex items-center gap-3">
         <ShieldCheck className="text-panel-accent" />
         <div>
-          <h1 className="text-xl font-semibold">Superadmin Login</h1>
-          <p className="text-sm text-panel-muted">{challengeToken ? "Enter your authenticator code" : "Access the VPS control plane"}</p>
+          <h1 className="text-xl font-semibold">{isAccountPortal ? "Account Login" : "Superadmin Login"}</h1>
+          <p className="text-sm text-panel-muted">{challengeToken ? "Enter your authenticator code" : isAccountPortal ? "Access your hosting account" : "Access the VPS control plane"}</p>
         </div>
       </div>
 
