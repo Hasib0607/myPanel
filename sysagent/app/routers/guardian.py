@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any
 
 import psutil
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
+
+from app.command import run_command
+from app.config import settings
 
 router = APIRouter()
 
@@ -27,6 +31,25 @@ WATCHED_SERVICES = [
 
 WATCHED_PORTS = [80, 443, 2083, 3000, 4000, 5000, 6379, 5432, 5433, 6432]
 NGINX_ACCESS_RE = re.compile(r'^(?P<ip>\S+) \S+ \S+ \[[^\]]+\] "(?P<method>\S+) (?P<path>[^"]*?) (?P<protocol>[^"]*?)" (?P<status>\d{3})')
+SAFE_RESTART_UNITS = {
+    "nginx": "nginx",
+    "panel-api": "vps-panel-api",
+    "panel-frontend": "vps-panel-frontend",
+    "panel-workers": "vps-panel-workers",
+}
+
+
+class ServiceRestartRequest(BaseModel):
+    serviceKey: str
+
+
+class Pm2RestartRequest(BaseModel):
+    name: str | None = None
+    pmId: int | None = None
+
+
+class LogCleanupRequest(BaseModel):
+    olderThanDays: int = Field(default=1, ge=1, le=30)
 
 
 def command_output(command: list[str], timeout: int = 4) -> dict[str, Any]:
@@ -152,6 +175,79 @@ def nginx_access_summary(lines: list[str]) -> dict[str, Any]:
         "topIps": [{"ip": ip, "count": count} for ip, count in ip_counts.most_common(8)],
         "topBadIps": [{"ip": ip, "count": count} for ip, count in bad_ip_counts.most_common(8)],
         "topBadPaths": [{"path": path, "count": count} for path, count in path_counts.most_common(8)],
+    }
+
+
+@router.post("/actions/restart-service")
+def restart_service(body: ServiceRestartRequest) -> dict[str, Any]:
+    unit = SAFE_RESTART_UNITS.get(body.serviceKey)
+    if not unit:
+        raise HTTPException(status_code=400, detail="Service is not in the Guardian safe restart allowlist")
+    return {
+        "action": "restart-service",
+        "serviceKey": body.serviceKey,
+        "unit": unit,
+        "result": run_command(["systemctl", "restart", unit], timeout=30),
+    }
+
+
+@router.post("/actions/restart-pm2")
+def restart_pm2(body: Pm2RestartRequest) -> dict[str, Any]:
+    target = str(body.pmId) if body.pmId is not None else body.name
+    if not target:
+        raise HTTPException(status_code=400, detail="PM2 name or pmId is required")
+    return {
+        "action": "restart-pm2",
+        "target": target,
+        "result": run_command(["pm2", "restart", target], timeout=60),
+    }
+
+
+@router.post("/actions/reload-nginx")
+def reload_nginx() -> dict[str, Any]:
+    test = run_command(["nginx", "-t"], timeout=30)
+    if test.get("returncode") != 0:
+        return {"action": "reload-nginx", "reloaded": False, "test": test, "reload": None}
+    reload_result = run_command(["systemctl", "reload", "nginx"], timeout=30)
+    return {"action": "reload-nginx", "reloaded": reload_result.get("returncode") == 0, "test": test, "reload": reload_result}
+
+
+@router.post("/actions/cleanup-logs")
+def cleanup_logs(body: LogCleanupRequest) -> dict[str, Any]:
+    root = Path(settings.deployment_log_root).resolve()
+    if not str(root).startswith("/var/log/vps-panel"):
+        raise HTTPException(status_code=400, detail="Guardian log cleanup is restricted to /var/log/vps-panel")
+    if not root.exists():
+        return {"action": "cleanup-logs", "root": str(root), "removed": [], "dryRun": not settings.allow_live_system_commands}
+
+    cutoff = datetime.now(timezone.utc).timestamp() - (body.olderThanDays * 86_400)
+    candidates = []
+    for path in root.rglob("*"):
+        if not path.is_file() or path.suffix not in {".log", ".txt"}:
+            continue
+        try:
+            if path.stat().st_mtime < cutoff:
+                candidates.append(path)
+        except OSError:
+            continue
+
+    removed = []
+    if settings.allow_live_system_commands:
+        for path in candidates[:200]:
+            try:
+                path.unlink()
+                removed.append(str(path))
+            except OSError:
+                continue
+    else:
+        removed = [str(path) for path in candidates[:200]]
+
+    return {
+        "action": "cleanup-logs",
+        "root": str(root),
+        "olderThanDays": body.olderThanDays,
+        "removed": removed,
+        "dryRun": not settings.allow_live_system_commands,
     }
 
 

@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/opt/vps-panel/api
 Environment=NODE_ENV=production
+Environment=GUARDIAN_AUTO_HEAL=false
 ExecStart=/usr/bin/npm run guardian
 Restart=always
 RestartSec=10

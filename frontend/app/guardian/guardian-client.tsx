@@ -1,9 +1,10 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { AlertTriangle, CheckCircle2, Clock3, HardDrive, MemoryStick, RadioTower, RefreshCw, ServerCrash, ShieldAlert } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
-import { apiGet } from "@/lib/api";
+import { apiGet, apiPost } from "@/lib/api";
 
 type Incident = {
   severity: "critical" | "warning" | string;
@@ -125,6 +126,8 @@ function Meter({ label, value, detail, icon: Icon }: { label: string; value: num
 }
 
 export function GuardianClient() {
+  const [autoHealResult, setAutoHealResult] = useState<string | null>(null);
+  const [autoHealBusy, setAutoHealBusy] = useState(false);
   const overview = useQuery({
     queryKey: ["guardian-overview"],
     queryFn: () => apiGet<GuardianOverview>("/guardian/overview"),
@@ -137,23 +140,53 @@ export function GuardianClient() {
   const incidents = overview.data?.incidents ?? [];
   const criticalCount = incidents.filter((incident) => incident.severity === "critical").length;
 
+  async function runAutoHeal() {
+    setAutoHealBusy(true);
+    setAutoHealResult(null);
+    try {
+      const result = await apiPost<{ actions: Array<{ action: string; target: string; skipped?: boolean; reason?: string }> }>("/guardian/auto-heal", {});
+      const skipped = result.actions.filter((action) => action.skipped).length;
+      setAutoHealResult(`${result.actions.length} safe actions evaluated${skipped ? `, ${skipped} skipped` : ""}.`);
+      await overview.refetch();
+    } catch (error) {
+      setAutoHealResult(error instanceof Error ? error.message : "Guardian auto-heal failed.");
+    } finally {
+      setAutoHealBusy(false);
+    }
+  }
+
   return (
     <>
       <PageHeader
         title="Guardian"
         description="Read-only server monitoring, incident detection, and deployment health signals."
         action={
-          <button
-            className="flex h-10 items-center gap-2 rounded-md border border-panel-line bg-white px-3 text-sm font-semibold hover:bg-slate-50"
-            onClick={() => overview.refetch()}
-            type="button"
-          >
-            <RefreshCw size={16} />
-            Run Diagnosis
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              className="flex h-10 items-center gap-2 rounded-md border border-panel-line bg-white px-3 text-sm font-semibold hover:bg-slate-50"
+              disabled={autoHealBusy}
+              onClick={runAutoHeal}
+              type="button"
+            >
+              <ServerCrash size={16} />
+              Auto-Heal
+            </button>
+            <button
+              className="flex h-10 items-center gap-2 rounded-md border border-panel-line bg-white px-3 text-sm font-semibold hover:bg-slate-50"
+              onClick={() => overview.refetch()}
+              type="button"
+            >
+              <RefreshCw size={16} />
+              Run Diagnosis
+            </button>
+          </div>
         }
       />
       <section className="space-y-6 p-8">
+        {autoHealResult ? (
+          <div className="rounded-md border border-panel-line bg-white px-4 py-3 text-sm text-slate-700">{autoHealResult}</div>
+        ) : null}
+
         {overview.isError ? (
           <div className="flex items-center gap-3 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-panel-danger">
             <AlertTriangle size={18} />
