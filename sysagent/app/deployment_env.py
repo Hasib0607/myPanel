@@ -5,8 +5,8 @@ import shlex
 from pathlib import Path
 
 VALID_ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-# Unquoted dotenv values cannot contain whitespace, #, or quotes.
-UNQUOTED_DOTENV_VALUE = re.compile(r"^[^\s#'\"]+$")
+# Runtime env files are sourced by bash; keep only shell-boring token chars unquoted.
+UNQUOTED_DOTENV_VALUE = re.compile(r"^[A-Za-z0-9_./:@%+=,-]+$")
 
 
 def normalize_process_env(port: int | None, env: dict[str, str] | None) -> dict[str, str]:

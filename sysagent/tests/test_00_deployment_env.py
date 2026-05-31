@@ -29,6 +29,7 @@ class DeploymentEnvTests(unittest.TestCase):
     def test_format_dotenv_line_quotes_values_with_hash_or_spaces(self) -> None:
         self.assertEqual(format_dotenv_line("APP_NAME", "My App"), "APP_NAME='My App'")
         self.assertEqual(format_dotenv_line("NOTE", "value#hash"), "NOTE='value#hash'")
+        self.assertEqual(format_dotenv_line("CALLBACK", "pay(done)"), "CALLBACK='pay(done)'")
 
     def test_format_dotenv_line_keeps_simple_values_unquoted(self) -> None:
         self.assertEqual(format_dotenv_line("APP_ENV", "production"), "APP_ENV=production")
