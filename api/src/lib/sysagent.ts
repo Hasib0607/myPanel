@@ -28,6 +28,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const sysagent = {
   stats: () => request("/system/stats"),
+  guardianDiagnosis: () => request("/guardian/diagnosis"),
   services: () => request<{ items: Array<{ key: string; name: string; port: number; status: "healthy" | "down"; detail: string; installed: boolean; manageable: boolean; availableActions: string[] }> }>("/system/services"),
   serviceAction: (serviceKey: string, action: string) =>
     request(`/system/services/${encodeURIComponent(serviceKey)}/action`, { method: "POST", body: JSON.stringify({ action }) }),

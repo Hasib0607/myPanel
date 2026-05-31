@@ -6,7 +6,7 @@ This file keeps every known incomplete, deferred, or partially complete task in 
 
 ## Deferred Feature: Server Guardian Bot
 
-Status: Parked for later planning
+Status: Phase 1 started
 
 Goal: Add a server autopilot/guardian agent that continuously monitors the VPS, diagnoses incidents, performs safe auto-healing, and suggests or applies security responses.
 
@@ -32,6 +32,13 @@ Suggested UI:
 Suggested service:
 
 - Add `vps-panel-guardian.service` plus BullMQ repeat jobs for periodic checks.
+
+Implemented Phase 1 foundation:
+
+- Added sysagent read-only `/guardian/diagnosis` for watched services, ports, resources, PM2 availability, Nginx/auth log signals, UFW, Fail2Ban, and active incident detection.
+- Added authenticated API `/api/v1/guardian/overview` with deployment and SSL expiry enrichment.
+- Added frontend `/guardian` page with live incidents, watched services, resource meters, security signals, watched ports, deployment watch, and SSL watch.
+- Added `vps-panel-guardian.service.example` and API `guardian` runner script for periodic read-only diagnosis logging.
 
 ## Current VPS Deployment Blockers
 

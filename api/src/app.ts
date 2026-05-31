@@ -19,6 +19,7 @@ import { dnsRoutes } from "./routes/dns.js";
 import { domainRoutes } from "./routes/domains.js";
 import { fileRoutes } from "./routes/files.js";
 import { firewallRoutes } from "./routes/firewall.js";
+import { guardianRoutes } from "./routes/guardian.js";
 import { mailRoutes } from "./routes/mail.js";
 import { sslRoutes } from "./routes/ssl.js";
 import { twoFactorRoutes } from "./routes/twoFactor.js";
@@ -102,6 +103,7 @@ export function buildApp() {
   app.register(mailRoutes, { prefix: "/api/v1/mail" });
   app.register(sslRoutes, { prefix: "/api/v1/ssl" });
   app.register(firewallRoutes, { prefix: "/api/v1/firewall" });
+  app.register(guardianRoutes, { prefix: "/api/v1/guardian" });
   app.register(fileRoutes, { prefix: "/api/v1/files" });
   app.register(deploymentRoutes, { prefix: "/api/v1/deployments" });
   app.register(deploymentWebhookRoutes, { prefix: "/api/v1/webhooks" });

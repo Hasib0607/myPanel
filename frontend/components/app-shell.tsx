@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Blocks, Database, Gauge, Globe2, HardDrive, Inbox, Lock, Network, Shield, SquareTerminal } from "lucide-react";
+import { Blocks, Database, Gauge, Globe2, HardDrive, Inbox, Lock, Network, Radar, Shield, SquareTerminal } from "lucide-react";
 import { LogoutButton } from "@/components/logout-button";
 
 const nav = [
@@ -8,6 +8,7 @@ const nav = [
   { href: "/dns", label: "DNS", icon: Network },
   { href: "/mail", label: "Mail", icon: Inbox },
   { href: "/firewall", label: "Firewall", icon: Shield },
+  { href: "/guardian", label: "Guardian", icon: Radar },
   { href: "/files", label: "Files", icon: HardDrive },
   { href: "/deployments", label: "Deployments", icon: Blocks },
   { href: "/databases", label: "Databases", icon: Database },

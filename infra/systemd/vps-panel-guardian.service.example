@@ -1,0 +1,17 @@
+[Unit]
+Description=VPS Panel Guardian Bot
+After=network-online.target vps-panel-api.service vps-panel-sysagent.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/vps-panel/api
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/npm run guardian
+Restart=always
+RestartSec=10
+User=vps-panel
+Group=vps-panel
+
+[Install]
+WantedBy=multi-user.target

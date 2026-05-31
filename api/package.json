@@ -8,6 +8,7 @@
     "dev:workers": "tsx watch src/workers.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
+    "guardian": "node dist/guardian.js",
     "start:workers": "node dist/workers.js",
     "lint": "tsc --noEmit",
     "test": "npm run build && NODE_ENV=test node --test dist/lib/*.test.js",
