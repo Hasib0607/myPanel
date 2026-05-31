@@ -21,6 +21,8 @@ DIRTY_STRATEGY="${PANEL_UPDATE_DIRTY_STRATEGY:-fail}"
 COMMAND_TIMEOUT="${PANEL_UPDATE_COMMAND_TIMEOUT:-30}"
 SYSTEMCTL_NO_BLOCK="${PANEL_UPDATE_SYSTEMCTL_NO_BLOCK:-true}"
 STALE_AFTER_SECONDS="${PANEL_UPDATE_STALE_AFTER_SECONDS:-1200}"
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")"
+SCRIPT_REEXECUTED="${PANEL_UPDATE_SCRIPT_REEXECUTED:-false}"
 
 mkdir -p "$(dirname "$LOG_FILE")"
 mkdir -p "$(dirname "$STATUS_FILE")"
@@ -89,6 +91,29 @@ run_timeout() {
     timeout "$COMMAND_TIMEOUT" "$@" 2>&1 | tee -a "$LOG_FILE"
   else
     "$@" 2>&1 | tee -a "$LOG_FILE"
+  fi
+}
+
+file_checksum() {
+  local path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{print $1}'
+  else
+    stat -c '%s:%Y' "$path" 2>/dev/null || stat -f '%z:%m' "$path"
+  fi
+}
+
+reexec_if_script_changed() {
+  local before="$1"
+  local after=""
+  after="$(file_checksum "$SCRIPT_PATH")"
+  if [[ "$before" != "$after" && "$SCRIPT_REEXECUTED" != "true" ]]; then
+    log "panel update script changed during pull; reloading updated script"
+    write_status "running" "panel update script changed; reloading updated script" "$(current_commit)" "$(current_commit_subject)"
+    export PANEL_UPDATE_SCRIPT_REEXECUTED=true
+    exec bash "$SCRIPT_PATH"
   fi
 }
 
@@ -294,6 +319,7 @@ printf '%s\n' "$$" > "$PID_FILE"
 
 log "starting panel self-update in $APP_DIR on branch $BRANCH"
 write_status "running" "panel self-update started" "$(current_commit)" "$(current_commit_subject)"
+SCRIPT_CHECKSUM_BEFORE_PULL="$(file_checksum "$SCRIPT_PATH")"
 
 patch_nginx_websocket() {
   if [[ ! -f "$NGINX_CONF" ]]; then
@@ -335,6 +361,7 @@ fi
 
 run git checkout "$BRANCH"
 run git pull --ff-only origin "$BRANCH"
+reexec_if_script_changed "$SCRIPT_CHECKSUM_BEFORE_PULL"
 NEW_COMMIT="$(current_commit)"
 NEW_COMMIT_SUBJECT="$(current_commit_subject)"
 write_status "running" "source updated; building panel" "$NEW_COMMIT" "$NEW_COMMIT_SUBJECT"
