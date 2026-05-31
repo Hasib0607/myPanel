@@ -19,7 +19,7 @@ type DeployStep = "PREFLIGHT" | "CLONING" | "INSTALLING" | "MIGRATING" | "BUILDI
 const buildLogRetentionMs = 24 * 60 * 60 * 1000;
 const deploymentWorkerInclude = Prisma.validator<Prisma.DeploymentInclude>()({
   domain: true,
-  domainBindings: { include: { domain: true }, orderBy: [{ role: "asc" }, { createdAt: "asc" }] },
+  domainBindings: { include: { domain: true, subdomain: { include: { domain: true } } }, orderBy: [{ role: "asc" }, { createdAt: "asc" }] },
   env: true
 });
 
@@ -245,16 +245,31 @@ function deploymentAppPath(rootPath: string, rootDirectory: string | null | unde
   return cleanRootDirectory && cleanRootDirectory !== "." ? path.join(rootPath, cleanRootDirectory) : rootPath;
 }
 
-type BoundDomain = { id: string; name: string; forceSsl: boolean; documentRoot?: string | null };
+type BoundDomain = { id: string; name: string; forceSsl: boolean; documentRoot?: string | null; includeWww?: boolean };
 
-function deploymentServerName(domain: { name: string } | null | undefined) {
+function deploymentServerName(domain: { name: string; includeWww?: boolean } | null | undefined) {
   if (!domain?.name) return null;
+  if (domain.includeWww === false) return domain.name;
   return `${domain.name} www.${domain.name}`;
 }
 
-function deploymentDomain(deployment: { domain?: BoundDomain | null; domainBindings?: Array<{ role: string; domain: BoundDomain }> }) {
-  return deployment.domainBindings?.find((binding) => binding.role === "primary")?.domain
-    ?? deployment.domainBindings?.[0]?.domain
+function boundDomainFromBinding(binding: { domain?: BoundDomain | null; subdomain?: { id: string; name: string; sslEnabled: boolean; domain: { name: string; documentRoot?: string | null } } | null }) {
+  if (binding.subdomain) {
+    return {
+      id: `subdomain:${binding.subdomain.id}`,
+      name: `${binding.subdomain.name}.${binding.subdomain.domain.name}`,
+      forceSsl: binding.subdomain.sslEnabled,
+      documentRoot: binding.subdomain.domain.documentRoot,
+      includeWww: false
+    };
+  }
+  return binding.domain ?? null;
+}
+
+function deploymentDomain(deployment: { domain?: BoundDomain | null; domainBindings?: Array<{ role: string; domain?: BoundDomain | null; subdomain?: { id: string; name: string; sslEnabled: boolean; domain: { name: string; documentRoot?: string | null } } | null }> }) {
+  const primary = deployment.domainBindings?.find((binding) => binding.role === "primary");
+  return (primary ? boundDomainFromBinding(primary) : null)
+    ?? (deployment.domainBindings?.[0] ? boundDomainFromBinding(deployment.domainBindings[0]) : null)
     ?? deployment.domain
     ?? null;
 }
@@ -315,7 +330,7 @@ function deploymentEnvWithPublicUrl(envVars: Record<string, string>, domain: Bou
 }
 
 async function ensureDeploymentDomainProxy(deploymentId: string, domain: BoundDomain | null) {
-  if (!domain) return;
+  if (!domain || domain.id.startsWith("subdomain:")) return;
   await prisma.domain.update({
     where: { id: domain.id },
     data: {
@@ -609,7 +624,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     if (domain?.forceSsl) {
       await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "SSL request", () =>
         sslQueue.add("issue", {
-          domainId: domain.id,
+          domainId: domain.id.startsWith("subdomain:") ? null : domain.id,
           domain: domain.name,
           email: `admin@${domain.name}`,
           source: "deployment"

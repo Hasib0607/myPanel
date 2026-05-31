@@ -351,6 +351,7 @@ model Subdomain {
   target     String
   sslEnabled Boolean @default(false) @map("ssl_enabled")
   domain     Domain  @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  deploymentBindings DeploymentDomain[]
 
   @@unique([domainId, name])
   @@map("subdomains")
@@ -516,14 +517,18 @@ model DeploymentDoctorApproval {
 model DeploymentDomain {
   id           String     @id @default(cuid())
   deploymentId String     @map("deployment_id")
-  domainId     String     @map("domain_id")
+  domainId     String?    @map("domain_id")
+  subdomainId  String?    @map("subdomain_id")
   role         String     @default("alias")
   createdAt    DateTime   @default(now()) @map("created_at")
   deployment   Deployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
-  domain       Domain     @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  domain       Domain?    @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  subdomain    Subdomain? @relation(fields: [subdomainId], references: [id], onDelete: Cascade)
 
   @@unique([deploymentId, domainId])
+  @@unique([deploymentId, subdomainId])
   @@index([domainId])
+  @@index([subdomainId])
   @@map("deployment_domains")
 }
 

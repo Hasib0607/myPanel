@@ -11,7 +11,8 @@ import { ResultNotice, actionIcon, formatDate, healthBadge, queryString, statusB
 type GithubRepo = { id?: string; owner: string; name: string; fullName: string; private: boolean; defaultBranch: string; updatedAt?: string };
 type GithubRepoResponse = { connected: boolean; dryRun: boolean; items: GithubRepo[]; note?: string };
 type GithubDetectResponse = DetectionResponse & { repository: string; dryRun: boolean };
-type Domain = { id: string; name: string };
+type Domain = { id: string; name: string; subdomains?: Array<{ id: string; name: string }> };
+type DomainOption = { id: string; name: string };
 type DomainListResponse = { items: Domain[] };
 type LogType = "build" | "running";
 
@@ -125,6 +126,16 @@ function draftFromDeployment(deployment: Deployment): Draft {
     dbType: deployment.dbType ?? "",
     autoDeployEnabled: deployment.autoDeployEnabled
   };
+}
+
+function domainOptions(domains: Domain[]): DomainOption[] {
+  return domains.flatMap((domain) => [
+    { id: domain.id, name: domain.name },
+    ...(domain.subdomains ?? []).map((subdomain) => ({
+      id: `subdomain:${subdomain.id}`,
+      name: `${subdomain.name}.${domain.name}`
+    }))
+  ]).sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function okNotice(message: string) {
@@ -486,7 +497,7 @@ export function DeploymentsClient() {
 
               <div className="min-h-0 flex-1 overflow-auto p-5">
                 {activeTab === "overview" ? <OverviewPanel deployment={selected} /> : null}
-                {activeTab === "domains" ? <DomainsPanel deployment={selected} domains={domains.data?.items ?? []} domainToAdd={domainToAdd} setDomainToAdd={setDomainToAdd} addDomain={() => addDomain.mutate()} setPrimary={(binding) => setPrimaryDomain.mutate(binding)} removeDomain={(binding) => removeDomain.mutate(binding)} /> : null}
+                {activeTab === "domains" ? <DomainsPanel deployment={selected} domains={domainOptions(domains.data?.items ?? [])} domainToAdd={domainToAdd} setDomainToAdd={setDomainToAdd} addDomain={() => addDomain.mutate()} setPrimary={(binding) => setPrimaryDomain.mutate(binding)} removeDomain={(binding) => removeDomain.mutate(binding)} /> : null}
                 {activeTab === "env" ? <EnvPanel deployment={selected} envKey={envKey} envValue={envValue} envSecret={envSecret} setEnvKey={setEnvKey} setEnvValue={setEnvValue} setEnvSecret={setEnvSecret} saveEnv={() => saveEnv.mutate()} savingEnv={saveEnv.isPending} removeEnv={(key) => removeEnv.mutate(key)} /> : null}
                 {activeTab === "settings" ? <SettingsPanel deployment={selected} deleteText={deleteText} setDeleteText={setDeleteText} onEdit={openEdit} onDelete={() => deleteProject.mutate()} deleting={deleteProject.isPending} /> : null}
               </div>
@@ -495,8 +506,8 @@ export function DeploymentsClient() {
         </main>
       </div>
 
-      {createOpen ? <ProjectModal title="Create Project" draft={draft} setDraft={setDraft} domains={domains.data?.items ?? []} onClose={() => setCreateOpen(false)} onDetect={() => detect.mutate("create")} onSubmit={() => createDeployment.mutate()} submitLabel="Create" busy={createDeployment.isPending} openGithub={() => setRepoPickerOpen(true)} /> : null}
-      {editingOpen ? <ProjectModal title="Edit Project" draft={editDraft} setDraft={setEditDraft} domains={domains.data?.items ?? []} onClose={() => setEditingOpen(false)} onDetect={() => detect.mutate("edit")} onSubmit={() => updateDeployment.mutate()} submitLabel="Save changes" busy={updateDeployment.isPending} openGithub={() => setRepoPickerOpen(true)} /> : null}
+      {createOpen ? <ProjectModal title="Create Project" draft={draft} setDraft={setDraft} domains={domainOptions(domains.data?.items ?? [])} onClose={() => setCreateOpen(false)} onDetect={() => detect.mutate("create")} onSubmit={() => createDeployment.mutate()} submitLabel="Create" busy={createDeployment.isPending} openGithub={() => setRepoPickerOpen(true)} /> : null}
+      {editingOpen ? <ProjectModal title="Edit Project" draft={editDraft} setDraft={setEditDraft} domains={domainOptions(domains.data?.items ?? [])} onClose={() => setEditingOpen(false)} onDetect={() => detect.mutate("edit")} onSubmit={() => updateDeployment.mutate()} submitLabel="Save changes" busy={updateDeployment.isPending} openGithub={() => setRepoPickerOpen(true)} /> : null}
       {repoPickerOpen ? <GithubModal repos={repos.data} loading={repos.isLoading} repoSearch={repoSearch} setRepoSearch={setRepoSearch} connection={githubConnection.data} githubToken={githubToken} setGithubToken={setGithubToken} githubUsername={githubUsername} setGithubUsername={setGithubUsername} saveToken={() => saveGithubToken.mutate()} savingToken={saveGithubToken.isPending} onClose={() => setRepoPickerOpen(false)} onDeploy={(repo) => importAndDeployGithub.mutate(repo)} deploying={importAndDeployGithub.isPending} /> : null}
       {logModalOpen ? <LogsModal title={logTitle} text={logText} onCopy={copyLogText} onClose={() => setLogModalOpen(false)} /> : null}
     </section>
@@ -524,7 +535,7 @@ function ProjectCard({ deployment, active, onSelect }: { deployment: Deployment;
   );
 }
 
-function ProjectModal({ title, draft, setDraft, domains, onClose, onDetect, onSubmit, submitLabel, busy, openGithub }: { title: string; draft: Draft; setDraft: (draft: Draft) => void; domains: Domain[]; onClose: () => void; onDetect: () => void; onSubmit: () => void; submitLabel: string; busy?: boolean; openGithub: () => void }) {
+function ProjectModal({ title, draft, setDraft, domains, onClose, onDetect, onSubmit, submitLabel, busy, openGithub }: { title: string; draft: Draft; setDraft: (draft: Draft) => void; domains: DomainOption[]; onClose: () => void; onDetect: () => void; onSubmit: () => void; submitLabel: string; busy?: boolean; openGithub: () => void }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-6">
       <div className="flex max-h-[88vh] w-full max-w-3xl flex-col rounded-md border border-panel-line bg-white shadow-xl">
@@ -540,7 +551,7 @@ function ProjectModal({ title, draft, setDraft, domains, onClose, onDetect, onSu
   );
 }
 
-function DeploymentFormFields({ value, onChange, domains }: { value: Draft; onChange: (next: Draft) => void; domains: Domain[] }) {
+function DeploymentFormFields({ value, onChange, domains }: { value: Draft; onChange: (next: Draft) => void; domains: DomainOption[] }) {
   return <div className="space-y-4">
     <div className="grid grid-cols-2 gap-3"><Input label="Project name" value={value.name} onChange={(name) => onChange({ ...value, name, slug: value.slug || slugify(name) })} /><Input label="Slug" value={value.slug} onChange={(slug) => onChange({ ...value, slug })} /></div>
     <label className="space-y-1 text-xs font-medium text-panel-muted">Primary domain<select className="h-9 w-full rounded-md border border-panel-line px-2 text-sm text-panel-ink" onChange={(event) => onChange({ ...value, domainId: event.target.value })} value={value.domainId}><option value="">No domain</option>{domains.map((domain) => <option key={domain.id} value={domain.id}>{domain.name}</option>)}</select></label>
@@ -566,7 +577,7 @@ function Metric({ label, value }: { label: string; value: string }) {
   return <div className="rounded-md border border-panel-line p-4"><div className="text-xs uppercase text-panel-muted">{label}</div><div className="mt-3 truncate text-sm font-semibold">{value}</div></div>;
 }
 
-function DomainsPanel({ deployment, domains, domainToAdd, setDomainToAdd, addDomain, setPrimary, removeDomain }: { deployment: Deployment; domains: Domain[]; domainToAdd: string; setDomainToAdd: (id: string) => void; addDomain: () => void; setPrimary: (binding: DeploymentDomainBinding) => void; removeDomain: (binding: DeploymentDomainBinding) => void }) {
+function DomainsPanel({ deployment, domains, domainToAdd, setDomainToAdd, addDomain, setPrimary, removeDomain }: { deployment: Deployment; domains: DomainOption[]; domainToAdd: string; setDomainToAdd: (id: string) => void; addDomain: () => void; setPrimary: (binding: DeploymentDomainBinding) => void; removeDomain: (binding: DeploymentDomainBinding) => void }) {
   const boundIds = new Set((deployment.domainBindings ?? []).map((binding) => binding.domainId));
   return <div className="space-y-4"><div className="flex gap-2"><select className="h-10 min-w-72 rounded-md border border-panel-line px-2 text-sm" onChange={(event) => setDomainToAdd(event.target.value)} value={domainToAdd}><option value="">Select domain</option>{domains.filter((domain) => !boundIds.has(domain.id)).map((domain) => <option key={domain.id} value={domain.id}>{domain.name}</option>)}</select><button className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={!domainToAdd} onClick={addDomain} type="button"><Plus size={15} />Add domain</button></div><div className="overflow-hidden rounded-md border border-panel-line">{(deployment.domainBindings ?? []).map((binding) => <div className="flex items-center justify-between border-b border-panel-line p-3 last:border-b-0" key={binding.id}><div><div className="font-semibold">{binding.domain.name}</div><div className="text-xs text-panel-muted">{binding.role}</div></div><div className="flex gap-2"><button className="h-8 rounded-md border border-panel-line px-2 text-xs" disabled={binding.role === "primary"} onClick={() => setPrimary(binding)} type="button">Make primary</button><button className="h-8 rounded-md border border-panel-line px-2 text-xs text-panel-danger" onClick={() => removeDomain(binding)} type="button">Remove</button></div></div>)}{(deployment.domainBindings ?? []).length === 0 ? <div className="p-8 text-center text-sm text-panel-muted">No domains attached.</div> : null}</div></div>;
 }
