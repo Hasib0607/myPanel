@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.command import run_command, run_install_plan
+from app.config import panel_env_path, reload_panel_env, settings
 from app.platform import current_os, install_plan_for, platform_summary, service_unit
 from app.service_registry import service_checks
 
@@ -18,7 +19,23 @@ class ServiceActionRequest(BaseModel):
 
 @router.get("/platform")
 def platform() -> dict:
-    return platform_summary(current_os())
+    summary = platform_summary(current_os())
+    summary["liveSystemCommandsEnabled"] = settings.allow_live_system_commands
+    summary["panelEnvPath"] = str(panel_env_path()) if panel_env_path() else None
+    return summary
+
+
+@router.post("/reload-env")
+def reload_env() -> dict:
+    path = reload_panel_env()
+    return {
+        "reloaded": path is not None,
+        "panelEnvPath": str(path) if path else None,
+        "liveSystemCommandsEnabled": settings.allow_live_system_commands,
+        "liveFileManagerEnabled": settings.allow_live_file_manager,
+        "liveNginxEnabled": settings.allow_live_nginx,
+        "liveSslEnabled": settings.allow_live_ssl,
+    }
 
 
 @router.get("/stats")

@@ -45,6 +45,8 @@ export const sysagent = {
   pruneBackups: (body: unknown) =>
     request<{ kept: number; removed: string[]; result: SysagentCommandResult }>("/backup/prune", { method: "POST", body: JSON.stringify(body) }),
   guardianDiagnosis: () => request("/guardian/diagnosis"),
+  reloadPanelEnv: () =>
+    request<{ reloaded: boolean; liveSystemCommandsEnabled: boolean; panelEnvPath?: string | null }>("/system/reload-env", { method: "POST" }),
   guardianRestartService: (serviceKey: string) =>
     request("/guardian/actions/restart-service", { method: "POST", body: JSON.stringify({ serviceKey }) }),
   guardianRestartPm2: (body: { name?: string; pmId?: number }) =>

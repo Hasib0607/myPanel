@@ -265,6 +265,8 @@ ensure_live_sysagent_config() {
     return 0
   fi
 
+  ln -sfn ../.env "$APP_DIR/sysagent/.env"
+
   current="$(grep -E '^ALLOW_LIVE_SYSTEM_COMMANDS=' "$file" | tail -n 1 | cut -d= -f2- || true)"
   if [[ "$current" != "true" ]]; then
     log "enabling ALLOW_LIVE_SYSTEM_COMMANDS=true for deploy/start/repair commands"

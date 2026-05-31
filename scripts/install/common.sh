@@ -322,7 +322,8 @@ EOF
   chmod 0640 "$APP_DIR/.env"
   ln -sfn ../.env "$APP_DIR/api/.env"
   ln -sfn ../.env "$APP_DIR/frontend/.env.production"
-  chown -h "$APP_USER:$APP_USER" "$APP_DIR/api/.env" "$APP_DIR/frontend/.env.production"
+  ln -sfn ../.env "$APP_DIR/sysagent/.env"
+  chown -h "$APP_USER:$APP_USER" "$APP_DIR/api/.env" "$APP_DIR/frontend/.env.production" "$APP_DIR/sysagent/.env"
 }
 
 prepare_runtime_directories() {

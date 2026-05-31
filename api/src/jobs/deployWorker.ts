@@ -232,12 +232,15 @@ async function setPanelEnvValue(key: string, value: string) {
   return { envPath, changed: next !== current };
 }
 
-async function systemctlRestart(service: string) {
+async function systemctlRestart(service: string, noBlock = false) {
   const candidates = ["/usr/bin/systemctl", "/bin/systemctl", "systemctl"];
   let lastError: unknown = null;
   for (const systemctl of candidates) {
     try {
-      return await execFileAsync("sudo", ["-n", systemctl, "--no-block", "restart", service], { timeout: 10_000 });
+      const args = noBlock
+        ? ["-n", systemctl, "--no-block", "restart", service]
+        : ["-n", systemctl, "restart", service];
+      return await execFileAsync("sudo", args, { timeout: 60_000 });
     } catch (error) {
       lastError = error;
       const code = (error as { code?: string }).code;
@@ -252,20 +255,47 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitForSysagentLiveCommandsEnabled(maxAttempts = 20) {
+  let lastDiagnosis: SysagentLiveDiagnosis | null = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    await sleep(1000);
+    lastDiagnosis = await sysagent.guardianDiagnosis() as SysagentLiveDiagnosis;
+    if (!sysagentLiveCommandsDisabled(lastDiagnosis)) {
+      return { attempt, diagnosis: lastDiagnosis };
+    }
+  }
+  throw new Error(`Sysagent live commands still disabled after ${maxAttempts} seconds`);
+}
+
 async function repairSysagentLiveCommands() {
   const envResults = [];
   envResults.push(await setPanelEnvValue("ALLOW_LIVE_SYSTEM_COMMANDS", "true"));
   envResults.push(await setPanelEnvValue("ALLOW_LIVE_FILE_MANAGER", "true"));
   envResults.push(await setPanelEnvValue("ALLOW_LIVE_NGINX", "true"));
   envResults.push(await setPanelEnvValue("ALLOW_LIVE_SSL", "true"));
+
+  let reload: { reloaded: boolean; liveSystemCommandsEnabled: boolean; panelEnvPath?: string | null } | null = null;
+  try {
+    reload = await sysagent.reloadPanelEnv();
+  } catch {
+    reload = { reloaded: false, liveSystemCommandsEnabled: false };
+  }
+
+  if (reload.liveSystemCommandsEnabled) {
+    const liveReady = await waitForSysagentLiveCommandsEnabled();
+    return { envResults, reload, liveReady };
+  }
+
   const restart = await systemctlRestart("vps-panel-sysagent");
-  await sleep(3000);
+  const liveReady = await waitForSysagentLiveCommandsEnabled();
   return {
     envResults,
+    reload,
     restart: {
       stdout: restart.stdout,
       stderr: restart.stderr
-    }
+    },
+    liveReady
   };
 }
 
@@ -288,17 +318,12 @@ async function assertSysagentLiveCommandsEnabled(deploymentId: string, releaseId
   try {
     await repairSysagentLiveCommandsForDeployment(deploymentId, releaseId, "diagnosis reported live commands disabled");
     await writeLog(deploymentId, releaseId, "PREFLIGHT", "Sysagent live command mode repaired; rechecking");
-    for (let attempt = 1; attempt <= 8; attempt += 1) {
-      await sleep(1500);
-      diagnosis = await sysagent.guardianDiagnosis() as SysagentLiveDiagnosis;
-      if (!sysagentLiveCommandsDisabled(diagnosis)) {
-        await writeLog(deploymentId, releaseId, "PREFLIGHT", "Sysagent live command preflight passed after repair", {
-          attempt,
-          config: diagnosis.config ?? null
-        });
-        return diagnosis;
-      }
-    }
+    const liveReady = await waitForSysagentLiveCommandsEnabled();
+    await writeLog(deploymentId, releaseId, "PREFLIGHT", "Sysagent live command preflight passed after repair", {
+      attempt: liveReady.attempt,
+      config: liveReady.diagnosis.config ?? null
+    });
+    return liveReady.diagnosis;
   } catch (error) {
     await writeLog(deploymentId, releaseId, "PREFLIGHT", "Sysagent live command auto-repair failed", {
       error: error instanceof Error ? error.message : String(error)
@@ -322,6 +347,7 @@ async function runLiveDeploymentProcess(
   }, "warn");
   try {
     await repairSysagentLiveCommandsForDeployment(deploymentId, releaseId, `${label} returned dry-run`);
+    await waitForSysagentLiveCommandsEnabled();
     result = await runStep(deploymentId, releaseId, "STARTING", `${label} retry after sysagent live repair`, () =>
       sysagent.deploymentProcess(body)
     );
