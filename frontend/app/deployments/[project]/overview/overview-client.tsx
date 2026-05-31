@@ -36,9 +36,9 @@ export function DeploymentOverviewClient({ project }: { project: string }) {
     onError: (error) => setNotice(error instanceof Error ? error.message : "Action failed")
   });
   const repair = useMutation({
-    mutationFn: (name: "auto" | "sync-runtime" | "health" | "restart" | "redeploy" | "set-node-memory" | "sync-public-env") => apiPost(`/deployments/${project}/doctor/repair`, { action: name }),
-    onSuccess: async (_result, name) => {
-      setNotice(`Doctor ${name} repair requested.`);
+    mutationFn: (name: "auto" | "sync-runtime" | "health" | "restart" | "redeploy" | "rollback" | "set-node-memory" | "sync-public-env" | "request-approval") => apiPost<any>(`/deployments/${project}/doctor/repair`, { action: name }),
+    onSuccess: async (result, name) => {
+      setNotice(result?.approvalRequired ? "Risky fix added to approval log." : `Doctor ${name} repair requested.`);
       await Promise.all([
         invalidate(),
         queryClient.invalidateQueries({ queryKey: ["deployment-doctor", project] })
@@ -111,7 +111,7 @@ export function DeploymentOverviewClient({ project }: { project: string }) {
                             <button
                               className="shrink-0 rounded-md border border-panel-line bg-white px-2 py-1 text-xs font-medium hover:bg-slate-50 disabled:opacity-50"
                               disabled={repair.isPending}
-                              onClick={() => repair.mutate(check.repairAction as "sync-runtime" | "health" | "restart" | "redeploy" | "set-node-memory" | "sync-public-env")}
+                              onClick={() => repair.mutate(check.repairAction as "sync-runtime" | "health" | "restart" | "redeploy" | "rollback" | "set-node-memory" | "sync-public-env" | "request-approval")}
                               type="button"
                             >
                               {check.repairAction}
@@ -139,6 +139,33 @@ export function DeploymentOverviewClient({ project }: { project: string }) {
                             >
                               Apply
                             </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                  {(doctor.data.riskyActions ?? []).length ? (
+                    <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <div className="text-xs font-semibold uppercase text-amber-800">Approval Required</div>
+                          <div className="mt-1 text-xs text-amber-900">These fixes change server packages, permissions, Supervisor, or Nginx routing.</div>
+                        </div>
+                        <button
+                          className="rounded-md border border-amber-300 bg-white px-2 py-1 text-xs font-semibold text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+                          disabled={repair.isPending}
+                          onClick={() => repair.mutate("request-approval")}
+                          type="button"
+                        >
+                          Request Approval
+                        </button>
+                      </div>
+                      <div className="mt-3 grid gap-2">
+                        {doctor.data.riskyActions.map((item) => (
+                          <div className="rounded-md border border-amber-200 bg-white p-2 text-xs" key={item.key}>
+                            <div className="font-semibold">{item.label}</div>
+                            <div className="mt-1 text-amber-900">{item.reason}</div>
+                            <code className="mt-2 block break-words rounded bg-slate-950 p-2 font-mono text-slate-100">{item.command}</code>
                           </div>
                         ))}
                       </div>

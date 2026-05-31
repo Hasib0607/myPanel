@@ -47,6 +47,7 @@ Implemented Phase 1 foundation:
 - Guardian critical actions now include manual safe restart controls for PostgreSQL, PgBouncer, Nginx, and panel services, direct Nginx config-test reload, action history records, notifications, audit logs, and post-action diagnosis rechecks.
 - Phase 4 started with a Deployment Doctor that auto-detects runtime drift, source/root issues, port conflicts, PM2/start command health, recent build/runtime error patterns, and public Nginx route problems, then offers safe repairs such as sync runtime commands, health recheck, restart, or redeploy.
 - Phase 4 slice 2 added Doctor evidence snippets, env fix suggestions, safe NODE_OPTIONS memory-cap repair, and public URL env sync for apps that redirect/generate localhost URLs.
+- Phase 4 slice 3/4 added richer build-error parsing, missing runtime tool detection, database checks, Nginx upstream inspection, Supervisor health validation, rollback suggestions, approval-required risky fix previews, and scheduled deployment health watch jobs.
 
 ## Current VPS Deployment Blockers
 

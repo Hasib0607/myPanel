@@ -79,7 +79,7 @@ const detectSchema = z.object({
   files: z.array(z.string()).optional()
 });
 const doctorRepairSchema = z.object({
-  action: z.enum(["auto", "sync-runtime", "health", "restart", "redeploy", "set-node-memory", "sync-public-env"])
+  action: z.enum(["auto", "sync-runtime", "health", "restart", "redeploy", "rollback", "set-node-memory", "sync-public-env", "request-approval"])
 });
 
 const preflightSchema = z.object({
@@ -459,15 +459,40 @@ function commandDetail(value: unknown) {
   return result?.stderr || result?.reason || result?.stdout || (typeof result?.returncode === "number" ? `exit ${result.returncode}` : "");
 }
 
-function knownErrorHint(text: string): { message: string; repairAction: "set-node-memory" | "sync-public-env" | "redeploy" | "restart" } | null {
+function knownErrorHint(text: string): { message: string; repairAction: "set-node-memory" | "sync-public-env" | "redeploy" | "restart"; category: string } | null {
   const lower = text.toLowerCase();
-  if (lower.includes("cannot find module") || lower.includes("module_not_found")) return { message: "Missing package or wrong build output. Run dependency install, verify package.json, then redeploy.", repairAction: "redeploy" };
-  if (lower.includes("eaddrinuse") || lower.includes("address already in use")) return { message: "Port conflict. Let the doctor redeploy so the worker can move the app to a free managed port.", repairAction: "redeploy" };
-  if (lower.includes("heap out of memory") || lower.includes("javascript heap out of memory") || lower.includes("sigkill") || lower.includes("killed")) return { message: "Server memory pressure. Add a Node memory cap and redeploy; if it repeats, add swap on the VPS.", repairAction: "set-node-memory" };
-  if (lower.includes("permission denied") || lower.includes("eacces")) return { message: "File permission issue. Ensure the panel user owns the deployment directory and runtime log directory.", repairAction: "redeploy" };
-  if (lower.includes("env") && (lower.includes("missing") || lower.includes("required"))) return { message: "Missing environment variable. Add required env keys in the deployment Env tab, then redeploy.", repairAction: "redeploy" };
-  if (lower.includes("localhost") || lower.includes("127.0.0.1")) return { message: "App may be generating internal localhost URLs. Sync public URL env values to the linked domain.", repairAction: "sync-public-env" };
+  if (lower.includes("eresolve") || lower.includes("unable to resolve dependency tree") || lower.includes("peer dep")) return { message: "NPM dependency resolution failed. Review peer dependencies or use a compatible lockfile before redeploying.", repairAction: "redeploy", category: "npm_peer_dependency" };
+  if (lower.includes("package-lock.json") && lower.includes("yarn.lock")) return { message: "Multiple lockfiles detected. Keep one package manager lockfile to avoid inconsistent installs.", repairAction: "redeploy", category: "lockfile_conflict" };
+  if (lower.includes("unsupported engine") || lower.includes("node version") || lower.includes("requires node")) return { message: "Node version mismatch. Set a compatible runtime version or update the app engines field.", repairAction: "redeploy", category: "node_version" };
+  if (lower.includes("prisma") && (lower.includes("migration") || lower.includes("p100") || lower.includes("database"))) return { message: "Prisma/database migration failed. Check DATABASE_URL, database grants, and migration state.", repairAction: "redeploy", category: "prisma_migration" };
+  if (lower.includes("composer") && (lower.includes("ext-") || lower.includes("requires php extension"))) return { message: "Composer is missing a required PHP extension. Install the extension on the VPS, then redeploy.", repairAction: "redeploy", category: "php_extension" };
+  if (lower.includes("cannot find module") || lower.includes("module_not_found")) return { message: "Missing package or wrong build output. Run dependency install, verify package.json, then redeploy.", repairAction: "redeploy", category: "missing_module" };
+  if (lower.includes("eaddrinuse") || lower.includes("address already in use")) return { message: "Port conflict. Let the doctor redeploy so the worker can move the app to a free managed port.", repairAction: "redeploy", category: "port_conflict" };
+  if (lower.includes("heap out of memory") || lower.includes("javascript heap out of memory") || lower.includes("sigkill") || lower.includes("killed")) return { message: "Server memory pressure. Add a Node memory cap and redeploy; if it repeats, add swap on the VPS.", repairAction: "set-node-memory", category: "memory" };
+  if (lower.includes("permission denied") || lower.includes("eacces")) return { message: "File permission issue. Ensure the panel user owns the deployment directory and runtime log directory.", repairAction: "redeploy", category: "permission" };
+  if (lower.includes("env") && (lower.includes("missing") || lower.includes("required"))) return { message: "Missing environment variable. Add required env keys in the deployment Env tab, then redeploy.", repairAction: "redeploy", category: "missing_env" };
+  if (lower.includes("localhost") || lower.includes("127.0.0.1")) return { message: "App may be generating internal localhost URLs. Sync public URL env values to the linked domain.", repairAction: "sync-public-env", category: "localhost_url" };
   return null;
+}
+
+function toolsForDeployment(deployment: Awaited<ReturnType<typeof findDeployment>>, detection: Awaited<ReturnType<typeof detectDeploymentSource>> | null) {
+  const tools = new Set<string>();
+  const packageManager = detection?.suggestions.packageManager ?? deployment.packageManager;
+  if (packageManager === "NPM") tools.add("npm");
+  if (packageManager === "PNPM") tools.add("pnpm");
+  if (packageManager === "YARN") tools.add("yarn");
+  if (packageManager === "COMPOSER") tools.add("composer");
+  if (packageManager === "PIP") tools.add("pip");
+  if (packageManager === "UV") tools.add("uv");
+  if (packageManager === "GO") tools.add("go");
+  const runtime = detection?.suggestions.runtime ?? deployment.runtime;
+  if (runtime === "NODE") tools.add("node");
+  if (runtime === "PHP") tools.add("php");
+  if (runtime === "PYTHON") tools.add("python3");
+  if (runtime === "GO") tools.add("go");
+  if ((deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework]) === "PM2") tools.add("pm2");
+  if ((deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework]) === "SUPERVISOR") tools.add("supervisorctl");
+  return [...tools];
 }
 
 function isLocalhostValue(value: string | null | undefined) {
@@ -556,6 +581,7 @@ async function syncDeploymentRuntime(deployment: Awaited<ReturnType<typeof findD
 async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeployment>>) {
   const checks: Array<{ key: string; label: string; status: "pass" | "warn" | "fail"; detail: string; fix?: string; repairAction?: string }> = [];
   const envSuggestions: Array<{ key: string; value: string; reason: string; repairAction: string }> = [];
+  const riskyActions: Array<{ key: string; label: string; command: string; reason: string; approvalRequired: true }> = [];
   const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
   const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
   const domain = deployment.domainBindings?.find((binding) => binding.role === "primary")?.domain ?? deployment.domainBindings?.[0]?.domain ?? deployment.domain;
@@ -611,6 +637,34 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
     checks.push({ key: "start_command", label: "Start command", status: "pass", detail: deployment.startCommand || detection?.suggestions.startCommand || "Static deployment" });
   }
 
+  const requiredTools = toolsForDeployment(deployment, detection);
+  let toolsResult: Awaited<ReturnType<typeof sysagent.deploymentRuntimeTools>> | null = null;
+  if (requiredTools.length) {
+    try {
+      toolsResult = await sysagent.deploymentRuntimeTools({ tools: requiredTools });
+      const missing = toolsResult.items.filter((tool) => !tool.installed);
+      checks.push({
+        key: "runtime_tools",
+        label: "Runtime tools",
+        status: missing.length ? "fail" : "pass",
+        detail: missing.length ? `Missing ${missing.map((tool) => tool.name).join(", ")}` : `Installed: ${toolsResult.items.map((tool) => tool.name).join(", ")}`,
+        fix: missing.length ? "Install missing runtime tools on the VPS, then redeploy." : undefined,
+        repairAction: missing.length ? "request-approval" : undefined
+      });
+      for (const tool of missing) {
+        riskyActions.push({
+          key: `install-${tool.name}`,
+          label: `Install ${tool.name}`,
+          command: tool.name === "pnpm" ? "npm install -g pnpm" : tool.name === "yarn" ? "npm install -g yarn" : `apt install ${tool.name}`,
+          reason: `${tool.name} is required for this deployment but is not available on the server.`,
+          approvalRequired: true
+        });
+      }
+    } catch (error) {
+      checks.push({ key: "runtime_tools", label: "Runtime tools", status: "warn", detail: error instanceof Error ? error.message : "Could not inspect runtime tools" });
+    }
+  }
+
   const policyError = deploymentPortPolicyError(deployment.port);
   const dbOwner = await prisma.deployment.findFirst({ where: { port: deployment.port, id: { not: deployment.id } }, select: { name: true, slug: true } });
   let livePort: unknown = null;
@@ -645,6 +699,68 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
     repairAction: healthDown ? "restart" : undefined
   });
 
+  if (deployment.dbType) {
+    const envKeys = new Set(deployment.env.map((item) => item.key));
+    const missingDbMeta = !deployment.dbName || !deployment.dbUser || !deployment.dbPasswordSecretRef;
+    let dbDetail = missingDbMeta ? "Database name, user, or password secret is missing." : `${deployment.dbType} metadata is configured.`;
+    let dbStatus: "pass" | "warn" | "fail" = missingDbMeta ? "fail" : "pass";
+    try {
+      const overview = await sysagent.databaseOverview() as { engines?: Array<{ engine: string; installed: boolean; databases: Array<{ name: string }>; users: Array<{ name: string }> }> };
+      const engine = overview.engines?.find((item) => item.engine === deployment.dbType);
+      const dbExists = Boolean(engine?.databases?.some((item) => item.name === deployment.dbName));
+      const userExists = Boolean(engine?.users?.some((item) => item.name === deployment.dbUser));
+      if (!engine?.installed) {
+        dbStatus = "fail";
+        dbDetail = `${deployment.dbType} service or CLI is not reachable.`;
+      } else if (!dbExists || !userExists) {
+        dbStatus = "fail";
+        dbDetail = `${deployment.dbName ?? "database"} ${dbExists ? "exists" : "is missing"}, ${deployment.dbUser ?? "user"} ${userExists ? "exists" : "is missing"}.`;
+      }
+    } catch (error) {
+      dbStatus = dbStatus === "fail" ? "fail" : "warn";
+      dbDetail = error instanceof Error ? error.message : "Could not inspect deployment database.";
+    }
+    if (!envKeys.has("DATABASE_URL")) {
+      dbStatus = dbStatus === "fail" ? "fail" : "warn";
+      dbDetail += " DATABASE_URL env is not configured.";
+    }
+    checks.push({
+      key: "database",
+      label: "Database",
+      status: dbStatus,
+      detail: dbDetail,
+      fix: dbStatus !== "pass" ? "Provision database credentials and set DATABASE_URL before redeploying." : undefined,
+      repairAction: dbStatus !== "pass" ? "request-approval" : undefined
+    });
+    if (dbStatus !== "pass") {
+      riskyActions.push({
+        key: "database-provision",
+        label: "Provision/fix deployment database",
+        command: `create/grant ${deployment.dbType} database ${deployment.dbName ?? "<db>"} for ${deployment.dbUser ?? "<user>"} and set DATABASE_URL`,
+        reason: "Database creation/grants and secrets affect application data access and require admin approval.",
+        approvalRequired: true
+      });
+    }
+  }
+
+  if (processManager === "SUPERVISOR") {
+    riskyActions.push({
+      key: "supervisor-config",
+      label: "Rewrite Supervisor config",
+      command: `supervisorctl reread && supervisorctl update && supervisorctl restart ${deployment.slug}`,
+      reason: "Supervisor-backed deployments may need a generated program config before start/restart can be trusted.",
+      approvalRequired: true
+    });
+    checks.push({
+      key: "supervisor",
+      label: "Supervisor readiness",
+      status: healthDown ? "warn" : "pass",
+      detail: healthDown ? "Supervisor process/config may need admin-approved rewrite." : "Supervisor-backed health check passed.",
+      fix: healthDown ? "Approve Supervisor config rewrite after reviewing the generated command." : undefined,
+      repairAction: healthDown ? "request-approval" : undefined
+    });
+  }
+
   let runtimeLogs = "";
   try {
     const logs = await sysagent.deploymentRuntimeLogs({ name: deployment.slug, logDir: deploymentLogDir(deployment.slug), lines: 160 });
@@ -667,6 +783,24 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
         envSuggestions.push({ key, value, reason: "Replace localhost/internal public URL with the deployment domain", repairAction: "sync-public-env" });
       }
     }
+  }
+  if (hint?.category === "permission") {
+    riskyActions.push({
+      key: "repair-permissions",
+      label: "Repair deployment ownership",
+      command: `chown -R panel:panel ${deployment.rootPath} ${deploymentLogDir(deployment.slug)}`,
+      reason: "Ownership/permission repairs affect files recursively and require explicit approval.",
+      approvalRequired: true
+    });
+  }
+  if (hint?.category === "php_extension") {
+    riskyActions.push({
+      key: "install-php-extension",
+      label: "Install missing PHP extension",
+      command: "apt install php-<extension-name>",
+      reason: "Composer reported a missing PHP extension. Admin should confirm exact extension before installing.",
+      approvalRequired: true
+    });
   }
   checks.push({
     key: "error_hints",
@@ -693,8 +827,48 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
       fix: publicFailed ? "Redeploy/restart to rewrite Nginx proxy and verify app public URL env values." : undefined,
       repairAction: publicFailed ? "redeploy" : undefined
     });
+    let nginxInspect: unknown = null;
+    try {
+      nginxInspect = await sysagent.deploymentNginxInspect({ deploymentId: deployment.id, serverName, upstreamPort: deployment.port, rootPath: deployment.rootPath });
+    } catch (error) {
+      nginxInspect = { returncode: 1, stderr: error instanceof Error ? error.message : "Nginx inspect failed" };
+    }
+    const nginxMismatch = commandFailed(nginxInspect);
+    checks.push({
+      key: "nginx_config",
+      label: "Nginx upstream",
+      status: nginxMismatch ? "warn" : "pass",
+      detail: commandDetail(nginxInspect) || `Nginx config points to ${(nginxInspect as { expectedUpstream?: string }).expectedUpstream}`,
+      fix: nginxMismatch ? "Redeploy to rewrite the generated deployment vhost after reviewing the expected upstream." : undefined,
+      repairAction: nginxMismatch ? "request-approval" : undefined
+    });
+    if (nginxMismatch) {
+      riskyActions.push({
+        key: "rewrite-nginx",
+        label: "Rewrite generated Nginx vhost",
+        command: `write deployment vhost for ${serverName} -> 127.0.0.1:${deployment.port}; nginx -t; systemctl reload nginx`,
+        reason: "Nginx rewrite changes public routing and should be approved after reviewing the target upstream.",
+        approvalRequired: true
+      });
+    }
   } else {
     checks.push({ key: "public_route", label: "Public website", status: "warn", detail: "No domain is linked yet.", fix: "Bind a domain to enable public route checks." });
+  }
+
+  const lastGoodRelease = await prisma.deploymentRelease.findFirst({
+    where: { deploymentId: deployment.id, status: "SUCCEEDED" },
+    orderBy: { createdAt: "desc" },
+    select: { id: true, commitSha: true, createdAt: true }
+  });
+  if ((deployment.status === "FAILED" || healthDown) && lastGoodRelease) {
+    checks.push({
+      key: "rollback",
+      label: "Rollback candidate",
+      status: "warn",
+      detail: `Last successful release ${lastGoodRelease.commitSha ?? lastGoodRelease.id} is available.`,
+      fix: "Rollback is available if redeploy keeps failing.",
+      repairAction: "rollback"
+    });
   }
 
   const failed = checks.filter((check) => check.status === "fail").length;
@@ -707,6 +881,7 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
     checks,
     evidence: evidenceLines(recentErrors),
     envSuggestions,
+    riskyActions,
     generatedAt: new Date().toISOString()
   };
 }
@@ -1331,6 +1506,12 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       return reply.code(202).send({ action, result, next: "redeploy" });
     }
 
+    if (action === "request-approval") {
+      await addLog(deployment.id, "PREFLIGHT", "Deployment doctor risky fix needs approval", undefined, { riskyActions: doctor.riskyActions } as unknown as Prisma.InputJsonObject);
+      await audit(request, { action: "CREATE", resource: "deployment_doctor_approval", resourceId: deployment.id, description: `Deployment doctor approval requested for ${deployment.slug}`, metadata: { riskyActions: doctor.riskyActions } as unknown as Prisma.InputJsonObject });
+      return reply.code(202).send({ action, approvalRequired: true, riskyActions: doctor.riskyActions });
+    }
+
     if (action === "health") {
       const result = await sysagent.deploymentHealth({
         deploymentId: deployment.id,
@@ -1369,6 +1550,14 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       await addLog(deployment.id, "QUEUED", "Deployment doctor queued redeploy", release.id, doctor as Prisma.InputJsonObject);
       const queue = await enqueueDeployAction(deployment.id, "deploy", release.id);
       await audit(request, { action: "DEPLOY", resource: "deployment", resourceId: deployment.id, description: `Deployment doctor queued redeploy for ${deployment.slug}`, metadata: { releaseId: release.id, queue, doctor } as Prisma.InputJsonObject });
+      return reply.code(202).send({ action, release, queue, doctor });
+    }
+
+    if (action === "rollback") {
+      const release = await prisma.deploymentRelease.findFirstOrThrow({ where: { deploymentId: deployment.id, status: "SUCCEEDED" }, orderBy: { createdAt: "desc" } });
+      await addLog(deployment.id, "ROLLBACK", `Deployment doctor queued rollback to ${release.id}`, release.id, doctor as Prisma.InputJsonObject);
+      const queue = await enqueueDeployAction(deployment.id, "rollback", release.id);
+      await audit(request, { action: "APPLY", resource: "deployment", resourceId: deployment.id, description: `Deployment doctor queued rollback for ${deployment.slug}`, metadata: { releaseId: release.id, queue, doctor } as Prisma.InputJsonObject });
       return reply.code(202).send({ action, release, queue, doctor });
     }
 

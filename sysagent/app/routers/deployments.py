@@ -3,6 +3,7 @@ import re
 import json
 import base64
 import time
+import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -102,6 +103,17 @@ class RuntimeLogsRequest(BaseModel):
     name: str
     logDir: str | None = None
     lines: int = Field(default=300, ge=1, le=2000)
+
+
+class RuntimeToolsRequest(BaseModel):
+    tools: list[str] = Field(default_factory=list, max_length=50)
+
+
+class NginxInspectRequest(BaseModel):
+    deploymentId: str
+    serverName: str | None = None
+    upstreamPort: int = Field(ge=1, le=65535)
+    rootPath: str
 
 
 def path_info(root_path: str) -> dict:
@@ -755,6 +767,63 @@ def _pm2_process_mismatch(body: HealthRequest) -> str | None:
     return None
 
 
+def _supervisor_process_mismatch(body: HealthRequest) -> str | None:
+    if not body.processName or (body.processManager or "").upper() != "SUPERVISOR":
+        return None
+    result = run_command(["supervisorctl", "status", body.processName])
+    if result.get("dryRun"):
+        return None
+    if result.get("returncode") != 0:
+        return result.get("stderr") or result.get("stdout") or f"Supervisor process '{body.processName}' was not found."
+    stdout = result.get("stdout") or ""
+    if "RUNNING" not in stdout:
+        return f"Supervisor process '{body.processName}' is not RUNNING: {stdout.strip()}"
+    return None
+
+
+@router.post("/runtime-tools")
+def runtime_tools(body: RuntimeToolsRequest) -> dict:
+    names = []
+    for tool in body.tools:
+        cleaned = re.sub(r"[^a-zA-Z0-9_.+-]+", "", tool).strip()
+        if cleaned and cleaned not in names:
+            names.append(cleaned)
+    items = []
+    for name in names:
+        path = shutil.which(name)
+        items.append({"name": name, "installed": bool(path), "path": path})
+    return {"items": items}
+
+
+@router.post("/nginx-inspect")
+def nginx_inspect(body: NginxInspectRequest) -> dict:
+    info = path_info(body.rootPath)
+    server_name = body.serverName or body.deploymentId
+    config_name = nginx_config_name(body.deploymentId, server_name)
+    available = safe_nginx_path("/etc/nginx/sites-available", config_name)
+    enabled = safe_nginx_path("/etc/nginx/sites-enabled", config_name)
+    content = ""
+    if available.exists():
+        content = available.read_text(encoding="utf-8", errors="ignore")
+    upstream = f"127.0.0.1:{body.upstreamPort}"
+    return {
+        "dryRun": False,
+        "command": ["nginx-inspect", config_name],
+        "returncode": 0 if available.exists() and upstream in content else 1,
+        "stdout": "",
+        "stderr": "" if available.exists() and upstream in content else "Generated Nginx config is missing or upstream port does not match",
+        "path": info,
+        "configName": config_name,
+        "availablePath": str(available),
+        "enabledPath": str(enabled),
+        "exists": available.exists(),
+        "enabled": enabled.exists(),
+        "expectedUpstream": upstream,
+        "containsExpectedUpstream": upstream in content,
+        "serverName": server_name,
+    }
+
+
 @router.post("/port-status")
 def port_status(body: PortStatusRequest) -> dict:
     info = path_info(body.rootPath)
@@ -802,6 +871,15 @@ def health(body: HealthRequest) -> dict:
             "returncode": 1,
             "stdout": "",
             "stderr": mismatch,
+        }
+    supervisor_mismatch = _supervisor_process_mismatch(body)
+    if supervisor_mismatch:
+        return {
+            "dryRun": False,
+            "command": ["supervisorctl", "status", body.processName or ""],
+            "returncode": 1,
+            "stdout": "",
+            "stderr": supervisor_mismatch,
         }
 
     # Phase 1: wait for the process to bind (with retries for connection refused).
