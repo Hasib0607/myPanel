@@ -203,6 +203,25 @@ def git_auth_env(token: str | None) -> dict[str, str] | None:
     }
 
 
+def git_safe_directory(root_path: str, target: Path) -> dict:
+    return guarded_command(root_path, ["git", "config", "--global", "--add", "safe.directory", str(target.resolve())])
+
+
+def git_command_with_safe_directory(root_path: str, target: Path, command: list[str], env: dict[str, str] | None = None) -> dict:
+    result = guarded_command_with_env(root_path, command, env=env)
+    text = f"{result.get('stderr') or ''}\n{result.get('stdout') or ''}".lower()
+    if result.get("returncode") == 128 and "dubious ownership" in text:
+        safe = git_safe_directory(root_path, target)
+        retry = guarded_command_with_env(root_path, command, env=env) if safe.get("returncode") == 0 else {
+            "returncode": 1,
+            "stderr": "Skipped because safe.directory repair failed",
+            "safeDirectory": safe,
+        }
+        retry["safeDirectory"] = safe
+        return retry
+    return result
+
+
 def deployment_cwd(root_path: str) -> str:
     return str(Path(root_path).resolve())
 
@@ -568,23 +587,24 @@ def guarded_write_file(root_path: str, target_path: str, content: str) -> dict:
 def git_sync(body: GitSyncRequest) -> dict:
     target = Path(body.rootPath)
     env = git_auth_env(body.gitToken)
+    safe = git_safe_directory(body.rootPath, target)
     if target.joinpath(".git").exists():
-        remote = guarded_command_with_env(body.rootPath, ["git", "-C", str(target), "remote", "set-url", "origin", body.gitUrl], env=env) if body.gitUrl else None
-        fetch = guarded_command_with_env(body.rootPath, ["git", "-C", str(target), "fetch", "origin", body.branch, "--prune"], env=env)
-        checkout = guarded_command_with_env(body.rootPath, ["git", "-C", str(target), "checkout", body.commitSha or body.branch], env=env)
-        pull = None if body.commitSha else guarded_command_with_env(body.rootPath, ["git", "-C", str(target), "pull", "--ff-only", "origin", body.branch], env=env)
-        return {"remote": remote, "sync": fetch, "checkout": checkout, "pull": pull}
+        remote = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "remote", "set-url", "origin", body.gitUrl], env=env) if body.gitUrl else None
+        fetch = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "fetch", "origin", body.branch, "--prune"], env=env)
+        checkout = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "checkout", body.commitSha or body.branch], env=env)
+        pull = None if body.commitSha else git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "pull", "--ff-only", "origin", body.branch], env=env)
+        return {"safeDirectory": safe, "remote": remote, "sync": fetch, "checkout": checkout, "pull": pull}
     if body.gitUrl:
         command = ["git", "clone", "--branch", body.branch, body.gitUrl, str(target)]
     else:
         command = ["git", "-C", str(target), "fetch", "--all", "--prune"]
-    result = guarded_command_with_env(body.rootPath, command, env=env)
+    result = git_command_with_safe_directory(body.rootPath, target, command, env=env)
     checkout = None
     if body.commitSha:
-        checkout = guarded_command_with_env(body.rootPath, ["git", "-C", str(target), "checkout", body.commitSha], env=env)
+        checkout = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "checkout", body.commitSha], env=env)
     elif not body.gitUrl:
-        checkout = guarded_command_with_env(body.rootPath, ["git", "-C", str(target), "checkout", body.branch], env=env)
-    return {"sync": result, "checkout": checkout}
+        checkout = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "checkout", body.branch], env=env)
+    return {"safeDirectory": safe, "sync": result, "checkout": checkout}
 
 
 @router.post("/install")
