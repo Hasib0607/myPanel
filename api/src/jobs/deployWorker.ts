@@ -212,11 +212,29 @@ function isDryRunResult(result: unknown) {
   return Boolean(result && typeof result === "object" && (result as { dryRun?: boolean }).dryRun);
 }
 
+function isSupervisorSpawnError(result: unknown) {
+  if (!result || typeof result !== "object") return false;
+  const text = JSON.stringify(result).toLowerCase();
+  return text.includes("spawn error") || text.includes("can't spawn") || text.includes("cannot spawn");
+}
+
 const liveSystemCommandsFix = "Set ALLOW_LIVE_SYSTEM_COMMANDS=true on vps-panel-sysagent, restart vps-panel-sysagent and vps-panel-workers, then retry.";
 
 type SysagentLiveDiagnosis = {
   config?: { liveSystemCommandsEnabled?: boolean };
   incidents?: Array<{ category?: string; title?: string; detail?: string }>;
+};
+
+type DeploymentProcessBody = {
+  deploymentId: string;
+  name: string;
+  rootPath: string;
+  action: string;
+  processManager: DeploymentProcessManager;
+  startCommand: string | null;
+  port: number;
+  env: Record<string, string>;
+  logDir: string;
 };
 
 function sysagentLiveCommandsDisabled(diagnosis: SysagentLiveDiagnosis) {
@@ -344,25 +362,43 @@ async function runLiveDeploymentProcess(
   deploymentId: string,
   releaseId: string | undefined,
   label: string,
-  body: Parameters<typeof sysagent.deploymentProcess>[0]
+  body: DeploymentProcessBody
 ) {
   let result = await runStep(deploymentId, releaseId, "STARTING", label, () => sysagent.deploymentProcess(body));
-  if (!isDryRunResult(result)) return result;
-
-  await writeLog(deploymentId, releaseId, "STARTING", `${label} returned dry-run; repairing sysagent live mode and retrying`, {
-    result: result as Prisma.InputJsonValue
-  }, "warn");
-  try {
-    await repairSysagentLiveCommandsForDeployment(deploymentId, releaseId, `${label} returned dry-run`);
-    await waitForSysagentLiveCommandsEnabled();
-    result = await runStep(deploymentId, releaseId, "STARTING", `${label} retry after sysagent live repair`, () =>
-      sysagent.deploymentProcess(body)
-    );
-  } catch (error) {
-    await writeLog(deploymentId, releaseId, "STARTING", `${label} live-mode repair failed`, {
-      error: error instanceof Error ? error.message : String(error)
-    }, "error");
+  if (isDryRunResult(result)) {
+    await writeLog(deploymentId, releaseId, "STARTING", `${label} returned dry-run; repairing sysagent live mode and retrying`, {
+      result: result as Prisma.InputJsonValue
+    }, "warn");
+    try {
+      await repairSysagentLiveCommandsForDeployment(deploymentId, releaseId, `${label} returned dry-run`);
+      await waitForSysagentLiveCommandsEnabled();
+      result = await runStep(deploymentId, releaseId, "STARTING", `${label} retry after sysagent live repair`, () =>
+        sysagent.deploymentProcess(body)
+      );
+    } catch (error) {
+      await writeLog(deploymentId, releaseId, "STARTING", `${label} live-mode repair failed`, {
+        error: error instanceof Error ? error.message : String(error)
+      }, "error");
+    }
   }
+
+  if (isSupervisorSpawnError(result)) {
+    await writeLog(deploymentId, releaseId, "STARTING", `${label} hit Supervisor spawn error; repairing permissions and retrying`, {
+      result: result as Prisma.InputJsonValue
+    }, "warn");
+    try {
+      const repair = await sysagent.deploymentRepairPermissions({ rootPath: body.rootPath, logDir: body.logDir });
+      await writeLog(deploymentId, releaseId, "STARTING", "Supervisor spawn permission repair completed", repair as Prisma.InputJsonObject);
+      result = await runStep(deploymentId, releaseId, "STARTING", `${label} retry after Supervisor permission repair`, () =>
+        sysagent.deploymentProcess(body)
+      );
+    } catch (error) {
+      await writeLog(deploymentId, releaseId, "STARTING", "Supervisor spawn permission repair failed", {
+        error: error instanceof Error ? error.message : String(error)
+      }, "error");
+    }
+  }
+
   return result;
 }
 
@@ -396,7 +432,13 @@ function liveResultFailureMessage(result: unknown, label: string) {
     const signal = "signal" in value && typeof value.signal === "string" ? value.signal : null;
     const stderrText = value.stderr ?? "";
     const stdoutText = value.stdout ?? "";
-    const detailText = stderrText || stdoutText;
+    const logsText = "logs" in value && typeof value.logs === "object" && value.logs !== null
+      ? ((value.logs as { stderr?: string; stdout?: string; text?: string }).stderr || (value.logs as { stderr?: string; stdout?: string; text?: string }).stdout || (value.logs as { stderr?: string; stdout?: string; text?: string }).text || "")
+      : "";
+    const postStatusText = "postStatus" in value && typeof value.postStatus === "object" && value.postStatus !== null
+      ? ((value.postStatus as { stdout?: string; stderr?: string }).stdout || (value.postStatus as { stdout?: string; stderr?: string }).stderr || "")
+      : "";
+    const detailText = [stderrText || stdoutText, logsText ? `Runtime logs: ${logsText}` : "", postStatusText ? `Supervisor status: ${postStatusText}` : ""].filter(Boolean).join("\n");
     const oomKilled = value.returncode === -9 || signal === "SIGKILL" || stderrText.includes("SIGKILL");
     const sigtermKilled = !oomKilled && (value.returncode === -15 || signal === "SIGTERM");
     const signalHint = oomKilled

@@ -293,7 +293,30 @@ def reset_runtime_logs(log_dir: Path) -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
     prune_project_logs(log_dir)
     for filename in ("running-out.log", "running-error.log"):
-        (log_dir / filename).write_text("", encoding="utf-8")
+        file_path = log_dir / filename
+        file_path.write_text("", encoding="utf-8")
+        file_path.chmod(0o664)
+    make_panel_owned(log_dir)
+
+
+def make_panel_owned(path: Path) -> None:
+    paths = [path]
+    if path.is_dir():
+        paths.extend(path.rglob("*"))
+    for item in paths:
+        try:
+            shutil.chown(item, user="panel", group="panel")
+        except (LookupError, OSError):
+            continue
+        try:
+            if item.is_dir():
+                item.chmod(0o775)
+            elif item.suffix in {".sh", ""} and item.name == "run.sh":
+                item.chmod(0o755)
+            else:
+                item.chmod(0o664)
+        except OSError:
+            continue
 
 
 def combine_pm2_results(root_path: str, steps: dict[str, dict], required: list[str]) -> dict:
@@ -369,6 +392,7 @@ def supervisor_start(body: ProcessRequest, start_command: list[str]) -> dict:
             body.port,
             body.env,
         )
+        make_panel_owned(wrapper_path.parent)
         remove_stale_supervisor_program_configs(body.name, config_path)
         config_path.write_text(supervisor_program_config(body, wrapper_path, log_dir), encoding="utf-8")
         write["stdout"] = f"runtimeEnv={runtime_env_path}"
@@ -389,6 +413,8 @@ def supervisor_start(body: ProcessRequest, start_command: list[str]) -> dict:
         stop["returncode"] = 0
     start = run_supervisorctl("start", body.name) if stop.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because stop failed"}
     status = run_supervisorctl("status", body.name) if start.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because start failed"}
+    post_status = run_supervisorctl("status", body.name) if start.get("returncode") != 0 else status
+    logs = runtime_logs(RuntimeLogsRequest(name=body.name, logDir=body.logDir, lines=120))
     steps = {"service": service, "write": write, "reread": reread, "update": update, "stop": stop, "start": start, "status": status}
     failed = [name for name, step in steps.items() if step.get("returncode", 0) != 0]
     return {
@@ -402,6 +428,9 @@ def supervisor_start(body: ProcessRequest, start_command: list[str]) -> dict:
         "returncode": 1 if failed else 0,
         "path": info,
         "configPath": str(config_path),
+        "wrapperPath": str(wrapper_path) if wrapper_path else None,
+        "postStatus": post_status,
+        "logs": logs,
         **steps,
     }
 
