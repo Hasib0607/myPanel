@@ -84,11 +84,23 @@ function deploymentRootForRepo(repoName: string) {
 function parseEnv(text: string) {
   return Object.fromEntries(text.split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith("#") && line.includes("=")).map((line) => {
     const index = line.indexOf("=");
-    return [line.slice(0, index).trim(), line.slice(index + 1)];
+    return [line.slice(0, index).trim(), normalizeEnvValue(line.slice(index + 1))];
   }));
 }
 
 type BulkEnvItem = { key: string; value: string; isSecret: boolean };
+
+function normalizeEnvValue(value: string) {
+  const trimmed = value.trim();
+  if (trimmed.length >= 2) {
+    const first = trimmed[0];
+    const last = trimmed[trimmed.length - 1];
+    if ((first === "\"" && last === "\"") || (first === "'" && last === "'") || (first === "`" && last === "`")) {
+      return trimmed.slice(1, -1);
+    }
+  }
+  return trimmed;
+}
 
 function parseBulkEnvItems(text: string, isSecret = false): BulkEnvItem[] {
   const trimmed = text.trim();
@@ -98,7 +110,7 @@ function parseBulkEnvItems(text: string, isSecret = false): BulkEnvItem[] {
     const parsed = Function(`"use strict"; return (${trimmed});`)() as Record<string, unknown>;
     return Object.entries(parsed).map(([key, value]) => ({
       key: key.trim().toUpperCase(),
-      value: value == null ? "" : String(value),
+      value: normalizeEnvValue(value == null ? "" : String(value)),
       isSecret
     })).filter((item) => item.key);
   }
@@ -111,7 +123,7 @@ function parseBulkEnvItems(text: string, isSecret = false): BulkEnvItem[] {
       const index = line.indexOf("=");
       return {
         key: line.slice(0, index).trim().toUpperCase(),
-        value: line.slice(index + 1),
+        value: normalizeEnvValue(line.slice(index + 1)),
         isSecret
       };
     })
@@ -421,7 +433,7 @@ export function DeploymentsClient() {
       if (!selected) throw new Error("Select a project first");
       const key = envKey.trim().toUpperCase();
       if (!key) throw new Error("Enter an environment key");
-      return apiPut<DeploymentEnvVar>(`/deployments/${selected.slug}/env/${encodeURIComponent(key)}`, { value: envValue, isSecret: envSecret });
+      return apiPut<DeploymentEnvVar>(`/deployments/${selected.slug}/env/${encodeURIComponent(key)}`, { value: normalizeEnvValue(envValue), isSecret: envSecret });
     },
     onSuccess: async () => {
       setNotice(`${envKey.trim().toUpperCase()} saved.`);
@@ -582,8 +594,14 @@ export function DeploymentsClient() {
 
 function ProjectCard({ deployment, active, onSelect }: { deployment: Deployment; active: boolean; onSelect: () => void }) {
   const latest = deployment.releases?.[0];
+  const domains = deployment.domainBindings?.map((binding) => {
+    const name = deploymentBindingName(binding);
+    return name ? { id: binding.id, name } : null;
+  }).filter((item): item is { id: string; name: string } => Boolean(item)) ?? [];
+  const fallbackDomain = deployment.domain?.name ? [{ id: deployment.domain.id, name: deployment.domain.name }] : [];
+  const linkedDomains = domains.length ? domains : fallbackDomain;
   return (
-    <button className={`mb-3 w-full rounded-md border p-4 text-left transition ${active ? "border-panel-accent bg-teal-50" : "border-panel-line bg-white hover:bg-slate-50"}`} onClick={onSelect} type="button">
+    <div className={`mb-3 w-full cursor-pointer rounded-md border p-4 text-left transition ${active ? "border-panel-accent bg-teal-50" : "border-panel-line bg-white hover:bg-slate-50"}`} onClick={onSelect} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onSelect(); }} role="button" tabIndex={0}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold text-panel-ink">{deployment.name}</div>
@@ -596,9 +614,20 @@ function ProjectCard({ deployment, active, onSelect }: { deployment: Deployment;
         <span className="rounded bg-slate-100 px-2 py-1">:{deployment.port}</span>
         <span className="rounded bg-slate-100 px-2 py-1">{latest?.status ?? "No release"}</span>
       </div>
-      <div className="mt-3 truncate text-xs text-panel-muted">{deployment.domainBindings?.map((item) => item.domain.name).join(", ") || deployment.domain?.name || deployment.rootPath}</div>
-    </button>
+      <div className="mt-3 truncate text-xs text-panel-muted">
+        {linkedDomains.length ? linkedDomains.map((domain, index) => (
+          <span key={domain.id}>
+            {index > 0 ? ", " : null}
+            <a className="font-medium text-panel-accent underline-offset-2 hover:underline" href={`https://${domain.name}`} onClick={(event) => event.stopPropagation()} rel="noreferrer" target="_blank">{domain.name}</a>
+          </span>
+        )) : deployment.rootPath}
+      </div>
+    </div>
   );
+}
+
+function deploymentBindingName(binding: DeploymentDomainBinding) {
+  return binding.subdomain ? `${binding.subdomain.name}.${binding.subdomain.domain.name}` : binding.domain?.name ?? "";
 }
 
 function ProjectModal({ title, draft, setDraft, domains, databaseOverview, onClose, onDetect, onSubmit, submitLabel, busy, openGithub }: { title: string; draft: Draft; setDraft: (draft: Draft) => void; domains: DomainOption[]; databaseOverview?: DatabaseOverview; onClose: () => void; onDetect: () => void; onSubmit: () => void; submitLabel: string; busy?: boolean; openGithub: () => void }) {
@@ -649,8 +678,8 @@ function Metric({ label, value }: { label: string; value: string }) {
 }
 
 function DomainsPanel({ deployment, domains, domainToAdd, setDomainToAdd, addDomain, setPrimary, removeDomain }: { deployment: Deployment; domains: DomainOption[]; domainToAdd: string; setDomainToAdd: (id: string) => void; addDomain: () => void; setPrimary: (binding: DeploymentDomainBinding) => void; removeDomain: (binding: DeploymentDomainBinding) => void }) {
-  const boundIds = new Set((deployment.domainBindings ?? []).map((binding) => binding.domainId));
-  return <div className="space-y-4"><div className="flex gap-2"><select className="h-10 min-w-72 rounded-md border border-panel-line px-2 text-sm" onChange={(event) => setDomainToAdd(event.target.value)} value={domainToAdd}><option value="">Select domain</option>{domains.filter((domain) => !boundIds.has(domain.id)).map((domain) => <option key={domain.id} value={domain.id}>{domain.name}</option>)}</select><button className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={!domainToAdd} onClick={addDomain} type="button"><Plus size={15} />Add domain</button></div><div className="overflow-hidden rounded-md border border-panel-line">{(deployment.domainBindings ?? []).map((binding) => <div className="flex items-center justify-between border-b border-panel-line p-3 last:border-b-0" key={binding.id}><div><div className="font-semibold">{binding.domain.name}</div><div className="text-xs text-panel-muted">{binding.role}</div></div><div className="flex gap-2"><button className="h-8 rounded-md border border-panel-line px-2 text-xs" disabled={binding.role === "primary"} onClick={() => setPrimary(binding)} type="button">Make primary</button><button className="h-8 rounded-md border border-panel-line px-2 text-xs text-panel-danger" onClick={() => removeDomain(binding)} type="button">Remove</button></div></div>)}{(deployment.domainBindings ?? []).length === 0 ? <div className="p-8 text-center text-sm text-panel-muted">No domains attached.</div> : null}</div></div>;
+  const boundIds = new Set((deployment.domainBindings ?? []).map((binding) => binding.subdomainId ?? binding.domainId).filter(Boolean));
+  return <div className="space-y-4"><div className="flex gap-2"><select className="h-10 min-w-72 rounded-md border border-panel-line px-2 text-sm" onChange={(event) => setDomainToAdd(event.target.value)} value={domainToAdd}><option value="">Select domain</option>{domains.filter((domain) => !boundIds.has(domain.id)).map((domain) => <option key={domain.id} value={domain.id}>{domain.name}</option>)}</select><button className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={!domainToAdd} onClick={addDomain} type="button"><Plus size={15} />Add domain</button></div><div className="overflow-hidden rounded-md border border-panel-line">{(deployment.domainBindings ?? []).map((binding) => <div className="flex items-center justify-between border-b border-panel-line p-3 last:border-b-0" key={binding.id}><div><div className="font-semibold">{deploymentBindingName(binding)}</div><div className="text-xs text-panel-muted">{binding.role}</div></div><div className="flex gap-2"><button className="h-8 rounded-md border border-panel-line px-2 text-xs" disabled={binding.role === "primary"} onClick={() => setPrimary(binding)} type="button">Make primary</button><button className="h-8 rounded-md border border-panel-line px-2 text-xs text-panel-danger" onClick={() => removeDomain(binding)} type="button">Remove</button></div></div>)}{(deployment.domainBindings ?? []).length === 0 ? <div className="p-8 text-center text-sm text-panel-muted">No domains attached.</div> : null}</div></div>;
 }
 
 function EnvPanel({ deployment, envKey, envValue, envSecret, bulkEnvText, bulkEnvSecret, setEnvKey, setEnvValue, setEnvSecret, setBulkEnvText, setBulkEnvSecret, saveEnv, saveBulkEnv, savingEnv, savingBulkEnv, removeEnv }: { deployment: Deployment; envKey: string; envValue: string; envSecret: boolean; bulkEnvText: string; bulkEnvSecret: boolean; setEnvKey: (value: string) => void; setEnvValue: (value: string) => void; setEnvSecret: (value: boolean) => void; setBulkEnvText: (value: string) => void; setBulkEnvSecret: (value: boolean) => void; saveEnv: () => void; saveBulkEnv: () => void; savingEnv?: boolean; savingBulkEnv?: boolean; removeEnv: (key: string) => void }) {

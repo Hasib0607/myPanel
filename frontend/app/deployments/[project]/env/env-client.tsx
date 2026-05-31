@@ -7,6 +7,18 @@ import { apiDelete, apiGet, apiPost, apiPut } from "@/lib/api";
 import type { Deployment, DeploymentEnvVar } from "../../deployment-types";
 import { EmptyState, ProjectTabs, ResultNotice } from "../../deployment-ui";
 
+function normalizeEnvValue(value: string) {
+  const trimmed = value.trim();
+  if (trimmed.length >= 2) {
+    const first = trimmed[0];
+    const last = trimmed[trimmed.length - 1];
+    if ((first === "\"" && last === "\"") || (first === "'" && last === "'") || (first === "`" && last === "`")) {
+      return trimmed.slice(1, -1);
+    }
+  }
+  return trimmed;
+}
+
 function parseEnv(text: string) {
   const trimmed = text.trim();
   if (!trimmed) return [];
@@ -15,7 +27,7 @@ function parseEnv(text: string) {
     const parsed = Function(`"use strict"; return (${trimmed});`)() as Record<string, unknown>;
     return Object.entries(parsed).map(([key, value]) => ({
       key: key.trim().toUpperCase(),
-      value: value == null ? "" : String(value),
+      value: normalizeEnvValue(value == null ? "" : String(value)),
       isSecret: false
     })).filter((item) => item.key);
   }
@@ -26,7 +38,7 @@ function parseEnv(text: string) {
     .filter((line) => line && !line.startsWith("#") && line.includes("="))
     .map((line) => {
       const index = line.indexOf("=");
-      return { key: line.slice(0, index).trim().toUpperCase(), value: line.slice(index + 1), isSecret: false };
+      return { key: line.slice(0, index).trim().toUpperCase(), value: normalizeEnvValue(line.slice(index + 1)), isSecret: false };
     });
 }
 
@@ -51,7 +63,7 @@ export function DeploymentEnvClient({ project }: { project: string }) {
   };
 
   const saveOne = useMutation({
-    mutationFn: () => apiPut<DeploymentEnvVar>(`/deployments/${project}/env/${encodeURIComponent(key)}`, { value, isSecret }),
+    mutationFn: () => apiPut<DeploymentEnvVar>(`/deployments/${project}/env/${encodeURIComponent(key)}`, { value: normalizeEnvValue(value), isSecret }),
     onSuccess: async () => {
       setNotice(`${key} saved.`);
       setKey("");

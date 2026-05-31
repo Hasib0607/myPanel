@@ -419,17 +419,31 @@ function sha256(value: string) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
+function normalizeEnvValue(value: string | null | undefined) {
+  if (value === undefined || value === null) return null;
+  const trimmed = value.trim();
+  if (trimmed.length >= 2) {
+    const first = trimmed[0];
+    const last = trimmed[trimmed.length - 1];
+    if ((first === "\"" && last === "\"") || (first === "'" && last === "'") || (first === "`" && last === "`")) {
+      return trimmed.slice(1, -1);
+    }
+  }
+  return trimmed;
+}
+
 async function normalizeEnvSecret(deploymentSlug: string, item: z.infer<typeof envVarSchema>) {
+  const value = normalizeEnvValue(item.value);
   if (!item.isSecret) {
     if (item.secretRef) await deleteSecret(item.secretRef);
-    return { value: item.value ?? null, isSecret: false, secretRef: null };
+    return { value, isSecret: false, secretRef: null };
   }
 
   const secretRef = item.secretRef ?? deploymentEnvSecretRef(deploymentSlug, item.key);
-  if (typeof item.value === "string") {
+  if (typeof value === "string") {
     await putSecret({
       ref: secretRef,
-      value: item.value,
+      value,
       kind: "DEPLOYMENT_ENV",
       label: item.key,
       metadata: { deploymentSlug, key: item.key }

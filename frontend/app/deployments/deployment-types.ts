@@ -9,13 +9,22 @@ export type DeploymentDomain = {
   name: string;
 };
 
+export type DeploymentSubdomain = {
+  id: string;
+  name: string;
+  sslEnabled?: boolean;
+  domain: DeploymentDomain;
+};
+
 export type DeploymentDomainBinding = {
   id: string;
   deploymentId: string;
-  domainId: string;
+  domainId: string | null;
+  subdomainId?: string | null;
   role: string;
   createdAt: string;
-  domain: DeploymentDomain;
+  domain: DeploymentDomain | null;
+  subdomain?: DeploymentSubdomain | null;
 };
 
 export type DeploymentRelease = {
