@@ -1410,6 +1410,15 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     }
 
     if (deployment.framework === "LARAVEL") {
+      const envSyncResult = await runStep(deployment.id, releaseId, "PREFLIGHT", "Sync Laravel .env", () =>
+        sysagent.deploymentSyncLaravelEnv({
+          rootPath: appPath,
+          port: deployment.port,
+          env: envVars
+        })
+      );
+      assertCommandTree(envSyncResult, "Sync Laravel .env");
+
       const optimizeClearResult = await runStep(deployment.id, releaseId, "INSTALLING", "Laravel cache clear", () =>
         sysagent.deploymentBuild({
           rootPath: appPath,

@@ -5,6 +5,8 @@ import shlex
 from pathlib import Path
 
 VALID_ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Unquoted dotenv values cannot contain whitespace, #, or quotes.
+UNQUOTED_DOTENV_VALUE = re.compile(r"^[^\s#'\"]+$")
 
 
 def normalize_process_env(port: int | None, env: dict[str, str] | None) -> dict[str, str]:
@@ -19,25 +21,32 @@ def normalize_process_env(port: int | None, env: dict[str, str] | None) -> dict[
 
 
 def format_dotenv_line(key: str, value: str) -> str:
+    """Format one KEY=VALUE line for Laravel phpdotenv and bash source."""
     if not VALID_ENV_KEY.match(key):
         raise ValueError(f"invalid env key: {key}")
     if value == "":
         return f"{key}="
-    if re.search(r'[\s#"\']|\\|\$', value) or "\n" in value or "\r" in value:
-        escaped = (
-            value.replace("\\", "\\\\")
-            .replace('"', '\\"')
-            .replace("$", "\\$")
-            .replace("`", "\\`")
-        )
+    if "\n" in value or "\r" in value:
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
         return f'{key}="{escaped}"'
-    return f"{key}={value}"
+    if UNQUOTED_DOTENV_VALUE.fullmatch(value):
+        return f"{key}={value}"
+    if "'" not in value:
+        return f"{key}='{value}'"
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'{key}="{escaped}"'
 
 
 def write_env_file(path: Path, env: dict[str, str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [format_dotenv_line(key, env[key]) for key in sorted(env)]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def sync_laravel_env_file(root_path: str, port: int | None, env: dict[str, str] | None) -> Path:
+    env_path = Path(root_path).resolve() / ".env"
+    write_env_file(env_path, normalize_process_env(port, env))
+    return env_path
 
 
 def is_laravel_artisan_command(start_command: list[str]) -> bool:
@@ -75,6 +84,5 @@ def prepare_supervisor_runtime(
     write_supervisor_wrapper(wrapper, runtime_env, str(cwd), start_command)
     laravel_env_path = None
     if is_laravel_artisan_command(start_command):
-        laravel_env_path = cwd / ".env"
-        write_env_file(laravel_env_path, process_env)
+        laravel_env_path = sync_laravel_env_file(str(cwd), port, env)
     return wrapper, runtime_env, laravel_env_path

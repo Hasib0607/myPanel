@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from app.command import run_command, run_install_plan
 from app.config import DEPLOYMENT_COMMANDS_LIVE, settings
-from app.deployment_env import prepare_supervisor_runtime
+from app.deployment_env import prepare_supervisor_runtime, sync_laravel_env_file
 from app.deployment_commands import normalize_laravel_start_command, parse_deployment_command
 from app.deployment_health import curl_health_probe
 from app.platform import runtime_tool_install_plan
@@ -129,6 +129,12 @@ class SupervisorRepairRequest(BaseModel):
 
 class LaravelWritablePathsRequest(BaseModel):
     rootPath: str
+
+
+class SyncEnvFileRequest(BaseModel):
+    rootPath: str
+    port: int | None = Field(default=None, ge=1, le=65535)
+    env: dict[str, str] | None = None
 
 
 def path_is_within(root: Path, target: Path) -> bool:
@@ -948,6 +954,35 @@ def repair_permissions(body: PermissionRepairRequest) -> dict:
         steps[target] = run_command(["chown", "-R", "panel:panel", target], timeout=120, allow_live=DEPLOYMENT_COMMANDS_LIVE)
     failed = [target for target, result in steps.items() if result.get("returncode") != 0]
     return {"dryRun": any(result.get("dryRun") for result in steps.values()), "returncode": 1 if failed else 0, "steps": steps}
+
+
+@router.post("/laravel/sync-env-file")
+def sync_laravel_env(body: SyncEnvFileRequest) -> dict:
+    info = path_info(body.rootPath)
+    if not info["allowed"]:
+        return blocked_command("Path escapes configured file manager root", ["sync-env-file", body.rootPath], info)
+    try:
+        env_path = sync_laravel_env_file(body.rootPath, body.port, body.env)
+    except (OSError, ValueError) as error:
+        return {
+            "dryRun": False,
+            "command": ["write-file", str(Path(body.rootPath) / ".env")],
+            "cwd": deployment_cwd(body.rootPath),
+            "stdout": "",
+            "stderr": str(error),
+            "returncode": 1,
+            "path": info,
+        }
+    return {
+        "dryRun": False,
+        "command": ["write-file", str(env_path)],
+        "cwd": deployment_cwd(body.rootPath),
+        "stdout": f"Synced {env_path}",
+        "stderr": "",
+        "returncode": 0,
+        "path": info,
+        "envPath": str(env_path),
+    }
 
 
 @router.post("/laravel/repair-writable-paths")

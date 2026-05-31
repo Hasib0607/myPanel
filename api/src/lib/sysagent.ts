@@ -117,6 +117,8 @@ export const sysagent = {
     request<SysagentCommandResult>("/deployments/repair-permissions", { method: "POST", body: JSON.stringify(body) }),
   deploymentRepairLaravelWritablePaths: (body: unknown) =>
     request<SysagentCommandResult>("/deployments/laravel/repair-writable-paths", { method: "POST", body: JSON.stringify(body) }),
+  deploymentSyncLaravelEnv: (body: { rootPath: string; port?: number; env?: Record<string, string> }) =>
+    request<SysagentCommandResult & { envPath?: string }>("/deployments/laravel/sync-env-file", { method: "POST", body: JSON.stringify(body) }),
   deploymentRepairSupervisor: (body: unknown) =>
     request<SysagentCommandResult>("/deployments/supervisor/repair", { method: "POST", body: JSON.stringify(body) }),
   deploymentNginxInspect: (body: unknown) =>
