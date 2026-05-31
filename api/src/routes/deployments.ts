@@ -79,7 +79,7 @@ const detectSchema = z.object({
   files: z.array(z.string()).optional()
 });
 const doctorRepairSchema = z.object({
-  action: z.enum(["auto", "sync-runtime", "health", "restart", "redeploy"])
+  action: z.enum(["auto", "sync-runtime", "health", "restart", "redeploy", "set-node-memory", "sync-public-env"])
 });
 
 const preflightSchema = z.object({
@@ -459,15 +459,80 @@ function commandDetail(value: unknown) {
   return result?.stderr || result?.reason || result?.stdout || (typeof result?.returncode === "number" ? `exit ${result.returncode}` : "");
 }
 
-function knownErrorHint(text: string) {
+function knownErrorHint(text: string): { message: string; repairAction: "set-node-memory" | "sync-public-env" | "redeploy" | "restart" } | null {
   const lower = text.toLowerCase();
-  if (lower.includes("cannot find module") || lower.includes("module_not_found")) return "Missing package or wrong build output. Run dependency install, verify package.json, then redeploy.";
-  if (lower.includes("eaddrinuse") || lower.includes("address already in use")) return "Port conflict. Let the doctor redeploy so the worker can move the app to a free managed port.";
-  if (lower.includes("heap out of memory") || lower.includes("sigkill") || lower.includes("killed")) return "Server memory pressure. Add swap or set NODE_OPTIONS=--max-old-space-size=512, then redeploy.";
-  if (lower.includes("permission denied") || lower.includes("eacces")) return "File permission issue. Ensure the panel user owns the deployment directory and runtime log directory.";
-  if (lower.includes("env") && (lower.includes("missing") || lower.includes("required"))) return "Missing environment variable. Add required env keys in the deployment Env tab, then redeploy.";
-  if (lower.includes("localhost") || lower.includes("127.0.0.1")) return "App may be generating internal localhost URLs. Set public URL env values to the real domain.";
+  if (lower.includes("cannot find module") || lower.includes("module_not_found")) return { message: "Missing package or wrong build output. Run dependency install, verify package.json, then redeploy.", repairAction: "redeploy" };
+  if (lower.includes("eaddrinuse") || lower.includes("address already in use")) return { message: "Port conflict. Let the doctor redeploy so the worker can move the app to a free managed port.", repairAction: "redeploy" };
+  if (lower.includes("heap out of memory") || lower.includes("javascript heap out of memory") || lower.includes("sigkill") || lower.includes("killed")) return { message: "Server memory pressure. Add a Node memory cap and redeploy; if it repeats, add swap on the VPS.", repairAction: "set-node-memory" };
+  if (lower.includes("permission denied") || lower.includes("eacces")) return { message: "File permission issue. Ensure the panel user owns the deployment directory and runtime log directory.", repairAction: "redeploy" };
+  if (lower.includes("env") && (lower.includes("missing") || lower.includes("required"))) return { message: "Missing environment variable. Add required env keys in the deployment Env tab, then redeploy.", repairAction: "redeploy" };
+  if (lower.includes("localhost") || lower.includes("127.0.0.1")) return { message: "App may be generating internal localhost URLs. Sync public URL env values to the linked domain.", repairAction: "sync-public-env" };
   return null;
+}
+
+function isLocalhostValue(value: string | null | undefined) {
+  return Boolean(value && /(^|\/\/|\.)localhost(?::\d+)?(\/|$)|(^|\/\/)127\.0\.0\.1(?::\d+)?(\/|$)|(^|\/\/)0\.0\.0\.0(?::\d+)?(\/|$)/i.test(value));
+}
+
+function publicUrlEnv(domain: { name: string } | null | undefined) {
+  if (!domain?.name) return {};
+  const url = `https://${domain.name}`;
+  return {
+    APP_URL: url,
+    APP_ORIGIN: url,
+    AUTH_URL: url,
+    BASE_URL: url,
+    NEXTAUTH_URL: url,
+    NEXT_PUBLIC_APP_URL: url,
+    NEXT_PUBLIC_APP_ORIGIN: url,
+    NEXT_PUBLIC_BASE_URL: url,
+    NEXT_PUBLIC_DOMAIN: domain.name,
+    NEXT_PUBLIC_SITE_URL: url,
+    PUBLIC_URL: url,
+    SITE_URL: url,
+    URL: url
+  };
+}
+
+function evidenceLines(text: string) {
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("== STDOUT") && !line.startsWith("== STDERR"))
+    .slice(-12)
+    .map((line) => line.slice(0, 500));
+}
+
+async function upsertPlainEnv(deploymentId: string, key: string, value: string) {
+  return prisma.deploymentEnvVar.upsert({
+    where: { deploymentId_key: { deploymentId, key } },
+    update: { value, isSecret: false, secretRef: null },
+    create: { deploymentId, key, value, isSecret: false, secretRef: null }
+  });
+}
+
+async function applyNodeMemoryEnv(deployment: Awaited<ReturnType<typeof findDeployment>>) {
+  const existing = deployment.env.find((item) => item.key === "NODE_OPTIONS");
+  const current = existing?.value ?? "";
+  const value = current.includes("--max-old-space-size=")
+    ? current
+    : [current, "--max-old-space-size=512"].filter(Boolean).join(" ").trim();
+  const envVar = await upsertPlainEnv(deployment.id, "NODE_OPTIONS", value);
+  return { env: [envVar], value };
+}
+
+async function applyPublicUrlEnv(deployment: Awaited<ReturnType<typeof findDeployment>>) {
+  const domain = deployment.domainBindings?.find((binding) => binding.role === "primary")?.domain ?? deployment.domainBindings?.[0]?.domain ?? deployment.domain;
+  const values = publicUrlEnv(domain);
+  const changed = [];
+  for (const [key, value] of Object.entries(values)) {
+    const existing = deployment.env.find((item) => item.key === key);
+    if (existing?.isSecret) continue;
+    if (!existing?.value || isLocalhostValue(existing.value)) {
+      changed.push(await upsertPlainEnv(deployment.id, key, value));
+    }
+  }
+  return { domain: domain?.name ?? null, changed };
 }
 
 async function syncDeploymentRuntime(deployment: Awaited<ReturnType<typeof findDeployment>>) {
@@ -490,6 +555,7 @@ async function syncDeploymentRuntime(deployment: Awaited<ReturnType<typeof findD
 
 async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeployment>>) {
   const checks: Array<{ key: string; label: string; status: "pass" | "warn" | "fail"; detail: string; fix?: string; repairAction?: string }> = [];
+  const envSuggestions: Array<{ key: string; value: string; reason: string; repairAction: string }> = [];
   const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
   const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
   const domain = deployment.domainBindings?.find((binding) => binding.role === "primary")?.domain ?? deployment.domainBindings?.[0]?.domain ?? deployment.domain;
@@ -591,13 +657,24 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
     runtimeLogs
   ].join("\n");
   const hint = knownErrorHint(recentErrors);
+  if (hint?.repairAction === "set-node-memory") {
+    envSuggestions.push({ key: "NODE_OPTIONS", value: "--max-old-space-size=512", reason: "Reduce Node build/runtime memory pressure", repairAction: "set-node-memory" });
+  }
+  if (hint?.repairAction === "sync-public-env" && domain?.name) {
+    for (const [key, value] of Object.entries(publicUrlEnv(domain))) {
+      const existing = deployment.env.find((item) => item.key === key);
+      if (!existing?.value || isLocalhostValue(existing.value)) {
+        envSuggestions.push({ key, value, reason: "Replace localhost/internal public URL with the deployment domain", repairAction: "sync-public-env" });
+      }
+    }
+  }
   checks.push({
     key: "error_hints",
     label: "Error analysis",
     status: hint ? "warn" : "pass",
-    detail: hint ?? "No known build/runtime error pattern found in recent logs.",
-    fix: hint ?? undefined,
-    repairAction: hint?.includes("Port conflict") ? "redeploy" : hint ? "redeploy" : undefined
+    detail: hint?.message ?? "No known build/runtime error pattern found in recent logs.",
+    fix: hint?.message,
+    repairAction: hint?.repairAction
   });
 
   if (serverName) {
@@ -628,6 +705,8 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
     summary: failed ? `${failed} blocking issue(s) found` : warnings ? `${warnings} warning(s) found` : "Deployment looks healthy",
     recommendedAction,
     checks,
+    evidence: evidenceLines(recentErrors),
+    envSuggestions,
     generatedAt: new Date().toISOString()
   };
 }
@@ -1236,6 +1315,20 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       await addLog(deployment.id, "PREFLIGHT", "Deployment doctor synced runtime commands", undefined, result as unknown as Prisma.InputJsonObject);
       await audit(request, { action: "UPDATE", resource: "deployment", resourceId: deployment.id, description: `Deployment doctor synced runtime commands for ${deployment.slug}`, metadata: result as unknown as Prisma.InputJsonObject });
       return reply.code(202).send({ action, result });
+    }
+
+    if (action === "set-node-memory") {
+      const result = await applyNodeMemoryEnv(deployment);
+      await addLog(deployment.id, "PREFLIGHT", "Deployment doctor applied Node memory env", undefined, result as unknown as Prisma.InputJsonObject);
+      await audit(request, { action: "UPDATE", resource: "deployment_env", resourceId: deployment.id, description: `Deployment doctor set NODE_OPTIONS for ${deployment.slug}`, metadata: result as unknown as Prisma.InputJsonObject });
+      return reply.code(202).send({ action, result, next: "redeploy" });
+    }
+
+    if (action === "sync-public-env") {
+      const result = await applyPublicUrlEnv(deployment);
+      await addLog(deployment.id, "PREFLIGHT", "Deployment doctor synced public URL env", undefined, result as unknown as Prisma.InputJsonObject);
+      await audit(request, { action: "UPDATE", resource: "deployment_env", resourceId: deployment.id, description: `Deployment doctor synced public URL env for ${deployment.slug}`, metadata: result as unknown as Prisma.InputJsonObject });
+      return reply.code(202).send({ action, result, next: "redeploy" });
     }
 
     if (action === "health") {

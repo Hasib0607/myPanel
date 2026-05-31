@@ -36,7 +36,7 @@ export function DeploymentOverviewClient({ project }: { project: string }) {
     onError: (error) => setNotice(error instanceof Error ? error.message : "Action failed")
   });
   const repair = useMutation({
-    mutationFn: (name: "auto" | "sync-runtime" | "health" | "restart" | "redeploy") => apiPost(`/deployments/${project}/doctor/repair`, { action: name }),
+    mutationFn: (name: "auto" | "sync-runtime" | "health" | "restart" | "redeploy" | "set-node-memory" | "sync-public-env") => apiPost(`/deployments/${project}/doctor/repair`, { action: name }),
     onSuccess: async (_result, name) => {
       setNotice(`Doctor ${name} repair requested.`);
       await Promise.all([
@@ -111,7 +111,7 @@ export function DeploymentOverviewClient({ project }: { project: string }) {
                             <button
                               className="shrink-0 rounded-md border border-panel-line bg-white px-2 py-1 text-xs font-medium hover:bg-slate-50 disabled:opacity-50"
                               disabled={repair.isPending}
-                              onClick={() => repair.mutate(check.repairAction as "sync-runtime" | "health" | "restart" | "redeploy")}
+                              onClick={() => repair.mutate(check.repairAction as "sync-runtime" | "health" | "restart" | "redeploy" | "set-node-memory" | "sync-public-env")}
                               type="button"
                             >
                               {check.repairAction}
@@ -121,6 +121,35 @@ export function DeploymentOverviewClient({ project }: { project: string }) {
                       </div>
                     ))}
                   </div>
+                  {(doctor.data.envSuggestions ?? []).length ? (
+                    <div className="mt-4 rounded-md border border-panel-line bg-white p-3">
+                      <div className="text-xs font-semibold uppercase text-panel-muted">Suggested Env Fixes</div>
+                      <div className="mt-2 grid gap-2">
+                        {doctor.data.envSuggestions.slice(0, 8).map((item) => (
+                          <div className="flex items-center justify-between gap-3 text-xs" key={`${item.key}-${item.value}`}>
+                            <div className="min-w-0">
+                              <div className="truncate font-mono font-semibold">{item.key}={item.value}</div>
+                              <div className="truncate text-panel-muted">{item.reason}</div>
+                            </div>
+                            <button
+                              className="shrink-0 rounded-md border border-panel-line px-2 py-1 font-medium hover:bg-slate-50 disabled:opacity-50"
+                              disabled={repair.isPending}
+                              onClick={() => repair.mutate(item.repairAction as "set-node-memory" | "sync-public-env")}
+                              type="button"
+                            >
+                              Apply
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                  {(doctor.data.evidence ?? []).length ? (
+                    <div className="mt-4">
+                      <div className="text-xs font-semibold uppercase text-panel-muted">Evidence</div>
+                      <pre className="mt-2 max-h-48 overflow-auto rounded-md bg-slate-950 p-3 text-xs text-slate-100">{doctor.data.evidence.join("\n")}</pre>
+                    </div>
+                  ) : null}
                 </div>
               </div>
             ) : null}

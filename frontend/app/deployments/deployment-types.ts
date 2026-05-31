@@ -135,7 +135,7 @@ export type QueueResponse = {
 export type DeploymentDoctorResponse = {
   status: "pass" | "warn" | "fail";
   summary: string;
-  recommendedAction: "sync-runtime" | "health" | "restart" | "redeploy" | null;
+  recommendedAction: "sync-runtime" | "health" | "restart" | "redeploy" | "set-node-memory" | "sync-public-env" | null;
   checks: Array<{
     key: string;
     label: string;
@@ -144,6 +144,8 @@ export type DeploymentDoctorResponse = {
     fix?: string;
     repairAction?: string;
   }>;
+  evidence: string[];
+  envSuggestions: Array<{ key: string; value: string; reason: string; repairAction: string }>;
   generatedAt: string;
 };
 
