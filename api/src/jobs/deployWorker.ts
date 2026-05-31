@@ -674,6 +674,51 @@ async function autoRepairPostgresEncoding(deploymentId: string, releaseId: strin
   return normalized.envVars;
 }
 
+async function shouldRunDatabaseMigration(
+  deployment: { id: string; dbType?: "POSTGRESQL" | "MYSQL" | null; dbName?: string | null },
+  releaseId: string | undefined,
+  envVars: Record<string, string>
+) {
+  const explicitSkip = ["1", "true", "yes"].includes((envVars.SKIP_DATABASE_MIGRATIONS || envVars.SKIP_DB_MIGRATIONS || "").toLowerCase());
+  if (explicitSkip) {
+    await writeLog(deployment.id, releaseId, "MIGRATING", "Migration skipped by env flag", {
+      SKIP_DATABASE_MIGRATIONS: envVars.SKIP_DATABASE_MIGRATIONS ?? null,
+      SKIP_DB_MIGRATIONS: envVars.SKIP_DB_MIGRATIONS ?? null
+    });
+    return false;
+  }
+
+  const explicitRun = ["1", "true", "yes"].includes((envVars.RUN_DATABASE_MIGRATIONS || envVars.RUN_DB_MIGRATIONS || "").toLowerCase());
+  if (explicitRun) return true;
+
+  if (!deployment.dbType || !deployment.dbName) return true;
+
+  try {
+    const tables = await sysagent.databaseTables({
+      engine: deployment.dbType,
+      database: deployment.dbName
+    }) as { tables?: string[]; result?: unknown };
+    const tableCount = tables.tables?.length ?? 0;
+    if (tableCount > 0) {
+      await writeLog(deployment.id, releaseId, "MIGRATING", "Migration skipped for existing selected database", {
+        dbType: deployment.dbType,
+        dbName: deployment.dbName,
+        tableCount,
+        reason: "Selected database already has tables. Add RUN_DATABASE_MIGRATIONS=true to force migrations."
+      });
+      return false;
+    }
+  } catch (error) {
+    await writeLog(deployment.id, releaseId, "MIGRATING", "Could not inspect selected database before migration", {
+      dbType: deployment.dbType ?? null,
+      dbName: deployment.dbName ?? null,
+      warning: error instanceof Error ? error.message : String(error)
+    }, "warn");
+  }
+
+  return true;
+}
+
 async function githubCloneToken(sourceProvider: string, gitUrl: string | null) {
   if (sourceProvider !== "GITHUB" || !gitUrl?.startsWith("https://github.com/")) return null;
   return getSecret(githubTokenSecretRef());
@@ -1015,23 +1060,25 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         assertCommandTree(packageDiscoverResult, "Laravel package discovery");
       }
 
-      const runDatabaseMigration = () => runStep(deployment.id, releaseId, "MIGRATING", "Database migration", () =>
-        sysagent.deploymentMigrate({
-          rootPath: appPath,
-          command: "php artisan migrate --force",
-          env: envVars
-        })
-      );
-      let migrateResult = await runDatabaseMigration();
-      try {
-        assertCommandTree(migrateResult, "Database migration");
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        const repairedEnv = await autoRepairPostgresEncoding(deployment.id, releaseId, detail, envVars).catch(() => null);
-        if (!repairedEnv) throw error;
-        envVars = repairedEnv;
-        migrateResult = await runDatabaseMigration();
-        assertCommandTree(migrateResult, "Database migration");
+      if (await shouldRunDatabaseMigration(deployment, releaseId, envVars)) {
+        const runDatabaseMigration = () => runStep(deployment.id, releaseId, "MIGRATING", "Database migration", () =>
+          sysagent.deploymentMigrate({
+            rootPath: appPath,
+            command: "php artisan migrate --force",
+            env: envVars
+          })
+        );
+        let migrateResult = await runDatabaseMigration();
+        try {
+          assertCommandTree(migrateResult, "Database migration");
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          const repairedEnv = await autoRepairPostgresEncoding(deployment.id, releaseId, detail, envVars).catch(() => null);
+          if (!repairedEnv) throw error;
+          envVars = repairedEnv;
+          migrateResult = await runDatabaseMigration();
+          assertCommandTree(migrateResult, "Database migration");
+        }
       }
     } else {
       await writeLog(deployment.id, releaseId, "MIGRATING", "Migration skipped for framework", { framework: deployment.framework });
