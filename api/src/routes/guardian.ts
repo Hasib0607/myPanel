@@ -130,6 +130,16 @@ function hasFailedReturncode(value: unknown): boolean {
   return Object.values(value as Record<string, unknown>).some((item) => hasFailedReturncode(item));
 }
 
+function hasDryRun(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  if ("dryRun" in value && (value as { dryRun?: unknown }).dryRun === true) return true;
+  return Object.values(value as Record<string, unknown>).some((item) => hasDryRun(item));
+}
+
+function serviceStatusAfter(diagnosis: GuardianDiagnosis | null, serviceKey: string) {
+  return diagnosis?.services?.find((service) => service.key === serviceKey) ?? null;
+}
+
 async function syncFileFindings() {
   const scan = await sysagent.guardianFileWatch();
   const activeFingerprints: string[] = [];
@@ -433,23 +443,34 @@ export const guardianRoutes: FastifyPluginAsync = async (app) => {
   app.post("/services/:serviceKey/restart", async (request, reply) => {
     const { serviceKey } = serviceActionSchema.parse(request.params);
     const restart = await sysagent.guardianRestartService(serviceKey);
-    const recheck = await trySysagent(null, () => sysagent.guardianDiagnosis());
-    const failed = hasFailedReturncode(restart);
+    const recheck = await trySysagent<GuardianDiagnosis | null>(null, () => sysagent.guardianDiagnosis() as Promise<GuardianDiagnosis>);
+    const serviceStatus = serviceStatusAfter(recheck, serviceKey);
+    const dryRun = hasDryRun(restart);
+    const commandFailed = hasFailedReturncode(restart);
+    const stillDown = serviceStatus?.status === "down";
+    const status = dryRun ? "SKIPPED" : commandFailed || stillDown ? "FAILED" : "SUCCEEDED";
+    const reason = dryRun
+      ? "live system commands are disabled; no restart was executed"
+      : commandFailed
+        ? "service restart command failed"
+        : stillDown
+          ? `service is still ${serviceStatus?.detail ?? "down"} after restart`
+          : null;
     const action = await prisma.guardianAction.create({
       data: {
         action: "manual-restart-service",
         target: serviceKey,
-        status: failed ? "FAILED" : "SUCCEEDED",
-        reason: failed ? "service restart command failed" : null,
-        result: { restart, recheck } as any
+        status,
+        reason,
+        result: { restart, recheck, serviceStatus } as any
       }
     });
     await prisma.guardianNotification.create({
       data: {
-        level: failed ? "CRITICAL" : "INFO",
-        title: failed ? `Restart failed: ${serviceKey}` : `Restart requested: ${serviceKey}`,
-        message: failed ? "Guardian could not restart the service." : "Guardian service restart completed.",
-        metadata: { actionId: action.id, restart } as any
+        level: status === "SUCCEEDED" ? "INFO" : "CRITICAL",
+        title: status === "SUCCEEDED" ? `Restart fixed: ${serviceKey}` : `Restart did not fix: ${serviceKey}`,
+        message: reason ?? "Guardian service restart completed and the service is healthy.",
+        metadata: { actionId: action.id, restart, serviceStatus } as any
       }
     });
     await audit(request, {
@@ -457,9 +478,9 @@ export const guardianRoutes: FastifyPluginAsync = async (app) => {
       resource: "guardian_service",
       resourceId: serviceKey,
       description: `Guardian restart requested for ${serviceKey}`,
-      metadata: { actionId: action.id, restart } as any
+      metadata: { actionId: action.id, restart, serviceStatus } as any
     });
-    return reply.code(202).send({ accepted: true, action, restart, recheck });
+    return reply.code(202).send({ accepted: true, action, restart, recheck, serviceStatus });
   });
 
   app.post("/nginx/reload", async (request, reply) => {

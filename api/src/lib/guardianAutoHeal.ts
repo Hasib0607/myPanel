@@ -18,7 +18,7 @@ type GuardianIncidentInput = {
 export type GuardianDiagnosis = {
   unavailable?: true;
   incidents?: GuardianIncidentInput[];
-  services?: Array<{ key: string; name: string; status: string; optional?: boolean }>;
+  services?: Array<{ key: string; name: string; status: string; detail?: string; optional?: boolean }>;
   pm2?: { items?: Array<{ name: string; pmId?: number; status: string; healthy: boolean }> };
   logs?: { nginxErrors?: number; badHttpResponses?: number };
   security?: {

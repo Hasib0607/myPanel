@@ -167,6 +167,24 @@ function actionDetail(action: GuardianOverview["recentActions"][number]) {
   return action.incident?.title ?? "Guardian action";
 }
 
+function commandLine(result: any) {
+  const command = result?.restart?.result?.command ?? result?.result?.command;
+  return Array.isArray(command) ? command.join(" ") : null;
+}
+
+function serviceActionMessage(result: any, serviceKey: string) {
+  const status = result?.action?.status;
+  const reason = result?.action?.reason;
+  const serviceStatus = result?.serviceStatus;
+  const command = commandLine(result);
+  const dryRun = result?.restart?.result?.dryRun;
+  if (status === "SUCCEEDED") return `${serviceKey} restarted and is healthy now.`;
+  if (dryRun) return `Dry-run only: live system commands are disabled. Command not executed${command ? `: ${command}` : ""}.`;
+  if (reason) return `Restart did not fix ${serviceKey}: ${reason}${command ? ` (${command})` : ""}.`;
+  if (serviceStatus?.status === "down") return `Restart ran, but ${serviceKey} is still down: ${serviceStatus.detail}.`;
+  return `Restart result for ${serviceKey}: ${status ?? "unknown"}.`;
+}
+
 function Meter({ label, value, detail, icon: Icon }: { label: string; value: number; detail: string; icon: typeof HardDrive }) {
   return (
     <div className="rounded-md border border-panel-line bg-white p-4">
@@ -226,8 +244,8 @@ export function GuardianClient() {
     setServiceBusy(serviceKey);
     setAutoHealResult(null);
     try {
-      await apiPost(`/guardian/services/${encodeURIComponent(serviceKey)}/restart`, {});
-      setAutoHealResult(`Restart requested for ${serviceKey}.`);
+      const result = await apiPost<any>(`/guardian/services/${encodeURIComponent(serviceKey)}/restart`, {});
+      setAutoHealResult(serviceActionMessage(result, serviceKey));
       await overview.refetch();
     } catch (error) {
       setAutoHealResult(error instanceof Error ? error.message : `Could not restart ${serviceKey}.`);
@@ -453,19 +471,6 @@ export function GuardianClient() {
                         <div className="mt-3 flex flex-wrap gap-2">
                           {(() => {
                             const service = !unavailable ? diagnosis?.services.find((item) => incident.title.includes(item.name) || incident.detail.includes(`${item.key}:`)) : null;
-                            if (service && canRestartService(service.key)) {
-                              return (
-                                <button
-                                  className="inline-flex items-center gap-1 rounded-md border border-panel-line px-2 py-1 text-xs font-medium hover:bg-slate-50 disabled:opacity-50"
-                                  disabled={serviceBusy !== null}
-                                  onClick={() => restartService(service.key)}
-                                  type="button"
-                                >
-                                  <RefreshCw size={13} />
-                                  {serviceBusy === service.key ? "Restarting..." : `Restart ${service.name}`}
-                                </button>
-                              );
-                            }
                             if (incident.category === "nginx") {
                               return (
                                 <button
@@ -476,6 +481,19 @@ export function GuardianClient() {
                                 >
                                   <RefreshCw size={13} />
                                   {serviceBusy === "nginx-reload" ? "Reloading..." : "Test & reload Nginx"}
+                                </button>
+                              );
+                            }
+                            if (service && canRestartService(service.key)) {
+                              return (
+                                <button
+                                  className="inline-flex items-center gap-1 rounded-md border border-panel-line px-2 py-1 text-xs font-medium hover:bg-slate-50 disabled:opacity-50"
+                                  disabled={serviceBusy !== null}
+                                  onClick={() => restartService(service.key)}
+                                  type="button"
+                                >
+                                  <RefreshCw size={13} />
+                                  {serviceBusy === service.key ? "Restarting..." : `Restart ${service.name}`}
                                 </button>
                               );
                             }
