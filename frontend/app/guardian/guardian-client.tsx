@@ -61,6 +61,18 @@ type GuardianOverview = {
       }
     | { unavailable: true; incidents: []; services: []; ports: [] };
   incidents: Incident[];
+  storedIncidents: Array<{ id: string; title: string; detail: string; severity: string; status: string; lastSeenAt: string }>;
+  recentActions: Array<{
+    id: string;
+    action: string;
+    target: string;
+    status: "SKIPPED" | "SUCCEEDED" | "FAILED";
+    reason: string | null;
+    retryCount: number;
+    createdAt: string;
+    incident: { title: string; severity: string; status: string } | null;
+    result?: unknown;
+  }>;
   deployments: Array<{ id: string; name: string; slug: string; status: string; healthStatus: string; port: number; lastHealthCheckAt: string | null }>;
   sslDomains: Array<{
     id: string;
@@ -107,6 +119,29 @@ function statusClass(status: string) {
   return status === "healthy" ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-panel-danger";
 }
 
+function actionStatusClass(status: string) {
+  if (status === "SUCCEEDED") return "bg-emerald-50 text-emerald-700";
+  if (status === "FAILED") return "bg-red-50 text-panel-danger";
+  return "bg-slate-100 text-slate-700";
+}
+
+function actionDetail(action: GuardianOverview["recentActions"][number]) {
+  if (action.reason) return action.reason;
+  const result = action.result as any;
+  if (action.action === "reload-nginx" && result?.test) {
+    const testText = result.test.stderr || result.test.stdout || "nginx -t completed";
+    const reloadText = result.reload?.stderr || result.reload?.stdout || (result.reloaded ? "reload requested" : "reload skipped");
+    return `${testText.toString().trim().split("\n")[0]} / ${reloadText.toString().trim().split("\n")[0]}`;
+  }
+  if (result?.restart?.result) {
+    return result.restart.result.stderr || result.restart.result.stdout || `returncode ${result.restart.result.returncode}`;
+  }
+  if (result?.freedBytes !== undefined) {
+    return `${result.removed?.length ?? 0} files, ${formatBytes(result.freedBytes)} ${result.dryRun ? "would be freed" : "freed"}`;
+  }
+  return action.incident?.title ?? "Guardian action";
+}
+
 function Meter({ label, value, detail, icon: Icon }: { label: string; value: number; detail: string; icon: typeof HardDrive }) {
   return (
     <div className="rounded-md border border-panel-line bg-white p-4">
@@ -144,9 +179,11 @@ export function GuardianClient() {
     setAutoHealBusy(true);
     setAutoHealResult(null);
     try {
-      const result = await apiPost<{ actions: Array<{ action: string; target: string; skipped?: boolean; reason?: string }> }>("/guardian/auto-heal", {});
-      const skipped = result.actions.filter((action) => action.skipped).length;
+      const result = await apiPost<{ actions: Array<{ action: string; target: string; status: string; reason?: string | null }> }>("/guardian/auto-heal", {});
+      const skipped = result.actions.filter((action) => action.status === "SKIPPED").length;
+      const failed = result.actions.filter((action) => action.status === "FAILED").length;
       setAutoHealResult(`${result.actions.length} safe actions evaluated${skipped ? `, ${skipped} skipped` : ""}.`);
+      if (failed) setAutoHealResult(`${result.actions.length} safe actions evaluated, ${failed} failed, ${skipped} skipped.`);
       await overview.refetch();
     } catch (error) {
       setAutoHealResult(error instanceof Error ? error.message : "Guardian auto-heal failed.");
@@ -246,6 +283,47 @@ export function GuardianClient() {
                         <div className="mt-1 text-sm text-panel-muted">{incident.detail}</div>
                         {incident.safeAction ? <div className="mt-1 text-xs text-panel-muted">Safe action candidate: {incident.safeAction}</div> : null}
                       </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-md border border-panel-line bg-white">
+              <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Auto-Heal History</div>
+              <div className="divide-y divide-panel-line">
+                {(overview.data?.recentActions ?? []).length === 0 ? (
+                  <div className="px-4 py-5 text-sm text-panel-muted">No Guardian actions recorded yet.</div>
+                ) : (overview.data?.recentActions ?? []).map((action) => (
+                  <div className="px-4 py-3 text-sm" key={action.id}>
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="truncate font-medium">{action.action} / {action.target}</div>
+                        <div className="truncate text-xs text-panel-muted">{actionDetail(action)}</div>
+                      </div>
+                      <div className="text-right">
+                        <span className={`rounded-md px-2 py-1 text-xs font-semibold ${actionStatusClass(action.status)}`}>{action.status}</span>
+                        <div className="mt-1 text-xs text-panel-muted">retry {action.retryCount}</div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-md border border-panel-line bg-white">
+              <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Incident History</div>
+              <div className="divide-y divide-panel-line">
+                {(overview.data?.storedIncidents ?? []).length === 0 ? (
+                  <div className="px-4 py-5 text-sm text-panel-muted">No stored Guardian incidents.</div>
+                ) : (overview.data?.storedIncidents ?? []).map((incident) => (
+                  <div className="px-4 py-3 text-sm" key={incident.id}>
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="truncate font-medium">{incident.title}</div>
+                        <div className="truncate text-xs text-panel-muted">{incident.detail}</div>
+                      </div>
+                      <span className={`rounded-md px-2 py-1 text-xs font-semibold ${incident.severity === "CRITICAL" ? "bg-red-50 text-panel-danger" : "bg-amber-50 text-amber-700"}`}>{incident.severity}</span>
                     </div>
                   </div>
                 ))}

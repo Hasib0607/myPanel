@@ -50,6 +50,8 @@ class Pm2RestartRequest(BaseModel):
 
 class LogCleanupRequest(BaseModel):
     olderThanDays: int = Field(default=1, ge=1, le=30)
+    minSizeMb: int = Field(default=1, ge=0, le=1024)
+    maxFiles: int = Field(default=200, ge=1, le=1000)
 
 
 def command_output(command: list[str], timeout: int = 4) -> dict[str, Any]:
@@ -222,31 +224,40 @@ def cleanup_logs(body: LogCleanupRequest) -> dict[str, Any]:
 
     cutoff = datetime.now(timezone.utc).timestamp() - (body.olderThanDays * 86_400)
     candidates = []
+    min_size = body.minSizeMb * 1024 * 1024
     for path in root.rglob("*"):
         if not path.is_file() or path.suffix not in {".log", ".txt"}:
             continue
         try:
-            if path.stat().st_mtime < cutoff:
-                candidates.append(path)
+            stat = path.stat()
+            if stat.st_mtime < cutoff and stat.st_size >= min_size:
+                candidates.append({"path": path, "size": stat.st_size})
         except OSError:
             continue
 
     removed = []
+    freed_bytes = 0
     if settings.allow_live_system_commands:
-        for path in candidates[:200]:
+        for item in candidates[:body.maxFiles]:
+            path = item["path"]
             try:
                 path.unlink()
                 removed.append(str(path))
+                freed_bytes += item["size"]
             except OSError:
                 continue
     else:
-        removed = [str(path) for path in candidates[:200]]
+        removed = [str(item["path"]) for item in candidates[:body.maxFiles]]
+        freed_bytes = sum(item["size"] for item in candidates[:body.maxFiles])
 
     return {
         "action": "cleanup-logs",
         "root": str(root),
         "olderThanDays": body.olderThanDays,
+        "minSizeMb": body.minSizeMb,
+        "candidateCount": len(candidates),
         "removed": removed,
+        "freedBytes": freed_bytes,
         "dryRun": not settings.allow_live_system_commands,
     }
 

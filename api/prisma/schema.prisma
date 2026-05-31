@@ -163,6 +163,23 @@ enum AuditAction {
   LOGOUT
 }
 
+enum GuardianSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+enum GuardianIncidentStatus {
+  OPEN
+  RESOLVED
+}
+
+enum GuardianActionStatus {
+  SKIPPED
+  SUCCEEDED
+  FAILED
+}
+
 model Domain {
   id           String        @id @default(cuid())
   name         String        @unique
@@ -445,6 +462,42 @@ model AuditLog {
   @@index([resource, createdAt])
   @@index([action, createdAt])
   @@map("audit_logs")
+}
+
+model GuardianIncident {
+  id         String                 @id @default(cuid())
+  fingerprint String               @unique
+  category   String
+  title      String
+  detail     String
+  severity   GuardianSeverity      @default(WARNING)
+  status     GuardianIncidentStatus @default(OPEN)
+  firstSeenAt DateTime             @default(now()) @map("first_seen_at")
+  lastSeenAt  DateTime             @default(now()) @map("last_seen_at")
+  resolvedAt  DateTime?            @map("resolved_at")
+  metadata    Json                 @default("{}")
+  actions     GuardianAction[]
+
+  @@index([status, lastSeenAt])
+  @@index([category, lastSeenAt])
+  @@map("guardian_incidents")
+}
+
+model GuardianAction {
+  id          String               @id @default(cuid())
+  incidentId  String?              @map("incident_id")
+  action      String
+  target      String
+  status      GuardianActionStatus
+  reason      String?
+  result      Json                 @default("{}")
+  retryCount  Int                  @default(0) @map("retry_count")
+  createdAt   DateTime             @default(now()) @map("created_at")
+  incident    GuardianIncident?    @relation(fields: [incidentId], references: [id], onDelete: SetNull)
+
+  @@index([action, target, createdAt])
+  @@index([status, createdAt])
+  @@map("guardian_actions")
 }
 
 model FirewallRule {
