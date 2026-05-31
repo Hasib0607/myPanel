@@ -4,7 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { AlertTriangle, CheckCircle2, Clock3, HardDrive, MemoryStick, RadioTower, RefreshCw, ServerCrash, ShieldAlert } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
-import { apiGet, apiPost } from "@/lib/api";
+import { apiDelete, apiGet, apiPost } from "@/lib/api";
 
 type Incident = {
   severity: "critical" | "warning" | string;
@@ -38,7 +38,7 @@ type GuardianOverview = {
           optional?: boolean;
         }>;
         ports: Array<{ port: number; listening: boolean; owner?: { process?: string; pid?: number } }>;
-        security: { sshFailures: number; ufw?: CommandOutput; fail2ban?: CommandOutput };
+        security: { sshFailures: number; ufw?: CommandOutput; fail2ban?: CommandOutput; fail2banSshd?: CommandOutput; suspiciousIps?: SuspiciousIp[] };
         logs: {
           nginxErrors: number;
           badHttpResponses: number;
@@ -82,7 +82,23 @@ type GuardianOverview = {
     daysRemaining: number | null;
     liveSsl: { ok: boolean; issuer?: string; validFrom?: string; validTo?: string; daysRemaining?: number; error?: string } | null;
   }>;
+  security: {
+    suspiciousIps: Array<SuspiciousIp & { allowlisted: boolean; blocked: boolean }>;
+    allowlist: Array<{ id: string; cidr: string; label: string | null; expiresAt: string | null }>;
+    activeBlocks: Array<{ id: string; ip: string; reason: string; score: number; status: string; expiresAt: string | null }>;
+  };
+  fileFindings: Array<{ id: string; path: string; reason: string; risk: string; status: string; sizeBytes: number; mode: string | null; owner: string | null; modifiedAt: string | null }>;
   generatedAt: string;
+};
+
+type SuspiciousIp = {
+  ip: string;
+  score: number;
+  sshFailures: number;
+  badHttp: number;
+  requests: number;
+  reasons: string[];
+  recommendation: "monitor" | "suggest-block" | "auto-block";
 };
 
 type CommandOutput = {
@@ -163,6 +179,8 @@ function Meter({ label, value, detail, icon: Icon }: { label: string; value: num
 export function GuardianClient() {
   const [autoHealResult, setAutoHealResult] = useState<string | null>(null);
   const [autoHealBusy, setAutoHealBusy] = useState(false);
+  const [securityNotice, setSecurityNotice] = useState<string | null>(null);
+  const [allowCidr, setAllowCidr] = useState("");
   const overview = useQuery({
     queryKey: ["guardian-overview"],
     queryFn: () => apiGet<GuardianOverview>("/guardian/overview"),
@@ -189,6 +207,64 @@ export function GuardianClient() {
       setAutoHealResult(error instanceof Error ? error.message : "Guardian auto-heal failed.");
     } finally {
       setAutoHealBusy(false);
+    }
+  }
+
+  async function blockIp(ip: string) {
+    setSecurityNotice(null);
+    try {
+      await apiPost("/guardian/block-ip", { ip, reason: "Guardian suspicious IP" });
+      setSecurityNotice(`Block requested for ${ip}.`);
+      await overview.refetch();
+    } catch (error) {
+      setSecurityNotice(error instanceof Error ? error.message : "Could not block IP.");
+    }
+  }
+
+  async function unblockIp(ip: string) {
+    setSecurityNotice(null);
+    try {
+      await apiPost("/guardian/unblock-ip", { ip, reason: "Guardian manual unblock" });
+      setSecurityNotice(`Unblock requested for ${ip}.`);
+      await overview.refetch();
+    } catch (error) {
+      setSecurityNotice(error instanceof Error ? error.message : "Could not unblock IP.");
+    }
+  }
+
+  async function scanFiles() {
+    setSecurityNotice(null);
+    try {
+      const result = await apiGet<{ scan: { scanned: number; findings: unknown[] } }>("/guardian/file-watch/scan");
+      setSecurityNotice(`File watch scanned ${result.scan.scanned} files and found ${result.scan.findings.length} suspicious items.`);
+      await overview.refetch();
+    } catch (error) {
+      setSecurityNotice(error instanceof Error ? error.message : "File watch scan failed.");
+    }
+  }
+
+  async function addAllowlist() {
+    const cidr = allowCidr.trim();
+    if (!cidr) return;
+    setSecurityNotice(null);
+    try {
+      await apiPost("/guardian/allowlist", { cidr, label: "Guardian allowlist" });
+      setAllowCidr("");
+      setSecurityNotice(`${cidr} added to allowlist.`);
+      await overview.refetch();
+    } catch (error) {
+      setSecurityNotice(error instanceof Error ? error.message : "Could not add allowlist entry.");
+    }
+  }
+
+  async function removeAllowlist(id: string) {
+    setSecurityNotice(null);
+    try {
+      await apiDelete(`/guardian/allowlist/${id}`);
+      setSecurityNotice("Allowlist entry removed.");
+      await overview.refetch();
+    } catch (error) {
+      setSecurityNotice(error instanceof Error ? error.message : "Could not remove allowlist entry.");
     }
   }
 
@@ -222,6 +298,9 @@ export function GuardianClient() {
       <section className="space-y-6 p-8">
         {autoHealResult ? (
           <div className="rounded-md border border-panel-line bg-white px-4 py-3 text-sm text-slate-700">{autoHealResult}</div>
+        ) : null}
+        {securityNotice ? (
+          <div className="rounded-md border border-panel-line bg-white px-4 py-3 text-sm text-slate-700">{securityNotice}</div>
         ) : null}
 
         {overview.isError ? (
@@ -356,6 +435,97 @@ export function GuardianClient() {
           </div>
 
           <div className="space-y-6">
+            <div className="rounded-md border border-panel-line bg-white">
+              <div className="flex items-center justify-between border-b border-panel-line px-4 py-3">
+                <div className="text-sm font-semibold">Suspicious IPs</div>
+                <span className="text-xs text-panel-muted">{overview.data?.security.suspiciousIps.length ?? 0} detected</span>
+              </div>
+              <div className="divide-y divide-panel-line">
+                {(overview.data?.security.suspiciousIps ?? []).length === 0 ? (
+                  <div className="px-4 py-5 text-sm text-panel-muted">No suspicious IPs in the current log sample.</div>
+                ) : (overview.data?.security.suspiciousIps ?? []).slice(0, 6).map((item) => (
+                  <div className="px-4 py-3 text-sm" key={item.ip}>
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="truncate font-medium">{item.ip}</div>
+                        <div className="truncate text-xs text-panel-muted">score {item.score} / {item.reasons.join(", ") || "monitor"}</div>
+                      </div>
+                      {item.blocked ? (
+                        <button className="rounded-md border border-panel-line px-2 py-1 text-xs hover:bg-slate-50" onClick={() => unblockIp(item.ip)} type="button">Unblock</button>
+                      ) : (
+                        <button className="rounded-md border border-panel-line px-2 py-1 text-xs hover:bg-slate-50 disabled:opacity-50" disabled={item.allowlisted} onClick={() => blockIp(item.ip)} type="button">
+                          {item.allowlisted ? "Allowed" : "Block"}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-md border border-panel-line bg-white">
+              <div className="flex items-center justify-between border-b border-panel-line px-4 py-3">
+                <div className="text-sm font-semibold">File Watch</div>
+                <button className="rounded-md border border-panel-line px-2 py-1 text-xs hover:bg-slate-50" onClick={scanFiles} type="button">Scan</button>
+              </div>
+              <div className="divide-y divide-panel-line">
+                {(overview.data?.fileFindings ?? []).length === 0 ? (
+                  <div className="px-4 py-5 text-sm text-panel-muted">No suspicious files recorded.</div>
+                ) : (overview.data?.fileFindings ?? []).slice(0, 6).map((finding) => (
+                  <div className="px-4 py-3 text-sm" key={finding.id}>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="truncate font-medium">{finding.path}</div>
+                        <div className="truncate text-xs text-panel-muted">{finding.reason}</div>
+                        <div className="mt-1 text-xs text-panel-muted">{formatBytes(finding.sizeBytes)} / {finding.mode ?? "-"}</div>
+                      </div>
+                      <span className={`rounded-md px-2 py-1 text-xs font-semibold ${finding.risk === "CRITICAL" ? "bg-red-50 text-panel-danger" : "bg-amber-50 text-amber-700"}`}>{finding.risk}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-md border border-panel-line bg-white">
+              <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Blocked IPs</div>
+              <div className="divide-y divide-panel-line">
+                {(overview.data?.security.activeBlocks ?? []).length === 0 ? (
+                  <div className="px-4 py-5 text-sm text-panel-muted">No active Guardian IP blocks.</div>
+                ) : (overview.data?.security.activeBlocks ?? []).slice(0, 6).map((block) => (
+                  <div className="flex items-center justify-between gap-3 px-4 py-3 text-sm" key={block.id}>
+                    <div className="min-w-0">
+                      <div className="truncate font-medium">{block.ip}</div>
+                      <div className="truncate text-xs text-panel-muted">{block.reason}</div>
+                    </div>
+                    <button className="rounded-md border border-panel-line px-2 py-1 text-xs hover:bg-slate-50" onClick={() => unblockIp(block.ip)} type="button">Unblock</button>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-md border border-panel-line bg-white p-4">
+              <div className="mb-3 text-sm font-semibold">Allowlist</div>
+              <div className="flex gap-2">
+                <input
+                  className="h-9 min-w-0 flex-1 rounded-md border border-panel-line px-3 text-sm"
+                  onChange={(event) => setAllowCidr(event.target.value)}
+                  placeholder="IP or CIDR"
+                  value={allowCidr}
+                />
+                <button className="rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50" onClick={addAllowlist} type="button">Add</button>
+              </div>
+              <div className="mt-3 space-y-2">
+                {(overview.data?.security.allowlist ?? []).length === 0 ? (
+                  <div className="text-sm text-panel-muted">No allowlist entries.</div>
+                ) : (overview.data?.security.allowlist ?? []).slice(0, 6).map((item) => (
+                  <div className="flex items-center justify-between gap-2 text-sm" key={item.id}>
+                    <span className="truncate">{item.cidr}</span>
+                    <button className="rounded-md border border-panel-line px-2 py-1 text-xs hover:bg-slate-50" onClick={() => removeAllowlist(item.id)} type="button">Remove</button>
+                  </div>
+                ))}
+              </div>
+            </div>
+
             <div className="rounded-md border border-panel-line bg-white p-4">
               <div className="mb-3 text-sm font-semibold">PM2 Apps</div>
               <div className="space-y-2 text-sm">

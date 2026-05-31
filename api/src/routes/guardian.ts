@@ -1,9 +1,22 @@
+import { createHash } from "node:crypto";
 import tls from "node:tls";
 import type { FastifyPluginAsync } from "fastify";
+import { z } from "zod";
 import { audit } from "../lib/audit.js";
 import { runGuardianAutoHeal, syncGuardianIncidentsOnly, type GuardianDiagnosis } from "../lib/guardianAutoHeal.js";
 import { prisma } from "../lib/prisma.js";
 import { sysagent } from "../lib/sysagent.js";
+
+const ipActionSchema = z.object({
+  ip: z.string().trim().min(3),
+  reason: z.string().trim().min(1).optional(),
+  durationMinutes: z.number().int().min(5).max(43_200).optional()
+});
+const allowlistSchema = z.object({
+  cidr: z.string().trim().min(3),
+  label: z.string().trim().optional(),
+  expiresAt: z.string().datetime().optional()
+});
 
 async function trySysagent<T>(fallback: T, fn: () => Promise<T>) {
   try {
@@ -52,11 +65,57 @@ function probeSsl(domain: string) {
   });
 }
 
+function isAllowlisted(ip: string, allowlist: Array<{ cidr: string }>) {
+  return allowlist.some((item) => item.cidr === ip);
+}
+
+function fileFingerprint(path: string, reason: string) {
+  return createHash("sha256").update(`${path}:${reason}`).digest("hex").slice(0, 32);
+}
+
+async function syncFileFindings() {
+  const scan = await sysagent.guardianFileWatch();
+  const activeFingerprints: string[] = [];
+  for (const finding of scan.findings) {
+    const fingerprint = fileFingerprint(finding.path, finding.reason);
+    activeFingerprints.push(fingerprint);
+    await prisma.guardianFileFinding.upsert({
+      where: { fingerprint },
+      update: {
+        path: finding.path,
+        reason: finding.reason,
+        risk: finding.risk,
+        status: "OPEN",
+        sizeBytes: finding.sizeBytes,
+        mode: finding.mode,
+        owner: finding.owner,
+        modifiedAt: finding.modifiedAt ? new Date(finding.modifiedAt) : null,
+        lastSeenAt: new Date()
+      },
+      create: {
+        fingerprint,
+        path: finding.path,
+        reason: finding.reason,
+        risk: finding.risk,
+        sizeBytes: finding.sizeBytes,
+        mode: finding.mode,
+        owner: finding.owner,
+        modifiedAt: finding.modifiedAt ? new Date(finding.modifiedAt) : null
+      }
+    });
+  }
+  await prisma.guardianFileFinding.updateMany({
+    where: { status: "OPEN", fingerprint: { notIn: activeFingerprints } },
+    data: { status: "RESOLVED" }
+  });
+  return scan;
+}
+
 export const guardianRoutes: FastifyPluginAsync = async (app) => {
   app.addHook("preHandler", app.requireAuth);
 
   app.get("/overview", async () => {
-    const [diagnosis, deployments, sslDomains, recentActions, storedIncidents] = await Promise.all([
+    const [diagnosis, deployments, sslDomains, recentActions, storedIncidents, allowlist, activeBlocks, fileFindings] = await Promise.all([
       trySysagent({ unavailable: true, incidents: [], services: [], ports: [] }, () => sysagent.guardianDiagnosis()),
       prisma.deployment.findMany({
         orderBy: { updatedAt: "desc" },
@@ -87,7 +146,10 @@ export const guardianRoutes: FastifyPluginAsync = async (app) => {
         where: { status: "OPEN" },
         orderBy: [{ severity: "desc" }, { lastSeenAt: "desc" }],
         take: 20
-      })
+      }),
+      prisma.guardianIpAllowlist.findMany({ orderBy: { createdAt: "desc" } }),
+      prisma.guardianIpBlock.findMany({ where: { status: "ACTIVE" }, orderBy: { createdAt: "desc" }, take: 50 }),
+      prisma.guardianFileFinding.findMany({ where: { status: "OPEN" }, orderBy: [{ risk: "desc" }, { lastSeenAt: "desc" }], take: 50 })
     ]);
 
     const sslProbes = await Promise.all(
@@ -135,8 +197,68 @@ export const guardianRoutes: FastifyPluginAsync = async (app) => {
       })),
       recentActions,
       storedIncidents,
+      security: {
+        allowlist,
+        activeBlocks,
+        suspiciousIps: ((diagnosis as any).security?.suspiciousIps ?? []).map((item: any) => ({
+          ...item,
+          allowlisted: isAllowlisted(item.ip, allowlist),
+          blocked: activeBlocks.some((block) => block.ip === item.ip)
+        }))
+      },
+      fileFindings,
       generatedAt: new Date().toISOString()
     };
+  });
+
+  app.get("/file-watch/scan", async () => {
+    const scan = await syncFileFindings();
+    const findings = await prisma.guardianFileFinding.findMany({ where: { status: "OPEN" }, orderBy: [{ risk: "desc" }, { lastSeenAt: "desc" }], take: 50 });
+    return { scan, findings };
+  });
+
+  app.post("/allowlist", async (request, reply) => {
+    const body = allowlistSchema.parse(request.body);
+    const item = await prisma.guardianIpAllowlist.upsert({
+      where: { cidr: body.cidr },
+      update: { label: body.label, expiresAt: body.expiresAt ? new Date(body.expiresAt) : null },
+      create: { cidr: body.cidr, label: body.label, expiresAt: body.expiresAt ? new Date(body.expiresAt) : null }
+    });
+    await audit(request, { action: "APPLY", resource: "guardian_allowlist", resourceId: item.id, description: `Allowlisted ${body.cidr}` });
+    return reply.code(201).send(item);
+  });
+
+  app.delete("/allowlist/:id", async (request) => {
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+    await prisma.guardianIpAllowlist.delete({ where: { id } });
+    return { ok: true };
+  });
+
+  app.post("/block-ip", async (request, reply) => {
+    const body = ipActionSchema.parse(request.body);
+    if (body.ip === request.ip) return reply.code(400).send({ error: "Refusing to block the current admin IP" });
+    const allowed = await prisma.guardianIpAllowlist.findFirst({ where: { cidr: body.ip, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] } });
+    if (allowed) return reply.code(409).send({ error: "IP is allowlisted" });
+    const result = await sysagent.guardianBlockIp({ ip: body.ip, reason: body.reason });
+    const block = await prisma.guardianIpBlock.create({
+      data: {
+        ip: body.ip,
+        reason: body.reason ?? "Guardian manual block",
+        score: 0,
+        expiresAt: body.durationMinutes ? new Date(Date.now() + body.durationMinutes * 60_000) : null,
+        result: result as any
+      }
+    });
+    await audit(request, { action: "APPLY", resource: "guardian_ip_block", resourceId: block.id, description: `Blocked ${body.ip}`, metadata: { result } as any });
+    return reply.code(202).send({ block, result });
+  });
+
+  app.post("/unblock-ip", async (request, reply) => {
+    const body = ipActionSchema.parse(request.body);
+    const result = await sysagent.guardianUnblockIp({ ip: body.ip, reason: body.reason });
+    await prisma.guardianIpBlock.updateMany({ where: { ip: body.ip, status: "ACTIVE" }, data: { status: "REMOVED", removedAt: new Date() } });
+    await audit(request, { action: "APPLY", resource: "guardian_ip_block", description: `Unblocked ${body.ip}`, metadata: { result } as any });
+    return reply.code(202).send({ ip: body.ip, result });
   });
 
   app.post("/auto-heal", async (request, reply) => {

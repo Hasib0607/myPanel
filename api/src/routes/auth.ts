@@ -38,6 +38,12 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     const passwordMatches = await bcrypt.compare(body.password, env.SUPERADMIN_PASSWORD_HASH);
 
     if (!usernameMatches || !passwordMatches) {
+      await audit(request, {
+        action: "LOGIN",
+        resource: "auth",
+        description: "Failed superadmin login",
+        metadata: { username: body.username, success: false }
+      });
       return reply.code(401).send({ error: "Invalid credentials" });
     }
 
@@ -93,6 +99,12 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     });
     const valid = result.valid;
     if (!valid) {
+      await audit(request, {
+        action: "LOGIN",
+        resource: "auth",
+        description: "Failed superadmin 2FA login",
+        metadata: { success: false, twoFactor: true }
+      });
       return reply.code(401).send({ error: "Invalid authenticator code" });
     }
 

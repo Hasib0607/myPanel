@@ -180,6 +180,18 @@ enum GuardianActionStatus {
   FAILED
 }
 
+enum GuardianBlockStatus {
+  ACTIVE
+  EXPIRED
+  REMOVED
+}
+
+enum GuardianFileFindingStatus {
+  OPEN
+  TRUSTED
+  RESOLVED
+}
+
 model Domain {
   id           String        @id @default(cuid())
   name         String        @unique
@@ -498,6 +510,52 @@ model GuardianAction {
   @@index([action, target, createdAt])
   @@index([status, createdAt])
   @@map("guardian_actions")
+}
+
+model GuardianIpAllowlist {
+  id        String   @id @default(cuid())
+  cidr      String   @unique
+  label     String?
+  expiresAt DateTime? @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([expiresAt])
+  @@map("guardian_ip_allowlist")
+}
+
+model GuardianIpBlock {
+  id        String              @id @default(cuid())
+  ip        String
+  reason    String
+  score     Int                 @default(0)
+  status    GuardianBlockStatus @default(ACTIVE)
+  expiresAt DateTime?           @map("expires_at")
+  result    Json                @default("{}")
+  createdAt DateTime            @default(now()) @map("created_at")
+  removedAt DateTime?           @map("removed_at")
+
+  @@index([ip, status])
+  @@index([status, expiresAt])
+  @@map("guardian_ip_blocks")
+}
+
+model GuardianFileFinding {
+  id          String                    @id @default(cuid())
+  fingerprint String                    @unique
+  path        String
+  reason      String
+  risk        GuardianSeverity          @default(WARNING)
+  status      GuardianFileFindingStatus @default(OPEN)
+  sizeBytes   Int                       @default(0) @map("size_bytes")
+  mode        String?
+  owner       String?
+  modifiedAt  DateTime?                 @map("modified_at")
+  firstSeenAt DateTime                  @default(now()) @map("first_seen_at")
+  lastSeenAt  DateTime                  @default(now()) @map("last_seen_at")
+  metadata    Json                      @default("{}")
+
+  @@index([status, risk, lastSeenAt])
+  @@map("guardian_file_findings")
 }
 
 model FirewallRule {

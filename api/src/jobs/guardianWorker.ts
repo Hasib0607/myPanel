@@ -1,7 +1,7 @@
 import { Worker } from "bullmq";
 import { redis } from "../lib/redis.js";
 import { logger } from "../lib/logger.js";
-import { runGuardianAutoHeal, syncGuardianIncidentsOnly, type GuardianDiagnosis } from "../lib/guardianAutoHeal.js";
+import { expireGuardianIpBlocks, runGuardianAutoHeal, syncGuardianIncidentsOnly, type GuardianDiagnosis } from "../lib/guardianAutoHeal.js";
 import { sysagent } from "../lib/sysagent.js";
 
 export const guardianWorker = new Worker(
@@ -13,11 +13,16 @@ export const guardianWorker = new Worker(
 
     if (job.name === "diagnose") {
       await syncGuardianIncidentsOnly(diagnosis);
-      return { incidents: diagnosis.incidents?.length ?? 0 };
+      const expired = await expireGuardianIpBlocks();
+      return { incidents: diagnosis.incidents?.length ?? 0, expiredBlocks: expired.length };
     }
 
     if (job.name === "auto-heal") {
-      return runGuardianAutoHeal(diagnosis);
+      const [healing, expired] = await Promise.all([
+        runGuardianAutoHeal(diagnosis),
+        expireGuardianIpBlocks()
+      ]);
+      return { ...healing, expiredBlocks: expired.length };
     }
 
     throw new Error(`Unknown guardian job: ${job.name}`);

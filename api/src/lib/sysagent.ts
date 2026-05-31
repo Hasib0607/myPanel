@@ -37,6 +37,12 @@ export const sysagent = {
     request("/guardian/actions/reload-nginx", { method: "POST" }),
   guardianCleanupLogs: (olderThanDays = 1) =>
     request("/guardian/actions/cleanup-logs", { method: "POST", body: JSON.stringify({ olderThanDays }) }),
+  guardianBlockIp: (body: { ip: string; reason?: string }) =>
+    request("/guardian/actions/block-ip", { method: "POST", body: JSON.stringify(body) }),
+  guardianUnblockIp: (body: { ip: string; reason?: string }) =>
+    request("/guardian/actions/unblock-ip", { method: "POST", body: JSON.stringify(body) }),
+  guardianFileWatch: () =>
+    request<{ roots: string[]; scanned: number; findings: Array<{ path: string; reason: string; risk: "WARNING" | "CRITICAL"; sizeBytes: number; mode?: string; owner?: string; modifiedAt?: string }> }>("/guardian/file-watch"),
   services: () => request<{ items: Array<{ key: string; name: string; port: number; status: "healthy" | "down"; detail: string; installed: boolean; manageable: boolean; availableActions: string[] }> }>("/system/services"),
   serviceAction: (serviceKey: string, action: string) =>
     request(`/system/services/${encodeURIComponent(serviceKey)}/action`, { method: "POST", body: JSON.stringify({ action }) }),

@@ -1,5 +1,6 @@
 import json
 import os
+import ipaddress
 import re
 import shutil
 import socket
@@ -52,6 +53,16 @@ class LogCleanupRequest(BaseModel):
     olderThanDays: int = Field(default=1, ge=1, le=30)
     minSizeMb: int = Field(default=1, ge=0, le=1024)
     maxFiles: int = Field(default=200, ge=1, le=1000)
+
+
+class IpActionRequest(BaseModel):
+    ip: str
+    reason: str | None = None
+
+
+SUSPICIOUS_FILE_EXTENSIONS = {".php", ".phtml", ".phar", ".cgi", ".pl", ".py", ".sh"}
+SUSPICIOUS_FILE_PATTERNS = ["base64_decode", "shell_exec", "passthru", "eval(", "assert($_", "preg_replace", "system("]
+IGNORED_DIR_NAMES = {".git", "node_modules", "vendor", ".next", "__pycache__", "cache", "logs"}
 
 
 def command_output(command: list[str], timeout: int = 4) -> dict[str, Any]:
@@ -111,6 +122,26 @@ def tail_file(path: str, lines: int = 80) -> list[str]:
 def count_patterns(lines: list[str], patterns: list[str]) -> int:
     lowered = [line.lower() for line in lines]
     return sum(1 for line in lowered if any(pattern in line for pattern in patterns))
+
+
+def safe_ip(ip: str) -> bool:
+    try:
+        parsed = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return not (parsed.is_private or parsed.is_loopback or parsed.is_link_local or parsed.is_multicast or parsed.is_reserved)
+
+
+def auth_ip_summary(lines: list[str]) -> list[dict[str, Any]]:
+    counts: Counter[str] = Counter()
+    for line in lines:
+        lowered = line.lower()
+        if not any(marker in lowered for marker in ["failed password", "invalid user", "authentication failure"]):
+            continue
+        match = re.search(r"from (?P<ip>[0-9a-fA-F:.]+)", line)
+        if match and safe_ip(match.group("ip")):
+            counts[match.group("ip")] += 1
+    return [{"ip": ip, "sshFailures": count} for ip, count in counts.most_common(20)]
 
 
 def pm2_status() -> dict[str, Any]:
@@ -178,6 +209,84 @@ def nginx_access_summary(lines: list[str]) -> dict[str, Any]:
         "topBadIps": [{"ip": ip, "count": count} for ip, count in bad_ip_counts.most_common(8)],
         "topBadPaths": [{"path": path, "count": count} for path, count in path_counts.most_common(8)],
     }
+
+
+def suspicious_ip_candidates(auth_lines: list[str], access_summary: dict[str, Any]) -> list[dict[str, Any]]:
+    by_ip: dict[str, dict[str, Any]] = {}
+    for item in auth_ip_summary(auth_lines):
+        by_ip[item["ip"]] = {"ip": item["ip"], "sshFailures": item["sshFailures"], "badHttp": 0, "requests": 0, "score": item["sshFailures"] * 20, "reasons": ["ssh failures"]}
+
+    for item in access_summary.get("topIps", []):
+        if not safe_ip(item["ip"]):
+            continue
+        by_ip.setdefault(item["ip"], {"ip": item["ip"], "sshFailures": 0, "badHttp": 0, "requests": 0, "score": 0, "reasons": []})
+        by_ip[item["ip"]]["requests"] = item["count"]
+        if item["count"] >= 50:
+            by_ip[item["ip"]]["score"] += min(40, item["count"] // 5)
+            by_ip[item["ip"]]["reasons"].append("request spike")
+
+    for item in access_summary.get("topBadIps", []):
+        if not safe_ip(item["ip"]):
+            continue
+        by_ip.setdefault(item["ip"], {"ip": item["ip"], "sshFailures": 0, "badHttp": 0, "requests": 0, "score": 0, "reasons": []})
+        by_ip[item["ip"]]["badHttp"] = item["count"]
+        by_ip[item["ip"]]["score"] += min(60, item["count"] * 10)
+        by_ip[item["ip"]]["reasons"].append("bad HTTP responses")
+
+    candidates = []
+    for item in by_ip.values():
+        item["recommendation"] = "auto-block" if item["score"] >= 80 else "suggest-block" if item["score"] >= 40 else "monitor"
+        candidates.append(item)
+    return sorted(candidates, key=lambda item: item["score"], reverse=True)[:20]
+
+
+def file_watch_scan() -> dict[str, Any]:
+    roots = [Path(root).resolve() for root in settings.guardian_file_watch_roots.split(",") if root.strip()]
+    findings = []
+    scanned = 0
+    max_files = 4000
+    for root in roots:
+        if not root.exists() or not root.is_dir():
+            continue
+        for path in root.rglob("*"):
+            if scanned >= max_files:
+                break
+            if any(part in IGNORED_DIR_NAMES for part in path.parts) or not path.is_file():
+                continue
+            scanned += 1
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            reasons = []
+            suffix = path.suffix.lower()
+            mode = oct(stat.st_mode & 0o777)
+            publicish = any(part in {"public_html", "uploads", "storage"} for part in path.parts)
+            if suffix in {".phtml", ".phar", ".cgi", ".pl", ".sh"} and publicish:
+                reasons.append(f"suspicious executable extension {suffix}")
+            if mode.endswith("777") or (stat.st_mode & 0o002):
+                reasons.append("world-writable permissions")
+            if path.name.startswith(".") and publicish:
+                reasons.append("hidden file in public path")
+            if suffix in SUSPICIOUS_FILE_EXTENSIONS and stat.st_size <= 512_000:
+                try:
+                    text = path.read_text(encoding="utf-8", errors="ignore").lower()
+                    matched = [pattern for pattern in SUSPICIOUS_FILE_PATTERNS if pattern in text]
+                    if matched:
+                        reasons.append(f"suspicious code pattern: {', '.join(matched[:3])}")
+                except OSError:
+                    pass
+            if reasons:
+                findings.append({
+                    "path": str(path),
+                    "reason": "; ".join(reasons),
+                    "risk": "CRITICAL" if any("code pattern" in reason or "world-writable" in reason for reason in reasons) else "WARNING",
+                    "sizeBytes": stat.st_size,
+                    "mode": mode,
+                    "owner": f"{stat.st_uid}:{stat.st_gid}",
+                    "modifiedAt": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+                })
+    return {"roots": [str(root) for root in roots], "scanned": scanned, "findings": findings[:200]}
 
 
 @router.post("/actions/restart-service")
@@ -262,6 +371,34 @@ def cleanup_logs(body: LogCleanupRequest) -> dict[str, Any]:
     }
 
 
+@router.post("/actions/block-ip")
+def block_ip(body: IpActionRequest) -> dict[str, Any]:
+    if not safe_ip(body.ip):
+        raise HTTPException(status_code=400, detail="Refusing to block private, loopback, reserved, or invalid IP")
+    return {
+        "action": "block-ip",
+        "ip": body.ip,
+        "reason": body.reason,
+        "result": run_command(["ufw", "deny", "from", body.ip], timeout=30),
+    }
+
+
+@router.post("/actions/unblock-ip")
+def unblock_ip(body: IpActionRequest) -> dict[str, Any]:
+    if not safe_ip(body.ip):
+        raise HTTPException(status_code=400, detail="Invalid IP")
+    return {
+        "action": "unblock-ip",
+        "ip": body.ip,
+        "result": run_command(["ufw", "--force", "delete", "deny", "from", body.ip], timeout=30),
+    }
+
+
+@router.get("/file-watch")
+def file_watch() -> dict[str, Any]:
+    return file_watch_scan()
+
+
 @router.get("/diagnosis")
 def diagnosis() -> dict[str, Any]:
     disk = shutil.disk_usage("/")
@@ -295,6 +432,7 @@ def diagnosis() -> dict[str, Any]:
     bad_http = count_patterns(nginx_access_lines, ['" 404 ', '" 500 ', '" 502 ', '" 503 ', '" 504 '])
     nginx_summary = nginx_access_summary(nginx_access_lines)
     ssh_failures = count_patterns(auth_lines, ["failed password", "invalid user", "authentication failure"])
+    security_candidates = suspicious_ip_candidates(auth_lines, nginx_summary)
     pm2 = pm2_status()
 
     incidents = []
@@ -339,7 +477,9 @@ def diagnosis() -> dict[str, Any]:
         "security": {
             "ufw": command_output(["ufw", "status", "verbose"]),
             "fail2ban": command_output(["fail2ban-client", "status"]),
+            "fail2banSshd": command_output(["fail2ban-client", "status", "sshd"]),
             "sshFailures": ssh_failures,
+            "suspiciousIps": security_candidates,
         },
         "logs": {
             "nginxErrors": nginx_errors,

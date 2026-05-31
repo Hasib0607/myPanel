@@ -41,6 +41,7 @@ Implemented Phase 1 foundation:
 - Added `vps-panel-guardian.service.example` and API `guardian` runner script for periodic read-only diagnosis logging.
 - Added parsed PM2 app health, Postgres/PgBouncer port awareness, live TLS certificate probing, and detailed Nginx access-log summaries for Phase 1 hardening.
 - Phase 2 implemented with safe auto-heal actions for allowlisted service restarts, PM2 restarts, Nginx config-test reloads, stale deployment log cleanup, DB-backed incident/action history, cooldown and retry limits, action result UI, health rechecks, and BullMQ worker execution. Actions respect `ALLOW_LIVE_SYSTEM_COMMANDS`; the guardian scheduler can enable periodic healing with `GUARDIAN_AUTO_HEAL=true`.
+- Phase 3 started with security response foundation: suspicious IP scoring from SSH/Nginx signals, IP allowlist/block history, manual block/unblock controls, temporary auto-block expiry support, failed-login audit signals, and suspicious file watch findings for unusual files under configured roots.
 
 ## Current VPS Deployment Blockers
 

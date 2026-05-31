@@ -21,6 +21,9 @@ export type GuardianDiagnosis = {
   services?: Array<{ key: string; name: string; status: string; optional?: boolean }>;
   pm2?: { items?: Array<{ name: string; pmId?: number; status: string; healthy: boolean }> };
   logs?: { nginxErrors?: number; badHttpResponses?: number };
+  security?: {
+    suspiciousIps?: Array<{ ip: string; score: number; recommendation: string; reasons?: string[] }>;
+  };
 };
 
 function severity(value: string | undefined) {
@@ -146,6 +149,10 @@ function incidentFor(records: Map<string, { id: string }>, input: GuardianIncide
 export async function runGuardianAutoHeal(diagnosis: GuardianDiagnosis) {
   const records = await syncIncidents(diagnosis);
   const actions = [];
+  const allowlist = await prisma.guardianIpAllowlist.findMany({
+    where: { OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }
+  });
+  const isAllowed = (ip: string) => allowlist.some((item) => item.cidr === ip);
 
   for (const service of diagnosis.services ?? []) {
     if (service.status !== "down" || service.optional) continue;
@@ -177,10 +184,45 @@ export async function runGuardianAutoHeal(diagnosis: GuardianDiagnosis) {
     actions.push(await guardedAction("reload-nginx", "nginx", incident ? incidentFor(records, incident) : null, async () => sysagent.guardianReloadNginx()));
   }
 
+  for (const item of diagnosis.security?.suspiciousIps ?? []) {
+    if (item.recommendation !== "auto-block" || isAllowed(item.ip)) continue;
+    actions.push(await guardedAction("block-ip", item.ip, null, async () => {
+      const result = await sysagent.guardianBlockIp({ ip: item.ip, reason: item.reasons?.join(", ") ?? "Guardian high-confidence suspicious IP" });
+      const block = await prisma.guardianIpBlock.create({
+        data: {
+          ip: item.ip,
+          reason: item.reasons?.join(", ") ?? "Guardian high-confidence suspicious IP",
+          score: item.score,
+          expiresAt: new Date(Date.now() + 60 * 60_000),
+          result: result as any
+        }
+      });
+      return { result, blockId: block.id };
+    }));
+  }
+
   actions.push(await guardedAction("cleanup-logs", "deployment-logs", null, async () => sysagent.guardianCleanupLogs(1)));
   return { actions };
 }
 
 export async function syncGuardianIncidentsOnly(diagnosis: GuardianDiagnosis) {
   return syncIncidents(diagnosis);
+}
+
+export async function expireGuardianIpBlocks() {
+  const expired = await prisma.guardianIpBlock.findMany({
+    where: { status: "ACTIVE", expiresAt: { lte: new Date() } }
+  });
+  const actions = [];
+  for (const block of expired) {
+    actions.push(await guardedAction("unblock-ip", block.ip, null, async () => {
+      const result = await sysagent.guardianUnblockIp({ ip: block.ip, reason: "temporary Guardian block expired" });
+      await prisma.guardianIpBlock.update({
+        where: { id: block.id },
+        data: { status: "EXPIRED", removedAt: new Date(), result: result as any }
+      });
+      return result;
+    }));
+  }
+  return actions;
 }
