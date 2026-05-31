@@ -408,7 +408,12 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=$APP_DIR/sysagent
-EnvironmentFile=$APP_DIR/.env
+EnvironmentFile=-$APP_DIR/.env
+Environment=ALLOW_LIVE_SYSTEM_COMMANDS=true
+Environment=ALLOW_LIVE_FILE_MANAGER=true
+Environment=ALLOW_LIVE_NGINX=true
+Environment=ALLOW_LIVE_SSL=true
+Environment=ALLOW_LIVE_DNS=true
 ExecStart=$APP_DIR/sysagent/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port $SYSAGENT_PORT
 Restart=always
 RestartSec=3

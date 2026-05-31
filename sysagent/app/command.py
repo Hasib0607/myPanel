@@ -23,6 +23,7 @@ def run_command(command: Sequence[str], cwd: str | None = None, env: dict[str, s
     if not live:
         return {
             "dryRun": True,
+            "liveCommandsDisabled": True,
             "command": list(command),
             "cwd": cwd,
             "stdout": "",
@@ -88,12 +89,12 @@ def run_command(command: Sequence[str], cwd: str | None = None, env: dict[str, s
     }
 
 
-def run_install_plan(plan: PackageInstallPlan, *, timeout: int | None = None) -> dict:
+def run_install_plan(plan: PackageInstallPlan, *, timeout: int | None = None, allow_live: bool | None = None) -> dict:
     step_results: list[dict] = []
     success = True
 
     for step in plan.steps:
-        result = run_command(list(step.command), env=step.env or None, timeout=timeout)
+        result = run_command(list(step.command), env=step.env or None, timeout=timeout, allow_live=allow_live)
         entry = {
             "description": step.description,
             "onFailure": step.on_failure,
@@ -106,7 +107,7 @@ def run_install_plan(plan: PackageInstallPlan, *, timeout: int | None = None) ->
 
     if not success and plan.fallback_steps:
         for step in plan.fallback_steps:
-            result = run_command(list(step.command), env=step.env or None, timeout=timeout)
+            result = run_command(list(step.command), env=step.env or None, timeout=timeout, allow_live=allow_live)
             entry = {
                 "description": step.description,
                 "onFailure": step.on_failure,

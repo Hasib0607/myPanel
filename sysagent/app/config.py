@@ -2,7 +2,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.env_loader import env_flag, panel_env_path, reload_panel_env
 
-__all__ = ["Settings", "panel_env_path", "reload_panel_env", "settings"]
+# Deployment lifecycle commands always execute live. The global live flag still
+# protects guardian, firewall, and file-manager operations on the host.
+DEPLOYMENT_COMMANDS_LIVE = True
+
+__all__ = ["DEPLOYMENT_COMMANDS_LIVE", "Settings", "panel_env_path", "reload_panel_env", "settings"]
 
 
 class Settings(BaseSettings):

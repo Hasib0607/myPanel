@@ -360,9 +360,30 @@ async function runLiveDeploymentProcess(
 }
 
 function liveResultFailureMessage(result: unknown, label: string) {
-  const value = result as { dryRun?: boolean; returncode?: number; stderr?: string; stdout?: string; reason?: string };
+  const value = result as {
+    dryRun?: boolean;
+    blocked?: boolean;
+    liveCommandsDisabled?: boolean;
+    returncode?: number;
+    stderr?: string;
+    stdout?: string;
+    reason?: string;
+    path?: { allowed?: boolean; target?: string; root?: string };
+  };
+  if (value?.blocked) {
+    const pathHint = value.path?.target && value.path?.root
+      ? ` Path ${value.path.target} is outside ${value.path.root}.`
+      : "";
+    return `${label} was blocked: ${value.reason ?? value.stderr ?? "policy restriction"}.${pathHint}`;
+  }
   if (value?.dryRun) {
-    return `${label} did not run live. ${liveSystemCommandsFix}`;
+    if (value.liveCommandsDisabled) {
+      return `${label} did not run live. ${liveSystemCommandsFix}`;
+    }
+    const detail = value.reason ?? value.stderr ?? value.stdout;
+    return detail
+      ? `${label} did not run live: ${detail}`
+      : `${label} did not run live. ${liveSystemCommandsFix}`;
   }
   if (typeof value?.returncode === "number" && value.returncode !== 0) {
     const signal = "signal" in value && typeof value.signal === "string" ? value.signal : null;

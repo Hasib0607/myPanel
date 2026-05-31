@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.command import run_command, run_install_plan
-from app.config import settings
+from app.config import DEPLOYMENT_COMMANDS_LIVE, settings
 from app.platform import runtime_tool_install_plan
 from app.nginx_paths import nginx_sites_available, nginx_sites_enabled
 from app.nginx_manager import acme_location, publish_nginx_config, safe_letsencrypt_path, safe_web_root
@@ -155,10 +155,11 @@ def blocked_command(reason: str, command: list[str], info: dict | None = None) -
     result = {
         "dryRun": True,
         "blocked": True,
+        "liveCommandsDisabled": False,
         "reason": reason,
         "command": command,
         "stdout": "",
-        "stderr": "",
+        "stderr": reason,
         "returncode": 1,
     }
     if info is not None:
@@ -168,18 +169,18 @@ def blocked_command(reason: str, command: list[str], info: dict | None = None) -
 
 def guarded_command(root_path: str, command: list[str], cwd: str | None = None) -> dict:
     info = path_info(root_path)
-    if not info["allowed"] and settings.allow_live_system_commands:
+    if not info["allowed"]:
         return blocked_command("Path escapes configured file manager root", command, info)
-    result = run_command(command, cwd=cwd)
+    result = run_command(command, cwd=cwd, allow_live=DEPLOYMENT_COMMANDS_LIVE)
     result["path"] = info
     return result
 
 
 def guarded_command_with_env(root_path: str, command: list[str], cwd: str | None = None, env: dict[str, str] | None = None) -> dict:
     info = path_info(root_path)
-    if not info["allowed"] and settings.allow_live_system_commands:
+    if not info["allowed"]:
         return blocked_command("Path escapes configured file manager root", command, info)
-    result = run_command(command, cwd=cwd, env=env)
+    result = run_command(command, cwd=cwd, env=env, allow_live=DEPLOYMENT_COMMANDS_LIVE)
     result["path"] = info
     return result
 
@@ -315,8 +316,12 @@ def combine_pm2_results(root_path: str, steps: dict[str, dict], required: list[s
         name for name in required
         if steps.get(name, {}).get("returncode", 0) != 0 or steps.get(name, {}).get("blocked")
     ]
+    blocked = next((steps[name].get("reason") for name in required if steps.get(name, {}).get("blocked")), None)
     return {
         "dryRun": any(step.get("dryRun") for step in steps.values()),
+        "blocked": any(step.get("blocked") for step in steps.values()),
+        "liveCommandsDisabled": any(step.get("liveCommandsDisabled") for step in steps.values()),
+        "reason": blocked,
         "command": ["pm2", "managed-lifecycle"],
         "cwd": deployment_cwd(root_path),
         "stdout": "",
@@ -370,18 +375,6 @@ def supervisor_start(body: ProcessRequest, start_command: list[str]) -> dict:
 
     config_dir = supervisor_config_dir()
     config_path = config_dir / f"{body.name}.conf"
-    if not settings.allow_live_system_commands:
-        return {
-            "dryRun": True,
-            "command": ["supervisorctl", "managed-lifecycle", body.name],
-            "cwd": deployment_cwd(body.rootPath),
-            "stdout": "",
-            "stderr": "",
-            "returncode": 0,
-            "path": info,
-            "configPath": str(config_path),
-        }
-
     if not info["allowed"]:
         return blocked_command("Path escapes configured file manager root", ["supervisorctl", "start", body.name], info)
 
@@ -401,17 +394,19 @@ def supervisor_start(body: ProcessRequest, start_command: list[str]) -> dict:
         write["stderr"] = str(error)
         write["returncode"] = 1
 
-    reread = run_command(["supervisorctl", "reread"], timeout=60) if write["returncode"] == 0 else {"returncode": 1, "stderr": "Skipped because config write failed"}
-    update = run_command(["supervisorctl", "update"], timeout=60) if reread.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because reread failed"}
-    stop = run_command(["supervisorctl", "stop", body.name], timeout=60) if update.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because update failed"}
+    reread = run_command(["supervisorctl", "reread"], timeout=60, allow_live=DEPLOYMENT_COMMANDS_LIVE) if write["returncode"] == 0 else {"returncode": 1, "stderr": "Skipped because config write failed"}
+    update = run_command(["supervisorctl", "update"], timeout=60, allow_live=DEPLOYMENT_COMMANDS_LIVE) if reread.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because reread failed"}
+    stop = run_command(["supervisorctl", "stop", body.name], timeout=60, allow_live=DEPLOYMENT_COMMANDS_LIVE) if update.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because update failed"}
     if "no such process" in (stop.get("stderr") or "").lower() or "not running" in (stop.get("stderr") or "").lower():
         stop["returncode"] = 0
-    start = run_command(["supervisorctl", "start", body.name], timeout=60) if stop.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because stop failed"}
-    status = run_command(["supervisorctl", "status", body.name], timeout=60) if start.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because start failed"}
+    start = run_command(["supervisorctl", "start", body.name], timeout=60, allow_live=DEPLOYMENT_COMMANDS_LIVE) if stop.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because stop failed"}
+    status = run_command(["supervisorctl", "status", body.name], timeout=60, allow_live=DEPLOYMENT_COMMANDS_LIVE) if start.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because start failed"}
     steps = {"write": write, "reread": reread, "update": update, "stop": stop, "start": start, "status": status}
     failed = [name for name, step in steps.items() if step.get("returncode") != 0]
     return {
         "dryRun": any(step.get("dryRun") for step in steps.values()),
+        "blocked": any(step.get("blocked") for step in steps.values()),
+        "liveCommandsDisabled": any(step.get("liveCommandsDisabled") for step in steps.values()),
         "command": ["supervisorctl", "managed-lifecycle", body.name],
         "cwd": deployment_cwd(body.rootPath),
         "stdout": status.get("stdout") or "",
@@ -429,8 +424,7 @@ def pm2_start(body: ProcessRequest, start_command: list[str]) -> dict:
         log_dir = safe_log_dir(body.name, body.logDir)
     except ValueError as error:
         return blocked_command(str(error), ["pm2", "start", body.name], path_info(body.rootPath))
-    if settings.allow_live_system_commands:
-        reset_runtime_logs(log_dir)
+    reset_runtime_logs(log_dir)
     delete = guarded_command(body.rootPath, ["pm2", "delete", body.name], cwd=cwd)
     if "not found" in (delete.get("stderr") or "").lower() or "not found" in (delete.get("stdout") or "").lower():
         delete["returncode"] = 0
@@ -533,25 +527,16 @@ def runtime_logs(body: RuntimeLogsRequest) -> dict:
 def guarded_write_file(root_path: str, target_path: str, content: str) -> dict:
     info = path_info(root_path)
     command = ["write-file", target_path]
-    if not info["allowed"] and settings.allow_live_system_commands:
+    if not info["allowed"]:
         return blocked_command("Path escapes configured file manager root", command, info)
-    if not settings.allow_live_system_commands:
-        result = {
-            "dryRun": True,
-            "command": command,
-            "stdout": "",
-            "stderr": "",
-            "returncode": 0,
-        }
-    else:
-        Path(target_path).write_text(content, encoding="utf-8")
-        result = {
-            "dryRun": False,
-            "command": command,
-            "stdout": "",
-            "stderr": "",
-            "returncode": 0,
-        }
+    Path(target_path).write_text(content, encoding="utf-8")
+    result = {
+        "dryRun": False,
+        "command": command,
+        "stdout": "",
+        "stderr": "",
+        "returncode": 0,
+    }
     result["path"] = info
     return result
 
@@ -782,7 +767,7 @@ def _curl_once(url: str) -> dict:
         "--connect-timeout", "5",
         "--max-time", "90",
         url,
-    ])
+    ], allow_live=DEPLOYMENT_COMMANDS_LIVE)
 
 
 def _curl_public_route(server_name: str, path: str = "/") -> dict:
@@ -802,7 +787,7 @@ def _curl_public_route(server_name: str, path: str = "/") -> dict:
         "--resolve", f"{primary}:443:127.0.0.1",
         "-w", "\n__effective_url=%{url_effective}",
         f"http://{primary}{clean_path}",
-    ])
+    ], allow_live=DEPLOYMENT_COMMANDS_LIVE)
     stdout = result.get("stdout") or ""
     marker = "\n__effective_url="
     effective_url = stdout.rsplit(marker, 1)[1].strip() if marker in stdout else ""
@@ -828,7 +813,7 @@ def _pm2_restart_count(process_name: str) -> int | None:
 
 
 def _pm2_process(process_name: str) -> dict | None:
-    result = run_command(["pm2", "jlist"])
+    result = run_command(["pm2", "jlist"], allow_live=DEPLOYMENT_COMMANDS_LIVE)
     if result.get("returncode") != 0:
         return None
     try:
@@ -858,7 +843,7 @@ def _pm2_process_port(proc: dict) -> str | None:
 
 
 def _pm2_owner_for_port(port: int) -> dict | None:
-    result = run_command(["pm2", "jlist"])
+    result = run_command(["pm2", "jlist"], allow_live=DEPLOYMENT_COMMANDS_LIVE)
     if result.get("returncode") != 0:
         return None
     try:
@@ -907,7 +892,7 @@ def _pm2_process_mismatch(body: HealthRequest) -> str | None:
 def _supervisor_process_mismatch(body: HealthRequest) -> str | None:
     if not body.processName or (body.processManager or "").upper() != "SUPERVISOR":
         return None
-    result = run_command(["supervisorctl", "status", body.processName])
+    result = run_command(["supervisorctl", "status", body.processName], allow_live=DEPLOYMENT_COMMANDS_LIVE)
     if result.get("dryRun"):
         return None
     if result.get("returncode") != 0:
@@ -938,7 +923,7 @@ def install_runtime_tool(body: RuntimeInstallRequest) -> dict:
         plan = runtime_tool_install_plan(body.tool)
     except KeyError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
-    return run_install_plan(plan, timeout=300)
+    return run_install_plan(plan, timeout=300, allow_live=DEPLOYMENT_COMMANDS_LIVE)
 
 
 @router.post("/repair-permissions")
@@ -952,7 +937,7 @@ def repair_permissions(body: PermissionRepairRequest) -> dict:
         if not info["allowed"] and not str(Path(target).resolve()).startswith(str(Path(settings.deployment_log_root).resolve())):
             steps[target] = blocked_command("Path escapes deployment roots", ["chown", "-R", "panel:panel", target], info)
             continue
-        steps[target] = run_command(["chown", "-R", "panel:panel", target], timeout=120)
+        steps[target] = run_command(["chown", "-R", "panel:panel", target], timeout=120, allow_live=DEPLOYMENT_COMMANDS_LIVE)
     failed = [target for target, result in steps.items() if result.get("returncode") != 0]
     return {"dryRun": any(result.get("dryRun") for result in steps.values()), "returncode": 1 if failed else 0, "steps": steps}
 
@@ -961,7 +946,7 @@ def repair_permissions(body: PermissionRepairRequest) -> dict:
 def repair_laravel_writable_paths(body: LaravelWritablePathsRequest) -> dict:
     root = str(Path(body.rootPath).resolve())
     info = path_info(root)
-    if not info["allowed"] and settings.allow_live_system_commands:
+    if not info["allowed"]:
         return blocked_command("Path escapes configured file manager root", ["laravel-repair", root], info)
 
     paths = [
@@ -978,9 +963,9 @@ def repair_laravel_writable_paths(body: LaravelWritablePathsRequest) -> dict:
         f"{root}/storage/logs",
     ]
 
-    mkdir = run_command(["mkdir", "-p", *paths], timeout=120)
-    chown = run_command(["chown", "-R", "panel:panel", f"{root}/storage", f"{root}/bootstrap/cache"], timeout=120) if mkdir.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because directory creation failed"}
-    chmod = run_command(["chmod", "-R", "ug+rwX", f"{root}/storage", f"{root}/bootstrap/cache"], timeout=120) if mkdir.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because directory creation failed"}
+    mkdir = run_command(["mkdir", "-p", *paths], timeout=120, allow_live=DEPLOYMENT_COMMANDS_LIVE)
+    chown = run_command(["chown", "-R", "panel:panel", f"{root}/storage", f"{root}/bootstrap/cache"], timeout=120, allow_live=DEPLOYMENT_COMMANDS_LIVE) if mkdir.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because directory creation failed"}
+    chmod = run_command(["chmod", "-R", "ug+rwX", f"{root}/storage", f"{root}/bootstrap/cache"], timeout=120, allow_live=DEPLOYMENT_COMMANDS_LIVE) if mkdir.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because directory creation failed"}
     failed = any(step.get("returncode") != 0 for step in [mkdir, chown, chmod])
     return {
         "dryRun": any(step.get("dryRun") for step in [mkdir, chown, chmod]),
@@ -994,9 +979,9 @@ def repair_laravel_writable_paths(body: LaravelWritablePathsRequest) -> dict:
 
 @router.post("/supervisor/repair")
 def repair_supervisor(body: SupervisorRepairRequest) -> dict:
-    reread = run_command(["supervisorctl", "reread"], timeout=60)
-    update = run_command(["supervisorctl", "update"], timeout=60) if reread.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because reread failed"}
-    restart = run_command(["supervisorctl", "restart", body.name], timeout=60) if update.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because update failed"}
+    reread = run_command(["supervisorctl", "reread"], timeout=60, allow_live=DEPLOYMENT_COMMANDS_LIVE)
+    update = run_command(["supervisorctl", "update"], timeout=60, allow_live=DEPLOYMENT_COMMANDS_LIVE) if reread.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because reread failed"}
+    restart = run_command(["supervisorctl", "restart", body.name], timeout=60, allow_live=DEPLOYMENT_COMMANDS_LIVE) if update.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because update failed"}
     failed = any(step.get("returncode") != 0 for step in [reread, update, restart])
     return {"dryRun": any(step.get("dryRun") for step in [reread, update, restart]), "returncode": 1 if failed else 0, "reread": reread, "update": update, "restart": restart}
 
@@ -1033,7 +1018,7 @@ def nginx_inspect(body: NginxInspectRequest) -> dict:
 @router.post("/port-status")
 def port_status(body: PortStatusRequest) -> dict:
     info = path_info(body.rootPath)
-    if not info["allowed"] and settings.allow_live_system_commands:
+    if not info["allowed"]:
         return blocked_command("Path escapes configured file manager root", ["port-status", str(body.port)], info)
 
     pm2_owner = _pm2_owner_for_port(body.port) if (body.processManager or "").upper() == "PM2" else None
@@ -1053,7 +1038,7 @@ def port_status(body: PortStatusRequest) -> dict:
             "owner": pm2_owner,
         }
 
-    ss = run_command(["ss", "-ltnp", f"sport = :{body.port}"], allow_live=settings.allow_live_system_commands)
+    ss = run_command(["ss", "-ltnp", f"sport = :{body.port}"], allow_live=DEPLOYMENT_COMMANDS_LIVE)
     stdout = ss.get("stdout") or ""
     occupied = f":{body.port}" in stdout
     return {

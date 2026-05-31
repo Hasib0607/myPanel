@@ -1,8 +1,18 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
+from app.env_loader import reload_panel_env
 from app.routers import backup, database, deployments, dns, files, firewall, guardian, mail_config, nginx, processes, ssl, system
 
-app = FastAPI(title="VPS Panel System Agent", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    reload_panel_env()
+    yield
+
+
+app = FastAPI(title="VPS Panel System Agent", version="0.1.0", lifespan=lifespan)
 
 app.include_router(system.router, prefix="/system", tags=["system"])
 app.include_router(backup.router, prefix="/backup", tags=["backup"])
