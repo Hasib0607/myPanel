@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Blocks, Database, Gauge, Globe2, HardDrive, Inbox, Lock, Network, Package, Radar, ServerCog, Shield, SquareTerminal, Users } from "lucide-react";
+import { Archive, Blocks, Database, Gauge, Globe2, HardDrive, Inbox, Lock, Network, Package, Radar, ServerCog, Shield, SquareTerminal, Users } from "lucide-react";
 import { LogoutButton } from "@/components/logout-button";
 
 const nav = [
@@ -18,6 +18,7 @@ const nav = [
   { href: "/files", label: "Files", icon: HardDrive },
   { href: "/deployments", label: "Deployments", icon: Blocks },
   { href: "/databases", label: "Databases", icon: Database },
+  { href: "/backups", label: "Backups", icon: Archive },
   { href: "/terminal", label: "Terminal", icon: SquareTerminal },
   { href: "/security", label: "Security", icon: Lock }
 ];

@@ -28,6 +28,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const sysagent = {
   stats: () => request("/system/stats"),
+  backupPlan: () => request<{ backupRoot: string; liveEnabled: boolean; includes: string[] }>("/backup/plan"),
+  backupArchives: () => request<{ items: Array<{ path: string; name: string; sizeBytes: number; modifiedAt: string; checksumPath: string }> }>("/backup/archives"),
+  createBackup: (body: unknown) =>
+    request<{ archivePath: string; stagingDir: string; includes: string[]; sizeBytes?: number | null; result: SysagentCommandResult }>("/backup/create", { method: "POST", body: JSON.stringify(body) }),
+  restorePreview: (path: string) =>
+    request<{ archivePath: string; commands: string[]; note: string }>(`/backup/restore-preview?path=${encodeURIComponent(path)}`, { method: "POST" }),
   guardianDiagnosis: () => request("/guardian/diagnosis"),
   guardianRestartService: (serviceKey: string) =>
     request("/guardian/actions/restart-service", { method: "POST", body: JSON.stringify({ serviceKey }) }),

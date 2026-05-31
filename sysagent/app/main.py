@@ -1,10 +1,11 @@
 from fastapi import FastAPI
 
-from app.routers import database, deployments, dns, files, firewall, guardian, mail_config, nginx, processes, ssl, system
+from app.routers import backup, database, deployments, dns, files, firewall, guardian, mail_config, nginx, processes, ssl, system
 
 app = FastAPI(title="VPS Panel System Agent", version="0.1.0")
 
 app.include_router(system.router, prefix="/system", tags=["system"])
+app.include_router(backup.router, prefix="/backup", tags=["backup"])
 app.include_router(guardian.router, prefix="/guardian", tags=["guardian"])
 app.include_router(firewall.router, prefix="/firewall", tags=["firewall"])
 app.include_router(deployments.router, prefix="/deployments", tags=["deployments"])

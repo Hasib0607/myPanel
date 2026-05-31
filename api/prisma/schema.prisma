@@ -249,6 +249,13 @@ enum WhmMigrationTaskType {
   ROLLBACK
 }
 
+enum PanelBackupStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
 model Domain {
   id           String        @id @default(cuid())
   name         String        @unique
@@ -668,6 +675,22 @@ model WhmMigrationTask {
 
   @@index([migrationId, type, status])
   @@map("whm_migration_tasks")
+}
+
+model PanelBackup {
+  id          String            @id @default(cuid())
+  label       String
+  status      PanelBackupStatus @default(QUEUED)
+  archivePath String?           @map("archive_path")
+  sizeBytes   Int?              @map("size_bytes")
+  includes    String[]          @default([])
+  result      Json              @default("{}")
+  createdAt   DateTime          @default(now()) @map("created_at")
+  startedAt   DateTime?         @map("started_at")
+  finishedAt  DateTime?         @map("finished_at")
+
+  @@index([status, createdAt])
+  @@map("panel_backups")
 }
 
 model AuditLog {
