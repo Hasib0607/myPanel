@@ -89,6 +89,8 @@ class PortStatusRequest(BaseModel):
 class PublicRouteRequest(BaseModel):
     serverName: str
     path: str = "/"
+    rootPath: str | None = None
+    framework: str | None = None
 
 
 class GuardianRepairRequest(BaseModel):
@@ -100,6 +102,7 @@ class GuardianRepairRequest(BaseModel):
 class RuntimeLogsRequest(BaseModel):
     name: str
     logDir: str | None = None
+    rootPath: str | None = None
     lines: int = Field(default=300, ge=1, le=2000)
 
 
@@ -556,14 +559,23 @@ def runtime_logs(body: RuntimeLogsRequest) -> dict:
 
     stdout = tail(log_dir / "running-out.log")
     stderr = tail(log_dir / "running-error.log")
+    laravel = ""
+    if body.rootPath:
+        root = Path(body.rootPath).resolve()
+        info = path_info(str(root))
+        if info["allowed"]:
+            laravel = tail(root / "storage" / "logs" / "laravel.log")
     text = "\n".join([
         f"== STDOUT ({log_dir / 'running-out.log'}) ==",
         stdout or "(empty)",
         "",
         f"== STDERR ({log_dir / 'running-error.log'}) ==",
         stderr or "(empty)",
+        "",
+        f"== LARAVEL ({Path(body.rootPath).resolve() / 'storage' / 'logs' / 'laravel.log' if body.rootPath else 'not requested'}) ==",
+        laravel or "(empty)",
     ])
-    return {"ok": True, "logDir": str(log_dir), "stdout": stdout, "stderr": stderr, "text": text}
+    return {"ok": True, "logDir": str(log_dir), "stdout": stdout, "stderr": stderr, "laravel": laravel, "text": text}
 
 
 def guarded_write_file(root_path: str, target_path: str, content: str) -> dict:
@@ -804,7 +816,31 @@ def _curl_once(url: str, *, accept_http_errors: bool = False) -> dict:
     return curl_health_probe(url, accept_http_errors=accept_http_errors)
 
 
-def _curl_public_route(server_name: str, path: str = "/") -> dict:
+def _tail_text(path: Path, lines: int = 120) -> str:
+    if not path.exists():
+        return ""
+    return "\n".join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:])
+
+
+def attach_laravel_diagnostics(result: dict, root_path: str | None, framework: str | None = None) -> dict:
+    if (framework or "").upper() != "LARAVEL" or not root_path:
+        return result
+    root = Path(root_path).resolve()
+    info = path_info(str(root))
+    if not info["allowed"]:
+        return result
+    laravel_log = root / "storage" / "logs" / "laravel.log"
+    tail_text = _tail_text(laravel_log)
+    if not tail_text:
+        return result
+    result["laravelLogPath"] = str(laravel_log)
+    result["laravelLogTail"] = tail_text
+    suffix = f"\n\nLaravel log tail ({laravel_log}):\n{tail_text}"
+    result["stderr"] = f"{result.get('stderr') or ''}{suffix}".strip()
+    return result
+
+
+def _curl_public_route(server_name: str, path: str = "/", root_path: str | None = None, framework: str | None = None) -> dict:
     primary = server_name.split()[0].strip()
     clean_path = path if path.startswith("/") else f"/{path}"
     result = run_command([
@@ -832,6 +868,8 @@ def _curl_public_route(server_name: str, path: str = "/") -> dict:
             "The app is generating localhost redirects; redeploy after clearing HOST/HOSTNAME env or set the app public URL to the domain."
         )
     result["effectiveUrl"] = effective_url
+    if result.get("returncode") != 0:
+        return attach_laravel_diagnostics(result, root_path, framework)
     return result
 
 
@@ -1050,6 +1088,7 @@ def guardian_repair(body: GuardianRepairRequest) -> dict:
         env = dict(body.env or {})
         if not env.get("APP_KEY", "").strip():
             steps["appKey"] = guarded_deployment_command(body.rootPath, "php artisan key:generate --force", env=env or None)
+        steps["optimizeClear"] = guarded_deployment_command(body.rootPath, "php artisan optimize:clear", env=env or None)
         steps["configClear"] = guarded_deployment_command(body.rootPath, "php artisan config:clear", env=env or None)
         steps["cacheClear"] = guarded_deployment_command(body.rootPath, "php artisan cache:clear", env=env or None)
         steps["routeClear"] = guarded_deployment_command(body.rootPath, "php artisan route:clear", env=env or None)
@@ -1174,7 +1213,7 @@ def health(body: HealthRequest) -> dict:
     # Phase 1: wait for the process to bind (with retries for connection refused).
     first = _curl_once(url, accept_http_errors=accept_http_errors)
     if first.get("returncode") != 0:
-        return first
+        return attach_laravel_diagnostics(first, body.rootPath, body.framework)
 
     # Phase 2: wait 8 s then verify the process is still up (catches immediate crashes).
     time.sleep(8)
@@ -1184,7 +1223,7 @@ def health(body: HealthRequest) -> dict:
             "App responded on first check but crashed within 8 s. "
             + (second.get("stderr") or "")
         ).strip()
-        return second
+        return attach_laravel_diagnostics(second, body.rootPath, body.framework)
 
     # Phase 3: PM2 crash-loop detection.
     # If the process has already restarted since we started it, it is crash-looping
@@ -1204,4 +1243,4 @@ def health(body: HealthRequest) -> dict:
 
 @router.post("/public-route")
 def public_route(body: PublicRouteRequest) -> dict:
-    return _curl_public_route(body.serverName, body.path)
+    return _curl_public_route(body.serverName, body.path, body.rootPath, body.framework)

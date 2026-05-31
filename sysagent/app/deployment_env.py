@@ -43,9 +43,34 @@ def write_env_file(path: Path, env: dict[str, str]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def read_existing_env_values(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    values: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not VALID_ENV_KEY.match(key):
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
 def sync_laravel_env_file(root_path: str, port: int | None, env: dict[str, str] | None) -> Path:
     env_path = Path(root_path).resolve() / ".env"
-    write_env_file(env_path, normalize_process_env(port, env))
+    process_env = normalize_process_env(port, env)
+    existing = read_existing_env_values(env_path)
+    # key:generate writes APP_KEY into .env. Preserve it on restart when the UI/env
+    # store does not yet have an APP_KEY, otherwise Laravel falls back into HTTP 500.
+    if not process_env.get("APP_KEY") and existing.get("APP_KEY"):
+        process_env["APP_KEY"] = existing["APP_KEY"]
+    write_env_file(env_path, process_env)
     return env_path
 
 

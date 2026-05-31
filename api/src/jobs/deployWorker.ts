@@ -624,7 +624,8 @@ async function assertHealthResult(
   result: unknown,
   label: string,
   deployment: { id: string; slug: string },
-  releaseId?: string
+  releaseId?: string,
+  appPath?: string
 ) {
   const value = result as { degraded?: boolean; httpCode?: number; stderr?: string };
   if (value?.degraded) {
@@ -633,6 +634,7 @@ async function assertHealthResult(
       const logs = await sysagent.deploymentRuntimeLogs({
         name: deployment.slug,
         logDir: deploymentLogDir(deployment.slug),
+        rootPath: appPath,
         lines: 120
       });
       runtimeText = logs.text ? `\n\nRunning log tail:\n${logs.text}` : "";
@@ -655,6 +657,7 @@ async function assertHealthResult(
     const logs = await sysagent.deploymentRuntimeLogs({
       name: deployment.slug,
       logDir: deploymentLogDir(deployment.slug),
+      rootPath: appPath,
       lines: 120
     });
     runtimeText = logs.text ? `\n\nRunning log tail:\n${logs.text}` : "";
@@ -703,7 +706,7 @@ async function runHealthCheckWithGuardianRecovery(
     );
 
     try {
-      const outcome = await assertHealthResult(health, label, deployment, releaseId);
+      const outcome = await assertHealthResult(health, label, deployment, releaseId, appPath);
       if (attempt > 1) {
         await writeLog(deployment.id, releaseId, "HEALTH_CHECK", "Guardian recovery succeeded", { attempt });
       }
@@ -741,7 +744,7 @@ async function runHealthCheckWithGuardianRecovery(
   throw lastError ?? new Error(`${label} failed`);
 }
 
-async function assertPublicRouteResult(result: unknown, label: string, deployment: { slug: string; domain?: { name: string } | null }) {
+async function assertPublicRouteResult(result: unknown, label: string, deployment: { slug: string; domain?: { name: string } | null }, appPath?: string) {
   const message = liveResultFailureMessage(result, label);
   if (!message) return;
 
@@ -750,6 +753,7 @@ async function assertPublicRouteResult(result: unknown, label: string, deploymen
     const logs = await sysagent.deploymentRuntimeLogs({
       name: deployment.slug,
       logDir: deploymentLogDir(deployment.slug),
+      rootPath: appPath,
       lines: 80
     });
     runtimeText = logs.text ? `\n\nRunning log tail:\n${logs.text}` : "";
@@ -780,11 +784,11 @@ async function optionalPublicRouteWarning(
   if (!domain) return null;
 
   let publicRoute = await runStep(deploymentId, releaseId, "HEALTH_CHECK", label, () =>
-    sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain) })
+    sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain), rootPath: appPath, framework: deployment.framework })
   );
 
   try {
-    await assertPublicRouteResult(publicRoute, label, deployment);
+    await assertPublicRouteResult(publicRoute, label, deployment, appPath);
     return null;
   } catch (error) {
     const firstMessage = error instanceof Error ? error.message : "Public route check failed";
@@ -807,12 +811,12 @@ async function optionalPublicRouteWarning(
     );
     await guardianRepairSleep(5000);
     publicRoute = await runStep(deploymentId, releaseId, "HEALTH_CHECK", `${label} retry after Guardian repair`, () =>
-      sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain) })
+      sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain), rootPath: appPath, framework: deployment.framework })
     );
   }
 
   try {
-    await assertPublicRouteResult(publicRoute, label, deployment);
+    await assertPublicRouteResult(publicRoute, label, deployment, appPath);
     await writeLog(deploymentId, releaseId, "HEALTH_CHECK", `${label} recovered after Guardian repair`);
     return null;
   } catch (error) {

@@ -108,7 +108,7 @@ export const sysagent = {
   deploymentPortStatus: (body: unknown) =>
     request<SysagentCommandResult & { occupied?: boolean; reusable?: boolean; owner?: unknown }>("/deployments/port-status", { method: "POST", body: JSON.stringify(body) }),
   deploymentRuntimeLogs: (body: unknown) =>
-    request<{ ok: boolean; logDir?: string; stdout: string; stderr: string; text: string; error?: string }>("/deployments/runtime-logs", { method: "POST", body: JSON.stringify(body) }),
+    request<{ ok: boolean; logDir?: string; stdout: string; stderr: string; laravel?: string; text: string; error?: string }>("/deployments/runtime-logs", { method: "POST", body: JSON.stringify(body) }),
   deploymentRuntimeTools: (body: unknown) =>
     request<{ items: Array<{ name: string; installed: boolean; path?: string | null }> }>("/deployments/runtime-tools", { method: "POST", body: JSON.stringify(body) }),
   deploymentInstallRuntimeTool: (body: unknown) =>
