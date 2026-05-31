@@ -43,6 +43,10 @@ export const sysagent = {
     request("/guardian/actions/unblock-ip", { method: "POST", body: JSON.stringify(body) }),
   guardianFileWatch: () =>
     request<{ roots: string[]; scanned: number; findings: Array<{ path: string; reason: string; risk: "WARNING" | "CRITICAL"; sizeBytes: number; mode?: string; owner?: string; modifiedAt?: string }> }>("/guardian/file-watch"),
+  guardianRateLimitTemplates: () =>
+    request<{ templates: Array<{ mode: string; content: string }> }>("/guardian/nginx-rate-limit/templates"),
+  guardianApplyRateLimit: (mode: "balanced" | "strict") =>
+    request("/guardian/nginx-rate-limit/apply", { method: "POST", body: JSON.stringify({ mode }) }),
   services: () => request<{ items: Array<{ key: string; name: string; port: number; status: "healthy" | "down"; detail: string; installed: boolean; manageable: boolean; availableActions: string[] }> }>("/system/services"),
   serviceAction: (serviceKey: string, action: string) =>
     request(`/system/services/${encodeURIComponent(serviceKey)}/action`, { method: "POST", body: JSON.stringify({ action }) }),

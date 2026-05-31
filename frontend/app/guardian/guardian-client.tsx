@@ -85,6 +85,8 @@ type GuardianOverview = {
   security: {
     suspiciousIps: Array<SuspiciousIp & { allowlisted: boolean; blocked: boolean }>;
     allowlist: Array<{ id: string; cidr: string; label: string | null; expiresAt: string | null }>;
+    trustedCidrs: string[];
+    loginAnomalies: Array<{ ip: string; failures: number; usernames: number; risk: string }>;
     activeBlocks: Array<{ id: string; ip: string; reason: string; score: number; status: string; expiresAt: string | null }>;
   };
   fileFindings: Array<{ id: string; path: string; reason: string; risk: string; status: string; sizeBytes: number; mode: string | null; owner: string | null; modifiedAt: string | null }>;
@@ -240,6 +242,16 @@ export function GuardianClient() {
       await overview.refetch();
     } catch (error) {
       setSecurityNotice(error instanceof Error ? error.message : "File watch scan failed.");
+    }
+  }
+
+  async function applyRateLimit(mode: "balanced" | "strict") {
+    setSecurityNotice(null);
+    try {
+      const result = await apiPost<any>("/guardian/rate-limit/apply", { mode });
+      setSecurityNotice(result?.dryRun ? `${mode} rate-limit template is ready as dry-run.` : `${mode} rate-limit template applied; nginx config tested.`);
+    } catch (error) {
+      setSecurityNotice(error instanceof Error ? error.message : "Could not apply rate-limit template.");
     }
   }
 
@@ -503,6 +515,32 @@ export function GuardianClient() {
               </div>
             </div>
 
+            <div className="rounded-md border border-panel-line bg-white">
+              <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Login Anomalies</div>
+              <div className="divide-y divide-panel-line">
+                {(overview.data?.security.loginAnomalies ?? []).length === 0 ? (
+                  <div className="px-4 py-5 text-sm text-panel-muted">No failed-login anomaly in the last hour.</div>
+                ) : (overview.data?.security.loginAnomalies ?? []).slice(0, 6).map((item) => (
+                  <div className="flex items-center justify-between gap-3 px-4 py-3 text-sm" key={item.ip}>
+                    <div className="min-w-0">
+                      <div className="truncate font-medium">{item.ip}</div>
+                      <div className="truncate text-xs text-panel-muted">{item.failures} failures / {item.usernames} usernames</div>
+                    </div>
+                    <span className={item.risk === "high" ? "text-panel-danger" : "text-amber-700"}>{item.risk}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-md border border-panel-line bg-white p-4">
+              <div className="mb-3 text-sm font-semibold">Nginx Rate Limit Templates</div>
+              <div className="flex gap-2">
+                <button className="rounded-md border border-panel-line px-3 py-2 text-sm hover:bg-slate-50" onClick={() => applyRateLimit("balanced")} type="button">Balanced</button>
+                <button className="rounded-md border border-panel-line px-3 py-2 text-sm hover:bg-slate-50" onClick={() => applyRateLimit("strict")} type="button">Strict</button>
+              </div>
+              <div className="mt-2 text-xs text-panel-muted">Writes `/etc/nginx/snippets/vps-panel-guardian-rate-limit.conf` only when live Nginx commands are enabled.</div>
+            </div>
+
             <div className="rounded-md border border-panel-line bg-white p-4">
               <div className="mb-3 text-sm font-semibold">Allowlist</div>
               <div className="flex gap-2">
@@ -515,6 +553,12 @@ export function GuardianClient() {
                 <button className="rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50" onClick={addAllowlist} type="button">Add</button>
               </div>
               <div className="mt-3 space-y-2">
+                {(overview.data?.security.trustedCidrs ?? []).slice(0, 4).map((cidr) => (
+                  <div className="flex items-center justify-between gap-2 text-sm" key={cidr}>
+                    <span className="truncate">{cidr}</span>
+                    <span className="text-xs text-panel-muted">trusted</span>
+                  </div>
+                ))}
                 {(overview.data?.security.allowlist ?? []).length === 0 ? (
                   <div className="text-sm text-panel-muted">No allowlist entries.</div>
                 ) : (overview.data?.security.allowlist ?? []).slice(0, 6).map((item) => (

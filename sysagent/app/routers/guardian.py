@@ -60,9 +60,17 @@ class IpActionRequest(BaseModel):
     reason: str | None = None
 
 
+class RateLimitTemplateRequest(BaseModel):
+    mode: str = Field(default="balanced", pattern="^(balanced|strict)$")
+
+
 SUSPICIOUS_FILE_EXTENSIONS = {".php", ".phtml", ".phar", ".cgi", ".pl", ".py", ".sh"}
 SUSPICIOUS_FILE_PATTERNS = ["base64_decode", "shell_exec", "passthru", "eval(", "assert($_", "preg_replace", "system("]
 IGNORED_DIR_NAMES = {".git", "node_modules", "vendor", ".next", "__pycache__", "cache", "logs"}
+RATE_LIMIT_TEMPLATES = {
+    "balanced": "limit_req_zone $binary_remote_addr zone=vps_panel_guardian:10m rate=10r/s;\nlimit_conn_zone $binary_remote_addr zone=vps_panel_conn:10m;\n",
+    "strict": "limit_req_zone $binary_remote_addr zone=vps_panel_guardian:10m rate=3r/s;\nlimit_conn_zone $binary_remote_addr zone=vps_panel_conn:10m;\n",
+}
 
 
 def command_output(command: list[str], timeout: int = 4) -> dict[str, Any]:
@@ -397,6 +405,23 @@ def unblock_ip(body: IpActionRequest) -> dict[str, Any]:
 @router.get("/file-watch")
 def file_watch() -> dict[str, Any]:
     return file_watch_scan()
+
+
+@router.get("/nginx-rate-limit/templates")
+def nginx_rate_limit_templates() -> dict[str, Any]:
+    return {"templates": [{"mode": key, "content": value} for key, value in RATE_LIMIT_TEMPLATES.items()]}
+
+
+@router.post("/nginx-rate-limit/apply")
+def nginx_rate_limit_apply(body: RateLimitTemplateRequest) -> dict[str, Any]:
+    content = RATE_LIMIT_TEMPLATES[body.mode]
+    path = Path("/etc/nginx/snippets/vps-panel-guardian-rate-limit.conf")
+    if not settings.allow_live_nginx:
+        return {"dryRun": True, "path": str(path), "content": content}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    test = run_command(["nginx", "-t"], allow_live=True, timeout=30)
+    return {"dryRun": False, "path": str(path), "content": content, "test": test}
 
 
 @router.get("/diagnosis")

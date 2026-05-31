@@ -34,7 +34,8 @@ const envSchema = z.object({
   ALLOW_PENDING_VANITY_NAMESERVER_DOMAINS: z.coerce.boolean().default(true),
   DOMAIN_NAMESERVER_RESOLVERS: z.string().default("1.1.1.1,8.8.8.8,9.9.9.9"),
   DOMAIN_NAMESERVER_DOH_URLS: z.string().default("https://cloudflare-dns.com/dns-query,https://dns.google/resolve,https://dns.quad9.net/dns-query"),
-  FILE_MANAGER_ROOT: z.string().default("/var/www")
+  FILE_MANAGER_ROOT: z.string().default("/var/www"),
+  GUARDIAN_TRUSTED_CIDRS: z.string().default("")
 });
 
 export const env = envSchema.parse(process.env);
