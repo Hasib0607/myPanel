@@ -205,6 +205,49 @@ enum GuardianFileFindingStatus {
   RESOLVED
 }
 
+enum WhmMigrationStatus {
+  DRAFT
+  CONNECTED
+  SCANNING
+  SCANNED
+  IMPORTING
+  IMPORTED
+  MIGRATING
+  COMPLETED
+  FAILED
+}
+
+enum WhmMigrationItemType {
+  ACCOUNT
+  DOMAIN
+  DNS_ZONE
+  DNS_RECORD
+  PACKAGE
+  MAILBOX
+  DATABASE
+  SSL
+  FILES
+}
+
+enum WhmMigrationItemStatus {
+  DISCOVERED
+  MAPPED
+  IMPORTED
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  SKIPPED
+}
+
+enum WhmMigrationTaskType {
+  FILE_SYNC
+  DATABASE_DUMP
+  MAIL_SYNC
+  DNS_CUTOVER
+  ROLLBACK
+}
+
 model Domain {
   id           String        @id @default(cuid())
   name         String        @unique
@@ -560,6 +603,68 @@ model Secret {
 
   @@index([kind])
   @@map("secrets")
+}
+
+model WhmMigration {
+  id             String             @id @default(cuid())
+  name           String
+  host           String
+  port           Int                @default(2087)
+  username       String
+  tokenSecretRef String             @map("token_secret_ref")
+  verifySsl      Boolean            @default(true) @map("verify_ssl")
+  status         WhmMigrationStatus @default(DRAFT)
+  serverInfo     Json               @default("{}") @map("server_info")
+  summary        Json               @default("{}")
+  lastScanAt     DateTime?          @map("last_scan_at")
+  createdAt      DateTime           @default(now()) @map("created_at")
+  updatedAt      DateTime           @updatedAt @map("updated_at")
+  items          WhmMigrationItem[]
+  tasks          WhmMigrationTask[]
+
+  @@index([status, updatedAt])
+  @@map("whm_migrations")
+}
+
+model WhmMigrationItem {
+  id            String                 @id @default(cuid())
+  migrationId   String                 @map("migration_id")
+  type          WhmMigrationItemType
+  sourceId      String                 @map("source_id")
+  sourceAccount String?                @map("source_account")
+  name          String
+  status        WhmMigrationItemStatus @default(DISCOVERED)
+  targetType    String?                @map("target_type")
+  targetId      String?                @map("target_id")
+  warnings      String[]               @default([])
+  data          Json                   @default("{}")
+  createdAt     DateTime               @default(now()) @map("created_at")
+  updatedAt     DateTime               @updatedAt @map("updated_at")
+  migration     WhmMigration           @relation(fields: [migrationId], references: [id], onDelete: Cascade)
+
+  @@unique([migrationId, type, sourceId])
+  @@index([migrationId, type, status])
+  @@index([sourceAccount])
+  @@map("whm_migration_items")
+}
+
+model WhmMigrationTask {
+  id          String                 @id @default(cuid())
+  migrationId String                 @map("migration_id")
+  type        WhmMigrationTaskType
+  account     String?
+  domain      String?
+  status      WhmMigrationItemStatus @default(QUEUED)
+  command     String?
+  result      Json                   @default("{}")
+  startedAt   DateTime?              @map("started_at")
+  finishedAt  DateTime?              @map("finished_at")
+  createdAt   DateTime               @default(now()) @map("created_at")
+  updatedAt   DateTime               @updatedAt @map("updated_at")
+  migration   WhmMigration           @relation(fields: [migrationId], references: [id], onDelete: Cascade)
+
+  @@index([migrationId, type, status])
+  @@map("whm_migration_tasks")
 }
 
 model AuditLog {

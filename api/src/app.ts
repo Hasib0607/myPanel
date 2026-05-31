@@ -27,6 +27,7 @@ import { mailRoutes } from "./routes/mail.js";
 import { packageRoutes } from "./routes/packages.js";
 import { sslRoutes } from "./routes/ssl.js";
 import { twoFactorRoutes } from "./routes/twoFactor.js";
+import { whmMigrationRoutes } from "./routes/whmMigration.js";
 
 export function buildApp() {
   const app = Fastify({ logger: true });
@@ -135,6 +136,7 @@ export function buildApp() {
   app.register(deploymentRoutes, { prefix: "/api/v1/deployments" });
   app.register(deploymentWebhookRoutes, { prefix: "/api/v1/webhooks" });
   app.register(terminalRoutes, { prefix: "/api/v1/terminal" });
+  app.register(whmMigrationRoutes, { prefix: "/api/v1/whm-migrations" });
 
   return app;
 }
