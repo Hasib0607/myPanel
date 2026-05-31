@@ -16,6 +16,14 @@ from app.deployment_commands import normalize_laravel_start_command, parse_deplo
 from app.platform import runtime_tool_install_plan
 from app.nginx_paths import nginx_sites_available, nginx_sites_enabled
 from app.nginx_manager import acme_location, publish_nginx_config, safe_letsencrypt_path, safe_web_root
+from app.supervisor_utils import (
+    ensure_supervisord_running,
+    format_supervisor_step_error,
+    run_supervisorctl,
+    supervisor_config_dir,
+    supervisor_program_path,
+    supervisorctl_command,
+)
 
 router = APIRouter()
 
@@ -308,15 +316,9 @@ def combine_pm2_results(root_path: str, steps: dict[str, dict], required: list[s
     }
 
 
-def supervisor_config_dir() -> Path:
-    for candidate in (Path("/etc/supervisor/conf.d"), Path("/etc/supervisord.d")):
-        if candidate.exists():
-            return candidate
-    return Path("/etc/supervisor/conf.d")
-
-
 def supervisor_env_value(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
+
 
 
 def supervisor_program_config(body: ProcessRequest, start_command: list[str], log_dir: Path) -> str:
@@ -327,6 +329,7 @@ def supervisor_program_config(body: ProcessRequest, start_command: list[str], lo
         f"[program:{body.name}]",
         f"directory={cwd}",
         f"command={shlex.join(start_command)}",
+        "user=panel",
         "autostart=true",
         "autorestart=true",
         "startsecs=3",
@@ -350,12 +353,13 @@ def supervisor_start(body: ProcessRequest, start_command: list[str]) -> dict:
         return blocked_command(str(error), ["supervisorctl", "start", body.name], info)
 
     config_dir = supervisor_config_dir()
-    config_path = config_dir / f"{body.name}.conf"
+    config_path = supervisor_program_path(body.name)
     if not info["allowed"]:
         return blocked_command("Path escapes configured file manager root", ["supervisorctl", "start", body.name], info)
 
     reset_runtime_logs(log_dir)
     config_dir.mkdir(parents=True, exist_ok=True)
+    service = ensure_supervisord_running()
     write = {
         "dryRun": False,
         "command": ["write-file", str(config_path)],
@@ -370,23 +374,27 @@ def supervisor_start(body: ProcessRequest, start_command: list[str]) -> dict:
         write["stderr"] = str(error)
         write["returncode"] = 1
 
-    reread = run_command(["supervisorctl", "reread"], timeout=60, allow_live=DEPLOYMENT_COMMANDS_LIVE) if write["returncode"] == 0 else {"returncode": 1, "stderr": "Skipped because config write failed"}
-    update = run_command(["supervisorctl", "update"], timeout=60, allow_live=DEPLOYMENT_COMMANDS_LIVE) if reread.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because reread failed"}
-    stop = run_command(["supervisorctl", "stop", body.name], timeout=60, allow_live=DEPLOYMENT_COMMANDS_LIVE) if update.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because update failed"}
+    if write["returncode"] == 0 and not service.get("running"):
+        write["returncode"] = 1
+        write["stderr"] = "supervisord is not running and could not be started"
+
+    reread = run_supervisorctl("reread") if write["returncode"] == 0 else {"returncode": 1, "stderr": "Skipped because config write failed"}
+    update = run_supervisorctl("update") if reread.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because reread failed"}
+    stop = run_supervisorctl("stop", body.name) if update.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because update failed"}
     if "no such process" in (stop.get("stderr") or "").lower() or "not running" in (stop.get("stderr") or "").lower():
         stop["returncode"] = 0
-    start = run_command(["supervisorctl", "start", body.name], timeout=60, allow_live=DEPLOYMENT_COMMANDS_LIVE) if stop.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because stop failed"}
-    status = run_command(["supervisorctl", "status", body.name], timeout=60, allow_live=DEPLOYMENT_COMMANDS_LIVE) if start.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because start failed"}
-    steps = {"write": write, "reread": reread, "update": update, "stop": stop, "start": start, "status": status}
-    failed = [name for name, step in steps.items() if step.get("returncode") != 0]
+    start = run_supervisorctl("start", body.name) if stop.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because stop failed"}
+    status = run_supervisorctl("status", body.name) if start.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because start failed"}
+    steps = {"service": service, "write": write, "reread": reread, "update": update, "stop": stop, "start": start, "status": status}
+    failed = [name for name, step in steps.items() if step.get("returncode", 0) != 0]
     return {
-        "dryRun": any(step.get("dryRun") for step in steps.values()),
-        "blocked": any(step.get("blocked") for step in steps.values()),
-        "liveCommandsDisabled": any(step.get("liveCommandsDisabled") for step in steps.values()),
-        "command": ["supervisorctl", "managed-lifecycle", body.name],
+        "dryRun": any(step.get("dryRun") for step in steps.values() if isinstance(step, dict)),
+        "blocked": any(step.get("blocked") for step in steps.values() if isinstance(step, dict)),
+        "liveCommandsDisabled": any(step.get("liveCommandsDisabled") for step in steps.values() if isinstance(step, dict)),
+        "command": supervisorctl_command("start", body.name),
         "cwd": deployment_cwd(body.rootPath),
         "stdout": status.get("stdout") or "",
-        "stderr": "; ".join(f"{name}: {steps[name].get('stderr') or 'failed'}" for name in failed),
+        "stderr": "; ".join(f"{name}: {format_supervisor_step_error(steps[name])}" for name in failed),
         "returncode": 1 if failed else 0,
         "path": info,
         "configPath": str(config_path),
@@ -859,7 +867,7 @@ def _pm2_process_mismatch(body: HealthRequest) -> str | None:
 def _supervisor_process_mismatch(body: HealthRequest) -> str | None:
     if not body.processName or (body.processManager or "").upper() != "SUPERVISOR":
         return None
-    result = run_command(["supervisorctl", "status", body.processName], allow_live=DEPLOYMENT_COMMANDS_LIVE)
+    result = run_supervisorctl("status", body.processName)
     if result.get("dryRun"):
         return None
     if result.get("returncode") != 0:
@@ -969,11 +977,20 @@ def guardian_repair(body: GuardianRepairRequest) -> dict:
 
 @router.post("/supervisor/repair")
 def repair_supervisor(body: SupervisorRepairRequest) -> dict:
-    reread = run_command(["supervisorctl", "reread"], timeout=60, allow_live=DEPLOYMENT_COMMANDS_LIVE)
-    update = run_command(["supervisorctl", "update"], timeout=60, allow_live=DEPLOYMENT_COMMANDS_LIVE) if reread.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because reread failed"}
-    restart = run_command(["supervisorctl", "restart", body.name], timeout=60, allow_live=DEPLOYMENT_COMMANDS_LIVE) if update.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because update failed"}
-    failed = any(step.get("returncode") != 0 for step in [reread, update, restart])
-    return {"dryRun": any(step.get("dryRun") for step in [reread, update, restart]), "returncode": 1 if failed else 0, "reread": reread, "update": update, "restart": restart}
+    service = ensure_supervisord_running()
+    reread = run_supervisorctl("reread")
+    update = run_supervisorctl("update") if reread.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because reread failed"}
+    restart = run_supervisorctl("restart", body.name) if update.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because update failed"}
+    failed = [name for name, step in {"service": service, "reread": reread, "update": update, "restart": restart}.items() if step.get("returncode", 0) != 0]
+    return {
+        "dryRun": any(step.get("dryRun") for step in [reread, update, restart]),
+        "returncode": 1 if failed else 0,
+        "service": service,
+        "reread": reread,
+        "update": update,
+        "restart": restart,
+        "stderr": "; ".join(f"{name}: {format_supervisor_step_error(step)}" for name, step in {"service": service, "reread": reread, "update": update, "restart": restart}.items() if name in failed),
+    }
 
 
 @router.post("/nginx-inspect")

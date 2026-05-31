@@ -10,6 +10,7 @@ _settings = types.SimpleNamespace(
     deployment_command_timeout_seconds=900,
 )
 _config_module.settings = _settings
+_config_module.DEPLOYMENT_COMMANDS_LIVE = True
 sys.modules.setdefault("app.config", _config_module)
 
 from app.command import run_install_plan  # noqa: E402
