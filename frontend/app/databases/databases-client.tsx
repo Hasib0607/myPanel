@@ -1,7 +1,7 @@
 "use client";
 
 import type React from "react";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Columns3, Copy, Database, Download, Eye, KeyRound, Plus, RefreshCw, ShieldCheck, Table2, Trash2, Upload, UserRound } from "lucide-react";
 import { apiDeleteBody, apiGet, apiPost, apiUpload } from "@/lib/api";
@@ -73,6 +73,8 @@ export function DatabasesClient() {
   const [columns, setColumns] = useState<ColumnListResult["columns"]>([]);
   const [rowPreview, setRowPreview] = useState("");
   const [lastSecret, setLastSecret] = useState<CredentialResult | null>(null);
+  const [rowImportTarget, setRowImportTarget] = useState<{ engine: Engine; database: string } | null>(null);
+  const rowImportInputRef = useRef<HTMLInputElement | null>(null);
 
   const overview = useQuery({
     queryKey: ["databases-overview"],
@@ -125,7 +127,7 @@ export function DatabasesClient() {
   });
 
   const exportDatabase = useMutation({
-    mutationFn: () => apiPost<ExportResult>("/databases/export", { engine: transfer.engine, database: transfer.database }),
+    mutationFn: (input: { engine: Engine; database: string }) => apiPost<ExportResult>("/databases/export", input),
     onSuccess: (result) => {
       downloadText(`${result.database}.sql`, result.dump, "application/sql;charset=utf-8");
       setNotice(`${result.database} exported.`);
@@ -144,19 +146,22 @@ export function DatabasesClient() {
   });
 
   const importDatabaseUpload = useMutation({
-    mutationFn: async () => {
-      if (!transferFile) throw new Error("Choose a SQL file first");
-      if (transferFile.size > maxSqlUploadBytes) throw new Error("SQL upload exceeds the 3GB limit");
+    mutationFn: async (input: { engine: Engine; database: string; file: File }) => {
+      if (input.file.size > maxSqlUploadBytes) throw new Error("SQL upload exceeds the 3GB limit");
       const params = new URLSearchParams({
-        engine: transfer.engine,
-        database: transfer.database,
-        filename: transferFile.name
+        engine: input.engine,
+        database: input.database,
+        filename: input.file.name
       });
-      return apiUpload(`/databases/import/upload?${params.toString()}`, transferFile, "application/vnd.vps-panel.db-import");
+      return apiUpload(`/databases/import/upload?${params.toString()}`, input.file, "application/vnd.vps-panel.db-import");
     },
-    onSuccess: async () => {
-      setNotice(`Imported ${transferFile?.name ?? "SQL file"} into ${transfer.database}.`);
-      setTransferFile(null);
+    onSuccess: async (_result, input) => {
+      setNotice(`Imported ${input.file.name} into ${input.database}.`);
+      if (rowImportTarget && rowImportTarget.engine === input.engine && rowImportTarget.database === input.database) {
+        setRowImportTarget(null);
+      } else {
+        setTransferFile(null);
+      }
       await refresh();
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not upload SQL file")
@@ -221,8 +226,21 @@ export function DatabasesClient() {
 
   const engineMap = useMemo(() => new Map((overview.data?.engines ?? []).map((item) => [item.engine, item])), [overview.data]);
 
+  function openRowImport(engine: Engine, database: string) {
+    setRowImportTarget({ engine, database });
+    rowImportInputRef.current?.click();
+  }
+
+  async function handleRowImportSelection(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file || !rowImportTarget) return;
+    importDatabaseUpload.mutate({ engine: rowImportTarget.engine, database: rowImportTarget.database, file });
+    event.target.value = "";
+  }
+
   return (
     <div className="space-y-5 p-6">
+      <input accept=".sql,.txt,.dump" className="hidden" onChange={handleRowImportSelection} ref={rowImportInputRef} type="file" />
       {notice ? <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-700">{notice}</div> : null}
 
       <div className="grid grid-cols-[1fr_380px] gap-5">
@@ -263,7 +281,13 @@ export function DatabasesClient() {
                             type="button"
                             title="Use in tools"
                           >
+                            <Database size={15} />
+                          </button>
+                          <button className="rounded-md border border-panel-line p-2 hover:bg-slate-50" disabled={exportDatabase.isPending} onClick={() => exportDatabase.mutate({ engine, database: database.name })} type="button" title="Export SQL">
                             <Download size={15} />
+                          </button>
+                          <button className="rounded-md border border-panel-line p-2 hover:bg-slate-50" disabled={importDatabaseUpload.isPending} onClick={() => openRowImport(engine, database.name)} type="button" title="Import SQL file">
+                            <Upload size={15} />
                           </button>
                           <button className="rounded-md border border-panel-line p-2 text-panel-danger hover:bg-red-50" onClick={() => deleteDatabase.mutate({ engine, database: database.name })} type="button" title="Delete database">
                             <Trash2 size={15} />
@@ -332,7 +356,7 @@ export function DatabasesClient() {
           <ActionPanel icon={<Download size={16} />} title="Import / export">
             <EngineSelect value={transfer.engine} onChange={(engine) => setTransfer({ ...transfer, engine })} />
             <Input label="Database" value={transfer.database} onChange={(value) => setTransfer({ ...transfer, database: cleanIdentifier(value) })} />
-            <button className="flex h-10 w-full items-center justify-center gap-2 rounded-md border border-panel-line text-sm font-semibold disabled:opacity-60" disabled={!transfer.database || exportDatabase.isPending} onClick={() => exportDatabase.mutate()} type="button">
+            <button className="flex h-10 w-full items-center justify-center gap-2 rounded-md border border-panel-line text-sm font-semibold disabled:opacity-60" disabled={!transfer.database || exportDatabase.isPending} onClick={() => exportDatabase.mutate({ engine: transfer.engine, database: transfer.database })} type="button">
               <Download size={15} /> {exportDatabase.isPending ? "Exporting..." : "Export SQL"}
             </button>
             <label className="space-y-1 text-xs font-medium text-panel-muted">
@@ -351,7 +375,7 @@ export function DatabasesClient() {
             <button
               className="flex h-10 w-full items-center justify-center gap-2 rounded-md border border-panel-line text-sm font-semibold disabled:opacity-60"
               disabled={!transfer.database || !transferFile || transferFile.size > maxSqlUploadBytes || importDatabaseUpload.isPending}
-              onClick={() => importDatabaseUpload.mutate()}
+              onClick={() => transferFile && importDatabaseUpload.mutate({ engine: transfer.engine, database: transfer.database, file: transferFile })}
               type="button"
             >
               <Upload size={15} /> {importDatabaseUpload.isPending ? "Uploading..." : "Upload and import SQL"}

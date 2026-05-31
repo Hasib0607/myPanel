@@ -8,13 +8,25 @@ import type { Deployment, DeploymentEnvVar } from "../../deployment-types";
 import { EmptyState, ProjectTabs, ResultNotice } from "../../deployment-ui";
 
 function parseEnv(text: string) {
-  return text
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+
+  if (trimmed.startsWith("{")) {
+    const parsed = Function(`"use strict"; return (${trimmed});`)() as Record<string, unknown>;
+    return Object.entries(parsed).map(([key, value]) => ({
+      key: key.trim().toUpperCase(),
+      value: value == null ? "" : String(value),
+      isSecret: false
+    })).filter((item) => item.key);
+  }
+
+  return trimmed
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith("#") && line.includes("="))
     .map((line) => {
       const index = line.indexOf("=");
-      return { key: line.slice(0, index).trim(), value: line.slice(index + 1), isSecret: false };
+      return { key: line.slice(0, index).trim().toUpperCase(), value: line.slice(index + 1), isSecret: false };
     });
 }
 
@@ -137,7 +149,7 @@ export function DeploymentEnvClient({ project }: { project: string }) {
 
           <div className="rounded-md border border-panel-line bg-white p-4">
             <div className="mb-3 flex items-center gap-2 text-sm font-semibold"><Upload size={16} />Bulk Import</div>
-            <textarea className="h-48 w-full rounded-md border border-panel-line p-3 font-mono text-xs" onChange={(event) => setBulkText(event.target.value)} placeholder="APP_KEY=value" value={bulkText} />
+            <textarea className="h-48 w-full rounded-md border border-panel-line p-3 font-mono text-xs" onChange={(event) => setBulkText(event.target.value)} placeholder={`{\n  APP_NAME: "eBitans",\n  APP_ENV: "production"\n}\n\nor\n\nAPP_KEY=value`} value={bulkText} />
             <button className="mt-3 flex h-10 w-full items-center justify-center gap-2 rounded-md border border-panel-line text-sm font-medium hover:bg-slate-50 disabled:opacity-60" disabled={!parseEnv(bulkText).length || saveBulk.isPending} onClick={() => saveBulk.mutate()} type="button"><Save size={15} />Import .env</button>
           </div>
 

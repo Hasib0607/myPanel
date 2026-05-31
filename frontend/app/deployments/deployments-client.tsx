@@ -14,6 +14,15 @@ type GithubDetectResponse = DetectionResponse & { repository: string; dryRun: bo
 type Domain = { id: string; name: string; subdomains?: Array<{ id: string; name: string }> };
 type DomainOption = { id: string; name: string };
 type DomainListResponse = { items: Domain[] };
+type DatabaseEngine = "POSTGRESQL" | "MYSQL";
+type DatabaseOverview = {
+  engines: Array<{
+    engine: DatabaseEngine;
+    installed: boolean;
+    databases: Array<{ name: string; owner: string | null }>;
+    users: Array<{ name: string; host: string | null }>;
+  }>;
+};
 type LogType = "build" | "running";
 
 type Draft = {
@@ -35,6 +44,8 @@ type Draft = {
   outputDirectory: string;
   envText: string;
   dbType: "" | "POSTGRESQL" | "MYSQL";
+  dbName: string;
+  dbUser: string;
   autoDeployEnabled: boolean;
 };
 
@@ -57,6 +68,8 @@ const initialDraft: Draft = {
   outputDirectory: ".next",
   envText: "NODE_ENV=production",
   dbType: "",
+  dbName: "",
+  dbUser: "",
   autoDeployEnabled: true
 };
 
@@ -73,6 +86,36 @@ function parseEnv(text: string) {
     const index = line.indexOf("=");
     return [line.slice(0, index).trim(), line.slice(index + 1)];
   }));
+}
+
+type BulkEnvItem = { key: string; value: string; isSecret: boolean };
+
+function parseBulkEnvItems(text: string, isSecret = false): BulkEnvItem[] {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+
+  if (trimmed.startsWith("{")) {
+    const parsed = Function(`"use strict"; return (${trimmed});`)() as Record<string, unknown>;
+    return Object.entries(parsed).map(([key, value]) => ({
+      key: key.trim().toUpperCase(),
+      value: value == null ? "" : String(value),
+      isSecret
+    })).filter((item) => item.key);
+  }
+
+  return trimmed
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#") && line.includes("="))
+    .map((line) => {
+      const index = line.indexOf("=");
+      return {
+        key: line.slice(0, index).trim().toUpperCase(),
+        value: line.slice(index + 1),
+        isSecret
+      };
+    })
+    .filter((item) => item.key);
 }
 
 function formPayload(draft: Draft) {
@@ -95,6 +138,8 @@ function formPayload(draft: Draft) {
     startCommand: draft.startCommand || null,
     outputDirectory: draft.outputDirectory || null,
     dbType: draft.dbType || null,
+    dbName: draft.dbName || null,
+    dbUser: draft.dbUser || null,
     envVars: parseEnv(draft.envText),
     autoDeployEnabled: draft.autoDeployEnabled,
     persistentPaths: []
@@ -124,6 +169,8 @@ function draftFromDeployment(deployment: Deployment): Draft {
       return acc;
     }, {})).map(([key, value]) => `${key}=${value}`).join("\n") || "NODE_ENV=production",
     dbType: deployment.dbType ?? "",
+    dbName: deployment.dbName ?? "",
+    dbUser: deployment.dbUser ?? "",
     autoDeployEnabled: deployment.autoDeployEnabled
   };
 }
@@ -191,6 +238,8 @@ export function DeploymentsClient() {
   const [envKey, setEnvKey] = useState("");
   const [envValue, setEnvValue] = useState("");
   const [envSecret, setEnvSecret] = useState(false);
+  const [bulkEnvText, setBulkEnvText] = useState("");
+  const [bulkEnvSecret, setBulkEnvSecret] = useState(false);
   const [deleteText, setDeleteText] = useState("");
   const [logModalOpen, setLogModalOpen] = useState(false);
   const [logText, setLogText] = useState("");
@@ -203,6 +252,7 @@ export function DeploymentsClient() {
     refetchInterval: 8000
   });
   const domains = useQuery({ queryKey: ["domains", "deployment-create"], queryFn: () => apiGet<DomainListResponse>("/domains?page=1&pageSize=100") });
+  const databaseOverview = useQuery({ queryKey: ["databases-overview", "deployment-create"], queryFn: () => apiGet<DatabaseOverview>("/databases") });
   const nextPort = useQuery({ queryKey: ["deployments-next-port"], queryFn: () => apiGet<{ port: number }>("/deployments/ports/next") });
   const repos = useQuery({ enabled: repoPickerOpen, queryKey: ["deployments-github-repos", repoSearch], queryFn: () => apiGet<GithubRepoResponse>(`/deployments/github/repos?${queryString({ search: repoSearch })}`) });
   const githubConnection = useQuery({ enabled: repoPickerOpen, queryKey: ["deployments-github-connection"], queryFn: () => apiGet<{ connected: boolean; username: string | null; scopes: string[] }>("/deployments/github/connection") });
@@ -392,6 +442,22 @@ export function DeploymentsClient() {
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not remove env")
   });
 
+  const saveBulkEnv = useMutation({
+    mutationFn: () => {
+      if (!selected) throw new Error("Select a project first");
+      const env = parseBulkEnvItems(bulkEnvText, bulkEnvSecret);
+      if (!env.length) throw new Error("Paste a JS object or KEY=value lines first");
+      return apiPost<{ ok: true; items: DeploymentEnvVar[] }>(`/deployments/${selected.slug}/env/bulk`, { env });
+    },
+    onSuccess: async (result) => {
+      setNotice(`${result.items.length} environment variables imported.`);
+      setBulkEnvText("");
+      setBulkEnvSecret(false);
+      await invalidateDeployments();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not import env block")
+  });
+
   const deleteProject = useMutation({
     mutationFn: () => {
       if (!selected) throw new Error("Select a project first");
@@ -498,7 +564,7 @@ export function DeploymentsClient() {
               <div className="min-h-0 flex-1 overflow-auto p-5">
                 {activeTab === "overview" ? <OverviewPanel deployment={selected} /> : null}
                 {activeTab === "domains" ? <DomainsPanel deployment={selected} domains={domainOptions(domains.data?.items ?? [])} domainToAdd={domainToAdd} setDomainToAdd={setDomainToAdd} addDomain={() => addDomain.mutate()} setPrimary={(binding) => setPrimaryDomain.mutate(binding)} removeDomain={(binding) => removeDomain.mutate(binding)} /> : null}
-                {activeTab === "env" ? <EnvPanel deployment={selected} envKey={envKey} envValue={envValue} envSecret={envSecret} setEnvKey={setEnvKey} setEnvValue={setEnvValue} setEnvSecret={setEnvSecret} saveEnv={() => saveEnv.mutate()} savingEnv={saveEnv.isPending} removeEnv={(key) => removeEnv.mutate(key)} /> : null}
+                {activeTab === "env" ? <EnvPanel deployment={selected} envKey={envKey} envValue={envValue} envSecret={envSecret} bulkEnvText={bulkEnvText} bulkEnvSecret={bulkEnvSecret} setEnvKey={setEnvKey} setEnvValue={setEnvValue} setEnvSecret={setEnvSecret} setBulkEnvText={setBulkEnvText} setBulkEnvSecret={setBulkEnvSecret} saveEnv={() => saveEnv.mutate()} saveBulkEnv={() => saveBulkEnv.mutate()} savingEnv={saveEnv.isPending} savingBulkEnv={saveBulkEnv.isPending} removeEnv={(key) => removeEnv.mutate(key)} /> : null}
                 {activeTab === "settings" ? <SettingsPanel deployment={selected} deleteText={deleteText} setDeleteText={setDeleteText} onEdit={openEdit} onDelete={() => deleteProject.mutate()} deleting={deleteProject.isPending} /> : null}
               </div>
             </div>
@@ -506,8 +572,8 @@ export function DeploymentsClient() {
         </main>
       </div>
 
-      {createOpen ? <ProjectModal title="Create Project" draft={draft} setDraft={setDraft} domains={domainOptions(domains.data?.items ?? [])} onClose={() => setCreateOpen(false)} onDetect={() => detect.mutate("create")} onSubmit={() => createDeployment.mutate()} submitLabel="Create" busy={createDeployment.isPending} openGithub={() => setRepoPickerOpen(true)} /> : null}
-      {editingOpen ? <ProjectModal title="Edit Project" draft={editDraft} setDraft={setEditDraft} domains={domainOptions(domains.data?.items ?? [])} onClose={() => setEditingOpen(false)} onDetect={() => detect.mutate("edit")} onSubmit={() => updateDeployment.mutate()} submitLabel="Save changes" busy={updateDeployment.isPending} openGithub={() => setRepoPickerOpen(true)} /> : null}
+      {createOpen ? <ProjectModal title="Create Project" draft={draft} setDraft={setDraft} domains={domainOptions(domains.data?.items ?? [])} databaseOverview={databaseOverview.data} onClose={() => setCreateOpen(false)} onDetect={() => detect.mutate("create")} onSubmit={() => createDeployment.mutate()} submitLabel="Create" busy={createDeployment.isPending} openGithub={() => setRepoPickerOpen(true)} /> : null}
+      {editingOpen ? <ProjectModal title="Edit Project" draft={editDraft} setDraft={setEditDraft} domains={domainOptions(domains.data?.items ?? [])} databaseOverview={databaseOverview.data} onClose={() => setEditingOpen(false)} onDetect={() => detect.mutate("edit")} onSubmit={() => updateDeployment.mutate()} submitLabel="Save changes" busy={updateDeployment.isPending} openGithub={() => setRepoPickerOpen(true)} /> : null}
       {repoPickerOpen ? <GithubModal repos={repos.data} loading={repos.isLoading} repoSearch={repoSearch} setRepoSearch={setRepoSearch} connection={githubConnection.data} githubToken={githubToken} setGithubToken={setGithubToken} githubUsername={githubUsername} setGithubUsername={setGithubUsername} saveToken={() => saveGithubToken.mutate()} savingToken={saveGithubToken.isPending} onClose={() => setRepoPickerOpen(false)} onDeploy={(repo) => importAndDeployGithub.mutate(repo)} deploying={importAndDeployGithub.isPending} /> : null}
       {logModalOpen ? <LogsModal title={logTitle} text={logText} onCopy={copyLogText} onClose={() => setLogModalOpen(false)} /> : null}
     </section>
@@ -535,7 +601,7 @@ function ProjectCard({ deployment, active, onSelect }: { deployment: Deployment;
   );
 }
 
-function ProjectModal({ title, draft, setDraft, domains, onClose, onDetect, onSubmit, submitLabel, busy, openGithub }: { title: string; draft: Draft; setDraft: (draft: Draft) => void; domains: DomainOption[]; onClose: () => void; onDetect: () => void; onSubmit: () => void; submitLabel: string; busy?: boolean; openGithub: () => void }) {
+function ProjectModal({ title, draft, setDraft, domains, databaseOverview, onClose, onDetect, onSubmit, submitLabel, busy, openGithub }: { title: string; draft: Draft; setDraft: (draft: Draft) => void; domains: DomainOption[]; databaseOverview?: DatabaseOverview; onClose: () => void; onDetect: () => void; onSubmit: () => void; submitLabel: string; busy?: boolean; openGithub: () => void }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-6">
       <div className="flex max-h-[88vh] w-full max-w-3xl flex-col rounded-md border border-panel-line bg-white shadow-xl">
@@ -543,7 +609,7 @@ function ProjectModal({ title, draft, setDraft, domains, onClose, onDetect, onSu
         <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
           <div className="grid grid-cols-4 gap-2">{sourceOptions.map((source) => <button className={`h-9 rounded-md border text-xs font-semibold ${draft.sourceProvider === source ? "border-panel-accent bg-teal-50 text-panel-accent" : "border-panel-line"}`} key={source} onClick={() => { setDraft({ ...draft, sourceProvider: source }); if (source === "GITHUB") openGithub(); }} type="button">{source.replace("_", " ")}</button>)}</div>
           {draft.sourceProvider === "GITHUB" ? <button className="flex h-10 w-full items-center justify-center gap-2 rounded-md border border-panel-line text-sm font-medium hover:bg-slate-50" onClick={openGithub} type="button"><Github size={15} />Choose GitHub project</button> : null}
-          <DeploymentFormFields value={draft} onChange={setDraft} domains={domains} />
+          <DeploymentFormFields value={draft} onChange={setDraft} domains={domains} databaseOverview={databaseOverview} />
         </div>
         <div className="flex justify-between border-t border-panel-line p-4"><button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm" onClick={onDetect} type="button"><Wand2 size={15} />Detect</button><div className="flex gap-2"><button className="h-9 rounded-md border border-panel-line px-3 text-sm" onClick={onClose} type="button">Cancel</button><button className="h-9 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={!draft.name || !draft.rootPath || !draft.port || busy} onClick={onSubmit} type="button">{submitLabel}</button></div></div>
       </div>
@@ -551,13 +617,18 @@ function ProjectModal({ title, draft, setDraft, domains, onClose, onDetect, onSu
   );
 }
 
-function DeploymentFormFields({ value, onChange, domains }: { value: Draft; onChange: (next: Draft) => void; domains: DomainOption[] }) {
+function DeploymentFormFields({ value, onChange, domains, databaseOverview }: { value: Draft; onChange: (next: Draft) => void; domains: DomainOption[]; databaseOverview?: DatabaseOverview }) {
+  const selectedDatabaseEngine = databaseOverview?.engines.find((engine) => engine.engine === value.dbType);
+  const selectedDatabaseRecord = selectedDatabaseEngine?.databases.find((database) => database.name === value.dbName);
+  const databaseUsers = selectedDatabaseEngine?.users ?? [];
   return <div className="space-y-4">
     <div className="grid grid-cols-2 gap-3"><Input label="Project name" value={value.name} onChange={(name) => onChange({ ...value, name, slug: value.slug || slugify(name) })} /><Input label="Slug" value={value.slug} onChange={(slug) => onChange({ ...value, slug })} /></div>
     <label className="space-y-1 text-xs font-medium text-panel-muted">Primary domain<select className="h-9 w-full rounded-md border border-panel-line px-2 text-sm text-panel-ink" onChange={(event) => onChange({ ...value, domainId: event.target.value })} value={value.domainId}><option value="">No domain</option>{domains.map((domain) => <option key={domain.id} value={domain.id}>{domain.name}</option>)}</select></label>
     <div className="grid grid-cols-2 gap-3"><Input label="Git URL" value={value.gitUrl} onChange={(gitUrl) => onChange({ ...value, gitUrl })} /><Input label="Branch" value={value.branch} onChange={(branch) => onChange({ ...value, branch })} /></div>
     <Input label="App root path" value={value.rootPath} onChange={(rootPath) => onChange({ ...value, rootPath })} />
-    <div className="grid grid-cols-3 gap-3"><label className="space-y-1 text-xs font-medium text-panel-muted">Framework<select className="h-9 w-full rounded-md border border-panel-line px-2 text-sm text-panel-ink" onChange={(event) => onChange({ ...value, framework: event.target.value as DeploymentFramework })} value={value.framework}>{frameworkOptions.map((framework) => <option key={framework} value={framework}>{framework}</option>)}</select></label><Input label="Port (auto)" readOnly value={value.port} onChange={(port) => onChange({ ...value, port })} /><label className="space-y-1 text-xs font-medium text-panel-muted">Database<select className="h-9 w-full rounded-md border border-panel-line px-2 text-sm text-panel-ink" onChange={(event) => onChange({ ...value, dbType: event.target.value as Draft["dbType"] })} value={value.dbType}><option value="">None</option><option value="POSTGRESQL">PostgreSQL</option><option value="MYSQL">MySQL</option></select></label></div>
+    <div className="grid grid-cols-3 gap-3"><label className="space-y-1 text-xs font-medium text-panel-muted">Framework<select className="h-9 w-full rounded-md border border-panel-line px-2 text-sm text-panel-ink" onChange={(event) => onChange({ ...value, framework: event.target.value as DeploymentFramework })} value={value.framework}>{frameworkOptions.map((framework) => <option key={framework} value={framework}>{framework}</option>)}</select></label><Input label="Port (auto)" readOnly value={value.port} onChange={(port) => onChange({ ...value, port })} /><label className="space-y-1 text-xs font-medium text-panel-muted">Database<select className="h-9 w-full rounded-md border border-panel-line px-2 text-sm text-panel-ink" onChange={(event) => onChange({ ...value, dbType: event.target.value as Draft["dbType"], dbName: "", dbUser: "" })} value={value.dbType}><option value="">None</option><option value="POSTGRESQL">PostgreSQL</option><option value="MYSQL">MySQL</option></select></label></div>
+    {value.dbType ? <div className="grid grid-cols-2 gap-3"><label className="space-y-1 text-xs font-medium text-panel-muted">Existing database<select className="h-9 w-full rounded-md border border-panel-line px-2 text-sm text-panel-ink" onChange={(event) => { const nextName = event.target.value; const nextRecord = selectedDatabaseEngine?.databases.find((database) => database.name === nextName); onChange({ ...value, dbName: nextName, dbUser: value.dbUser || nextRecord?.owner || "" }); }} value={value.dbName}><option value="">Select existing database</option>{(selectedDatabaseEngine?.databases ?? []).map((database) => <option key={database.name} value={database.name}>{database.name}</option>)}</select></label><label className="space-y-1 text-xs font-medium text-panel-muted">Database user<select className="h-9 w-full rounded-md border border-panel-line px-2 text-sm text-panel-ink" onChange={(event) => onChange({ ...value, dbUser: event.target.value })} value={value.dbUser}><option value="">{selectedDatabaseRecord?.owner ? "Use detected owner" : "Select database user"}</option>{databaseUsers.map((user) => <option key={`${user.name}:${user.host ?? "local"}`} value={user.name}>{user.name}{user.host ? ` @ ${user.host}` : ""}</option>)}</select></label></div> : null}
+    {value.dbType ? <div className="grid grid-cols-2 gap-3"><Input label="Database name" value={value.dbName} onChange={(dbName) => onChange({ ...value, dbName })} /><Input label="Database user" value={value.dbUser} onChange={(dbUser) => onChange({ ...value, dbUser })} /></div> : null}
     <label className="flex h-10 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium text-panel-ink"><input checked={value.autoDeployEnabled} onChange={(event) => onChange({ ...value, autoDeployEnabled: event.target.checked })} type="checkbox" /> Auto deploy on GitHub push</label>
     {(["installCommand", "buildCommand", "startCommand", "outputDirectory"] as const).map((field) => <input className="h-9 w-full rounded-md border border-panel-line px-3 font-mono text-xs" key={field} onChange={(event) => onChange({ ...value, [field]: event.target.value })} placeholder={field} value={value[field]} />)}
     <textarea className="h-28 w-full rounded-md border border-panel-line p-3 font-mono text-xs" onChange={(event) => onChange({ ...value, envText: event.target.value })} value={value.envText} />
@@ -582,8 +653,14 @@ function DomainsPanel({ deployment, domains, domainToAdd, setDomainToAdd, addDom
   return <div className="space-y-4"><div className="flex gap-2"><select className="h-10 min-w-72 rounded-md border border-panel-line px-2 text-sm" onChange={(event) => setDomainToAdd(event.target.value)} value={domainToAdd}><option value="">Select domain</option>{domains.filter((domain) => !boundIds.has(domain.id)).map((domain) => <option key={domain.id} value={domain.id}>{domain.name}</option>)}</select><button className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={!domainToAdd} onClick={addDomain} type="button"><Plus size={15} />Add domain</button></div><div className="overflow-hidden rounded-md border border-panel-line">{(deployment.domainBindings ?? []).map((binding) => <div className="flex items-center justify-between border-b border-panel-line p-3 last:border-b-0" key={binding.id}><div><div className="font-semibold">{binding.domain.name}</div><div className="text-xs text-panel-muted">{binding.role}</div></div><div className="flex gap-2"><button className="h-8 rounded-md border border-panel-line px-2 text-xs" disabled={binding.role === "primary"} onClick={() => setPrimary(binding)} type="button">Make primary</button><button className="h-8 rounded-md border border-panel-line px-2 text-xs text-panel-danger" onClick={() => removeDomain(binding)} type="button">Remove</button></div></div>)}{(deployment.domainBindings ?? []).length === 0 ? <div className="p-8 text-center text-sm text-panel-muted">No domains attached.</div> : null}</div></div>;
 }
 
-function EnvPanel({ deployment, envKey, envValue, envSecret, setEnvKey, setEnvValue, setEnvSecret, saveEnv, savingEnv, removeEnv }: { deployment: Deployment; envKey: string; envValue: string; envSecret: boolean; setEnvKey: (value: string) => void; setEnvValue: (value: string) => void; setEnvSecret: (value: boolean) => void; saveEnv: () => void; savingEnv?: boolean; removeEnv: (key: string) => void }) {
-  return <div className="grid grid-cols-[1fr_360px] gap-5"><div className="overflow-hidden rounded-md border border-panel-line">{(deployment.env ?? []).map((item) => <div className="flex items-center justify-between border-b border-panel-line p-3 last:border-b-0" key={item.key}><div><div className="font-mono text-sm font-semibold">{item.key}</div><div className="mt-1 max-w-xl truncate font-mono text-xs text-panel-muted">{item.isSecret ? item.secretRef ?? "[secret]" : item.value}</div></div><button className="h-8 rounded-md border border-panel-line px-2 text-xs text-panel-danger" onClick={() => removeEnv(item.key)} type="button"><Trash2 size={13} /></button></div>)}{(deployment.env ?? []).length === 0 ? <div className="p-8 text-center text-sm text-panel-muted">No environment variables.</div> : null}</div><div className="rounded-md border border-panel-line p-4"><div className="mb-3 flex items-center gap-2 text-sm font-semibold"><KeyRound size={16} />Add env</div><div className="space-y-3"><input className="h-9 w-full rounded-md border border-panel-line px-3 font-mono text-sm" onChange={(event) => setEnvKey(event.target.value.toUpperCase())} placeholder="KEY" value={envKey} /><textarea className="h-28 w-full rounded-md border border-panel-line p-3 font-mono text-sm" onChange={(event) => setEnvValue(event.target.value)} placeholder="value" value={envValue} /><label className="flex items-center gap-2 text-sm text-panel-muted"><input checked={envSecret} onChange={(event) => setEnvSecret(event.target.checked)} type="checkbox" /> Store as secret</label><button className="h-10 w-full rounded-md bg-panel-accent text-sm font-semibold text-white disabled:opacity-60" disabled={!envKey.trim() || savingEnv} onClick={saveEnv} type="button">{savingEnv ? "Saving..." : "Save variable"}</button></div></div></div>;
+function EnvPanel({ deployment, envKey, envValue, envSecret, bulkEnvText, bulkEnvSecret, setEnvKey, setEnvValue, setEnvSecret, setBulkEnvText, setBulkEnvSecret, saveEnv, saveBulkEnv, savingEnv, savingBulkEnv, removeEnv }: { deployment: Deployment; envKey: string; envValue: string; envSecret: boolean; bulkEnvText: string; bulkEnvSecret: boolean; setEnvKey: (value: string) => void; setEnvValue: (value: string) => void; setEnvSecret: (value: boolean) => void; setBulkEnvText: (value: string) => void; setBulkEnvSecret: (value: boolean) => void; saveEnv: () => void; saveBulkEnv: () => void; savingEnv?: boolean; savingBulkEnv?: boolean; removeEnv: (key: string) => void }) {
+  let bulkCount = 0;
+  try {
+    bulkCount = parseBulkEnvItems(bulkEnvText, bulkEnvSecret).length;
+  } catch {
+    bulkCount = 0;
+  }
+  return <div className="grid grid-cols-[1fr_360px] gap-5"><div className="overflow-hidden rounded-md border border-panel-line">{(deployment.env ?? []).map((item) => <div className="flex items-center justify-between border-b border-panel-line p-3 last:border-b-0" key={item.key}><div><div className="font-mono text-sm font-semibold">{item.key}</div><div className="mt-1 max-w-xl truncate font-mono text-xs text-panel-muted">{item.isSecret ? item.secretRef ?? "[secret]" : item.value}</div></div><button className="h-8 rounded-md border border-panel-line px-2 text-xs text-panel-danger" onClick={() => removeEnv(item.key)} type="button"><Trash2 size={13} /></button></div>)}{(deployment.env ?? []).length === 0 ? <div className="p-8 text-center text-sm text-panel-muted">No environment variables.</div> : null}</div><div className="space-y-4"><div className="rounded-md border border-panel-line p-4"><div className="mb-3 flex items-center gap-2 text-sm font-semibold"><KeyRound size={16} />Add env</div><div className="space-y-3"><input className="h-9 w-full rounded-md border border-panel-line px-3 font-mono text-sm" onChange={(event) => setEnvKey(event.target.value.toUpperCase())} placeholder="KEY" value={envKey} /><textarea className="h-28 w-full rounded-md border border-panel-line p-3 font-mono text-sm" onChange={(event) => setEnvValue(event.target.value)} placeholder="value" value={envValue} /><label className="flex items-center gap-2 text-sm text-panel-muted"><input checked={envSecret} onChange={(event) => setEnvSecret(event.target.checked)} type="checkbox" /> Store as secret</label><button className="h-10 w-full rounded-md bg-panel-accent text-sm font-semibold text-white disabled:opacity-60" disabled={!envKey.trim() || savingEnv} onClick={saveEnv} type="button">{savingEnv ? "Saving..." : "Save variable"}</button></div></div><div className="rounded-md border border-panel-line p-4"><div className="mb-3 flex items-center gap-2 text-sm font-semibold"><Plus size={16} />Bulk env</div><div className="space-y-3"><textarea className="h-40 w-full rounded-md border border-panel-line p-3 font-mono text-xs" onChange={(event) => setBulkEnvText(event.target.value)} placeholder={`{\n  APP_NAME: "eBitans",\n  APP_ENV: "production",\n  DB_HOST: "127.0.0.1"\n}\n\nor\n\nAPP_NAME=eBitans\nAPP_ENV=production`} value={bulkEnvText} /><label className="flex items-center gap-2 text-sm text-panel-muted"><input checked={bulkEnvSecret} onChange={(event) => setBulkEnvSecret(event.target.checked)} type="checkbox" /> Store all imported values as secret</label><div className="text-xs text-panel-muted">{bulkCount > 0 ? `${bulkCount} variables ready to import.` : "Paste a JS object or KEY=value block."}</div><button className="h-10 w-full rounded-md border border-panel-line text-sm font-semibold disabled:opacity-60" disabled={!bulkCount || savingBulkEnv} onClick={saveBulkEnv} type="button">{savingBulkEnv ? "Importing..." : "Import env block"}</button></div></div></div></div>;
 }
 
 function SettingsPanel({ deployment, deleteText, setDeleteText, onEdit, onDelete, deleting }: { deployment: Deployment; deleteText: string; setDeleteText: (value: string) => void; onEdit: () => void; onDelete: () => void; deleting?: boolean }) {
