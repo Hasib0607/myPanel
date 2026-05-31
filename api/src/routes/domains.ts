@@ -41,6 +41,12 @@ const createDomainSchema = z.object({
   hostingDeploymentId: z.string().nullable().optional()
 });
 
+const bulkCreateDomainSchema = createDomainSchema.omit({ name: true }).extend({
+  domains: z.array(domainNameSchema).min(1).max(250),
+  skipExisting: z.boolean().default(true),
+  publish: z.boolean().default(true)
+});
+
 const subdomainSchema = z.object({
   name: z.string().trim().toLowerCase(),
   target: z.string().min(1),
@@ -301,6 +307,17 @@ function parseCreateDomain(body: unknown) {
   }
 }
 
+function parseBulkCreateDomains(body: unknown) {
+  try {
+    return bulkCreateDomainSchema.parse(body);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      throw Object.assign(new Error(zodIssueMessage(error)), { statusCode: 400 });
+    }
+    throw error;
+  }
+}
+
 async function publishDomainHosting(domainId: string) {
   const domain = await prisma.domain.findUniqueOrThrow({
     where: { id: domainId },
@@ -357,6 +374,38 @@ async function publishDomainHosting(domainId: string) {
   return { domain, fileScaffold, zone, dnsResult, nginxResult };
 }
 
+type CreateDomainInput = z.infer<typeof createDomainSchema>;
+
+async function createDomainWithDefaults(input: CreateDomainInput, nameServers: ActiveNameServer[]) {
+  const documentRoot = normalizeDocumentRoot(input.documentRoot);
+  const redirectUrl = normalizeRedirectUrl(input.redirectUrl);
+  await validateHostingSettings({ ...input, redirectUrl });
+  await assertDomainUsesHostingNameServers(input.name, nameServers);
+
+  return prisma.$transaction(async (tx) => {
+    const created = await tx.domain.create({
+      data: {
+        name: input.name,
+        forceSsl: input.forceSsl,
+        hostingMode: input.hostingMode,
+        documentRoot,
+        redirectUrl,
+        hostingDeploymentId: input.hostingDeploymentId ?? null
+      }
+    });
+    await tx.dnsRecord.createMany({ data: defaultRecords(created.id, created.name, nameServers), skipDuplicates: true });
+    return tx.domain.findUniqueOrThrow({ where: { id: created.id }, include: domainInclude() });
+  });
+}
+
+async function getActiveNameServers() {
+  return prisma.nameServer.findMany({
+    where: { active: true },
+    orderBy: [{ sortOrder: "asc" }, { hostname: "asc" }],
+    select: { hostname: true, ipv4: true, ipv6: true }
+  });
+}
+
 export const domainRoutes: FastifyPluginAsync = async (app) => {
   app.addHook("preHandler", app.requireAuth);
 
@@ -384,32 +433,9 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
 
   app.post("/", async (request, reply) => {
     const body = parseCreateDomain(request.body);
-    const documentRoot = normalizeDocumentRoot(body.documentRoot);
-    const redirectUrl = normalizeRedirectUrl(body.redirectUrl);
-    await validateHostingSettings({ ...body, redirectUrl });
     let domain;
     try {
-      const nameServers = await prisma.nameServer.findMany({
-        where: { active: true },
-        orderBy: [{ sortOrder: "asc" }, { hostname: "asc" }],
-        select: { hostname: true, ipv4: true, ipv6: true }
-      });
-      await assertDomainUsesHostingNameServers(body.name, nameServers);
-
-      domain = await prisma.$transaction(async (tx) => {
-        const created = await tx.domain.create({
-          data: {
-            name: body.name,
-            forceSsl: body.forceSsl,
-            hostingMode: body.hostingMode,
-            documentRoot,
-            redirectUrl,
-            hostingDeploymentId: body.hostingDeploymentId ?? null
-          }
-        });
-        await tx.dnsRecord.createMany({ data: defaultRecords(created.id, created.name, nameServers), skipDuplicates: true });
-        return tx.domain.findUniqueOrThrow({ where: { id: created.id }, include: domainInclude() });
-      });
+      domain = await createDomainWithDefaults(body, await getActiveNameServers());
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
         return reply.code(409).send({ error: "Domain already exists" });
@@ -434,6 +460,79 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
       metadata: JSON.parse(JSON.stringify({ fileScaffold, publish: publishResult })) as Prisma.InputJsonValue
     });
     return reply.code(201).send(domain);
+  });
+
+  app.post("/bulk", async (request, reply) => {
+    const body = parseBulkCreateDomains(request.body);
+    const uniqueDomains = [...new Set(body.domains)];
+    const nameServers = await getActiveNameServers();
+    const results: Array<{
+      input: string;
+      name: string;
+      status: "created" | "skipped" | "failed";
+      domain?: Awaited<ReturnType<typeof createDomainWithDefaults>>;
+      error?: string;
+      publishWarning?: string;
+    }> = [];
+
+    for (const name of uniqueDomains) {
+      try {
+        const existing = await prisma.domain.findUnique({ where: { name }, include: domainInclude() });
+        if (existing && body.skipExisting) {
+          results.push({ input: name, name, status: "skipped", domain: existing });
+          continue;
+        }
+
+        const domain = await createDomainWithDefaults({ ...body, name }, nameServers);
+        const fileScaffold = await ensureDomainFileStructure(domain.name);
+        let publishResult: Awaited<ReturnType<typeof publishDomainHosting>> | null = null;
+        let publishWarning: string | undefined;
+        if (body.publish) {
+          try {
+            publishResult = await publishDomainHosting(domain.id);
+          } catch (error) {
+            publishWarning = error instanceof Error ? error.message : "Domain hosting publish failed";
+            app.log.warn({ error, domain: domain.name }, "bulk domain hosting publish failed");
+          }
+        }
+        await clearDomainCaches(domain.id);
+        await audit(request, {
+          action: "CREATE",
+          resource: "domain",
+          resourceId: domain.id,
+          description: `Created domain ${domain.name} from bulk add`,
+          metadata: JSON.parse(JSON.stringify({ fileScaffold, publish: publishResult, publishWarning })) as Prisma.InputJsonValue
+        });
+        results.push({ input: name, name: domain.name, status: "created", domain, publishWarning });
+      } catch (error) {
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002" && body.skipExisting) {
+          results.push({ input: name, name, status: "skipped", error: "Domain already exists" });
+          continue;
+        }
+        results.push({
+          input: name,
+          name,
+          status: "failed",
+          error: error instanceof Error ? error.message : "Could not add domain"
+        });
+      }
+    }
+
+    const summary = {
+      created: results.filter((result) => result.status === "created").length,
+      skipped: results.filter((result) => result.status === "skipped").length,
+      failed: results.filter((result) => result.status === "failed").length
+    };
+
+    await clearDomainCaches();
+    await audit(request, {
+      action: "CREATE",
+      resource: "domain",
+      description: `Bulk domain add: ${summary.created} created, ${summary.skipped} skipped, ${summary.failed} failed`,
+      metadata: JSON.parse(JSON.stringify({ summary, domains: uniqueDomains })) as Prisma.InputJsonValue
+    });
+
+    return reply.code(summary.failed > 0 ? 207 : 201).send({ ...summary, total: results.length, results });
   });
 
   app.get("/:domainId", async (request) => {

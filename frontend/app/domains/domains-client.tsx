@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Eye, Globe2, Mail, Network, Plus, Search, Settings2, ShieldCheck, Split, Trash2, X } from "lucide-react";
+import { AlertTriangle, Eye, Globe2, ListPlus, Mail, Network, Plus, Search, Settings2, ShieldCheck, Split, Trash2, X } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { apiDeleteBody, apiGet, apiPatch, apiPost } from "@/lib/api";
 
@@ -56,6 +56,22 @@ type DomainListResponse = {
   pageSize: number;
 };
 
+type BulkDomainResult = {
+  input: string;
+  name: string;
+  status: "created" | "skipped" | "failed";
+  error?: string;
+  publishWarning?: string;
+};
+
+type BulkDomainResponse = {
+  created: number;
+  skipped: number;
+  failed: number;
+  total: number;
+  results: BulkDomainResult[];
+};
+
 function statusClass(status: DomainStatus) {
   if (status === "ACTIVE") return "bg-emerald-50 text-emerald-700";
   if (status === "SUSPENDED") return "bg-red-50 text-panel-danger";
@@ -88,7 +104,20 @@ export function DomainsClient() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [hostingDraft, setHostingDraft] = useState<HostingDraft | null>(null);
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkText, setBulkText] = useState("");
+  const [bulkForceSsl, setBulkForceSsl] = useState(true);
+  const [bulkPublish, setBulkPublish] = useState(true);
+  const [bulkSkipExisting, setBulkSkipExisting] = useState(true);
+  const [bulkResults, setBulkResults] = useState<BulkDomainResponse | null>(null);
   const normalizedNewDomain = normalizeDomainInput(newDomain);
+  const parsedBulkDomains = useMemo(() => {
+    const domains = bulkText
+      .split(/[\s,;]+/)
+      .map((value) => normalizeDomainInput(value))
+      .filter(Boolean);
+    return [...new Set(domains)];
+  }, [bulkText]);
 
   const queryPath = useMemo(() => {
     const params = new URLSearchParams({ page: "1", pageSize: "50" });
@@ -119,6 +148,24 @@ export function DomainsClient() {
       await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
     onError: (err) => setError(err instanceof Error ? err.message : "Could not add domain")
+  });
+
+  const createBulkDomains = useMutation({
+    mutationFn: () => apiPost<BulkDomainResponse>("/domains/bulk", {
+      domains: parsedBulkDomains,
+      forceSsl: bulkForceSsl,
+      skipExisting: bulkSkipExisting,
+      publish: bulkPublish
+    }),
+    onSuccess: async (response) => {
+      setError("");
+      setBulkResults(response);
+      setNotice(`Bulk add complete: ${response.created} created, ${response.skipped} skipped, ${response.failed} failed.`);
+      if (response.failed === 0) setBulkText("");
+      await queryClient.invalidateQueries({ queryKey: ["domains"] });
+      await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : "Could not add domains")
   });
 
   const updateStatus = useMutation({
@@ -212,28 +259,58 @@ export function DomainsClient() {
     createDomain.mutate();
   }
 
+  function submitBulkDomains(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    setNotice("");
+    setBulkResults(null);
+    if (parsedBulkDomains.length === 0) {
+      setError("Paste at least one domain first.");
+      return;
+    }
+    const invalid = parsedBulkDomains.find((domain) => !validDomainInput(domain));
+    if (invalid) {
+      setError(`${invalid} is not a valid root domain.`);
+      return;
+    }
+    createBulkDomains.mutate();
+  }
+
   return (
     <>
       <PageHeader
         title="Domains"
         description="Manage root domains, subdomains, SSL, and default records for high-volume hosting."
         action={
-          <form className="flex items-center gap-2" onSubmit={submitNewDomain}>
-            <input
-              className="h-10 w-64 rounded-md border border-panel-line px-3 text-sm"
-              onChange={(event) => setNewDomain(event.target.value)}
-              placeholder="example.com"
-              value={newDomain}
-            />
-            <label className="flex h-10 items-center gap-2 rounded-md border border-panel-line bg-white px-3 text-sm">
-              <input checked={forceSsl} onChange={(event) => setForceSsl(event.target.checked)} type="checkbox" />
-              Force SSL
-            </label>
-            <button className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-4 text-sm font-semibold text-white disabled:opacity-60" disabled={createDomain.isPending} type="submit">
-              <Plus size={16} />
-              {createDomain.isPending ? "Adding" : "Add"}
+          <div className="flex items-center gap-2">
+            <form className="flex items-center gap-2" onSubmit={submitNewDomain}>
+              <input
+                className="h-10 w-64 rounded-md border border-panel-line px-3 text-sm"
+                onChange={(event) => setNewDomain(event.target.value)}
+                placeholder="example.com"
+                value={newDomain}
+              />
+              <label className="flex h-10 items-center gap-2 rounded-md border border-panel-line bg-white px-3 text-sm">
+                <input checked={forceSsl} onChange={(event) => setForceSsl(event.target.checked)} type="checkbox" />
+                Force SSL
+              </label>
+              <button className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-4 text-sm font-semibold text-white disabled:opacity-60" disabled={createDomain.isPending} type="submit">
+                <Plus size={16} />
+                {createDomain.isPending ? "Adding" : "Add"}
+              </button>
+            </form>
+            <button
+              className="flex h-10 items-center gap-2 rounded-md border border-panel-line bg-white px-4 text-sm font-semibold hover:bg-slate-50"
+              onClick={() => {
+                setBulkOpen(true);
+                setBulkResults(null);
+              }}
+              type="button"
+            >
+              <ListPlus size={16} />
+              Bulk Add
             </button>
-          </form>
+          </div>
         }
       />
       <section className="p-8">
@@ -379,6 +456,90 @@ export function DomainsClient() {
           </table>
         </div>
       </section>
+      {bulkOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-6">
+          <div className="w-full max-w-3xl rounded-md border border-panel-line bg-white shadow-xl">
+            <div className="flex items-center justify-between border-b border-panel-line px-5 py-4">
+              <div>
+                <h2 className="text-lg font-semibold text-panel-text">Bulk Add Domains</h2>
+                <p className="text-sm text-panel-muted">{parsedBulkDomains.length} domain{parsedBulkDomains.length === 1 ? "" : "s"} ready</p>
+              </div>
+              <button className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line hover:bg-slate-50" onClick={() => setBulkOpen(false)} type="button">
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={submitBulkDomains}>
+              <div className="space-y-4 p-5">
+                <label className="block text-sm font-semibold text-panel-muted">
+                  Domains
+                  <textarea
+                    className="mt-2 min-h-48 w-full rounded-md border border-panel-line px-3 py-2 font-mono text-sm text-panel-text"
+                    onChange={(event) => setBulkText(event.target.value)}
+                    placeholder={"example.com\nexample.net\nexample.org"}
+                    value={bulkText}
+                  />
+                </label>
+                <div className="grid gap-3 md:grid-cols-3">
+                  <label className="flex items-center gap-2 rounded-md border border-panel-line px-3 py-2 text-sm">
+                    <input checked={bulkForceSsl} onChange={(event) => setBulkForceSsl(event.target.checked)} type="checkbox" />
+                    Force SSL
+                  </label>
+                  <label className="flex items-center gap-2 rounded-md border border-panel-line px-3 py-2 text-sm">
+                    <input checked={bulkPublish} onChange={(event) => setBulkPublish(event.target.checked)} type="checkbox" />
+                    Publish DNS/vhost
+                  </label>
+                  <label className="flex items-center gap-2 rounded-md border border-panel-line px-3 py-2 text-sm">
+                    <input checked={bulkSkipExisting} onChange={(event) => setBulkSkipExisting(event.target.checked)} type="checkbox" />
+                    Skip existing
+                  </label>
+                </div>
+                {bulkResults ? (
+                  <div className="rounded-md border border-panel-line">
+                    <div className="flex items-center justify-between border-b border-panel-line px-4 py-3 text-sm">
+                      <span className="font-semibold">Import results</span>
+                      <span className="text-panel-muted">{bulkResults.created} created, {bulkResults.skipped} skipped, {bulkResults.failed} failed</span>
+                    </div>
+                    <div className="max-h-56 overflow-auto">
+                      {bulkResults.results.map((result) => (
+                        <div key={`${result.name}-${result.status}`} className="grid grid-cols-[1fr_auto] gap-3 border-t border-panel-line px-4 py-2 text-sm first:border-t-0">
+                          <div>
+                            <div className="font-medium text-panel-text">{result.name}</div>
+                            {result.error || result.publishWarning ? (
+                              <div className="text-xs text-panel-muted">{result.error || result.publishWarning}</div>
+                            ) : null}
+                          </div>
+                          <span className={`h-7 rounded-md px-2 py-1 text-xs font-semibold ${
+                            result.status === "created"
+                              ? "bg-emerald-50 text-emerald-700"
+                              : result.status === "failed"
+                                ? "bg-red-50 text-panel-danger"
+                                : "bg-slate-100 text-panel-muted"
+                          }`}>
+                            {result.status}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+              <div className="flex justify-end gap-2 border-t border-panel-line px-5 py-4">
+                <button className="h-10 rounded-md border border-panel-line px-4 text-sm font-semibold hover:bg-slate-50" onClick={() => setBulkOpen(false)} type="button">
+                  Close
+                </button>
+                <button
+                  className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-4 text-sm font-semibold text-white disabled:opacity-60"
+                  disabled={createBulkDomains.isPending}
+                  type="submit"
+                >
+                  <ListPlus size={16} />
+                  {createBulkDomains.isPending ? "Adding" : "Add Domains"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
       {hostingDraft ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-6">
           <div className="w-full max-w-2xl rounded-md border border-panel-line bg-white shadow-xl">
