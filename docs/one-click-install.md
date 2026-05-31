@@ -130,6 +130,23 @@ sudo bash scripts/install/uninstall.sh --yes
 
 Add `--purge-db`, `--purge-app`, or `--purge-logs` only when you explicitly want to delete those resources.
 
+Repair an older `:2083` panel listener after updating:
+
+```bash
+sudo bash /opt/vps-panel/scripts/maintenance/repair-panel-listener.sh
+```
+
+For trusted SSL, point a real domain to the VPS first, then run:
+
+```bash
+sudo bash /opt/vps-panel/scripts/maintenance/repair-panel-listener.sh \
+  --domain panel.example.com \
+  --enable-ssl \
+  --ssl-email admin@example.com
+```
+
+Trusted Let's Encrypt certificates cannot be issued for a bare IP address.
+
 ## Useful options
 
 ```bash

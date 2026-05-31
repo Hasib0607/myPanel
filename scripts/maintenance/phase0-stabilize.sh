@@ -5,7 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../install/lib/os.sh
 source "$SCRIPT_DIR/../install/lib/os.sh"
 
-PANEL_LOGIN_PORT="${PANEL_LOGIN_PORT:-2083}"
+PANEL_LOGIN_PORT="${PANEL_LOGIN_PORT:-8453}"
+CPANEL_LOGIN_PORT="${CPANEL_LOGIN_PORT:-3138}"
 PANEL_API_PORT="${PANEL_API_PORT:-4000}"
 PANEL_FRONTEND_PORT="${PANEL_FRONTEND_PORT:-3000}"
 VPS_IP="${VPS_IP:-$(hostname -I | awk '{print $1}')}"
@@ -74,6 +75,7 @@ EOF
 
 log "Replacing old panel Nginx aliases with protected site"
 rm -f "$NGINX_SITES_ENABLED/vps-panel" "$NGINX_SITES_ENABLED/vps-panel-2083"
+rm -f "$NGINX_SITES_AVAILABLE/vps-panel" "$NGINX_SITES_AVAILABLE/vps-panel-2083"
 ln -sfn "$NGINX_SITES_AVAILABLE/$PANEL_SITE" "$NGINX_SITES_ENABLED/$PANEL_SITE"
 
 log "Restarting core panel dependencies (redis=$REDIS_SERVICE)"

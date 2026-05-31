@@ -43,7 +43,7 @@ def watched_services() -> list[dict[str, Any]]:
         services.append(entry)
     return services
 
-WATCHED_PORTS = [80, 443, 2083, 3000, 4000, 5000, 6379, 5432, 5433, 6432]
+WATCHED_PORTS = [80, 443, 3138, 3000, 4000, 5000, 6379, 5432, 5433, 6432, 8453]
 NGINX_ACCESS_RE = re.compile(r'^(?P<ip>\S+) \S+ \S+ \[[^\]]+\] "(?P<method>\S+) (?P<path>[^"]*?) (?P<protocol>[^"]*?)" (?P<status>\d{3})')
 SAFE_RESTART_UNITS = {
     "nginx": "nginx",

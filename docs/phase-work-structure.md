@@ -38,7 +38,7 @@ Status: in progress. API allocation/validation and installer defaults are implem
 Goal: no project can ever use panel or infrastructure ports.
 
 Tasks:
-- Add reserved ports: `22, 25, 53, 80, 443, 993, 2083, 3000, 3010, 4000, 5000, 5432, 6379`.
+- Add reserved ports: `22, 25, 53, 80, 443, 993, 3000, 3138, 4000, 5000, 5432, 6379, 8453`.
 - Move deployment port pool to `10000-19999`.
 - Reject reserved or already-used ports in create/edit APIs.
 - Backfill old deployments away from unsafe ports.
