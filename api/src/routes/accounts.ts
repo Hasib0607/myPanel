@@ -14,6 +14,7 @@ const accountSchema = z.object({
   email: z.string().email().nullable().optional(),
   ownerName: z.string().trim().min(1).nullable().optional(),
   password: z.string().min(10).max(128).optional(),
+  packageId: z.string().nullable().optional(),
   packageName: z.string().trim().min(1).nullable().optional(),
   diskLimitMb: z.number().int().min(0).nullable().optional(),
   domainLimit: z.number().int().min(0).nullable().optional(),
@@ -51,7 +52,7 @@ async function usageFor(accountId: string) {
     prisma.domain.count({ where: { accountId } }),
     prisma.deployment.count({ where: { accountId } }),
     prisma.mailAccount.count({ where: { accountId } }),
-    prisma.deployment.count({ where: { accountId, dbType: { not: null } } })
+    prisma.accountDatabase.count({ where: { accountId } })
   ]);
   return { domains, deployments, mailAccounts, databases };
 }
@@ -85,6 +86,11 @@ export const accountRoutes: FastifyPluginAsync = async (app) => {
 
   app.post("/", async (request, reply) => {
     const body = accountSchema.parse(request.body);
+    const selectedPackage = body.packageId
+      ? await prisma.accountPackage.findUniqueOrThrow({ where: { id: body.packageId } })
+      : body.packageName
+        ? null
+        : await prisma.accountPackage.findFirst({ where: { isDefault: true }, orderBy: { name: "asc" } });
     const password = body.password ?? generatedPassword();
     const passwordHash = await bcrypt.hash(password, 12);
     const account = await prisma.account.create({
@@ -93,13 +99,14 @@ export const accountRoutes: FastifyPluginAsync = async (app) => {
         email: body.email ?? null,
         ownerName: body.ownerName ?? null,
         passwordHash,
+        packageId: selectedPackage?.id ?? body.packageId ?? null,
         homeRoot: accountHomeRoot(body.username),
-        packageName: body.packageName ?? null,
-        diskLimitMb: body.diskLimitMb ?? null,
-        domainLimit: body.domainLimit ?? null,
-        mailboxLimit: body.mailboxLimit ?? null,
-        databaseLimit: body.databaseLimit ?? null,
-        deploymentLimit: body.deploymentLimit ?? null
+        packageName: selectedPackage?.name ?? body.packageName ?? null,
+        diskLimitMb: body.diskLimitMb ?? selectedPackage?.diskLimitMb ?? null,
+        domainLimit: body.domainLimit ?? selectedPackage?.domainLimit ?? null,
+        mailboxLimit: body.mailboxLimit ?? selectedPackage?.mailboxLimit ?? null,
+        databaseLimit: body.databaseLimit ?? selectedPackage?.databaseLimit ?? null,
+        deploymentLimit: body.deploymentLimit ?? selectedPackage?.deploymentLimit ?? null
       },
       include: { _count: { select: { domains: true, deployments: true, mailAccounts: true } } }
     });

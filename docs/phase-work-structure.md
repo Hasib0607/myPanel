@@ -28,6 +28,8 @@ Account split status:
 - Account creation scaffolds `/var/www/accounts/<username>/public_html` plus default hosting folders through sysagent.
 - Account dashboard on `/account` is scoped to the signed-in account and exposes only account-owned domains, files, mailboxes, deployments, usage, and profile/password controls.
 - Account file APIs are locked to the account home root and reject path traversal.
+- Account portal now includes scoped deployment create/start/stop/restart/deploy actions, account-owned database provisioning records, live disk usage calculation, file read/edit/save, DNS record creation, SSL queue actions, and mailbox enable/reset/delete controls.
+- WHM includes reusable package templates under `/packages`; package limits can be applied to accounts and default package selection is supported.
 
 ## Phase 1: Port Reservation And Allocation
 

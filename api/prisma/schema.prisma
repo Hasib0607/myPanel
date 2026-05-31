@@ -237,6 +237,7 @@ model Account {
   ownerName    String?       @map("owner_name")
   passwordHash String        @map("password_hash")
   status       AccountStatus @default(ACTIVE)
+  packageId    String?       @map("package_id")
   homeRoot     String        @map("home_root")
   packageName  String?       @map("package_name")
   diskLimitMb  Int?          @map("disk_limit_mb")
@@ -247,12 +248,49 @@ model Account {
   metadata     Json          @default("{}")
   createdAt    DateTime      @default(now()) @map("created_at")
   updatedAt    DateTime      @updatedAt @map("updated_at")
+  package      AccountPackage? @relation(fields: [packageId], references: [id], onDelete: SetNull)
   domains      Domain[]
   deployments  Deployment[]
   mailAccounts MailAccount[]
+  databases    AccountDatabase[]
 
   @@index([status, createdAt])
+  @@index([packageId])
   @@map("accounts")
+}
+
+model AccountPackage {
+  id              String    @id @default(cuid())
+  name            String    @unique
+  description     String?
+  diskLimitMb     Int?      @map("disk_limit_mb")
+  domainLimit     Int?      @map("domain_limit")
+  mailboxLimit    Int?      @map("mailbox_limit")
+  databaseLimit   Int?      @map("database_limit")
+  deploymentLimit Int?      @map("deployment_limit")
+  isDefault       Boolean   @default(false) @map("is_default")
+  metadata        Json      @default("{}")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  accounts        Account[]
+
+  @@index([isDefault, name])
+  @@map("account_packages")
+}
+
+model AccountDatabase {
+  id        String       @id @default(cuid())
+  accountId String       @map("account_id")
+  engine    DatabaseType
+  database  String
+  username  String
+  createdAt DateTime     @default(now()) @map("created_at")
+  updatedAt DateTime     @updatedAt @map("updated_at")
+  account   Account      @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([engine, database])
+  @@index([accountId, engine])
+  @@map("account_databases")
 }
 
 model Subdomain {

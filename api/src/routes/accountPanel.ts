@@ -1,11 +1,13 @@
 import bcrypt from "bcrypt";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { Prisma } from "@prisma/client";
+import { DeploymentFramework, Prisma } from "@prisma/client";
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
+import { deployQueue, sslQueue } from "../jobs/queues.js";
 import { audit } from "../lib/audit.js";
 import { prisma } from "../lib/prisma.js";
+import { sysagent } from "../lib/sysagent.js";
 
 function accountId(request: any) {
   return request.user.accountId as string;
@@ -51,21 +53,129 @@ const mailboxSchema = z.object({
 });
 const mailboxUpdateSchema = z.object({
   quotaMb: z.number().int().min(128).optional(),
-  enabled: z.boolean().optional()
+  enabled: z.boolean().optional(),
+  password: z.string().min(10).max(128).optional()
+});
+const deploymentSchema = z.object({
+  domainId: z.string().nullable().optional(),
+  name: z.string().min(1),
+  slug: z.string().trim().toLowerCase().regex(/^[a-z0-9-]+$/).optional(),
+  framework: z.enum(["LARAVEL", "NEXTJS", "NODEJS", "PYTHON", "GO", "STATIC"]).default("STATIC"),
+  sourceProvider: z.enum(["MANUAL", "GIT_URL", "FILE_MANAGER", "UPLOAD"]).default("FILE_MANAGER"),
+  gitUrl: z.string().url().nullable().optional(),
+  branch: z.string().default("main"),
+  rootDirectory: z.string().default("."),
+  installCommand: z.string().nullable().optional(),
+  buildCommand: z.string().nullable().optional(),
+  startCommand: z.string().nullable().optional(),
+  outputDirectory: z.string().nullable().optional(),
+  publicDirectory: z.string().nullable().optional(),
+  autoDeployEnabled: z.boolean().default(false)
+});
+const dnsRecordSchema = z.object({
+  type: z.enum(["A", "AAAA", "CNAME", "MX", "TXT", "NS", "SRV", "CAA"]),
+  name: z.string().trim().min(1).default("@"),
+  value: z.string().trim().min(1),
+  ttl: z.number().int().min(60).max(86400).default(3600),
+  priority: z.number().int().min(0).max(65535).nullable().optional()
+});
+const databaseSchema = z.object({
+  engine: z.enum(["POSTGRESQL", "MYSQL"]),
+  database: z.string().regex(/^[a-zA-Z0-9_]+$/),
+  username: z.string().regex(/^[a-zA-Z0-9_]+$/),
+  password: z.string().min(12).max(256).optional()
+});
+const sslSchema = z.object({
+  email: z.string().email().optional(),
+  includeWww: z.boolean().default(true)
 });
 const unsafeName = /[<>:"|?*\x00-\x1F]/;
+const deploymentPortStart = Number(process.env.DEPLOYMENT_PORT_START ?? 10000);
+const deploymentPortEnd = Number(process.env.DEPLOYMENT_PORT_END ?? 19999);
+const defaultProcessManagerByFramework: Record<DeploymentFramework, "PM2" | "SUPERVISOR" | "STATIC"> = {
+  LARAVEL: "SUPERVISOR",
+  NEXTJS: "PM2",
+  NODEJS: "PM2",
+  PYTHON: "SUPERVISOR",
+  GO: "SUPERVISOR",
+  STATIC: "STATIC"
+};
 
 function usageFrom(account: any) {
   return {
     domains: account._count.domains,
     deployments: account._count.deployments,
     mailAccounts: account._count.mailAccounts,
-    databases: account.deployments?.filter((deployment: any) => deployment.dbType).length ?? 0,
+    databases: account._count.databases ?? 0,
+    diskUsedMb: account.diskUsedMb ?? 0,
     diskLimitMb: account.diskLimitMb,
     domainLimit: account.domainLimit,
     mailboxLimit: account.mailboxLimit,
     databaseLimit: account.databaseLimit,
     deploymentLimit: account.deploymentLimit
+  };
+}
+
+function slugify(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+}
+
+async function uniqueDeploymentSlug(base: string) {
+  const root = slugify(base) || "app";
+  for (let index = 0; index < 50; index += 1) {
+    const slug = index === 0 ? root : `${root}-${index + 1}`;
+    const existing = await prisma.deployment.findUnique({ where: { slug } });
+    if (!existing) return slug;
+  }
+  return `${root}-${Date.now()}`;
+}
+
+async function nextDeploymentPort() {
+  const deployments = await prisma.deployment.findMany({
+    where: { port: { gte: deploymentPortStart, lte: deploymentPortEnd } },
+    select: { port: true }
+  });
+  const used = new Set(deployments.map((deployment) => deployment.port));
+  for (let port = deploymentPortStart; port <= deploymentPortEnd; port += 1) {
+    if (!used.has(port)) return port;
+  }
+  throw Object.assign(new Error(`No available deployment ports in ${deploymentPortStart}-${deploymentPortEnd}`), { statusCode: 409 });
+}
+
+async function directorySizeBytes(root: string) {
+  let total = 0;
+  async function walk(dir: string) {
+    let entries: Array<import("node:fs").Dirent>;
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(fullPath);
+      } else if (entry.isFile()) {
+        total += await fs.stat(fullPath).then((stats) => stats.size).catch(() => 0);
+      }
+    }
+  }
+  await walk(root);
+  return total;
+}
+
+function expiryStatus(expiry: Date | null) {
+  if (!expiry) return { state: "missing", daysRemaining: null, alert: false };
+  const daysRemaining = Math.ceil((expiry.getTime() - Date.now()) / 86_400_000);
+  return {
+    state: daysRemaining < 0 ? "expired" : daysRemaining < 14 ? "expiring" : "valid",
+    daysRemaining,
+    alert: daysRemaining < 14
   };
 }
 
@@ -124,18 +234,21 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
 
   app.get("/dashboard", async (request: any) => {
     const id = accountId(request);
-    const [account, domains, deployments, mailAccounts] = await Promise.all([
-      prisma.account.findUniqueOrThrow({ where: { id }, include: { deployments: { select: { dbType: true } }, _count: { select: { domains: true, deployments: true, mailAccounts: true } } } }),
+    const [account, domains, deployments, mailAccounts, databases] = await Promise.all([
+      prisma.account.findUniqueOrThrow({ where: { id }, include: { _count: { select: { domains: true, deployments: true, mailAccounts: true, databases: true } } } }),
       prisma.domain.findMany({ where: { accountId: id }, orderBy: { createdAt: "desc" }, take: 10 }),
       prisma.deployment.findMany({ where: { accountId: id }, orderBy: { createdAt: "desc" }, take: 10 }),
-      prisma.mailAccount.findMany({ where: { accountId: id }, orderBy: { createdAt: "desc" }, take: 10, include: { domain: true } })
+      prisma.mailAccount.findMany({ where: { accountId: id }, orderBy: { createdAt: "desc" }, take: 10, include: { domain: true } }),
+      prisma.accountDatabase.findMany({ where: { accountId: id }, orderBy: { createdAt: "desc" }, take: 10 })
     ]);
+    const diskUsedMb = Math.ceil(await directorySizeBytes(account.homeRoot) / 1024 / 1024);
     return {
-      account: safeAccount(account),
-      usage: usageFrom(account),
+      account: safeAccount({ ...account, diskUsedMb }),
+      usage: usageFrom({ ...account, diskUsedMb }),
       domains,
       deployments,
       mailAccounts,
+      databases,
       fileRoot: account.homeRoot
     };
   });
@@ -171,9 +284,207 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     }
   });
 
+  app.get("/domains/:domainId/dns", async (request: any) => {
+    const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
+    const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
+    return prisma.dnsRecord.findMany({ where: { domainId: domain.id }, orderBy: [{ type: "asc" }, { name: "asc" }] });
+  });
+
+  app.post("/domains/:domainId/dns", async (request: any, reply) => {
+    const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
+    const body = dnsRecordSchema.parse(request.body);
+    const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
+    const record = await prisma.dnsRecord.create({
+      data: {
+        domainId: domain.id,
+        type: body.type,
+        name: body.name,
+        value: body.value,
+        ttl: body.ttl,
+        priority: body.priority ?? null
+      }
+    });
+    await audit(request, { action: "CREATE", resource: "dns_record", resourceId: record.id, description: `Account created ${record.type} record for ${domain.name}` });
+    return reply.code(201).send(record);
+  });
+
+  app.delete("/domains/:domainId/dns/:recordId", async (request: any) => {
+    const { domainId, recordId } = z.object({ domainId: z.string(), recordId: z.string() }).parse(request.params);
+    const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
+    const deleted = await prisma.dnsRecord.deleteMany({ where: { id: recordId, domainId: domain.id } });
+    if (deleted.count === 0) throw app.httpErrors.notFound("DNS record not found");
+    await audit(request, { action: "DELETE", resource: "dns_record", resourceId: recordId, description: `Account deleted DNS record for ${domain.name}` });
+    return { ok: true };
+  });
+
+  app.get("/domains/:domainId/ssl", async (request: any) => {
+    const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
+    const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
+    return {
+      domainId: domain.id,
+      domain: domain.name,
+      sslEnabled: domain.sslEnabled,
+      sslExpiry: domain.sslExpiry,
+      forceSsl: domain.forceSsl,
+      ...expiryStatus(domain.sslEnabled ? domain.sslExpiry : null)
+    };
+  });
+
+  app.post("/domains/:domainId/ssl/:action", async (request: any, reply) => {
+    const { domainId, action } = z.object({ domainId: z.string(), action: z.enum(["issue", "renew"]) }).parse(request.params);
+    const body = sslSchema.parse(request.body ?? {});
+    const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    const webRoot = path.join(account.homeRoot, "public_html");
+    const job = await sslQueue.add(action, {
+      domainId: domain.id,
+      domain: domain.name,
+      email: body.email ?? `admin@${domain.name}`,
+      webRoot,
+      includeWww: body.includeWww,
+      forceSsl: domain.forceSsl,
+      source: "account"
+    });
+    await audit(request, { action: "APPLY", resource: "ssl", resourceId: domain.id, description: `Account queued SSL ${action} for ${domain.name}` });
+    return reply.code(202).send({ queued: true, jobId: job.id });
+  });
+
   app.get("/deployments", async (request: any) =>
     prisma.deployment.findMany({ where: { accountId: accountId(request) }, orderBy: { createdAt: "desc" } })
   );
+
+  app.post("/deployments", async (request: any, reply) => {
+    const body = deploymentSchema.parse(request.body);
+    const account = await prisma.account.findUniqueOrThrow({
+      where: { id: accountId(request) },
+      include: { _count: { select: { domains: true, deployments: true, mailAccounts: true, databases: true } } }
+    });
+    assertLimit(account._count.deployments, account.deploymentLimit, "Deployment");
+    const domain = body.domainId ? await prisma.domain.findFirstOrThrow({ where: { id: body.domainId, accountId: account.id } }) : null;
+    const slug = await uniqueDeploymentSlug(body.slug || body.name);
+    const rootPath = path.join(account.homeRoot, "deployments", slug);
+    await fs.mkdir(rootPath, { recursive: true });
+    const deployment = await prisma.deployment.create({
+      data: {
+        accountId: account.id,
+        domainId: domain?.id ?? null,
+        name: body.name,
+        slug,
+        framework: body.framework,
+        runtime: body.framework === "STATIC" ? "STATIC" : null,
+        sourceProvider: body.sourceProvider,
+        gitUrl: body.gitUrl ?? null,
+        branch: body.branch,
+        rootDirectory: body.rootDirectory,
+        rootPath,
+        installCommand: body.installCommand ?? null,
+        buildCommand: body.buildCommand ?? null,
+        startCommand: body.startCommand ?? null,
+        outputDirectory: body.outputDirectory ?? null,
+        publicDirectory: body.publicDirectory ?? null,
+        processManager: defaultProcessManagerByFramework[body.framework],
+        port: await nextDeploymentPort(),
+        autoDeployEnabled: body.autoDeployEnabled,
+        status: "STOPPED"
+      }
+    });
+    if (domain) {
+      await prisma.deploymentDomain.upsert({
+        where: { deploymentId_domainId: { deploymentId: deployment.id, domainId: domain.id } },
+        update: { role: "primary" },
+        create: { deploymentId: deployment.id, domainId: domain.id, role: "primary" }
+      });
+      await prisma.domain.update({ where: { id: domain.id }, data: { hostingMode: "DEPLOYMENT_PROXY", hostingDeploymentId: deployment.id } });
+    }
+    await audit(request, { action: "CREATE", resource: "deployment", resourceId: deployment.id, description: `Account created deployment ${deployment.slug}` });
+    return reply.code(201).send(deployment);
+  });
+
+  app.get("/deployments/:deploymentId/logs", async (request: any) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const deployment = await prisma.deployment.findFirstOrThrow({ where: { id: deploymentId, accountId: accountId(request) } });
+    return prisma.deploymentLog.findMany({
+      where: { deploymentId: deployment.id },
+      orderBy: { createdAt: "asc" },
+      take: 200
+    });
+  });
+
+  app.post("/deployments/:deploymentId/:action", async (request: any, reply) => {
+    const params = z.object({
+      deploymentId: z.string(),
+      action: z.enum(["deploy", "redeploy", "start", "stop", "restart"])
+    }).parse(request.params);
+    const deployment = await prisma.deployment.findFirstOrThrow({ where: { id: params.deploymentId, accountId: accountId(request) } });
+    const release = ["deploy", "redeploy"].includes(params.action)
+      ? await prisma.deploymentRelease.create({
+          data: {
+            deploymentId: deployment.id,
+            status: "QUEUED",
+            commitSha: deployment.commitSha,
+            sourcePath: deployment.rootPath,
+            envSnapshot: deployment.envVars === null ? {} : deployment.envVars as Prisma.InputJsonValue,
+            processConfig: { port: deployment.port, processManager: deployment.processManager, startCommand: deployment.startCommand }
+          }
+        })
+      : null;
+    await prisma.deployment.update({
+      where: { id: deployment.id },
+      data: {
+        status: params.action === "stop" ? "STOPPED" : "QUEUED",
+        healthStatus: params.action === "stop" ? "DOWN" : "UNKNOWN"
+      }
+    });
+    const queue = await deployQueue.add(params.action, { deploymentId: deployment.id, releaseId: release?.id });
+    await audit(request, { action: params.action === "stop" ? "STOP" : params.action === "restart" ? "RESTART" : "DEPLOY", resource: "deployment", resourceId: deployment.id, description: `Account queued ${params.action} for ${deployment.slug}` });
+    return reply.code(202).send({ queued: true, jobId: queue.id, release });
+  });
+
+  app.get("/databases", async (request: any) =>
+    prisma.accountDatabase.findMany({ where: { accountId: accountId(request) }, orderBy: { createdAt: "desc" } })
+  );
+
+  app.post("/databases", async (request: any, reply) => {
+    const body = databaseSchema.parse(request.body);
+    const account = await prisma.account.findUniqueOrThrow({
+      where: { id: accountId(request) },
+      include: { _count: { select: { domains: true, deployments: true, mailAccounts: true, databases: true } } }
+    });
+    assertLimit(account._count.databases, account.databaseLimit, "Database");
+    const prefix = `${account.username}_`.replace(/[^a-zA-Z0-9_]/g, "_").slice(0, 24);
+    if (!body.database.startsWith(prefix) || !body.username.startsWith(prefix)) {
+      throw app.httpErrors.badRequest(`Database and username must start with ${prefix}`);
+    }
+    const result = await sysagent.provisionDatabase(body);
+    const accountDatabase = await prisma.accountDatabase.create({
+      data: {
+        accountId: account.id,
+        engine: body.engine,
+        database: body.database,
+        username: body.username
+      }
+    });
+    await audit(request, { action: "CREATE", resource: "database", resourceId: accountDatabase.id, description: `Account created ${body.engine} database ${body.database}`, metadata: { result } as any });
+    return reply.code(201).send({ ...accountDatabase, result });
+  });
+
+  app.post("/databases/:databaseId/password", async (request: any) => {
+    const { databaseId } = z.object({ databaseId: z.string() }).parse(request.params);
+    const body = z.object({ password: z.string().min(12).max(256) }).parse(request.body);
+    const accountDatabase = await prisma.accountDatabase.findFirstOrThrow({ where: { id: databaseId, accountId: accountId(request) } });
+    const result = await sysagent.databasePassword({ engine: accountDatabase.engine, username: accountDatabase.username, password: body.password });
+    await audit(request, { action: "UPDATE", resource: "database-user", resourceId: accountDatabase.id, description: `Account changed DB password for ${accountDatabase.username}`, metadata: { result } as any });
+    return { ok: true, result };
+  });
+
+  app.delete("/databases/:databaseId", async (request: any) => {
+    const { databaseId } = z.object({ databaseId: z.string() }).parse(request.params);
+    const accountDatabase = await prisma.accountDatabase.findFirstOrThrow({ where: { id: databaseId, accountId: accountId(request) } });
+    const result = await sysagent.databaseDelete({ engine: accountDatabase.engine, database: accountDatabase.database });
+    await prisma.accountDatabase.delete({ where: { id: accountDatabase.id } });
+    await audit(request, { action: "DELETE", resource: "database", resourceId: accountDatabase.id, description: `Account deleted database ${accountDatabase.database}`, metadata: { result } as any });
+    return { ok: true, result };
+  });
 
   app.get("/mail", async (request: any) =>
     prisma.mailAccount.findMany({ where: { accountId: accountId(request) }, orderBy: { createdAt: "desc" }, include: { domain: true } })
@@ -203,9 +514,14 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
   app.patch("/mail/:mailboxId", async (request: any) => {
     const { mailboxId } = z.object({ mailboxId: z.string() }).parse(request.params);
     const body = mailboxUpdateSchema.parse(request.body);
+    const data = {
+      quotaMb: body.quotaMb,
+      enabled: body.enabled,
+      ...(body.password ? { passwordHash: await bcrypt.hash(body.password, 12) } : {})
+    };
     const mailbox = await prisma.mailAccount.updateMany({
       where: { id: mailboxId, accountId: accountId(request) },
-      data: body
+      data
     });
     if (mailbox.count === 0) throw app.httpErrors.notFound("Mailbox not found");
     await audit(request, { action: "UPDATE", resource: "mail_account", resourceId: mailboxId, description: "Account updated mailbox" });

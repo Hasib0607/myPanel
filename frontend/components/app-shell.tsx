@@ -2,12 +2,13 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Blocks, Database, Gauge, Globe2, HardDrive, Inbox, Lock, Network, Radar, Shield, SquareTerminal, Users } from "lucide-react";
+import { Blocks, Database, Gauge, Globe2, HardDrive, Inbox, Lock, Network, Package, Radar, Shield, SquareTerminal, Users } from "lucide-react";
 import { LogoutButton } from "@/components/logout-button";
 
 const nav = [
   { href: "/dashboard", label: "Dashboard", icon: Gauge },
   { href: "/accounts", label: "Accounts", icon: Users },
+  { href: "/packages", label: "Packages", icon: Package },
   { href: "/domains", label: "Domains", icon: Globe2 },
   { href: "/guardian", label: "Guardian", icon: Radar },
   { href: "/dns", label: "DNS", icon: Network },

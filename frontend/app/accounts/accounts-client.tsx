@@ -22,12 +22,14 @@ type Account = {
   generatedPassword?: string;
   _count?: { domains: number; deployments: number; mailAccounts: number };
 };
+type HostingPackage = { id: string; name: string; diskLimitMb: number | null; domainLimit: number | null; mailboxLimit: number | null; databaseLimit: number | null; deploymentLimit: number | null };
 
 const initialDraft = {
   username: "",
   email: "",
   ownerName: "",
   password: "",
+  packageId: "",
   packageName: "Default",
   diskLimitMb: "10240",
   domainLimit: "5",
@@ -46,6 +48,10 @@ export function AccountsClient() {
     queryKey: ["accounts", search, status],
     queryFn: () => apiGet<{ items: Account[] }>(`/accounts?search=${encodeURIComponent(search)}${status ? `&status=${status}` : ""}`)
   });
+  const packages = useQuery({
+    queryKey: ["packages"],
+    queryFn: () => apiGet<{ items: HostingPackage[] }>("/packages")
+  });
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["accounts"] });
 
@@ -55,6 +61,7 @@ export function AccountsClient() {
       email: draft.email || null,
       ownerName: draft.ownerName || null,
       password: draft.password || undefined,
+      packageId: draft.packageId || null,
       packageName: draft.packageName || null,
       diskLimitMb: draft.diskLimitMb ? Number(draft.diskLimitMb) : null,
       domainLimit: draft.domainLimit ? Number(draft.domainLimit) : null,
@@ -103,6 +110,29 @@ export function AccountsClient() {
           <Input label="Email" value={draft.email} onChange={(email) => setDraft({ ...draft, email })} />
           <Input label="Owner" value={draft.ownerName} onChange={(ownerName) => setDraft({ ...draft, ownerName })} />
           <Input label="Password (optional)" value={draft.password} onChange={(password) => setDraft({ ...draft, password })} type="password" />
+          <label className="block space-y-1 text-xs font-medium text-panel-muted">
+            <span>Package template</span>
+            <select
+              className="h-10 w-full rounded-md border border-panel-line px-3 text-sm text-panel-ink"
+              onChange={(event) => {
+                const selected = packages.data?.items.find((item) => item.id === event.target.value);
+                setDraft({
+                  ...draft,
+                  packageId: event.target.value,
+                  packageName: selected?.name ?? draft.packageName,
+                  diskLimitMb: selected?.diskLimitMb?.toString() ?? draft.diskLimitMb,
+                  domainLimit: selected?.domainLimit?.toString() ?? draft.domainLimit,
+                  mailboxLimit: selected?.mailboxLimit?.toString() ?? draft.mailboxLimit,
+                  databaseLimit: selected?.databaseLimit?.toString() ?? draft.databaseLimit,
+                  deploymentLimit: selected?.deploymentLimit?.toString() ?? draft.deploymentLimit
+                });
+              }}
+              value={draft.packageId}
+            >
+              <option value="">Manual limits</option>
+              {(packages.data?.items ?? []).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+            </select>
+          </label>
           <div className="grid grid-cols-2 gap-3">
             <Input label="Disk MB" value={draft.diskLimitMb} onChange={(diskLimitMb) => setDraft({ ...draft, diskLimitMb: digitsOnly(diskLimitMb) })} />
             <Input label="Domains" value={draft.domainLimit} onChange={(domainLimit) => setDraft({ ...draft, domainLimit: digitsOnly(domainLimit) })} />
