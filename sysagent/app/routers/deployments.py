@@ -20,7 +20,9 @@ router = APIRouter()
 ALLOWED_DEPLOY_EXECUTABLES = {
     "./app",
     "composer",
+    "flask",
     "go",
+    "gunicorn",
     "node",
     "next",
     "npm",
@@ -31,10 +33,12 @@ ALLOWED_DEPLOY_EXECUTABLES = {
     "pnpm",
     "python",
     "python3",
+    "react-scripts",
     "serve",
     "true",
     "uv",
     "uvicorn",
+    "vite",
     "yarn",
 }
 
@@ -119,7 +123,7 @@ class NginxInspectRequest(BaseModel):
 
 
 class RuntimeInstallRequest(BaseModel):
-    tool: str = Field(pattern="^(pnpm|yarn|composer|uv|go|php|nodejs|supervisor|pm2)$")
+    tool: str = Field(pattern="^(pnpm|yarn|composer|uv|go|php|python|nodejs|supervisor|pm2)$")
 
 
 class PermissionRepairRequest(BaseModel):
@@ -479,7 +483,7 @@ def install(body: CommandRequest) -> dict:
         "PNPM": "pnpm install",
         "YARN": "yarn install",
         "COMPOSER": "composer install --no-dev --optimize-autoloader",
-        "PIP": "pip install -r requirements.txt",
+        "PIP": "pip3 install -r requirements.txt",
         "UV": "uv sync",
         "GO": "go mod download",
         "NONE": "true",

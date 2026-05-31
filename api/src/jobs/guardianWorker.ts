@@ -5,6 +5,8 @@ import { expireGuardianIpBlocks, runGuardianAutoHeal, syncGuardianIncidentsOnly,
 import { prisma } from "../lib/prisma.js";
 import { sysagent } from "../lib/sysagent.js";
 
+const staleDeploymentMs = Number(process.env.GUARDIAN_STALE_DEPLOYMENT_MS ?? 15 * 60_000);
+
 function deploymentAppPath(rootPath: string, rootDirectory: string | null | undefined) {
   const cleanRootDirectory = (rootDirectory || ".").replace(/^\/+|\/+$/g, "");
   return cleanRootDirectory && cleanRootDirectory !== "." ? `${rootPath.replace(/\/+$/, "")}/${cleanRootDirectory}` : rootPath;
@@ -18,7 +20,13 @@ function defaultProcessManager(framework: string) {
 
 async function runDeploymentWatch() {
   const deployments = await prisma.deployment.findMany({
-    where: { OR: [{ status: "FAILED" }, { healthStatus: { in: ["DOWN", "DEGRADED", "UNKNOWN"] } }] },
+    where: {
+      OR: [
+        { status: "FAILED" },
+        { healthStatus: { in: ["DOWN", "DEGRADED", "UNKNOWN"] } },
+        { status: { in: ["DEPLOYING", "BUILDING", "QUEUED"] }, updatedAt: { lte: new Date(Date.now() - staleDeploymentMs) } }
+      ]
+    },
     orderBy: { updatedAt: "desc" },
     take: 25
   });
@@ -34,31 +42,47 @@ async function runDeploymentWatch() {
         rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory)
       }) as { dryRun?: boolean; returncode?: number; stderr?: string; stdout?: string };
       const healthy = !result.dryRun && result.returncode === 0;
+      const stalePending = ["DEPLOYING", "BUILDING", "QUEUED"].includes(deployment.status) && Date.now() - deployment.updatedAt.getTime() >= staleDeploymentMs;
       await prisma.deployment.update({
         where: { id: deployment.id },
-        data: { healthStatus: healthy ? "HEALTHY" : "DOWN", lastHealthCheckAt: new Date() }
+        data: {
+          status: healthy ? "RUNNING" : stalePending ? "FAILED" : deployment.status,
+          healthStatus: healthy ? "HEALTHY" : "DOWN",
+          lastHealthCheckAt: new Date()
+        }
       });
       await prisma.deploymentLog.create({
         data: {
           deploymentId: deployment.id,
           step: "HEALTH_CHECK",
           level: healthy ? "info" : "warn",
-          message: healthy ? "Scheduled deployment watch passed" : "Scheduled deployment watch failed",
-          metadata: { result } as any
+          message: healthy
+            ? "Scheduled deployment watch passed"
+            : stalePending
+              ? "Scheduled deployment watch marked stale deployment as failed"
+              : "Scheduled deployment watch failed",
+          metadata: { result, stalePending } as any
         }
       });
-      results.push({ deploymentId: deployment.id, healthy });
+      results.push({ deploymentId: deployment.id, healthy, stalePending });
     } catch (error) {
+      const stalePending = ["DEPLOYING", "BUILDING", "QUEUED"].includes(deployment.status) && Date.now() - deployment.updatedAt.getTime() >= staleDeploymentMs;
+      if (stalePending) {
+        await prisma.deployment.update({
+          where: { id: deployment.id },
+          data: { status: "FAILED", healthStatus: "DOWN", lastHealthCheckAt: new Date() }
+        });
+      }
       await prisma.deploymentLog.create({
         data: {
           deploymentId: deployment.id,
           step: "HEALTH_CHECK",
           level: "error",
-          message: "Scheduled deployment watch errored",
-          metadata: { error: error instanceof Error ? error.message : String(error) }
+          message: stalePending ? "Scheduled deployment watch marked stale deployment as failed after error" : "Scheduled deployment watch errored",
+          metadata: { error: error instanceof Error ? error.message : String(error), stalePending } as any
         }
       });
-      results.push({ deploymentId: deployment.id, healthy: false });
+      results.push({ deploymentId: deployment.id, healthy: false, stalePending });
     }
   }
   return { checked: results.length, results };

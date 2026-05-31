@@ -576,7 +576,7 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
   if (lower.includes("unsupported engine") || lower.includes("node version") || lower.includes("requires node")) return { message: "Node version mismatch. Set a compatible runtime version or update the app engines field.", repairAction: "redeploy", category: "node_version" };
   if (lower.includes("prisma") && (lower.includes("migration") || lower.includes("p100") || lower.includes("database"))) return { message: "Prisma/database migration failed. Check DATABASE_URL, database grants, and migration state.", repairAction: "redeploy", category: "prisma_migration" };
   if (lower.includes("composer") && (lower.includes("ext-") || lower.includes("requires php extension"))) return { message: "Composer is missing a required PHP extension. Install the extension on the VPS, then redeploy.", repairAction: "redeploy", category: "php_extension" };
-  if ((lower.includes("no such file or directory") || lower.includes("command not found") || lower.includes("unsupported deployment executable")) && (lower.includes("composer") || lower.includes("php") || lower.includes("node") || lower.includes("npm") || lower.includes("pnpm") || lower.includes("yarn") || lower.includes("pm2") || lower.includes("supervisor"))) {
+  if ((lower.includes("no such file or directory") || lower.includes("command not found") || lower.includes("unsupported deployment executable")) && (lower.includes("composer") || lower.includes("php") || lower.includes("python") || lower.includes("pip") || lower.includes("uv") || lower.includes("uvicorn") || lower.includes("gunicorn") || lower.includes("node") || lower.includes("npm") || lower.includes("pnpm") || lower.includes("yarn") || lower.includes("next") || lower.includes("vite") || lower.includes("pm2") || lower.includes("supervisor"))) {
     return { message: "A required runtime tool is missing on the VPS. Use Deployment Doctor to request approval for the missing tool install, then redeploy.", repairAction: "request-approval", category: "missing_runtime_tool" };
   }
   if (lower.includes("cannot find module") || lower.includes("module_not_found")) return { message: "Missing package or wrong build output. Run dependency install, verify package.json, then redeploy.", repairAction: "redeploy", category: "missing_module" };
@@ -674,6 +674,7 @@ async function executeDoctorApproval(deployment: Awaited<ReturnType<typeof findD
     const toolMap: Record<string, string> = {
       "install-composer": "composer",
       "install-php": "php",
+      "install-python": "python",
       "install-nodejs": "nodejs",
       "install-pnpm": "pnpm",
       "install-yarn": "yarn",
@@ -794,6 +795,20 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
     });
   } else {
     checks.push({ key: "start_command", label: "Start command", status: "pass", detail: deployment.startCommand || detection?.suggestions.startCommand || "Static deployment" });
+  }
+
+  const outputDirectory = deployment.outputDirectory ?? detection?.suggestions.outputDirectory ?? null;
+  if (deployment.buildCommand && outputDirectory && outputDirectory !== ".") {
+    const outputPath = path.join(appPath, outputDirectory);
+    const outputExists = await fs.stat(outputPath).then((stats) => stats.isDirectory()).catch(() => false);
+    checks.push({
+      key: "build_output",
+      label: "Build output",
+      status: outputExists ? "pass" : "fail",
+      detail: outputExists ? `Found at ${outputPath}` : `Missing build output at ${outputPath}`,
+      fix: outputExists ? undefined : "Redeploy to rerun the build, then verify the output directory setting and build command.",
+      repairAction: outputExists ? undefined : "redeploy"
+    });
   }
 
   const runtimeTools = requiredRuntimeExecutables({

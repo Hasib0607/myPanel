@@ -419,13 +419,35 @@ async function assertRuntimeToolsInstalled(deploymentId: string, releaseId: stri
   const requiredTools = requiredRuntimeExecutables(deployment);
   if (requiredTools.length === 0) return;
 
-  const toolsResult = await runStep(deploymentId, releaseId, "PREFLIGHT", "Runtime tools check", () =>
-    sysagent.deploymentRuntimeTools({ tools: requiredTools })
-  );
-  const missing = toolsResult.items.filter((tool) => !tool.installed).map((tool) => tool.name);
+  const inspectTools = async () =>
+    runStep(deploymentId, releaseId, "PREFLIGHT", "Runtime tools check", () =>
+      sysagent.deploymentRuntimeTools({ tools: requiredTools })
+    );
+
+  let toolsResult = await inspectTools();
+  let missing = toolsResult.items.filter((tool) => !tool.installed).map((tool) => tool.name);
   if (missing.length === 0) return;
 
   const approvalTargets = runtimeInstallTargetsForMissingExecutables(missing);
+  const autoInstalled: string[] = [];
+
+  for (const target of approvalTargets) {
+    const installResult = await runStep(deploymentId, releaseId, "PREFLIGHT", `Auto-install ${target.tool}`, () =>
+      sysagent.deploymentInstallRuntimeTool({ tool: target.tool })
+    );
+    assertLiveResult(installResult, `Auto-install ${target.tool}`);
+    autoInstalled.push(target.tool);
+  }
+
+  if (autoInstalled.length > 0) {
+    toolsResult = await inspectTools();
+    missing = toolsResult.items.filter((tool) => !tool.installed).map((tool) => tool.name);
+    if (missing.length === 0) {
+      await writeLog(deploymentId, releaseId, "PREFLIGHT", "Runtime tools auto-installed", { tools: autoInstalled });
+      return;
+    }
+  }
+
   for (const target of approvalTargets) {
     const existing = await prisma.deploymentDoctorApproval.findFirst({
       where: {
@@ -447,7 +469,7 @@ async function assertRuntimeToolsInstalled(deploymentId: string, releaseId: stri
   }
 
   throw new Error(
-    `Missing runtime tools on the server: ${missing.join(", ")}. Pending repair approvals were created for installable tools. Open Deployment Doctor, approve the install, then redeploy.`
+    `Missing runtime tools on the server: ${missing.join(", ")}. Auto-install could not finish everything. Pending repair approvals were created for installable tools. Open Deployment Doctor, approve the remaining installs, then redeploy.`
   );
 }
 
@@ -486,72 +508,95 @@ function assertCommandTree(result: unknown, label: string) {
 
 async function processLifecycleAction(action: string, deploymentId: string, releaseId: string | undefined) {
   let deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: deploymentWorkerInclude });
-  if (action !== "stop") {
-    deployment = await ensureManagedDeploymentPort(deployment, releaseId);
-  }
-  const envVars = await resolveEnvVars(deployment.env);
-  const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
   const processAction = action === "redeploy" || action === "deploy" ? "start" : action;
-  const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
-  const domain = deploymentDomain(deployment);
-  const runtimeEnvVars = deploymentEnvWithPublicUrl(envVars, domain);
 
-  if (processAction !== "stop" && domain) {
-    await ensureDeploymentDomainProxy(deployment.id, domain);
-    const serverName = deploymentServerName(domain);
-    const nginxResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config", () =>
-      sysagent.deploymentNginx({
+  try {
+    if (action !== "stop") {
+      deployment = await ensureManagedDeploymentPort(deployment, releaseId);
+    }
+    await assertRuntimeToolsInstalled(deployment.id, releaseId, {
+      framework: deployment.framework,
+      packageManager: deployment.packageManager,
+      runtime: deployment.runtime,
+      processManager: deployment.processManager,
+      installCommand: deployment.installCommand,
+      buildCommand: deployment.buildCommand,
+      startCommand: deployment.startCommand
+    });
+
+    const envVars = await resolveEnvVars(deployment.env);
+    const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
+    const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
+    const domain = deploymentDomain(deployment);
+    const runtimeEnvVars = deploymentEnvWithPublicUrl(envVars, domain);
+
+    if (processAction !== "stop" && domain) {
+      await ensureDeploymentDomainProxy(deployment.id, domain);
+      const serverName = deploymentServerName(domain);
+      const nginxResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config", () =>
+        sysagent.deploymentNginx({
+          deploymentId: deployment.id,
+          serverName,
+          upstreamPort: deployment.port,
+          rootPath: deployment.rootPath,
+          fallbackRootPath: deploymentFallbackRootPath(domain),
+          forceSsl: domain.forceSsl
+        })
+      );
+      assertLiveResult((nginxResult as { write?: unknown }).write, "Nginx proxy config write");
+      assertLiveResult((nginxResult as { enable?: unknown }).enable, "Nginx proxy config enable");
+      assertLiveResult((nginxResult as { test?: unknown }).test, "Nginx config test");
+      assertLiveResult((nginxResult as { reload?: unknown }).reload, "Nginx reload");
+    }
+
+    const result = await runStep(deployment.id, releaseId, "STARTING", `${action} process`, () =>
+      sysagent.deploymentProcess({
         deploymentId: deployment.id,
-        serverName,
-        upstreamPort: deployment.port,
-        rootPath: deployment.rootPath,
-        fallbackRootPath: deploymentFallbackRootPath(domain),
-        forceSsl: domain.forceSsl
+        name: deployment.slug,
+        rootPath: appPath,
+        action: processAction,
+        processManager,
+        startCommand: renderStartCommand(deployment),
+        port: deployment.port,
+        env: runtimeEnvVars,
+        logDir: deploymentLogDir(deployment.slug)
       })
     );
-    assertLiveResult((nginxResult as { write?: unknown }).write, "Nginx proxy config write");
-    assertLiveResult((nginxResult as { enable?: unknown }).enable, "Nginx proxy config enable");
-    assertLiveResult((nginxResult as { test?: unknown }).test, "Nginx config test");
-    assertLiveResult((nginxResult as { reload?: unknown }).reload, "Nginx reload");
+    assertLiveResult(result, `${action} process`);
+
+    if (processAction === "stop") {
+      await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "STOPPED", healthStatus: "DOWN", lastHealthCheckAt: new Date() } });
+      return { result, status: "STOPPED", healthStatus: "DOWN" };
+    }
+
+    const health = await runStep(deployment.id, releaseId, "HEALTH_CHECK", `${action} health check`, () =>
+        sysagent.deploymentHealth({
+          deploymentId: deployment.id,
+          port: deployment.port,
+          healthUrl: deployment.healthUrl,
+          processName: deployment.slug,
+          processManager,
+          rootPath: appPath
+        })
+    );
+    await assertHealthResult(health, `${action} health check`, deployment);
+
+    const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, `${action} public website check`, { ...deployment, domain });
+
+    const healthStatus = publicRouteWarning ? "DEGRADED" : "HEALTHY";
+    await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "RUNNING", healthStatus, lastHealthCheckAt: new Date() } });
+    return { result, health, status: "RUNNING", healthStatus, publicRouteWarning };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown lifecycle error";
+    const nextStatus = processAction === "stop" ? "RUNNING" : "FAILED";
+    const nextHealth = processAction === "stop" ? "UNKNOWN" : "DOWN";
+    await prisma.deployment.update({
+      where: { id: deployment.id },
+      data: { status: nextStatus, healthStatus: nextHealth, lastHealthCheckAt: new Date() }
+    });
+    await writeLog(deployment.id, releaseId, "FAILED", `${action} failed`, { error: message }, "error");
+    throw error;
   }
-
-  const result = await runStep(deployment.id, releaseId, "STARTING", `${action} process`, () =>
-    sysagent.deploymentProcess({
-      deploymentId: deployment.id,
-      name: deployment.slug,
-      rootPath: appPath,
-      action: processAction,
-      processManager,
-      startCommand: renderStartCommand(deployment),
-      port: deployment.port,
-      env: runtimeEnvVars,
-      logDir: deploymentLogDir(deployment.slug)
-    })
-  );
-  assertLiveResult(result, `${action} process`);
-
-  if (processAction === "stop") {
-    await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "STOPPED", healthStatus: "DOWN", lastHealthCheckAt: new Date() } });
-    return { result, status: "STOPPED", healthStatus: "DOWN" };
-  }
-
-  const health = await runStep(deployment.id, releaseId, "HEALTH_CHECK", `${action} health check`, () =>
-      sysagent.deploymentHealth({
-        deploymentId: deployment.id,
-        port: deployment.port,
-        healthUrl: deployment.healthUrl,
-        processName: deployment.slug,
-        processManager,
-        rootPath: appPath
-      })
-  );
-  await assertHealthResult(health, `${action} health check`, deployment);
-
-  const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, `${action} public website check`, { ...deployment, domain });
-
-  const healthStatus = publicRouteWarning ? "DEGRADED" : "HEALTHY";
-  await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "RUNNING", healthStatus, lastHealthCheckAt: new Date() } });
-  return { result, health, status: "RUNNING", healthStatus, publicRouteWarning };
 }
 
 async function processDeploy(action: string, deploymentId: string, releaseId: string | undefined) {

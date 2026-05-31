@@ -245,6 +245,7 @@ PACKAGE_SETS: dict[OsFamily, dict[str, tuple[str, ...]]] = {
             "php-curl",
             "php-zip",
         ),
+        "python_runtime": ("python3", "python3-venv", "python3-pip"),
         "nodejs_runtime": ("nodejs", "npm"),
         "supervisor": ("supervisor",),
         "golang": ("golang-go",),
@@ -296,6 +297,7 @@ PACKAGE_SETS: dict[OsFamily, dict[str, tuple[str, ...]]] = {
             "php-curl",
             "php-zip",
         ),
+        "python_runtime": ("python3", "python3-pip"),
         "nodejs_runtime": ("nodejs", "npm"),
         "supervisor": ("supervisor",),
         "golang": ("golang",),
@@ -358,7 +360,7 @@ PLATFORM_PATHS: dict[OsFamily, PlatformPaths] = {
     ),
 }
 
-RUNTIME_TOOL_KEYS = frozenset({"composer", "golang", "php_runtime", "nodejs_runtime", "supervisor", "pnpm", "yarn", "uv", "pm2"})
+RUNTIME_TOOL_KEYS = frozenset({"composer", "golang", "php_runtime", "python_runtime", "nodejs_runtime", "supervisor", "pnpm", "yarn", "uv", "pm2"})
 
 
 def _resolve_family(info: OsReleaseInfo | None = None) -> OsFamily:
@@ -551,7 +553,7 @@ def runtime_tool_install_plan(tool: str, info: OsReleaseInfo | None = None) -> P
     if tool == "composer":
         return composer_install_plan(info)
 
-    package_key = {"php": "php_runtime", "go": "golang", "nodejs": "nodejs_runtime"}.get(tool, tool)
+    package_key = {"php": "php_runtime", "python": "python_runtime", "go": "golang", "nodejs": "nodejs_runtime"}.get(tool, tool)
     if package_key not in PACKAGE_SETS[_resolve_family(info)]:
         raise KeyError(f"Unknown runtime tool '{tool}'")
     return install_plan_for(package_key, info)

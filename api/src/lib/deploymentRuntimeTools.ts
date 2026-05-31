@@ -12,7 +12,7 @@ type RuntimeToolInput = {
 
 export type RuntimeInstallTarget = {
   actionKey: string;
-  tool: "composer" | "php" | "nodejs" | "pnpm" | "yarn" | "uv" | "go" | "supervisor" | "pm2";
+  tool: "composer" | "php" | "python" | "nodejs" | "pnpm" | "yarn" | "uv" | "go" | "supervisor" | "pm2";
   label: string;
   command: string;
   reason: string;
@@ -30,11 +30,13 @@ function executablesForCommand(command: string | null | undefined) {
   const executable = firstExecutable(command);
   if (!executable) return [];
   if (executable === "npm" || executable === "npx") return ["node", "npm"];
+  if (executable === "next" || executable === "vite" || executable === "react-scripts") return ["node", "npm"];
   if (executable === "pnpm") return ["node", "pnpm"];
   if (executable === "yarn") return ["node", "yarn"];
   if (executable === "composer") return ["php", "composer"];
   if (executable === "php" || executable === "php-fpm") return ["php"];
-  if (executable === "python" || executable === "python3" || executable === "pip" || executable === "pip3" || executable === "uvicorn") return ["python3"];
+  if (executable === "python" || executable === "python3" || executable === "uvicorn" || executable === "gunicorn" || executable === "flask") return ["python3"];
+  if (executable === "pip" || executable === "pip3") return ["python3", "pip3"];
   if (executable === "uv") return ["python3", "uv"];
   if (executable === "go") return ["go"];
   if (executable === "pm2") return ["node", "pm2"];
@@ -61,7 +63,10 @@ export function requiredRuntimeExecutables(input: RuntimeToolInput) {
     tools.add("php");
     tools.add("composer");
   }
-  if (input.packageManager === "PIP") tools.add("python3");
+  if (input.packageManager === "PIP") {
+    tools.add("python3");
+    tools.add("pip3");
+  }
   if (input.packageManager === "UV") {
     tools.add("python3");
     tools.add("uv");
@@ -113,6 +118,14 @@ const installTargetCatalog: RuntimeInstallTarget[] = [
     command: "Install PHP, php-fpm, and common Laravel extensions via panel runtime-tools",
     reason: "PHP runtime and php-fpm are required for Laravel apps.",
     executables: ["php"]
+  },
+  {
+    actionKey: "install-python",
+    tool: "python",
+    label: "Install Python runtime",
+    command: "Install Python 3 and pip via panel runtime-tools",
+    reason: "Python 3 and pip are required for this deployment.",
+    executables: ["python3", "pip3"]
   },
   {
     actionKey: "install-nodejs",
