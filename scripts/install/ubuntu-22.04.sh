@@ -7,6 +7,8 @@ source "$SCRIPT_DIR/common.sh"
 
 require_root
 require_repo_url
+validate_bootstrap_inputs
+maybe_exit_dry_run
 
 log "Installing Ubuntu packages"
 export DEBIAN_FRONTEND=noninteractive

@@ -2,7 +2,40 @@
 
 Supported: **Ubuntu 22.04** and **AlmaLinux 9**.
 
-## Auto-detect OS (recommended)
+## Bootstrap from one command (recommended)
+
+This path auto-detects Ubuntu 22.04 or AlmaLinux 9, provisions an empty PostgreSQL database, writes the project `.env`, builds the API/frontend, installs systemd services, opens WHM/cPanel ports, and runs smoke tests.
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/YOUR_OWNER/YOUR_REPO/main/scripts/install/bootstrap.sh" | sudo bash -s -- \
+  --repo "https://github.com/YOUR_OWNER/YOUR_REPO.git" \
+  --branch main \
+  --domain panel.example.com \
+  --db-name panel_main \
+  --db-user panel_user \
+  --db-pass "change-this-database-password" \
+  --admin-user admin \
+  --admin-pass "change-this-admin-password"
+```
+
+Preview without changing the server:
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/YOUR_OWNER/YOUR_REPO/main/scripts/install/bootstrap.sh" | sudo bash -s -- \
+  --repo "https://github.com/YOUR_OWNER/YOUR_REPO.git" \
+  --domain panel.example.com \
+  --dry-run
+```
+
+For an external or already-created empty database, pass the full URL and skip local DB creation:
+
+```bash
+sudo bash scripts/install/bootstrap.sh \
+  --repo "https://github.com/YOUR_OWNER/YOUR_REPO.git" \
+  --database-url "postgresql://panel_user:password@db.example.com:5432/panel_main"
+```
+
+## Auto-detect OS with environment variables
 
 ```bash
 export REPO_URL="https://github.com/YOUR_OWNER/YOUR_REPO.git"
@@ -54,7 +87,7 @@ Uses `dnf`, CRB + EPEL, firewalld, `redis` + `named` services, and creates a Deb
 - database migrations and production builds
 - smoke tests for sysagent, API, frontend, panel Nginx proxy, Redis, PostgreSQL, and systemd services
 
-Output includes the generated admin password and webhook secret. Save them immediately.
+The database starts empty apart from Prisma migration metadata. Output includes the generated admin password and webhook secret when you do not pass them explicitly. Save them immediately.
 
 Validate after install:
 
@@ -75,6 +108,10 @@ export DEPLOYMENT_PORT_START=10000
 export DEPLOYMENT_PORT_END=19999
 export SUPERADMIN_USERNAME=admin
 export SUPERADMIN_PASSWORD="your-strong-password"
+export DB_NAME=panel_main
+export DB_USER=panel_user
+export DB_PASSWORD="your-strong-db-password"
+export PANEL_DOMAIN=panel.example.com
 ```
 
 ## AlmaLinux notes

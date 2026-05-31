@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 # Shared VPS panel installer functions. Source from OS-specific installers.
 
+detect_vps_ip() {
+  local ip=""
+  ip="$(hostname -I 2>/dev/null | awk '{print $1}')" || true
+  if [[ -z "$ip" ]]; then
+    ip="$(hostname -i 2>/dev/null | awk '{print $1}')" || true
+  fi
+  echo "${ip:-127.0.0.1}"
+}
+
 : "${APP_DIR:=/opt/vps-panel}"
 : "${APP_USER:=panel}"
 : "${APP_BRANCH:=main}"
@@ -17,15 +26,23 @@
 : "${DB_NAME:=panel_main}"
 : "${DB_USER:=panel_user}"
 : "${DB_PASSWORD:=$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-24)}"
+: "${DB_HOST:=localhost}"
+: "${DB_PORT:=5432}"
+: "${DB_CREATE:=true}"
+: "${DATABASE_URL:=postgresql://$DB_USER:$DB_PASSWORD@$DB_HOST:$DB_PORT/$DB_NAME}"
+: "${DIRECT_DATABASE_URL:=$DATABASE_URL}"
 : "${SUPERADMIN_USERNAME:=admin}"
 : "${SUPERADMIN_PASSWORD:=$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-18)}"
-: "${VPS_IP:=$(hostname -I | awk '{print $1}')}"
+: "${VPS_IP:=$(detect_vps_ip)}"
+: "${PANEL_DOMAIN:=}"
+: "${PANEL_PUBLIC_HOST:=${PANEL_DOMAIN:-$VPS_IP}}"
 : "${PANEL_UPDATE_REPO_FULL_NAME:=}"
 : "${WEB_GROUP:=www-data}"
 : "${REDIS_SERVICE:=redis-server}"
 : "${BIND_SYSTEMD_SERVICE:=bind9}"
 : "${NGINX_SITES_AVAILABLE:=/etc/nginx/sites-available}"
 : "${NGINX_SITES_ENABLED:=/etc/nginx/sites-enabled}"
+: "${DRY_RUN:=false}"
 
 log() {
   echo "[$(date -Is)] $*"
@@ -49,6 +66,59 @@ require_repo_url() {
     echo "Set REPO_URL, for example:"
     echo "REPO_URL=https://github.com/owner/myPanel.git sudo -E bash $0"
     exit 2
+  fi
+}
+
+require_db_identifier() {
+  local value="$1"
+  local label="$2"
+  if [[ ! "$value" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    echo "$label must be a PostgreSQL-safe identifier: letters, numbers, and underscores only; first character must not be a number."
+    exit 2
+  fi
+}
+
+validate_bootstrap_inputs() {
+  if [[ "$DB_CREATE" == "true" && ( "$DB_HOST" == "localhost" || "$DB_HOST" == "127.0.0.1" ) ]]; then
+    require_db_identifier "$DB_NAME" "DB_NAME"
+    require_db_identifier "$DB_USER" "DB_USER"
+  fi
+  for port_var in PANEL_LOGIN_PORT CPANEL_LOGIN_PORT PANEL_PORT FRONTEND_PORT SYSAGENT_PORT DB_PORT; do
+    local port="${!port_var}"
+    if [[ ! "$port" =~ ^[0-9]+$ || "$port" -lt 1 || "$port" -gt 65535 ]]; then
+      echo "$port_var must be a TCP port between 1 and 65535."
+      exit 2
+    fi
+  done
+}
+
+print_bootstrap_plan() {
+  cat <<EOF
+VPS Panel bootstrap plan
+
+OS installer:      auto-detected by scripts/install/install.sh
+Repository:        ${REPO_URL:-existing checkout at $APP_DIR}
+Branch:            $APP_BRANCH
+App directory:     $APP_DIR
+App user:          $APP_USER
+Public host:       $PANEL_PUBLIC_HOST
+WHM/Admin port:    $PANEL_LOGIN_PORT
+cPanel port:       $CPANEL_LOGIN_PORT
+API port:          $PANEL_PORT
+Frontend port:     $FRONTEND_PORT
+Sysagent port:     $SYSAGENT_PORT
+Database URL:      $DATABASE_URL
+Create database:   $DB_CREATE
+Admin username:    $SUPERADMIN_USERNAME
+
+The database will start empty apart from Prisma migration metadata.
+EOF
+}
+
+maybe_exit_dry_run() {
+  if [[ "$DRY_RUN" == "true" ]]; then
+    print_bootstrap_plan
+    exit 0
   fi
 }
 
@@ -122,12 +192,12 @@ PANEL_UPDATE_COMMAND_TIMEOUT=30
 PANEL_UPDATE_SYSTEMCTL_NO_BLOCK=true
 PANEL_UPDATE_SERVICE_ACTIVE_ATTEMPTS=20
 PANEL_UPDATE_STALE_AFTER_SECONDS=1200
-FRONTEND_URL=http://$VPS_IP:$PANEL_LOGIN_PORT
-NEXT_PUBLIC_API_URL=http://$VPS_IP:$PANEL_LOGIN_PORT/api/v1
+FRONTEND_URL=http://$PANEL_PUBLIC_HOST:$PANEL_LOGIN_PORT
+NEXT_PUBLIC_API_URL=http://$PANEL_PUBLIC_HOST:$PANEL_LOGIN_PORT/api/v1
 NEXT_PUBLIC_PANEL_LOGIN_PORT=$PANEL_LOGIN_PORT
 NEXT_PUBLIC_CPANEL_LOGIN_PORT=$CPANEL_LOGIN_PORT
-DATABASE_URL=postgresql://$DB_USER:$DB_PASSWORD@localhost:5432/$DB_NAME
-DIRECT_DATABASE_URL=postgresql://$DB_USER:$DB_PASSWORD@localhost:5432/$DB_NAME
+DATABASE_URL=$DATABASE_URL
+DIRECT_DATABASE_URL=$DIRECT_DATABASE_URL
 REDIS_URL=redis://localhost:6379
 SYSAGENT_URL=http://127.0.0.1:$SYSAGENT_PORT
 VPS_IP=$VPS_IP
@@ -255,7 +325,7 @@ write_panel_nginx_config() {
 # Protected panel listener. Domain/project publishing must never overwrite this file.
 server {
     listen $PANEL_LOGIN_PORT;
-    server_name $VPS_IP _;
+    server_name $PANEL_PUBLIC_HOST $VPS_IP _;
 
     client_max_body_size 100M;
 
@@ -296,7 +366,7 @@ server {
 
 server {
     listen $CPANEL_LOGIN_PORT;
-    server_name $VPS_IP _;
+    server_name $PANEL_PUBLIC_HOST $VPS_IP _;
 
     client_max_body_size 100M;
 
@@ -341,14 +411,25 @@ EOF
 }
 
 create_postgresql_database() {
+  if [[ "$DB_CREATE" != "true" ]]; then
+    log "Skipping PostgreSQL database creation because DB_CREATE=$DB_CREATE"
+    return
+  fi
+  if [[ "$DB_HOST" != "localhost" && "$DB_HOST" != "127.0.0.1" ]]; then
+    log "Skipping PostgreSQL database creation for remote DB_HOST=$DB_HOST"
+    return
+  fi
+  require_db_identifier "$DB_NAME" "DB_NAME"
+  require_db_identifier "$DB_USER" "DB_USER"
+  local db_password_sql="${DB_PASSWORD//\'/\'\'}"
   log "Creating PostgreSQL database"
   runuser -u postgres -- psql -v ON_ERROR_STOP=1 <<SQL
 DO \$\$
 BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$DB_USER') THEN
-    CREATE ROLE $DB_USER LOGIN PASSWORD '$DB_PASSWORD';
+    CREATE ROLE $DB_USER LOGIN PASSWORD '$db_password_sql';
   ELSE
-    ALTER ROLE $DB_USER WITH PASSWORD '$DB_PASSWORD';
+    ALTER ROLE $DB_USER WITH PASSWORD '$db_password_sql';
   END IF;
 END
 \$\$;
@@ -374,7 +455,11 @@ run_smoke_tests() {
   curl --fail --silent --show-error --head "http://127.0.0.1:$PANEL_LOGIN_PORT/login" >/dev/null
   curl --fail --silent --show-error --head "http://127.0.0.1:$CPANEL_LOGIN_PORT/login" >/dev/null
   redis-cli ping >/dev/null
-  runuser -u postgres -- psql -d "$DB_NAME" -c "select 1" >/dev/null
+  if [[ "$DB_CREATE" == "true" && ( "$DB_HOST" == "localhost" || "$DB_HOST" == "127.0.0.1" ) ]]; then
+    runuser -u postgres -- psql -d "$DB_NAME" -c "select 1" >/dev/null
+  else
+    psql "$DATABASE_URL" -c "select 1" >/dev/null
+  fi
   systemctl is-active --quiet vps-panel-sysagent vps-panel-api vps-panel-workers vps-panel-frontend nginx "$REDIS_SERVICE" postgresql
 }
 
@@ -384,6 +469,7 @@ print_install_summary() {
 
 Panel URL: http://$VPS_IP:$PANEL_LOGIN_PORT/login
 Account URL: http://$VPS_IP:$CPANEL_LOGIN_PORT/login
+Public host: $PANEL_PUBLIC_HOST
 Username:  $SUPERADMIN_USERNAME
 Password:  $SUPERADMIN_PASSWORD
 

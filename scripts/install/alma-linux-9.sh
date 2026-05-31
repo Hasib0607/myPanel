@@ -13,6 +13,8 @@ NGINX_SITES_ENABLED="/etc/nginx/sites-enabled"
 
 require_root
 require_repo_url
+validate_bootstrap_inputs
+maybe_exit_dry_run
 
 log "Enabling AlmaLinux repositories (CRB + EPEL)"
 dnf -y install dnf-plugins-core

@@ -35,10 +35,14 @@ On a production VPS, run `sysagent` bound to `127.0.0.1` only and place Nginx in
 One-command install:
 
 ```bash
-export REPO_URL="https://github.com/YOUR_OWNER/YOUR_REPO.git"
-export APP_BRANCH="main"
-export VPS_IP="YOUR_SERVER_IP"
-bash scripts/install/install.sh
+curl -fsSL "https://raw.githubusercontent.com/YOUR_OWNER/YOUR_REPO/main/scripts/install/bootstrap.sh" | sudo bash -s -- \
+  --repo "https://github.com/YOUR_OWNER/YOUR_REPO.git" \
+  --domain panel.example.com \
+  --db-name panel_main \
+  --db-user panel_user \
+  --db-pass "change-this-database-password" \
+  --admin-user admin \
+  --admin-pass "change-this-admin-password"
 ```
 
 See `docs/one-click-install.md` and `docs/almalinux-missing-tracker.md` for OS-specific notes and remaining live QA items.
