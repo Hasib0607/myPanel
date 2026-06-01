@@ -223,6 +223,19 @@ async function assertDomainUsesHostingNameServers(domain: string, nameServers: A
   }
 }
 
+async function domainNameserverPendingReason(domain: string, nameServers: ActiveNameServer[]) {
+  try {
+    await assertDomainUsesHostingNameServers(domain, nameServers);
+    return null;
+  } catch (error) {
+    if (!env.ALLOW_PENDING_DOMAIN_NAMESERVER_MISMATCH) throw error;
+    if (error && typeof error === "object" && "statusCode" in error && error.statusCode === 400) {
+      return error instanceof Error ? error.message : "Domain nameservers are not pointing to this server yet.";
+    }
+    throw error;
+  }
+}
+
 export function defaultRecords(domainId: string, domain: string, nameServers: ActiveNameServer[] = []) {
   const records: Prisma.DnsRecordCreateManyInput[] = [
     { domainId, type: "A" as const, name: "@", value: env.VPS_IP },
@@ -387,12 +400,13 @@ async function createDomainWithDefaults(input: CreateDomainInput, nameServers: A
   const documentRoot = normalizeDocumentRoot(input.documentRoot);
   const redirectUrl = normalizeRedirectUrl(input.redirectUrl);
   await validateHostingSettings({ ...input, redirectUrl });
-  await assertDomainUsesHostingNameServers(input.name, nameServers);
+  const pendingReason = await domainNameserverPendingReason(input.name, nameServers);
 
   return prisma.$transaction(async (tx) => {
     const created = await tx.domain.create({
       data: {
         name: input.name,
+        status: pendingReason ? "PENDING" : "ACTIVE",
         forceSsl: input.forceSsl,
         hostingMode: input.hostingMode,
         documentRoot,
