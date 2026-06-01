@@ -562,7 +562,7 @@ User=$APP_USER
 WorkingDirectory=$APP_DIR
 EnvironmentFile=$APP_DIR/.env
 Environment=PANEL_UPDATE_ISOLATED=true
-ExecStart=/usr/bin/bash $APP_DIR/scripts/deploy/update-panel.sh
+ExecStart=/usr/bin/env PANEL_UPDATE_ISOLATED=true /usr/bin/bash $APP_DIR/scripts/deploy/update-panel.sh
 KillMode=process
 TimeoutStopSec=30
 

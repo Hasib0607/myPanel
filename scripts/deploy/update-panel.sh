@@ -150,16 +150,40 @@ EOF
   log "Configured non-interactive GitHub credentials from PANEL_UPDATE_GIT_TOKEN"
 }
 
+current_systemd_unit() {
+  if [[ ! -r /proc/self/cgroup ]]; then
+    return 0
+  fi
+  grep -oE '[^/]+\.service' /proc/self/cgroup 2>/dev/null | tail -n 1 || true
+}
+
 handoff_to_isolated_service() {
+  local current_unit=""
+  current_unit="$(current_systemd_unit)"
+
   if [[ "${PANEL_UPDATE_ISOLATED:-false}" == "true" ]]; then
     return 0
   fi
 
-  log "panel self-update is running inside another service context; handing off to vps-panel-self-update.service"
+  if [[ "$current_unit" == "vps-panel-self-update.service" ]]; then
+    log "panel self-update is already running inside vps-panel-self-update.service"
+    return 0
+  fi
+
+  case "$current_unit" in
+    vps-panel-api.service|vps-panel-workers.service|vps-panel-guardian.service|vps-panel-frontend.service)
+      ;;
+    *)
+      log "panel self-update is not running inside a panel service context; continuing in current process"
+      return 0
+      ;;
+  esac
+
+  log "panel self-update is running inside $current_unit; handing off to vps-panel-self-update.service"
   if [[ "$(id -u)" == "0" ]]; then
-    systemctl start vps-panel-self-update
+    "$SYSTEMCTL_BIN" start vps-panel-self-update 2>&1 | tee -a "$LOG_FILE"
   else
-    "$SUDO_BIN" -n "$SYSTEMCTL_BIN" start vps-panel-self-update
+    "$SUDO_BIN" -n "$SYSTEMCTL_BIN" start vps-panel-self-update 2>&1 | tee -a "$LOG_FILE"
   fi
   write_status "running" "panel self-update handed off to vps-panel-self-update.service" "$(current_commit)" "$(current_commit_subject)"
   rm -f "$PID_FILE"
