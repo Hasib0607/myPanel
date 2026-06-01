@@ -34,6 +34,7 @@ import {
   deploymentSslCertificatePaths,
   deploymentHttpsReady,
   deploymentSslCertificatePathsWhenReady,
+  deploymentCertbotIncludeWww,
   deploymentSslContactEmail,
   disableDeploymentTlsInDatabase,
   syncDeploymentTlsWithCertificate,
@@ -1622,6 +1623,37 @@ async function reconcileMisdetectedLaravelFramework(
   return updated;
 }
 
+async function reconcileLaravelRootDirectory(
+  deployment: DeploymentWithWorkerRelations,
+  releaseId: string | undefined,
+  appPath: string
+) {
+  if (deployment.framework !== "LARAVEL") {
+    return { deployment, appPath };
+  }
+  if (await deploymentHasLaravelArtisan(appPath)) {
+    return { deployment, appPath };
+  }
+  if (!(await deploymentHasLaravelArtisan(deployment.rootPath))) {
+    return { deployment, appPath };
+  }
+
+  const updated = await prisma.deployment.update({
+    where: { id: deployment.id },
+    data: { rootDirectory: ".", publicDirectory: deployment.publicDirectory || "public" },
+    include: deploymentWorkerInclude
+  });
+
+  await writeLog(deployment.id, releaseId, "PREFLIGHT", "Corrected Laravel app root directory", {
+    previousRootDirectory: deployment.rootDirectory,
+    previousAppPath: appPath,
+    appPath: deployment.rootPath,
+    publicDirectory: updated.publicDirectory
+  }, "warn");
+
+  return { deployment: updated, appPath: deployment.rootPath };
+}
+
 async function ensureLaravelAppKey(
   deploymentId: string,
   releaseId: string | undefined,
@@ -1941,7 +1973,8 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
     });
 
     const envVars = await resolveEnvVars(deployment.env);
-    const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
+    let appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
+    ({ deployment, appPath } = await reconcileLaravelRootDirectory(deployment, releaseId, appPath));
     const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
     const domain = deploymentDomain(deployment);
     const runtimeEnvVars = deploymentEnvWithPublicUrl(envVars, domain);
@@ -2076,7 +2109,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     });
     await assertRuntimeToolsInstalled(deployment.id, releaseId, deployment);
 
-    const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
+    let appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
+    ({ deployment, appPath } = await reconcileLaravelRootDirectory(deployment, releaseId, appPath));
     deployment = await reconcileMisdetectedLaravelFramework(deployment, releaseId, appPath);
     deployment = await reconcileMissingStartCommand(deployment, releaseId);
     deployment = await reconcileNodeProductionStartCommand(deployment, releaseId);
@@ -2219,6 +2253,11 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     }
 
     await ensureParentDomainDeploymentProxy(deployment.id, domain);
+    await repairSysagentLiveCommandsForDeployment(
+      deployment.id,
+      releaseId,
+      "before nginx proxy and SSL"
+    ).catch(() => undefined);
     const serverName = deploymentServerName(domain);
     let proxyHttpsReady = false;
     if (domain) {
@@ -2256,7 +2295,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         domain: domain.name,
         email: deploymentSslContactEmail(domain),
         webRoot: deploymentFallbackRootPath(domain) ?? `${env.FILE_MANAGER_ROOT}/${domain.name}/public_html`,
-        includeWww: domain.includeWww !== false,
+        includeWww: deploymentCertbotIncludeWww(domain),
         forceSsl: true,
         source: "deployment"
       });
@@ -2265,6 +2304,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           await waitForQueueJob(sslJob);
           return { queued: true, jobId: sslJob.id, completed: true };
         });
+        proxyHttpsReady = true;
         const httpsNginx = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx HTTPS proxy config", () =>
           publishDeploymentProxyNginx({
             deploymentId: deployment.id,
@@ -2288,9 +2328,11 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           envVars = await ensureLaravelAppKey(deployment.id, releaseId, appPath, deployment.port, envVars);
         }
       } catch (error) {
-        domain = await disableDeploymentTlsInDatabase(domain);
+        domain = await disableDeploymentTlsInDatabase(domain, { clearForceSsl: false });
+        const sslDetail = error instanceof Error ? error.message : String(error);
         await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "SSL certificate issue warning", {
-          warning: error instanceof Error ? error.message : String(error)
+          warning: sslDetail,
+          hint: `Use http://${domain.name}/ until SSL succeeds. Check ALLOW_LIVE_SSL=true, certbot installed, and DNS A record for ${domain.name}.`
         }, "warn");
         await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx HTTP fallback after SSL failure", () =>
           publishDeploymentProxyNginx({

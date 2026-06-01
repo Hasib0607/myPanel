@@ -93,6 +93,13 @@ export async function ensureParentDomainDeploymentProxy(deploymentId: string, do
   });
 }
 
+/** Only apex domains (example.com) should request www; subdomains like admin.example.com must not. */
+export function deploymentCertbotIncludeWww(domain: BoundDomain) {
+  if (domain.includeWww === false) return false;
+  const labels = domain.name.split(".").filter(Boolean);
+  return labels.length <= 2;
+}
+
 export function deploymentSslContactEmail(domain: BoundDomain | null) {
   if (!domain?.name) return "admin@localhost";
   const parts = domain.name.split(".").filter(Boolean);

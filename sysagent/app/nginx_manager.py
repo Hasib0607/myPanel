@@ -104,14 +104,62 @@ def run_live_step(action: str, fn: Callable[[], T]) -> T:
         raise HTTPException(status_code=500, detail=f"Nginx {action} failed: {error}") from error
 
 
+def server_name_tokens(server_name: str) -> list[str]:
+    return [part.strip() for part in server_name.split() if part.strip()]
+
+
 def _config_has_server_name(path: Path, server_name: str) -> bool:
     """Return True if an nginx config file contains a server_name directive for server_name."""
     try:
         text = path.read_text(encoding="utf-8", errors="ignore")
-        # Match: server_name <anything> <server_name> <anything>;
-        return bool(re.search(r'\bserver_name\b[^;]*\b' + re.escape(server_name) + r'\b', text))
+        for token in server_name_tokens(server_name):
+            if re.search(r"\bserver_name\b[^;]*\b" + re.escape(token) + r"\b", text):
+                return True
+        return False
     except OSError:
         return False
+
+
+def _config_has_insecure_port443(path: Path) -> bool:
+    """True when a file listens on 443 without the ssl flag (plain HTTP on 443 → browser SSL protocol errors)."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    if not re.search(r"listen\s+(?:\[::\]:)?443\b", text):
+        return False
+    if re.search(r"listen\s+(?:\[::\]:)?443\s+ssl\b", text):
+        return False
+    return True
+
+
+def remove_insecure_port443_configs(our_name: str, server_name: str, *scan_dirs: str) -> list[str]:
+    removed: list[str] = []
+    our_filename = f"{our_name}.conf"
+    tokens = server_name_tokens(server_name)
+    if not tokens:
+        return removed
+    for scan_dir in scan_dirs:
+        enabled_dir = Path(scan_dir)
+        if not enabled_dir.is_dir():
+            continue
+        for conf_path in enabled_dir.iterdir():
+            if conf_path.name == our_filename:
+                continue
+            stem = conf_path.stem.lower()
+            if stem in PROTECTED_CONFIG_NAMES or "vps-panel" in stem:
+                continue
+            try:
+                target = conf_path.resolve() if conf_path.is_symlink() else conf_path
+                if not _config_has_insecure_port443(target):
+                    continue
+                if not any(_config_has_server_name(target, token) for token in tokens):
+                    continue
+                conf_path.unlink()
+                removed.append(conf_path.name)
+            except OSError:
+                pass
+    return removed
 
 
 def remove_conflicting_configs(our_name: str, server_name: str, *scan_dirs: str) -> list[str]:
@@ -220,6 +268,11 @@ def publish_nginx_config(name: str, config: str, sites_available: str, sites_ena
             "remove conflicting configs",
             lambda: remove_conflicting_configs(name, server_name, *scan_dirs),
         )
+        insecure_removed = run_live_step(
+            "remove insecure port 443 configs",
+            lambda: remove_insecure_port443_configs(name, server_name, *scan_dirs),
+        )
+        removed = [*removed, *insecure_removed]
     else:
         removed = []
 

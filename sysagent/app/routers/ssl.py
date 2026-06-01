@@ -10,6 +10,13 @@ from app.nginx_manager import acme_root_for_server_name, letsencrypt_certificate
 router = APIRouter()
 
 
+def certbot_should_include_www(domain: str, include_www: bool) -> bool:
+    if not include_www:
+        return False
+    labels = [part for part in domain.split(".") if part]
+    return len(labels) <= 2
+
+
 class CertificateRequest(BaseModel):
     domain: str = Field(pattern=r"^[a-zA-Z0-9.-]+$")
     email: str
@@ -73,7 +80,7 @@ def issue_certificate(payload: CertificateRequest) -> dict:
         "-d",
         payload.domain,
     ]
-    if payload.includeWww:
+    if certbot_should_include_www(payload.domain, payload.includeWww):
         command.extend(["-d", f"www.{payload.domain}"])
 
     return run_command(command, allow_live=settings.allow_live_ssl)
