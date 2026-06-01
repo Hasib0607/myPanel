@@ -27,7 +27,10 @@ import {
   deploymentServerName,
   deploymentSslCertificatePaths,
   deploymentWantsSsl,
+  deploymentHttpsReady,
+  deploymentSslCertificatePathsWhenReady,
   enableDeploymentTlsInDatabase,
+  ensureAcmeWebroot,
   ensureParentDomainDeploymentProxy,
   publishDeploymentProxyNginx,
   waitForQueueJob
@@ -513,9 +516,9 @@ function deploymentDomain(deployment: { domain?: BoundDomain | null; domainBindi
     ?? null;
 }
 
-function deploymentPublicEnv(domain: BoundDomain | null) {
+function deploymentPublicEnv(domain: BoundDomain | null, httpsReady = false) {
   if (!domain?.name) return {} as Record<string, string>;
-  const scheme = domain.sslEnabled ? "https" : "http";
+  const scheme = httpsReady ? "https" : "http";
   const url = `${scheme}://${domain.name}`;
   return {
     APP_URL: url,
@@ -557,8 +560,8 @@ function isSameDomainPublicUrl(value: string | null | undefined, domain: BoundDo
   }
 }
 
-function deploymentEnvWithPublicUrl(envVars: Record<string, string>, domain: BoundDomain | null) {
-  const publicEnv: Record<string, string> = deploymentPublicEnv(domain);
+function deploymentEnvWithPublicUrl(envVars: Record<string, string>, domain: BoundDomain | null, httpsReady = false) {
+  const publicEnv: Record<string, string> = deploymentPublicEnv(domain, httpsReady);
   const merged: Record<string, string> = { ...publicEnv, ...envVars };
 
   if (!domain?.name) return merged;
@@ -815,8 +818,9 @@ async function optionalPublicRouteWarning(
     await guardianRepairSleep(5000);
   }
 
+  const httpsReady = await deploymentHttpsReady(domain);
   let publicRoute = await runStep(deploymentId, releaseId, "HEALTH_CHECK", label, () =>
-    sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain), rootPath: appPath, framework: deployment.framework, requireHttps: Boolean(domain.sslEnabled) })
+    sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain), rootPath: appPath, framework: deployment.framework, requireHttps: httpsReady })
   );
 
   try {
@@ -839,7 +843,7 @@ async function optionalPublicRouteWarning(
         );
         await guardianRepairSleep(5000);
         publicRoute = await runStep(deploymentId, releaseId, "HEALTH_CHECK", `${label} retry after Redis repair`, () =>
-          sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain), rootPath: appPath, framework: deployment.framework, requireHttps: Boolean(domain.sslEnabled) })
+          sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain), rootPath: appPath, framework: deployment.framework, requireHttps: httpsReady })
         );
         warning = await assertPublicRouteResult(publicRoute, label, deployment, appPath);
       }
@@ -879,8 +883,9 @@ async function optionalPublicRouteWarning(
       })
     );
     await guardianRepairSleep(5000);
+    const retryHttpsReady = await deploymentHttpsReady(domain);
     publicRoute = await runStep(deploymentId, releaseId, "HEALTH_CHECK", `${label} retry after Guardian repair`, () =>
-      sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain), rootPath: appPath, framework: deployment.framework, requireHttps: Boolean(domain.sslEnabled) })
+      sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain), rootPath: appPath, framework: deployment.framework, requireHttps: retryHttpsReady })
     );
   }
 
@@ -1443,15 +1448,15 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
     if (processAction !== "stop" && domain) {
       await ensureParentDomainDeploymentProxy(deployment.id, domain);
       const serverName = deploymentServerName(domain);
-      const nginxResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config", () =>
+      const nginxResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config", async () =>
         sysagent.deploymentNginx({
           deploymentId: deployment.id,
           serverName,
           upstreamPort: deployment.port,
           rootPath: deployment.rootPath,
           fallbackRootPath: deploymentFallbackRootPath(domain),
-          forceSsl: deploymentWantsSsl(domain),
-          ...deploymentSslCertificatePaths(domain)
+          forceSsl: false,
+          ...(await deploymentSslCertificatePathsWhenReady(domain))
         })
       );
       assertLiveResult((nginxResult as { write?: unknown }).write, "Nginx proxy config write");
@@ -1693,15 +1698,15 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     }
     await ensureParentDomainDeploymentProxy(deployment.id, domain);
     const serverName = deploymentServerName(domain);
-    const nginxResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config", () =>
+    const nginxResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config", async () =>
       sysagent.deploymentNginx({
         deploymentId: deployment.id,
         serverName,
         upstreamPort: deployment.port,
         rootPath: deployment.rootPath,
         fallbackRootPath: deploymentFallbackRootPath(domain),
-        forceSsl: deploymentWantsSsl(domain),
-        ...deploymentSslCertificatePaths(domain)
+        forceSsl: false,
+        ...(await deploymentSslCertificatePathsWhenReady(domain))
       })
     );
     assertLiveResult((nginxResult as { write?: unknown }).write, "Nginx proxy config write");
@@ -1710,6 +1715,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     assertLiveResult((nginxResult as { reload?: unknown }).reload, "Nginx reload");
 
     if (domain && deploymentWantsSsl(domain)) {
+      await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Prepare ACME webroot", () => ensureAcmeWebroot(domain));
       const sslJob = await sslQueue.add("issue", {
         domainId: domain.id.startsWith("subdomain:") ? null : domain.id,
         subdomainId: domain.id.startsWith("subdomain:") ? domain.id.slice("subdomain:".length) : null,
@@ -1725,7 +1731,6 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           await waitForQueueJob(sslJob);
           return { queued: true, jobId: sslJob.id, completed: true };
         });
-        domain = { ...domain, sslEnabled: true, forceSsl: true };
         const httpsNginx = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx HTTPS proxy config", () =>
           publishDeploymentProxyNginx({
             deploymentId: deployment.id,
@@ -1744,9 +1749,23 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "SSL certificate issue warning", {
           warning: error instanceof Error ? error.message : String(error)
         }, "warn");
+        await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx HTTP fallback after SSL failure", () =>
+          publishDeploymentProxyNginx({
+            deploymentId: deployment.id,
+            fqdn: serverName ?? domain!.name,
+            upstreamPort: deployment.port,
+            rootPath: deployment.rootPath,
+            fallbackRootPath: deploymentFallbackRootPath(domain),
+            forceHttps: false
+          })
+        );
       }
     } else {
       await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "SSL request skipped", { reason: domain ? "No domain linked" : "No linked domain" });
+    }
+
+    if (domain && (await deploymentHttpsReady(domain))) {
+      envVars = deploymentEnvWithPublicUrl(envVars, domain, true);
     }
 
     const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];

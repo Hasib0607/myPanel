@@ -26,7 +26,7 @@ from app.deployment_commands import normalize_laravel_start_command, parse_deplo
 from app.deployment_health import curl_health_probe
 from app.platform import runtime_tool_install_plan
 from app.nginx_paths import nginx_sites_available, nginx_sites_enabled
-from app.nginx_manager import acme_location, publish_nginx_config, safe_letsencrypt_path, safe_web_root
+from app.nginx_manager import acme_location, letsencrypt_certificate_exists, publish_nginx_config, safe_letsencrypt_path, safe_web_root
 from app.supervisor_utils import (
     ensure_supervisord_running,
     format_supervisor_step_error,
@@ -719,7 +719,11 @@ def nginx(body: NginxRequest) -> dict:
         fallback_root = safe_web_root(body.fallbackRootPath) if body.fallbackRootPath else None
         ssl_certificate = safe_letsencrypt_path(body.sslCertificate) if body.sslCertificate else None
         ssl_certificate_key = safe_letsencrypt_path(body.sslCertificateKey) if body.sslCertificateKey else None
-        has_ssl = ssl_certificate is not None and ssl_certificate_key is not None
+        has_ssl = (
+            ssl_certificate is not None
+            and ssl_certificate_key is not None
+            and letsencrypt_certificate_exists(server_name.split()[0])
+        )
 
         if has_ssl and settings.allow_live_nginx and (not ssl_certificate.exists() or not ssl_certificate_key.exists()):
             if body.requireSsl:
@@ -877,6 +881,7 @@ def _curl_public_route(server_name: str, path: str = "/", root_path: str | None 
     primary = server_name.split()[0].strip()
     clean_path = path if path.startswith("/") else f"/{path}"
     is_laravel = (framework or "").upper() == "LARAVEL"
+    use_https = require_https and letsencrypt_certificate_exists(primary)
 
     def probe(url: str, *, accept_http_errors: bool) -> dict:
         command = [
@@ -923,8 +928,20 @@ def _curl_public_route(server_name: str, path: str = "/", root_path: str | None 
             raw["stderr"] = f"HTTP {http_code} from {url}"
         return raw
 
-    scheme = "https" if require_https else "http"
+    scheme = "https" if use_https else "http"
     result = probe(f"{scheme}://{primary}{clean_path}", accept_http_errors=is_laravel)
+
+    if use_https and result.get("returncode") == 7:
+        http_result = probe(f"http://{primary}{clean_path}", accept_http_errors=is_laravel)
+        if http_result.get("returncode") == 0:
+            http_result["degraded"] = True
+            http_result["stderr"] = (
+                "HTTPS is not listening on port 443 (SSL certificate missing or nginx not configured). "
+                f"HTTP probe succeeded at http://{primary}{clean_path}. Redeploy or issue SSL from the panel."
+            )
+            return attach_laravel_diagnostics(http_result, root_path, framework)
+        result = http_result
+
     if result.get("httpCode") in {301, 302, 307, 308} and result.get("effectiveUrl", "").startswith("https://"):
         result = probe(result["effectiveUrl"], accept_http_errors=is_laravel)
 

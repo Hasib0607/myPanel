@@ -57,6 +57,21 @@ export function deploymentSslCertificatePaths(domain: BoundDomain | null) {
   };
 }
 
+export async function deploymentHttpsReady(domain: BoundDomain | null) {
+  if (!domain?.name) return false;
+  try {
+    const status = await sysagent.certificateExists(domain.name);
+    return Boolean(status.exists);
+  } catch {
+    return false;
+  }
+}
+
+export async function deploymentSslCertificatePathsWhenReady(domain: BoundDomain | null) {
+  if (!domain || !(await deploymentHttpsReady(domain))) return {};
+  return deploymentSslCertificatePaths(domain);
+}
+
 export function deploymentFallbackRootPath(domain: BoundDomain | null) {
   if (!domain?.name) return null;
   const documentRoot = (domain.documentRoot || "public_html").replace(/^\/+|\/+$/g, "") || "public_html";
@@ -149,20 +164,30 @@ export async function publishDeploymentProxyNginx(input: {
   forceHttps: boolean;
   requireSsl?: boolean;
 }) {
+  const bound: BoundDomain = {
+    id: input.fqdn,
+    name: input.fqdn.split(" ")[0] ?? input.fqdn,
+    forceSsl: input.forceHttps,
+    sslEnabled: input.forceHttps
+  };
+  const httpsReady = input.forceHttps ? await deploymentHttpsReady(bound) : false;
   return sysagent.deploymentNginx({
     deploymentId: input.deploymentId,
     serverName: input.fqdn,
     upstreamPort: input.upstreamPort,
     rootPath: input.rootPath,
     fallbackRootPath: input.fallbackRootPath,
-    forceSsl: input.forceHttps,
+    forceSsl: input.forceHttps && httpsReady,
     requireSsl: input.requireSsl ?? false,
-    ...deploymentSslCertificatePaths({
-      id: input.fqdn,
-      name: input.fqdn,
-      forceSsl: input.forceHttps,
-      sslEnabled: input.forceHttps
-    })
+    ...(httpsReady ? deploymentSslCertificatePaths(bound) : {})
+  });
+}
+
+export async function ensureAcmeWebroot(domain: BoundDomain | null) {
+  if (!domain?.name) return;
+  await sysagent.ensureAcmeWebroot({
+    domain: domain.name,
+    webRoot: deploymentFallbackRootPath(domain) ?? undefined
   });
 }
 

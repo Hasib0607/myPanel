@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 
 from app.command import run_command
 from app.config import settings
-from app.nginx_manager import run_live_step, safe_web_root
+from app.nginx_manager import acme_root_for_server_name, letsencrypt_certificate_exists, run_live_step, safe_web_root
 
 router = APIRouter()
 
@@ -23,8 +23,41 @@ class CertificatePreflightRequest(BaseModel):
     includeWww: bool = True
 
 
+class EnsureAcmeWebrootRequest(BaseModel):
+    domain: str = Field(pattern=r"^[a-zA-Z0-9.-]+$")
+    webRoot: str | None = None
+
+
+@router.get("/certificate-exists/{domain}")
+def certificate_exists(domain: str) -> dict:
+    primary = domain.split()[0].strip()
+    return {
+        "domain": primary,
+        "exists": letsencrypt_certificate_exists(primary),
+        "certificate": f"/etc/letsencrypt/live/{primary}/fullchain.pem",
+        "privateKey": f"/etc/letsencrypt/live/{primary}/privkey.pem",
+    }
+
+
+@router.post("/ensure-acme-webroot")
+def ensure_acme_webroot(body: EnsureAcmeWebrootRequest) -> dict:
+    primary = body.domain.split()[0].strip()
+    web_root = safe_web_root(body.webRoot) if body.webRoot else acme_root_for_server_name(primary)
+    challenge_dir = web_root / ".well-known" / "acme-challenge"
+    if settings.allow_live_ssl:
+        run_live_step("ACME webroot create", lambda: challenge_dir.mkdir(parents=True, exist_ok=True))
+    return {
+        "dryRun": not settings.allow_live_ssl,
+        "returncode": 0,
+        "webRoot": str(web_root),
+        "challengeDir": str(challenge_dir),
+        "domain": primary,
+    }
+
+
 @router.post("/issue")
 def issue_certificate(payload: CertificateRequest) -> dict:
+    ensure_acme_webroot(EnsureAcmeWebrootRequest(domain=payload.domain, webRoot=payload.webRoot))
     web_root = safe_web_root(payload.webRoot)
     command = [
         "certbot",

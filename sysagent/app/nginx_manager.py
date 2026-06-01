@@ -41,6 +41,13 @@ def safe_web_root(root_path: str, detail: str = "Website root escapes file manag
     return target
 
 
+def letsencrypt_certificate_exists(domain: str) -> bool:
+    primary = domain.split()[0].strip()
+    cert = Path(f"/etc/letsencrypt/live/{primary}/fullchain.pem")
+    key = Path(f"/etc/letsencrypt/live/{primary}/privkey.pem")
+    return cert.is_file() and key.is_file()
+
+
 def safe_letsencrypt_path(path: str) -> Path:
     root = Path("/etc/letsencrypt/live")
     target = Path(path)
