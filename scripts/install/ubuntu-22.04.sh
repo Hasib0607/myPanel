@@ -16,7 +16,7 @@ install_ubuntu_packages() {
   log "Installing Ubuntu packages"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y ca-certificates curl gnupg git nginx certbot python3-certbot-nginx postgresql postgresql-contrib redis-server bind9 bind9utils dnsutils ufw python3 python3-venv python3-pip unzip zip openssl build-essential acl lsof psmisc
+  apt-get install -y ca-certificates curl gnupg git nginx certbot python3-certbot-nginx postgresql postgresql-contrib redis-server bind9 bind9utils dnsutils ufw python3 python3-venv python3-pip unzip zip openssl build-essential acl lsof psmisc php php-cli php-fpm php-mysql php-pgsql php-xml php-mbstring php-curl php-zip php-gd php-soap
 
   if ! command -v node >/dev/null 2>&1 || ! node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 20 || (major === 20 && minor >= 9) ? 0 : 1)'; then
     log "Installing Node.js 22"
@@ -30,6 +30,7 @@ install_ubuntu_packages() {
 
 enable_ubuntu_base_services() {
   systemctl enable --now postgresql redis-server bind9 nginx
+  systemctl enable --now php*-fpm >/dev/null 2>&1 || true
 }
 
 run_step install_packages install_ubuntu_packages

@@ -26,6 +26,8 @@ Common options:
   --db-host HOST             PostgreSQL host. Default: localhost.
   --db-port PORT             PostgreSQL port. Default: 5432.
   --database-url URL         Full DATABASE_URL. Overrides DB pieces in .env.
+  --git-user USER            Git username saved for non-interactive panel self-updates.
+  --git-token TOKEN          Git token/password saved for non-interactive panel self-updates.
   --skip-db-create           Do not create local PostgreSQL database/user.
   --enable-ssl               Issue Let's Encrypt cert and serve panel ports over HTTPS.
   --ssl-email EMAIL          Email for Let's Encrypt registration.
@@ -126,6 +128,16 @@ while [[ $# -gt 0 ]]; do
       export DATABASE_URL="$2"
       export DIRECT_DATABASE_URL="$2"
       export DB_CREATE=false
+      shift 2
+      ;;
+    --git-user)
+      require_value "$1" "${2:-}"
+      export PANEL_UPDATE_GIT_USERNAME="$2"
+      shift 2
+      ;;
+    --git-token)
+      require_value "$1" "${2:-}"
+      export PANEL_UPDATE_GIT_TOKEN="$2"
       shift 2
       ;;
     --skip-db-create)

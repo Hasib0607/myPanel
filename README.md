@@ -35,17 +35,16 @@ On a production VPS, run `sysagent` bound to `127.0.0.1` only and place Nginx in
 One-command install:
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/YOUR_OWNER/YOUR_REPO/main/scripts/install/bootstrap.sh" | sudo bash -s -- \
-  --repo "https://github.com/YOUR_OWNER/YOUR_REPO.git" \
-  --domain panel.example.com \
-  --db-name panel_main \
-  --db-user panel_user \
-  --db-pass "change-this-database-password" \
-  --admin-user admin \
-  --admin-pass "change-this-admin-password"
+curl -fsSL "https://raw.githubusercontent.com/Hasib0607/myPanel/main/scripts/install/quick.sh" | sudo bash
 ```
 
-Use `--prompt-secrets` to avoid putting passwords in shell history, and add `--enable-ssl --ssl-email admin@example.com` when the panel domain already points to the server.
+Optional, if the repo is private or panel self-update should pull without asking for GitHub credentials:
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/Hasib0607/myPanel/main/scripts/install/quick.sh" | sudo env GITHUB_USER="Hasib0607" GITHUB_TOKEN="github_pat_xxx" bash
+```
+
+Use `PROMPT_SECRETS=true` to avoid putting passwords in shell history, and add `ENABLE_SSL=true SSL_EMAIL=admin@example.com PANEL_DOMAIN=panel.example.com` when the panel domain already points to the server.
 
 See `docs/one-click-install.md` and `docs/almalinux-missing-tracker.md` for OS-specific notes and remaining live QA items.
 

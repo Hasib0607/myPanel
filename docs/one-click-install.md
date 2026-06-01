@@ -6,6 +6,32 @@ Supported: **Ubuntu 22.04** and **AlmaLinux 9**.
 
 This path auto-detects Ubuntu 22.04 or AlmaLinux 9, provisions an empty PostgreSQL database, writes the project `.env`, builds the API/frontend, installs systemd services, opens WHM/cPanel ports, and runs smoke tests.
 
+Shortest install for this repo:
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/Hasib0607/myPanel/main/scripts/install/quick.sh" | sudo bash
+```
+
+Private repo or non-interactive panel self-updates:
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/Hasib0607/myPanel/main/scripts/install/quick.sh" | sudo env GITHUB_USER="Hasib0607" GITHUB_TOKEN="github_pat_xxx" bash
+```
+
+Optional custom values:
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/Hasib0607/myPanel/main/scripts/install/quick.sh" | sudo env \
+  ADMIN_PASS="change-this-admin-password" \
+  DB_PASS="change-this-database-password" \
+  PANEL_DOMAIN="panel.example.com" \
+  ENABLE_SSL=true \
+  SSL_EMAIL="admin@example.com" \
+  bash
+```
+
+Generic installer form:
+
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/YOUR_OWNER/YOUR_REPO/main/scripts/install/bootstrap.sh" | sudo bash -s -- \
   --repo "https://github.com/YOUR_OWNER/YOUR_REPO.git" \
@@ -99,7 +125,7 @@ Uses `dnf`, CRB + EPEL, firewalld, `redis` + `named` services, and creates a Deb
 - Certbot (Ubuntu repos / Alma EPEL)
 - `/opt/vps-panel`
 - managed deployment ports `10000-19999`, keeping panel ports reserved
-- systemd services: `vps-panel-api`, `vps-panel-workers`, `vps-panel-frontend`, `vps-panel-sysagent`
+- systemd services: `vps-panel-api`, `vps-panel-workers`, `vps-panel-guardian`, `vps-panel-frontend`, `vps-panel-sysagent`
 - WHM-style admin listener on `:8453`
 - cPanel-style account listener on `:3138`
 - PM2 startup for deployed Node/Next.js projects

@@ -28,6 +28,7 @@ install_alma_packages() {
   dnf install -y \
     ca-certificates curl gnupg2 git nginx firewalld \
     postgresql-server postgresql-contrib redis bind bind-utils \
+    php php-cli php-fpm php-mysqlnd php-pgsql php-xml php-mbstring php-curl php-zip php-gd php-soap \
     python3 python3-pip unzip zip openssl \
     gcc gcc-c++ make automake autoconf libtool acl lsof psmisc \
     policycoreutils-python-utils selinux-policy-targeted
@@ -83,6 +84,7 @@ EOF
 
 enable_alma_base_services() {
   systemctl enable --now redis named nginx
+  systemctl enable --now php-fpm || true
 }
 
 run_step install_packages install_alma_packages
