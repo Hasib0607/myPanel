@@ -28,6 +28,12 @@ type PanelUpdateStatus = {
   [key: string]: unknown;
 };
 
+type CurrentPanelSource = {
+  commit: string;
+  commitSubject: string;
+  branch: string;
+};
+
 function webhookSecretRef(deploymentSlug: string) {
   return `deployment:${deploymentSlug}:webhook`;
 }
@@ -227,6 +233,35 @@ function gitCommitSubject(commit: string | undefined) {
   });
 }
 
+function gitCurrentSource() {
+  return new Promise<CurrentPanelSource>((resolve) => {
+    execFile(
+      "git",
+      ["rev-parse", "--short", "HEAD"],
+      { cwd: env.PANEL_UPDATE_WORKDIR, timeout: 3000 },
+      (commitError, commitStdout) => {
+        execFile(
+          "git",
+          ["log", "-1", "--pretty=%s"],
+          { cwd: env.PANEL_UPDATE_WORKDIR, timeout: 3000 },
+          (_subjectError, subjectStdout) => {
+            execFile(
+              "git",
+              ["branch", "--show-current"],
+              { cwd: env.PANEL_UPDATE_WORKDIR, timeout: 3000 },
+              (_branchError, branchStdout) => resolve({
+                commit: commitError ? "" : commitStdout.trim(),
+                commitSubject: subjectStdout.trim(),
+                branch: branchStdout.trim()
+              })
+            );
+          }
+        );
+      }
+    );
+  });
+}
+
 export const deploymentWebhookRoutes: FastifyPluginAsync = async (app) => {
   app.removeContentTypeParser("application/json");
   app.addContentTypeParser("application/json", { parseAs: "buffer" }, (_request, body, done) => {
@@ -330,6 +365,7 @@ export const deploymentWebhookRoutes: FastifyPluginAsync = async (app) => {
 
   app.get("/panel-update/status", { preHandler: app.requireAuth }, async () => {
     const logFile = env.PANEL_UPDATE_LOG_FILE;
+    const currentSource = await gitCurrentSource();
     const status: PanelUpdateStatus = await readPanelUpdateStatus() ?? {
         state: "unknown",
         message: "No panel update status has been written yet",
@@ -362,7 +398,7 @@ export const deploymentWebhookRoutes: FastifyPluginAsync = async (app) => {
         status.stale = true;
       }
     }
-    return { status, recentLog };
+    return { status, recentLog, currentSource };
   });
 
   app.post("/panel-update/rebuild", { preHandler: app.requireAuth }, async (request, reply) => {

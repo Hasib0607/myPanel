@@ -67,6 +67,11 @@ type PanelUpdateStatus = {
     logFile?: string;
   };
   recentLog: string[];
+  currentSource?: {
+    commit: string;
+    commitSubject: string;
+    branch: string;
+  };
 };
 
 function formatBytes(value: number) {
@@ -355,6 +360,12 @@ export function DashboardClient() {
                   </span>
                 </div>
                 <div className="mt-2 text-xs text-panel-muted">{panelUpdate.data?.status.message ?? "Checking update status..."}</div>
+                {panelUpdate.data?.currentSource?.commit ? (
+                  <div className="mt-2 rounded-md bg-slate-50 px-2 py-1 text-xs text-panel-muted">
+                    Installed <span className="font-mono">{panelUpdate.data.currentSource.commit}</span>
+                    {panelUpdate.data.currentSource.commitSubject ? <span> · {panelUpdate.data.currentSource.commitSubject}</span> : null}
+                  </div>
+                ) : null}
                 {panelUpdate.data?.status.commitSubject ? (
                   <div className="mt-2 text-xs font-medium text-panel-ink">{panelUpdate.data.status.commitSubject}</div>
                 ) : null}
