@@ -128,14 +128,19 @@ function resolveNodeStartCommand(
   if (pkg.main) {
     return `node ${pkg.main}`;
   }
-  if (scripts.preview) {
-    return `${run("preview")} -- --host 127.0.0.1 --port {PORT}`;
-  }
-  if (options?.vite || scripts.build) {
+  if (scripts.build) {
     const output = outputDirectory || (options?.cra ? "build" : "dist");
     return `npx serve -s ${output} -l {PORT}`;
   }
+  if (scripts.preview) {
+    return `${run("preview")} -- --host 127.0.0.1 --port {PORT}`;
+  }
   return null;
+}
+
+export function nodeStartUsesVitePreview(startCommand: string | null | undefined) {
+  const normalized = (startCommand || "").toLowerCase();
+  return normalized.includes("vite preview") || normalized.includes("run preview");
 }
 
 function nodeJsDetection(

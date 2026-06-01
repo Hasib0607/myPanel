@@ -74,6 +74,7 @@ class NginxRequest(BaseModel):
     upstreamPort: int = Field(ge=1, le=65535)
     rootPath: str
     framework: str | None = None
+    loopbackProxyHost: bool = False
     publicDirectory: str | None = "public"
     fallbackRootPath: str | None = None
     forceSsl: bool = True
@@ -752,6 +753,7 @@ def nginx(body: NginxRequest) -> dict:
             upstream_port=body.upstreamPort,
             fallback_error_page=fallback_error_page,
             fallback_location=fallback_location,
+            loopback_proxy_host=body.loopbackProxyHost,
         )
         if body.forceSsl and has_ssl:
             http_location = (

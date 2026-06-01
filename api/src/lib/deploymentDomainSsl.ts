@@ -1,5 +1,6 @@
 import type { Job } from "bullmq";
 import type { DeploymentFramework } from "@prisma/client";
+import { nodeStartUsesVitePreview } from "./deploymentDetection.js";
 import { prisma } from "./prisma.js";
 import { env } from "../config/env.js";
 import path from "node:path";
@@ -171,6 +172,7 @@ export function buildDeploymentNginxRequest(input: {
   upstreamPort: number;
   rootPath: string;
   framework: DeploymentFramework;
+  startCommand?: string | null;
   publicDirectory?: string | null;
   outputDirectory?: string | null;
   fallbackRootPath: string | null;
@@ -185,6 +187,7 @@ export function buildDeploymentNginxRequest(input: {
     upstreamPort: input.upstreamPort,
     rootPath: input.rootPath,
     framework: input.framework,
+    loopbackProxyHost: nodeStartUsesVitePreview(input.startCommand),
     publicDirectory: deploymentNginxPublicDirectory(input),
     fallbackRootPath: input.fallbackRootPath,
     forceSsl: input.forceSsl,
@@ -201,6 +204,7 @@ export async function publishDeploymentProxyNginx(input: {
   upstreamPort: number;
   rootPath: string;
   framework: DeploymentFramework;
+  startCommand?: string | null;
   publicDirectory?: string | null;
   outputDirectory?: string | null;
   fallbackRootPath: string | null;
@@ -221,6 +225,7 @@ export async function publishDeploymentProxyNginx(input: {
       upstreamPort: input.upstreamPort,
       rootPath: input.rootPath,
       framework: input.framework,
+      startCommand: input.startCommand,
       publicDirectory: input.publicDirectory,
       outputDirectory: input.outputDirectory,
       fallbackRootPath: input.fallbackRootPath,

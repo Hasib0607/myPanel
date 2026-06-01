@@ -761,6 +761,7 @@ async function executeDoctorApproval(deployment: Awaited<ReturnType<typeof findD
         upstreamPort: deployment.port,
         rootPath: deployment.rootPath,
         framework: deployment.framework,
+        startCommand: deployment.startCommand,
         publicDirectory: deployment.publicDirectory,
         outputDirectory: deployment.outputDirectory,
         fallbackRootPath: deploymentFallbackRootPath(domain),

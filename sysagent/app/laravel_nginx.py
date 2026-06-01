@@ -1,8 +1,9 @@
-def nginx_proxy_headers(upstream_port: int) -> str:
+def nginx_proxy_headers(upstream_port: int, *, loopback_host: bool = False) -> str:
+    host_header = f"127.0.0.1:{upstream_port}" if loopback_host else "$http_host"
     return (
         "        proxy_http_version 1.1;\n"
         f"        proxy_pass http://127.0.0.1:{upstream_port};\n"
-        "        proxy_set_header Host $http_host;\n"
+        f"        proxy_set_header Host {host_header};\n"
         "        proxy_set_header X-Forwarded-Host $host;\n"
         "        proxy_set_header X-Forwarded-Port $server_port;\n"
         "        proxy_set_header Forwarded \"proto=$scheme;host=$http_host\";\n"
@@ -21,11 +22,11 @@ def nginx_proxy_headers(upstream_port: int) -> str:
     )
 
 
-def nginx_upstream_proxy_locations(upstream_port: int) -> str:
+def nginx_upstream_proxy_locations(upstream_port: int, *, loopback_host: bool = False) -> str:
     """Proxy all traffic to the app process (Vite preview, Next.js, Node APIs)."""
     return (
         "    location / {\n"
-        f"{nginx_proxy_headers(upstream_port)}"
+        f"{nginx_proxy_headers(upstream_port, loopback_host=loopback_host)}"
         "    }\n"
     )
 
@@ -60,10 +61,11 @@ def nginx_app_locations(
     upstream_port: int,
     fallback_error_page: str,
     fallback_location: str,
+    loopback_proxy_host: bool = False,
 ) -> str:
     normalized = (framework or "").upper()
     if normalized in {"NODEJS", "NEXTJS", "PYTHON", "GO"}:
-        return nginx_upstream_proxy_locations(upstream_port)
+        return nginx_upstream_proxy_locations(upstream_port, loopback_host=loopback_proxy_host)
     if normalized == "STATIC":
         return nginx_spa_static_locations(public_root, upstream_port)
     return nginx_laravel_app_locations(

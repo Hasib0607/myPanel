@@ -10,7 +10,8 @@ import {
   deploymentHasLaravelArtisan,
   deploymentRunsLaravel,
   detectDeploymentFiles,
-  detectDeploymentSource
+  detectDeploymentSource,
+  nodeStartUsesVitePreview
 } from "../lib/deploymentDetection.js";
 import { requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import {
@@ -810,6 +811,10 @@ function isNginxStaticRootForbidden(warning: string) {
   return /HTTP 403/i.test(warning) && /403 Forbidden/i.test(warning) && /nginx/i.test(warning);
 }
 
+function isPublicRouteHttp403(warning: string) {
+  return /HTTP 403/i.test(warning);
+}
+
 function isMissingLaravelAppKeyWarning(warning: string) {
   return /MissingAppKeyException/i.test(warning) || /No application encryption key has been specified/i.test(warning);
 }
@@ -822,6 +827,7 @@ async function republishDeploymentNginxVhost(
     port: number;
     rootPath: string;
     framework: DeploymentFramework;
+    startCommand?: string | null;
     publicDirectory?: string | null;
     outputDirectory?: string | null;
   },
@@ -837,12 +843,47 @@ async function republishDeploymentNginxVhost(
       upstreamPort: deployment.port,
       rootPath: deployment.rootPath,
       framework: deployment.framework,
+      startCommand: deployment.startCommand,
       publicDirectory: deployment.publicDirectory,
       outputDirectory: deployment.outputDirectory,
       fallbackRootPath: deploymentFallbackRootPath(domain),
       forceHttps: httpsReady
     })
   );
+}
+
+async function reconcileNodeProductionStartCommand(
+  deployment: DeploymentWithWorkerRelations,
+  releaseId: string | undefined
+) {
+  if (deployment.framework !== "NODEJS" && deployment.framework !== "NEXTJS") {
+    return deployment;
+  }
+
+  const detection = await detectDeploymentSource(deployment.rootPath, deployment.rootDirectory);
+  const suggested = detection.suggestions.startCommand;
+  if (!suggested || suggested === deployment.startCommand) {
+    return deployment;
+  }
+
+  const usesPreview = nodeStartUsesVitePreview(deployment.startCommand);
+  const suggestsServe = /\bserve\s+-s\b/.test(suggested);
+  if (!usesPreview || !suggestsServe) {
+    return deployment;
+  }
+
+  const updated = await prisma.deployment.update({
+    where: { id: deployment.id },
+    data: { startCommand: suggested, processManager: detection.suggestions.processManager ?? "PM2" },
+    include: deploymentWorkerInclude
+  });
+
+  await writeLog(deployment.id, releaseId, "PREFLIGHT", "Switched Node start command from Vite preview to static serve", {
+    previousStartCommand: deployment.startCommand,
+    startCommand: suggested
+  }, "warn");
+
+  return updated;
 }
 
 async function assertPublicRouteResult(result: unknown, label: string, deployment: { slug: string; domain?: { name: string } | null }, appPath?: string) {
@@ -970,10 +1011,29 @@ async function optionalPublicRouteWarning(
         warning = await assertPublicRouteResult(publicRoute, label, deployment, appPath);
       }
     }
-    if (warning && isNginxStaticRootForbidden(warning)) {
+    if (warning && isPublicRouteHttp403(warning) && deployment.framework === "NODEJS" && nodeStartUsesVitePreview(deployment.startCommand)) {
+      const current = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: deploymentWorkerInclude });
+      const reconciled = await reconcileNodeProductionStartCommand(current, releaseId);
+      Object.assign(deployment, { startCommand: reconciled.startCommand, processManager: reconciled.processManager });
+      await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Restart after Node production start command fix", () =>
+        restartDeploymentProcess({
+          deploymentId,
+          slug: deployment.slug,
+          appPath,
+          port: deployment.port,
+          processManager,
+          startCommand: renderStartCommand(deployment),
+          envVars,
+          logDir: deploymentLogDir(deployment.slug)
+        })
+      );
+      await guardianRepairSleep(5000);
+      warning = null;
+    }
+    if (warning && (isNginxStaticRootForbidden(warning) || isPublicRouteHttp403(warning))) {
       await republishDeploymentNginxVhost(deploymentId, releaseId, deployment, domain);
       await guardianRepairSleep(2000);
-      publicRoute = await runStep(deploymentId, releaseId, "HEALTH_CHECK", `${label} retry after nginx static-root fix`, () =>
+      publicRoute = await runStep(deploymentId, releaseId, "HEALTH_CHECK", `${label} retry after nginx public route fix`, () =>
         sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain), rootPath: appPath, framework: deployment.framework, requireHttps: httpsReady })
       );
       warning = await assertPublicRouteResult(publicRoute, label, deployment, appPath);
@@ -1299,6 +1359,47 @@ async function autoRepairComposerPlatformIssue(deploymentId: string, releaseId: 
 
   await writeLog(deploymentId, releaseId, "PREFLIGHT", "Composer platform repair applied", { tools: autoInstalled });
   return autoInstalled.length > 0;
+}
+
+async function ensureComposerDeclaredPlatformExtensions(deploymentId: string, releaseId: string | undefined, appPath: string) {
+  const composerJsonPath = path.join(appPath, "composer.json");
+  let composerJson: unknown;
+  try {
+    composerJson = JSON.parse(await fs.readFile(composerJsonPath, "utf8"));
+  } catch {
+    return false;
+  }
+
+  const manifest = composerJson as {
+    require?: Record<string, unknown>;
+    "require-dev"?: Record<string, unknown>;
+  };
+  const requiredKeys = new Set([
+    ...Object.keys(manifest.require ?? {}),
+    ...Object.keys(manifest["require-dev"] ?? {})
+  ].map((key) => key.toLowerCase()));
+
+  const targets = [];
+  if (requiredKeys.has("ext-soap")) targets.push({ tool: "php-soap" as const, label: "PHP SOAP extension" });
+  if (requiredKeys.has("ext-gd")) targets.push({ tool: "php-gd" as const, label: "PHP GD extension" });
+  if (targets.length === 0) return false;
+
+  await writeLog(deploymentId, releaseId, "PREFLIGHT", "Composer declared PHP extensions detected", {
+    composerJsonPath,
+    tools: targets.map((target) => target.tool)
+  }, "warn");
+
+  const installed: string[] = [];
+  for (const target of targets) {
+    const result = await runStep(deploymentId, releaseId, "PREFLIGHT", `Pre-install ${target.label}`, () =>
+      sysagent.deploymentInstallRuntimeTool({ tool: target.tool })
+    );
+    assertLiveResult(result, `Pre-install ${target.label}`);
+    installed.push(target.tool);
+  }
+
+  await writeLog(deploymentId, releaseId, "PREFLIGHT", "Composer PHP extension preflight completed", { tools: installed });
+  return installed.length > 0;
 }
 
 function isLaravelWritablePathIssue(text: string) {
@@ -1855,6 +1956,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
             upstreamPort: deployment.port,
             rootPath: deployment.rootPath,
             framework: deployment.framework,
+            startCommand: deployment.startCommand,
             publicDirectory: deployment.publicDirectory,
             outputDirectory: deployment.outputDirectory,
             fallbackRootPath: deploymentFallbackRootPath(domain),
@@ -1976,6 +2078,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
     deployment = await reconcileMisdetectedLaravelFramework(deployment, releaseId, appPath);
     deployment = await reconcileMissingStartCommand(deployment, releaseId);
+    deployment = await reconcileNodeProductionStartCommand(deployment, releaseId);
     await assertRuntimeToolsInstalled(deployment.id, releaseId, deployment);
 
     if (deployment.processManager === "NONE" && deployment.framework !== "STATIC") {
@@ -2009,10 +2112,19 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
 
     if (deployment.installCommand || deployment.packageManager) {
       await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "BUILDING" } });
+      const installCommandText = renderDeploymentCommand(deployment.installCommand, deployment.port);
+      const runsComposer = deployment.packageManager === "COMPOSER" || /\bcomposer\b/i.test(installCommandText ?? "");
+      if (runsComposer) {
+        await ensureComposerDeclaredPlatformExtensions(deployment.id, releaseId, appPath).catch(async (error) => {
+          await writeLog(deployment.id, releaseId, "PREFLIGHT", "Composer PHP extension preflight failed", {
+            error: error instanceof Error ? error.message : String(error)
+          }, "error");
+        });
+      }
       const runDependencyInstall = () => runStep(deployment.id, releaseId, "INSTALLING", "Dependency install", () =>
         sysagent.deploymentInstall({
           rootPath: appPath,
-          command: renderDeploymentCommand(deployment.installCommand, deployment.port),
+          command: installCommandText,
           packageManager: deployment.packageManager,
           env: envVars
         })
@@ -2115,6 +2227,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           upstreamPort: deployment.port,
           rootPath: deployment.rootPath,
           framework: deployment.framework,
+          startCommand: deployment.startCommand,
           publicDirectory: deployment.publicDirectory,
           outputDirectory: deployment.outputDirectory,
           fallbackRootPath: deploymentFallbackRootPath(domain),
@@ -2152,6 +2265,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
             upstreamPort: deployment.port,
             rootPath: deployment.rootPath,
             framework: deployment.framework,
+            startCommand: deployment.startCommand,
             publicDirectory: deployment.publicDirectory,
             outputDirectory: deployment.outputDirectory,
             fallbackRootPath: deploymentFallbackRootPath(domain),
@@ -2177,6 +2291,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
             upstreamPort: deployment.port,
             rootPath: deployment.rootPath,
             framework: deployment.framework,
+            startCommand: deployment.startCommand,
             publicDirectory: deployment.publicDirectory,
             outputDirectory: deployment.outputDirectory,
             fallbackRootPath: deploymentFallbackRootPath(domain),

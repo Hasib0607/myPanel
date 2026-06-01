@@ -28,8 +28,18 @@ test("detectDeploymentFiles infers Vite preview or static serve without start sc
     null
   );
   assert.equal(withPreview.detected, "NODEJS");
-  assert.match(withPreview.suggestions.startCommand ?? "", /preview/);
+  assert.match(withPreview.suggestions.startCommand ?? "", /serve -s dist/);
   assert.equal(withPreview.suggestions.processManager, "PM2");
+
+  const previewOnly = detectDeploymentFiles(
+    ["package.json", "vite.config.ts"],
+    JSON.stringify({
+      scripts: { dev: "vite", preview: "vite preview" },
+      devDependencies: { vite: "^5.0.0", react: "^18.0.0" }
+    }),
+    null
+  );
+  assert.match(previewOnly.suggestions.startCommand ?? "", /preview/);
 
   const withoutStart = detectDeploymentFiles(
     ["package.json", "vite.config.ts"],

@@ -349,6 +349,7 @@ async function publishDomainHosting(domainId: string) {
         upstreamPort: deployment.port,
         rootPath: deployment.rootPath,
         framework: deployment.framework,
+        startCommand: deployment.startCommand,
         publicDirectory: deployment.publicDirectory,
         outputDirectory: deployment.outputDirectory,
         fallbackRootPath: path.join(env.FILE_MANAGER_ROOT, domain.name, normalizeDocumentRoot(domain.documentRoot)),
