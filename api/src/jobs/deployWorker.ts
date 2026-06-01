@@ -529,7 +529,7 @@ function deploymentPublicEnv(domain: BoundDomain | null, httpsReady = false) {
   if (!domain?.name) return {} as Record<string, string>;
   const scheme = httpsReady ? "https" : "http";
   const url = `${scheme}://${domain.name}`;
-  return {
+  const shared = {
     APP_URL: url,
     ASSET_URL: url,
     APP_ORIGIN: url,
@@ -553,6 +553,18 @@ function deploymentPublicEnv(domain: BoundDomain | null, httpsReady = false) {
     SITE_URL: url,
     URL: url,
     VERCEL_URL: domain.name
+  };
+  if (scheme === "https") {
+    return {
+      ...shared,
+      SESSION_SECURE_COOKIE: "true",
+      SESSION_SAME_SITE: "lax",
+      TRUSTED_PROXIES: "*"
+    };
+  }
+  return {
+    ...shared,
+    SESSION_SECURE_COOKIE: "false"
   };
 }
 
@@ -581,6 +593,19 @@ function deploymentEnvWithPublicUrl(envVars: Record<string, string>, domain: Bou
     if (!currentValue || isLocalhostValue(currentValue) || isSameDomainPublicUrl(currentValue, domain)) {
       merged[key] = publicValue;
     }
+  }
+
+  if (httpsReady) {
+    const httpsUrl = `https://${domain.name}`;
+    for (const key of ["APP_URL", "ASSET_URL", "APP_ORIGIN", "AUTH_URL", "BASE_URL", "PUBLIC_URL", "SITE_URL", "URL"]) {
+      const current = merged[key];
+      if (!current || isLocalhostValue(current) || isSameDomainPublicUrl(current, domain)) {
+        merged[key] = httpsUrl;
+      }
+    }
+    merged.SESSION_SECURE_COOKIE = "true";
+    merged.SESSION_SAME_SITE = merged.SESSION_SAME_SITE || "lax";
+    merged.TRUSTED_PROXIES = merged.TRUSTED_PROXIES || "*";
   }
 
   return merged;
@@ -841,6 +866,9 @@ async function optionalPublicRouteWarning(
     await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Prepare Laravel public route check", () =>
       sysagent.deploymentRepairLaravelWritablePaths({ rootPath: appPath })
     );
+    if (await deploymentHttpsReady(domain)) {
+      envVars = deploymentEnvWithPublicUrl(envVars, domain, true);
+    }
     envVars = await ensureLaravelAppKey(deploymentId, releaseId, appPath, deployment.port, envVars);
     await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Guardian preflight repair", () =>
       runGuardianDeploymentRepair({ rootPath: appPath, framework: deployment.framework, envVars })
@@ -945,6 +973,33 @@ async function optionalPublicRouteWarning(
       await guardianRepairSleep(5000);
       publicRoute = await runStep(deploymentId, releaseId, "HEALTH_CHECK", `${label} retry after APP_KEY repair`, () =>
         sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain), rootPath: appPath, framework: deployment.framework, requireHttps: httpsReady })
+      );
+      warning = await assertPublicRouteResult(publicRoute, label, deployment, appPath);
+    }
+    const routeMeta = publicRoute as { effectiveUrl?: string };
+    if (
+      deployment.framework === "LARAVEL"
+      && httpsReady
+      && routeMeta.effectiveUrl?.toLowerCase().startsWith(`http://${domain.name.toLowerCase()}`)
+    ) {
+      envVars = deploymentEnvWithPublicUrl(envVars, domain, true);
+      envVars = await ensureLaravelAppKey(deploymentId, releaseId, appPath, deployment.port, envVars);
+      await republishDeploymentNginxVhost(deploymentId, releaseId, deployment, domain);
+      await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Restart after HTTPS URL repair", () =>
+        restartDeploymentProcess({
+          deploymentId,
+          slug: deployment.slug,
+          appPath,
+          port: deployment.port,
+          processManager,
+          startCommand: renderStartCommand(deployment),
+          envVars,
+          logDir: deploymentLogDir(deployment.slug)
+        })
+      );
+      await guardianRepairSleep(5000);
+      publicRoute = await runStep(deploymentId, releaseId, "HEALTH_CHECK", `${label} retry after HTTPS URL repair`, () =>
+        sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain), rootPath: appPath, framework: deployment.framework, requireHttps: true })
       );
       warning = await assertPublicRouteResult(publicRoute, label, deployment, appPath);
     }
@@ -1840,6 +1895,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     }
     await ensureParentDomainDeploymentProxy(deployment.id, domain);
     const serverName = deploymentServerName(domain);
+    const proxyHttpsReady = domain ? await deploymentHttpsReady(domain) : false;
     const nginxResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config", async () =>
       sysagent.deploymentNginx({
         deploymentId: deployment.id,
@@ -1848,7 +1904,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         rootPath: deployment.rootPath,
         publicDirectory: deployment.publicDirectory ?? "public",
         fallbackRootPath: deploymentFallbackRootPath(domain),
-        forceSsl: false,
+        forceSsl: proxyHttpsReady,
         ...(await deploymentSslCertificatePathsWhenReady(domain))
       })
     );
@@ -1889,6 +1945,10 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         assertLiveResult((httpsNginx as { enable?: unknown }).enable, "Nginx HTTPS proxy config enable");
         assertLiveResult((httpsNginx as { test?: unknown }).test, "Nginx HTTPS config test");
         assertLiveResult((httpsNginx as { reload?: unknown }).reload, "Nginx HTTPS reload");
+        envVars = deploymentEnvWithPublicUrl(envVars, domain, true);
+        if (deployment.framework === "LARAVEL") {
+          envVars = await ensureLaravelAppKey(deployment.id, releaseId, appPath, deployment.port, envVars);
+        }
       } catch (error) {
         await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "SSL certificate issue warning", {
           warning: error instanceof Error ? error.message : String(error)

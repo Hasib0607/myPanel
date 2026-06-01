@@ -83,6 +83,28 @@ def normalize_database_charset_env(process_env: dict[str, str]) -> dict[str, str
     return process_env
 
 
+def normalize_laravel_https_env(process_env: dict[str, str]) -> dict[str, str]:
+    """Align session/proxy env with APP_URL so HTTPS logins work behind nginx."""
+    app_url = (process_env.get("APP_URL") or "").strip()
+    lower = app_url.lower()
+    if lower.startswith("https://"):
+        process_env["SESSION_SECURE_COOKIE"] = "true"
+        if not (process_env.get("SESSION_SAME_SITE") or "").strip():
+            process_env["SESSION_SAME_SITE"] = "lax"
+        host = app_url.split("://", 1)[1].split("/")[0].strip()
+        if host and not (process_env.get("SANCTUM_STATEFUL_DOMAINS") or "").strip():
+            process_env["SANCTUM_STATEFUL_DOMAINS"] = host
+        if not (process_env.get("TRUSTED_PROXIES") or "").strip():
+            process_env["TRUSTED_PROXIES"] = "*"
+    elif lower.startswith("http://"):
+        process_env["SESSION_SECURE_COOKIE"] = "false"
+    return process_env
+
+
+def finalize_laravel_process_env(process_env: dict[str, str]) -> dict[str, str]:
+    return normalize_laravel_https_env(normalize_laravel_redis_env(normalize_database_charset_env(process_env)))
+
+
 def resolve_laravel_app_key(process_env: dict[str, str], existing: dict[str, str]) -> str | None:
     for candidate in (process_env.get("APP_KEY"), existing.get("APP_KEY")):
         if is_valid_laravel_app_key(candidate):
@@ -106,8 +128,8 @@ def prepare_laravel_env_for_sync(
     resolved = resolve_laravel_app_key(process_env, existing)
     if resolved:
         process_env["APP_KEY"] = resolved
-        return normalize_laravel_redis_env(normalize_database_charset_env(process_env)), False
-    return normalize_laravel_redis_env(normalize_database_charset_env(process_env)), True
+        return finalize_laravel_process_env(process_env), False
+    return finalize_laravel_process_env(process_env), True
 
 
 def format_dotenv_line(key: str, value: str) -> str:

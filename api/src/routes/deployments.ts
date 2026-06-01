@@ -642,6 +642,7 @@ function publicUrlEnv(domain: { name: string } | null | undefined) {
   const url = `https://${domain.name}`;
   return {
     APP_URL: url,
+    ASSET_URL: url,
     APP_ORIGIN: url,
     AUTH_URL: url,
     BASE_URL: url,
@@ -653,7 +654,10 @@ function publicUrlEnv(domain: { name: string } | null | undefined) {
     NEXT_PUBLIC_SITE_URL: url,
     PUBLIC_URL: url,
     SITE_URL: url,
-    URL: url
+    URL: url,
+    SESSION_SECURE_COOKIE: "true",
+    SESSION_SAME_SITE: "lax",
+    TRUSTED_PROXIES: "*"
   };
 }
 

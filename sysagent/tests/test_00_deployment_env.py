@@ -7,6 +7,7 @@ from app.deployment_env import (
     is_laravel_artisan_command,
     is_valid_laravel_app_key,
     normalize_database_charset_env,
+    normalize_laravel_https_env,
     normalize_laravel_redis_env,
     normalize_process_env,
     prepare_laravel_env_for_sync,
@@ -44,6 +45,15 @@ class DeploymentEnvTests(unittest.TestCase):
         self.assertEqual(env["CACHE_STORE"], "file")
         self.assertEqual(env["SESSION_DRIVER"], "file")
         self.assertEqual(env["QUEUE_CONNECTION"], "sync")
+
+    def test_normalize_laravel_https_env(self) -> None:
+        https_env = normalize_laravel_https_env({"APP_URL": "https://admin.example.com"})
+        self.assertEqual(https_env["SESSION_SECURE_COOKIE"], "true")
+        self.assertEqual(https_env["SESSION_SAME_SITE"], "lax")
+        self.assertEqual(https_env["TRUSTED_PROXIES"], "*")
+
+        http_env = normalize_laravel_https_env({"APP_URL": "http://admin.example.com"})
+        self.assertEqual(http_env["SESSION_SECURE_COOKIE"], "false")
 
     def test_normalize_database_charset_env_for_postgres(self) -> None:
         env = normalize_database_charset_env(
