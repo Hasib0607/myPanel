@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Clipboard, Eye, FolderGit2, GitBranch, Github, History, KeyRound, List, Pencil, Play, Plus, Save, Search, Settings2, Square, ToggleLeft, ToggleRight, Trash2, Wand2, X } from "lucide-react";
+import { CheckCircle2, Clipboard, Eye, FolderGit2, GitBranch, Github, History, KeyRound, List, Pencil, Play, Plus, Rocket, Save, Search, Settings2, ShieldCheck, Square, ToggleLeft, ToggleRight, Trash2, Wand2, X } from "lucide-react";
 import { apiDelete, apiDeleteBody, apiGet, apiGetText, apiPatch, apiPost, apiPut } from "@/lib/api";
 import type { Deployment, DeploymentDomainBinding, DeploymentEnvVar, DeploymentFramework, DeploymentListResponse, DeploymentRelease, DetectionResponse, PreflightResponse, QueueResponse, DeploymentSourceProvider } from "./deployment-types";
 import { frameworkOptions, sourceOptions } from "./deployment-types";
@@ -353,6 +353,29 @@ export function DeploymentsClient() {
     onError: (error) => setNotice(error instanceof Error ? error.message : "Action failed")
   });
 
+  const guardianFix = useMutation({
+    mutationFn: (deployment: Deployment) => apiPost<any>(`/deployments/${deployment.slug}/doctor/repair`, { action: "auto" }),
+    onSuccess: async (result, deployment) => {
+      if (result?.approvalRequired) {
+        setNotice(`Guardian prepared approval fixes for ${deployment.name}. Open project overview to approve risky actions.`);
+      } else {
+        setNotice(`Guardian fix requested for ${deployment.name}.`);
+      }
+      await invalidateDeployments();
+      if (deployment.slug) await queryClient.invalidateQueries({ queryKey: ["deployment-doctor", deployment.slug] });
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Guardian fix failed")
+  });
+
+  const panelUpdate = useMutation({
+    mutationFn: () => apiPost<{ pid?: number | null; queued?: boolean; message?: string }>("/guardian/panel-update/rebuild", {}),
+    onSuccess: (result) => {
+      const suffix = result?.pid ? ` PID ${result.pid}` : "";
+      setNotice(`Panel update queued${suffix}. API/worker/sysagent will restart if the update script is configured.`);
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Panel update failed")
+  });
+
   const toggleAutoDeploy = useMutation({
     mutationFn: (deployment: Deployment) => apiPatch<Deployment>(`/deployments/${deployment.slug}`, { autoDeployEnabled: !deployment.autoDeployEnabled }),
     onSuccess: async (deployment) => {
@@ -621,6 +644,8 @@ export function DeploymentsClient() {
                     ))}
                     <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium hover:bg-slate-50 disabled:opacity-50" disabled={openLogs.isPending} onClick={() => openLogs.mutate({ deployment: selected, type: "build" })} type="button"><Clipboard size={15} />Build log</button>
                     <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium hover:bg-slate-50 disabled:opacity-50" disabled={openLogs.isPending} onClick={() => openLogs.mutate({ deployment: selected, type: "running" })} type="button"><Clipboard size={15} />Running log</button>
+                    <button className="flex h-9 items-center gap-2 rounded-md border border-sky-200 bg-sky-50 px-3 text-sm font-semibold text-sky-700 hover:bg-sky-100 disabled:opacity-50" disabled={guardianFix.isPending} onClick={() => guardianFix.mutate(selected)} type="button"><ShieldCheck size={15} />Guardian fix</button>
+                    <button className="flex h-9 items-center gap-2 rounded-md border border-violet-200 bg-violet-50 px-3 text-sm font-semibold text-violet-700 hover:bg-violet-100 disabled:opacity-50" disabled={panelUpdate.isPending} onClick={() => panelUpdate.mutate()} type="button"><Rocket size={15} />Update panel</button>
                     <button
                       className={`flex h-9 items-center gap-2 rounded-md border px-3 text-sm font-medium disabled:opacity-50 ${selected.autoDeployEnabled ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-panel-line text-panel-muted hover:bg-slate-50"}`}
                       disabled={toggleAutoDeploy.isPending}
