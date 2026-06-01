@@ -1159,6 +1159,28 @@ async function upsertDeploymentEnvValue(deploymentId: string, key: string, value
   });
 }
 
+async function stripStaleDatabaseEnvFromPanel(deploymentId: string) {
+  for (const key of ["DB_PASSWORD", "DATABASE_URL"] as const) {
+    const row = await prisma.deploymentEnvVar.findUnique({
+      where: { deploymentId_key: { deploymentId, key } },
+      select: { value: true, secretRef: true }
+    });
+    if (!row) continue;
+    if (key === "DB_PASSWORD" && row.secretRef) continue;
+    if (row.value !== null || key === "DATABASE_URL") {
+      await deleteDeploymentEnvValue(deploymentId, key);
+    }
+  }
+}
+
+type DatabaseProvisionResponse = {
+  password?: string;
+  result?: {
+    verifyLocal?: { returncode?: number };
+    verifyTcp?: { returncode?: number };
+  };
+};
+
 async function deleteDeploymentEnvValue(deploymentId: string, key: string) {
   const existing = await prisma.deploymentEnvVar.findUnique({
     where: { deploymentId_key: { deploymentId, key } },
@@ -1292,10 +1314,52 @@ async function autoRepairDatabaseAccess(
     evidence: errorText.slice(0, 4000)
   }, "warn");
 
-  const repaired = await buildDatabaseRuntimeEnv(deployment, envVars);
+  const repaired = await buildDatabaseRuntimeEnv(deployment, envVars, { forcePasswordRotate: true, releaseId });
   const nextEnv = repaired.envVars;
   await ensureLaravelAppKey(deployment.id, releaseId, appPath, deployment.port, nextEnv);
   return nextEnv;
+}
+
+async function ensureLaravelDatabaseConnection(
+  deployment: DeploymentDatabaseRuntime,
+  releaseId: string | undefined,
+  appPath: string,
+  port: number,
+  envVars: Record<string, string>
+) {
+  if (!deployment.dbType || !deployment.dbName || !deployment.dbUser) return envVars;
+
+  const verify = () =>
+    runStep(deployment.id, releaseId, "PREFLIGHT", "Verify Laravel database connection", () =>
+      sysagent.deploymentBuild({
+        rootPath: appPath,
+        command: "php artisan db:show --no-interaction",
+        env: envVars
+      })
+    );
+
+  let result = await verify();
+  try {
+    assertCommandTree(result, "Laravel database connection");
+    return envVars;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!isMysqlAccessDenied(message)) throw error;
+    await writeLog(deployment.id, releaseId, "PREFLIGHT", "Laravel database connection failed; repairing credentials", {
+      evidence: message.slice(0, 4000)
+    }, "warn");
+    const repaired = await buildDatabaseRuntimeEnv(deployment, envVars, { forcePasswordRotate: true, releaseId });
+    const nextEnv = await ensureLaravelAppKey(deployment.id, releaseId, appPath, port, repaired.envVars);
+    result = await runStep(deployment.id, releaseId, "PREFLIGHT", "Verify Laravel database connection retry", () =>
+      sysagent.deploymentBuild({
+        rootPath: appPath,
+        command: "php artisan db:show --no-interaction",
+        env: nextEnv
+      })
+    );
+    assertCommandTree(result, "Laravel database connection");
+    return nextEnv;
+  }
 }
 
 async function autoRepairLaravelRedis(
@@ -1498,7 +1562,8 @@ async function resolveEnvVars(env: { key: string; value: string | null; secretRe
 
 async function buildDatabaseRuntimeEnv(
   deployment: { id: string; dbType?: "POSTGRESQL" | "MYSQL" | null; dbName?: string | null; dbUser?: string | null; dbPasswordSecretRef?: string | null },
-  envVars: Record<string, string>
+  envVars: Record<string, string>,
+  options?: { forcePasswordRotate?: boolean; releaseId?: string }
 ) {
   const selectedEngine = await normalizeSelectedDatabaseEngineEnv(deployment, envVars);
   const nextEnv = { ...selectedEngine.envVars };
@@ -1506,22 +1571,51 @@ async function buildDatabaseRuntimeEnv(
 
   if (!deployment.dbType || !deployment.dbName || !deployment.dbUser) return { envVars: nextEnv, changed };
 
+  await stripStaleDatabaseEnvFromPanel(deployment.id);
+  delete nextEnv.DB_PASSWORD;
+  delete nextEnv.DATABASE_URL;
+  changed = true;
+
   const secretRef = deployment.dbPasswordSecretRef ?? `deployment:${deployment.id}:database-password`;
-  let password = deployment.dbPasswordSecretRef ? await getSecret(deployment.dbPasswordSecretRef) : null;
+  let password = options?.forcePasswordRotate ? null : await getSecret(secretRef);
   const protectedUsers = new Set(["root", "mysql", "mariadb.sys", "postgres"]);
   if (!protectedUsers.has(deployment.dbUser)) {
-    const provision = await sysagent.provisionDatabase({
+    let provision = (await sysagent.provisionDatabase({
       engine: deployment.dbType,
       database: deployment.dbName,
       username: deployment.dbUser,
       password: password ?? undefined
-    }) as { password?: string; result?: unknown };
+    })) as DatabaseProvisionResponse;
     assertCommandTree(provision.result, "Database provision/grant");
+
+    const verifyOk =
+      provision.result?.verifyLocal?.returncode === 0 || provision.result?.verifyTcp?.returncode === 0;
+    if (!verifyOk) {
+      await writeLog(deployment.id, options?.releaseId, "PREFLIGHT", "Database credential verify failed; rotating password", {
+        dbUser: deployment.dbUser,
+        dbName: deployment.dbName
+      }, "warn");
+      const rotated = (await sysagent.databasePassword({
+        engine: deployment.dbType,
+        username: deployment.dbUser
+      })) as { password?: string };
+      password = rotated.password ?? null;
+      provision = (await sysagent.provisionDatabase({
+        engine: deployment.dbType,
+        database: deployment.dbName,
+        username: deployment.dbUser,
+        password: password ?? undefined
+      })) as DatabaseProvisionResponse;
+      assertCommandTree(provision.result, "Database reprovision after password rotate");
+    }
+
     if (provision.password) {
       password = provision.password;
+    }
+    if (password) {
       await putSecret({
         ref: secretRef,
-        value: provision.password,
+        value: password,
         kind: "DATABASE_PASSWORD",
         label: `${deployment.dbUser}@${deployment.dbName}`,
         metadata: { deploymentId: deployment.id, engine: deployment.dbType, database: deployment.dbName, username: deployment.dbUser }
@@ -1773,7 +1867,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
     let domain = deploymentDomain(deployment);
     let envVars = deploymentEnvWithPublicUrl(await resolveEnvVars(deployment.env), domain);
-    const databaseRuntime = await buildDatabaseRuntimeEnv(deployment, envVars);
+    const databaseRuntime = await buildDatabaseRuntimeEnv(deployment, envVars, { releaseId });
     envVars = databaseRuntime.envVars;
     if (databaseRuntime.changed) {
       await writeLog(deployment.id, releaseId, "PREFLIGHT", "Normalized deployment database runtime env", {
@@ -1821,6 +1915,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
 
     if (deployment.framework === "LARAVEL") {
       envVars = await ensureLaravelAppKey(deployment.id, releaseId, appPath, deployment.port, envVars);
+      envVars = await ensureLaravelDatabaseConnection(deployment, releaseId, appPath, deployment.port, envVars);
 
       const optimizeClearResult = await runStep(deployment.id, releaseId, "INSTALLING", "Laravel cache clear", () =>
         sysagent.deploymentBuild({

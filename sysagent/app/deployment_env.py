@@ -4,6 +4,7 @@ import re
 import shlex
 import subprocess
 from pathlib import Path
+from urllib.parse import quote_plus
 
 VALID_ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Runtime env files are sourced by bash; keep only shell-boring token chars unquoted.
@@ -83,6 +84,33 @@ def normalize_database_charset_env(process_env: dict[str, str]) -> dict[str, str
     return process_env
 
 
+def normalize_laravel_database_env(process_env: dict[str, str]) -> dict[str, str]:
+    """Keep DATABASE_URL in sync with DB_* so Laravel does not use a stale URL."""
+    connection = (process_env.get("DB_CONNECTION") or "").strip().lower()
+    database = (process_env.get("DB_DATABASE") or process_env.get("DB_NAME") or "").strip()
+    username = (process_env.get("DB_USERNAME") or process_env.get("DB_USER") or "").strip()
+    if not database or not username:
+        return process_env
+
+    password = process_env.get("DB_PASSWORD", "")
+    host = (process_env.get("DB_HOST") or "127.0.0.1").strip()
+    port = (process_env.get("DB_PORT") or "").strip()
+
+    if connection in {"mysql", "mariadb"}:
+        port = port or "3306"
+        process_env["DATABASE_URL"] = (
+            f"mysql://{quote_plus(username)}:{quote_plus(password)}@{host}:{port}/{quote_plus(database)}"
+        )
+        return process_env
+
+    if connection in {"pgsql", "postgres", "postgresql"}:
+        port = port or "5432"
+        process_env["DATABASE_URL"] = (
+            f"postgresql://{quote_plus(username)}:{quote_plus(password)}@{host}:{port}/{quote_plus(database)}"
+        )
+    return process_env
+
+
 def normalize_laravel_https_env(process_env: dict[str, str]) -> dict[str, str]:
     """Align session/proxy env with APP_URL so HTTPS logins work behind nginx."""
     app_url = (process_env.get("APP_URL") or "").strip()
@@ -102,7 +130,9 @@ def normalize_laravel_https_env(process_env: dict[str, str]) -> dict[str, str]:
 
 
 def finalize_laravel_process_env(process_env: dict[str, str]) -> dict[str, str]:
-    return normalize_laravel_https_env(normalize_laravel_redis_env(normalize_database_charset_env(process_env)))
+    return normalize_laravel_https_env(
+        normalize_laravel_database_env(normalize_laravel_redis_env(normalize_database_charset_env(process_env)))
+    )
 
 
 def resolve_laravel_app_key(process_env: dict[str, str], existing: dict[str, str]) -> str | None:

@@ -7,6 +7,7 @@ from app.deployment_env import (
     is_laravel_artisan_command,
     is_valid_laravel_app_key,
     normalize_database_charset_env,
+    normalize_laravel_database_env,
     normalize_laravel_https_env,
     normalize_laravel_redis_env,
     normalize_process_env,
@@ -45,6 +46,21 @@ class DeploymentEnvTests(unittest.TestCase):
         self.assertEqual(env["CACHE_STORE"], "file")
         self.assertEqual(env["SESSION_DRIVER"], "file")
         self.assertEqual(env["QUEUE_CONNECTION"], "sync")
+
+    def test_normalize_laravel_database_env_rebuilds_database_url(self) -> None:
+        env = normalize_laravel_database_env(
+            {
+                "DB_CONNECTION": "mysql",
+                "DB_HOST": "127.0.0.1",
+                "DB_PORT": "3306",
+                "DB_DATABASE": "ebitans_main",
+                "DB_USERNAME": "ebitans_main",
+                "DB_PASSWORD": "secret!pass",
+                "DATABASE_URL": "mysql://ebitans_main:old-wrong@localhost:3306/ebitans_main",
+            }
+        )
+        self.assertIn("ebitans_main:secret%21pass@127.0.0.1:3306/ebitans_main", env["DATABASE_URL"])
+        self.assertNotIn("old-wrong", env["DATABASE_URL"])
 
     def test_normalize_laravel_https_env(self) -> None:
         https_env = normalize_laravel_https_env({"APP_URL": "https://admin.example.com"})
