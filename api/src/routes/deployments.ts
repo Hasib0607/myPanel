@@ -1354,15 +1354,21 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     const contents = await githubJson<Array<{ name: string; type: string }>>(contentsPath, token);
     const files = Array.isArray(contents) ? contents.map((item) => item.name) : [];
     let packageJson: string | null = null;
+    let composerJson: string | null = null;
     if (files.some((file) => file.toLowerCase() === "package.json")) {
       const packagePath = `/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/contents/${requestedPath ? `${requestedPath}/` : ""}package.json?ref=${encodeURIComponent(query.branch)}`;
       const packageFile = await githubJson<{ content: string; encoding: string }>(packagePath, token);
       if (packageFile.encoding === "base64") packageJson = Buffer.from(packageFile.content, "base64").toString("utf8");
     }
+    if (files.some((file) => file.toLowerCase() === "composer.json")) {
+      const composerPath = `/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/contents/${requestedPath ? `${requestedPath}/` : ""}composer.json?ref=${encodeURIComponent(query.branch)}`;
+      const composerFile = await githubJson<{ content: string; encoding: string }>(composerPath, token);
+      if (composerFile.encoding === "base64") composerJson = Buffer.from(composerFile.content, "base64").toString("utf8");
+    }
     return {
       repository: `${params.owner}/${params.repo}`,
       dryRun: false,
-      ...detectDeploymentFiles(files, packageJson)
+      ...detectDeploymentFiles(files, packageJson, composerJson)
     };
   });
 

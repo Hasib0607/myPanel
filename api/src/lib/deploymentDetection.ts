@@ -14,6 +14,11 @@ type PackageJson = {
   main?: string;
 };
 
+type ComposerJson = {
+  require?: Record<string, string>;
+  "require-dev"?: Record<string, string>;
+};
+
 export type DetectionSuggestion = {
   runtime: DeploymentRuntime | null;
   packageManager: DeploymentPackageManager | null;
@@ -65,6 +70,10 @@ function hasDependency(pkg: PackageJson, name: string) {
   return Boolean(pkg.dependencies?.[name] || pkg.devDependencies?.[name]);
 }
 
+function hasScript(pkg: PackageJson, name: string) {
+  return Boolean(pkg.scripts?.[name]);
+}
+
 function readPackageJson(raw: string | null | undefined): PackageJson | null {
   if (!raw) return null;
   try {
@@ -72,6 +81,70 @@ function readPackageJson(raw: string | null | undefined): PackageJson | null {
   } catch {
     return null;
   }
+}
+
+function readComposerJson(raw: string | null | undefined): ComposerJson | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as ComposerJson;
+  } catch {
+    return null;
+  }
+}
+
+function isLaravelComposerPackage(composer: ComposerJson | null) {
+  if (!composer) return false;
+  const requirements = { ...composer.require, ...composer["require-dev"] };
+  return Boolean(
+    requirements["laravel/framework"]
+      || requirements["laravel/lumen-framework"]
+      || requirements["illuminate/support"]
+  );
+}
+
+function isNodeFrontendPackage(pkg: PackageJson) {
+  return (
+    hasDependency(pkg, "react")
+    || hasDependency(pkg, "react-dom")
+    || hasDependency(pkg, "vite")
+    || hasDependency(pkg, "next")
+    || hasDependency(pkg, "@vitejs/plugin-react")
+    || hasDependency(pkg, "react-scripts")
+  );
+}
+
+function nodeJsDetection(
+  files: string[],
+  names: Set<string>,
+  packageManager: DeploymentPackageManager,
+  pkg: PackageJson,
+  reason: string,
+  confidence: number,
+  outputDirectory: string | null
+): DeploymentDetection {
+  const scripts = pkg.scripts ?? {};
+  const hasScriptName = (name: string) => Boolean(scripts[name]);
+  const startCommand = hasScriptName("start")
+    ? packageRun(packageManager, "start")
+    : pkg.main
+      ? `node ${pkg.main}`
+      : null;
+
+  return {
+    detected: "NODEJS",
+    confidence,
+    reason,
+    files,
+    suggestions: {
+      runtime: "NODE",
+      packageManager,
+      installCommand: packageInstall(packageManager),
+      buildCommand: hasScriptName("build") ? packageRun(packageManager, "build") : null,
+      startCommand,
+      outputDirectory,
+      processManager: startCommand ? "PM2" : "NONE"
+    }
+  };
 }
 
 async function readTextIfExists(filePath: string) {
@@ -82,18 +155,23 @@ async function readTextIfExists(filePath: string) {
   }
 }
 
-export function detectDeploymentFiles(files: string[], packageJsonText?: string | null): DeploymentDetection {
+export function detectDeploymentFiles(
+  files: string[],
+  packageJsonText?: string | null,
+  composerJsonText?: string | null
+): DeploymentDetection {
   const names = new Set(files.map((file) => file.toLowerCase()));
   const packageManager = packageManagerFor(names);
   const pkg = readPackageJson(packageJsonText);
+  const composer = readComposerJson(composerJsonText);
   const scripts = pkg?.scripts ?? {};
-  const hasScript = (name: string) => Boolean(scripts[name]);
+  const hasPkgScript = (name: string) => Boolean(scripts[name]);
 
-  if (names.has("artisan") || names.has("composer.json")) {
+  if (names.has("artisan")) {
     return {
       detected: "LARAVEL",
-      confidence: 0.9,
-      reason: "Found Laravel/PHP markers",
+      confidence: 0.98,
+      reason: "Found artisan",
       files,
       suggestions: {
         runtime: "PHP",
@@ -118,7 +196,7 @@ export function detectDeploymentFiles(files: string[], packageJsonText?: string 
         runtime: "NODE",
         packageManager,
         installCommand: packageInstall(packageManager),
-        buildCommand: hasScript("build") ? packageRun(packageManager, "build") : null,
+        buildCommand: hasPkgScript("build") ? packageRun(packageManager, "build") : null,
         startCommand: "npx next start -p {PORT} -H 127.0.0.1",
         outputDirectory: ".next",
         processManager: "PM2"
@@ -127,39 +205,48 @@ export function detectDeploymentFiles(files: string[], packageJsonText?: string 
   }
 
   const viteDetected = names.has("vite.config.js") || names.has("vite.config.ts") || names.has("vite.config.mjs") || (pkg ? hasDependency(pkg, "vite") : false);
-  if (viteDetected) {
-    return {
-      detected: "NODEJS",
-      confidence: 0.9,
-      reason: "Found Vite markers",
-      files,
-      suggestions: {
-        runtime: "NODE",
-        packageManager,
-        installCommand: packageInstall(packageManager),
-        buildCommand: hasScript("build") ? packageRun(packageManager, "build") : null,
-        startCommand: hasScript("preview") ? `${packageRun(packageManager, "preview")} -- --host 127.0.0.1 --port {PORT}` : "npx serve -s dist -l {PORT}",
-        outputDirectory: "dist",
-        processManager: "PM2"
-      }
-    };
+  if (viteDetected && pkg) {
+    return nodeJsDetection(files, names, packageManager, pkg, "Found Vite markers", 0.9, "dist");
   }
 
-  if (pkg) {
-    const startCommand = hasScript("start") ? packageRun(packageManager, "start") : pkg.main ? `node ${pkg.main}` : null;
+  if (pkg && isNodeFrontendPackage(pkg)) {
+    return nodeJsDetection(
+      files,
+      names,
+      packageManager,
+      pkg,
+      "Found package.json with React/Vite/Node frontend markers",
+      0.92,
+      hasPkgScript("build") ? "dist" : null
+    );
+  }
+
+  if (pkg && (hasPkgScript("start") || pkg.main)) {
+    return nodeJsDetection(
+      files,
+      names,
+      packageManager,
+      pkg,
+      hasPkgScript("start") ? "Found package.json with a start script" : "Found package.json with a main entry",
+      hasPkgScript("start") ? 0.84 : 0.6,
+      hasPkgScript("build") ? "dist" : null
+    );
+  }
+
+  if (names.has("composer.json") && isLaravelComposerPackage(composer)) {
     return {
-      detected: "NODEJS",
-      confidence: startCommand ? 0.8 : 0.55,
-      reason: startCommand ? "Found package.json with a runnable Node command" : "Found package.json but no start script or main entry",
+      detected: "LARAVEL",
+      confidence: 0.9,
+      reason: "Found Laravel composer dependencies",
       files,
       suggestions: {
-        runtime: "NODE",
-        packageManager,
-        installCommand: packageInstall(packageManager),
-        buildCommand: hasScript("build") ? packageRun(packageManager, "build") : null,
-        startCommand,
-        outputDirectory: hasScript("build") ? "dist" : null,
-        processManager: startCommand ? "PM2" : "NONE"
+        runtime: "PHP",
+        packageManager: "COMPOSER",
+        installCommand: "composer install --no-dev --optimize-autoloader --no-interaction --no-scripts",
+        buildCommand: null,
+        startCommand: "php artisan serve --host=127.0.0.1 --port {PORT}",
+        outputDirectory: "public",
+        processManager: "SUPERVISOR"
       }
     };
   }
@@ -217,5 +304,15 @@ export async function detectDeploymentSource(rootPath: string, rootDirectory = "
   const sourceRoot = path.resolve(rootPath, rootDirectory || ".");
   const files = await fs.readdir(sourceRoot);
   const packageJson = await readTextIfExists(path.join(sourceRoot, "package.json"));
-  return { ...(detectDeploymentFiles(files, packageJson)), rootPath: sourceRoot };
+  const composerJson = await readTextIfExists(path.join(sourceRoot, "composer.json"));
+  return { ...(detectDeploymentFiles(files, packageJson, composerJson)), rootPath: sourceRoot };
+}
+
+export async function deploymentHasLaravelArtisan(appPath: string) {
+  try {
+    await fs.access(path.join(appPath, "artisan"));
+    return true;
+  } catch {
+    return false;
+  }
 }

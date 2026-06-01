@@ -6,7 +6,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { redis } from "../lib/redis.js";
 import { logger } from "../lib/logger.js";
-import { detectDeploymentSource } from "../lib/deploymentDetection.js";
+import { deploymentHasLaravelArtisan, detectDeploymentSource } from "../lib/deploymentDetection.js";
 import { requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import {
   deploymentRecoveryAttempts,
@@ -1416,6 +1416,40 @@ async function applyLaravelAppKeyFromSync(
   return envVars;
 }
 
+async function reconcileMisdetectedLaravelFramework(
+  deployment: DeploymentWithWorkerRelations,
+  releaseId: string | undefined,
+  appPath: string
+) {
+  if (deployment.framework !== "LARAVEL" || (await deploymentHasLaravelArtisan(appPath))) {
+    return deployment;
+  }
+
+  const detection = await detectDeploymentSource(deployment.rootPath, deployment.rootDirectory);
+  const updated = await prisma.deployment.update({
+    where: { id: deployment.id },
+    data: {
+      framework: detection.detected,
+      runtime: detection.suggestions.runtime,
+      packageManager: detection.suggestions.packageManager,
+      installCommand: detection.suggestions.installCommand,
+      buildCommand: detection.suggestions.buildCommand,
+      startCommand: detection.suggestions.startCommand,
+      outputDirectory: detection.suggestions.outputDirectory,
+      processManager: detection.suggestions.processManager
+    },
+    include: deploymentWorkerInclude
+  });
+
+  await writeLog(deployment.id, releaseId, "PREFLIGHT", "Corrected misdetected Laravel framework", {
+    previousFramework: "LARAVEL",
+    detected: detection.detected,
+    reason: detection.reason
+  }, "warn");
+
+  return updated;
+}
+
 async function ensureLaravelAppKey(
   deploymentId: string,
   releaseId: string | undefined,
@@ -1860,11 +1894,13 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     });
     await assertRuntimeToolsInstalled(deployment.id, releaseId, deployment);
 
+    const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
+    deployment = await reconcileMisdetectedLaravelFramework(deployment, releaseId, appPath);
+    await assertRuntimeToolsInstalled(deployment.id, releaseId, deployment);
+
     if (deployment.processManager === "NONE" && deployment.framework !== "STATIC") {
       throw new Error(`No runnable start command found for ${deployment.slug}. Add a package.json start script or set a manual start command.`);
     }
-
-    const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
     let domain = deploymentDomain(deployment);
     let envVars = deploymentEnvWithPublicUrl(await resolveEnvVars(deployment.env), domain);
     const databaseRuntime = await buildDatabaseRuntimeEnv(deployment, envVars, { releaseId });
