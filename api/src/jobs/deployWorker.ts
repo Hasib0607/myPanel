@@ -37,6 +37,7 @@ import {
   enableDeploymentTlsInDatabase,
   ensureAcmeWebroot,
   ensureParentDomainDeploymentProxy,
+  buildDeploymentNginxRequest,
   publishDeploymentProxyNginx,
   waitForQueueJob
 } from "../lib/deploymentDomainSsl.js";
@@ -552,6 +553,9 @@ function deploymentPublicEnv(domain: BoundDomain | null, httpsReady = false) {
     NEXT_PUBLIC_ORIGIN: url,
     NEXT_PUBLIC_SITE_URL: url,
     NEXT_PUBLIC_URL: url,
+    VITE_APP_URL: url,
+    VITE_BASE_URL: url,
+    VITE_PUBLIC_URL: url,
     ORIGIN: url,
     PUBLIC_URL: url,
     SERVER_URL: url,
@@ -813,7 +817,14 @@ function isMissingLaravelAppKeyWarning(warning: string) {
 async function republishDeploymentNginxVhost(
   deploymentId: string,
   releaseId: string | undefined,
-  deployment: { id: string; port: number; rootPath: string; publicDirectory?: string | null },
+  deployment: {
+    id: string;
+    port: number;
+    rootPath: string;
+    framework: DeploymentFramework;
+    publicDirectory?: string | null;
+    outputDirectory?: string | null;
+  },
   domain: BoundDomain
 ) {
   const serverName = deploymentServerName(domain);
@@ -825,7 +836,9 @@ async function republishDeploymentNginxVhost(
       fqdn: serverName,
       upstreamPort: deployment.port,
       rootPath: deployment.rootPath,
-      publicDirectory: deployment.publicDirectory ?? "public",
+      framework: deployment.framework,
+      publicDirectory: deployment.publicDirectory,
+      outputDirectory: deployment.outputDirectory,
       fallbackRootPath: deploymentFallbackRootPath(domain),
       forceHttps: httpsReady
     })
@@ -844,15 +857,19 @@ async function assertPublicRouteResult(result: unknown, label: string, deploymen
   if (!message) return null;
 
   const runtimeText = await deploymentRuntimeLogTail(deployment, appPath);
-
-  const diagnosticText = runtimeText.replace(/server running on \[[^\]]+\]/ig, "");
-  const localhostProxyMatch = diagnosticText.match(/https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?[^\s)"]*/i);
+  const routeMeta = result as { effectiveUrl?: string; stdout?: string };
+  const curlDiagnostic = stripAnsi(`${message}\n${routeMeta.stdout ?? ""}\n${routeMeta.effectiveUrl ?? ""}`);
+  const localhostProxyMatch = curlDiagnostic.match(/https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?(?:\/|$)/i);
   const domainHint = localhostProxyMatch
-    ? ` The app is healthy on localhost, but it is generating an internal URL (${localhostProxyMatch[0]}). Fix the deployed app env/source so public URLs use ${deployment.domain?.name ? `https://${deployment.domain.name}` : "the domain"} instead of localhost.`
+    ? ` The app is healthy on localhost, but the public route resolved to an internal URL (${localhostProxyMatch[0]}). Fix the deployed app env/source so public URLs use ${deployment.domain?.name ? `https://${deployment.domain.name}` : "the domain"} instead of localhost.`
     : deployment.domain?.name
-      ? ` The app is healthy on localhost, but the public domain returned an error. Check the Nginx vhost, SSL redirect, DNS A record, and whether the app is generating localhost URLs.`
+      ? ` The app is healthy on localhost, but the public domain returned an error. Check the Nginx vhost, SSL redirect, DNS A record, and upstream port.`
       : "";
   throw new Error(`${message}${domainHint}${runtimeText}`);
+}
+
+function stripAnsi(text: string) {
+  return text.replace(/\u001b\[[0-9;]*m/g, "");
 }
 
 async function optionalPublicRouteWarning(
@@ -1831,16 +1848,20 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
       await ensureParentDomainDeploymentProxy(deployment.id, domain);
       const serverName = deploymentServerName(domain);
       const nginxResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config", async () =>
-        sysagent.deploymentNginx({
-          deploymentId: deployment.id,
-          serverName,
-          upstreamPort: deployment.port,
-          rootPath: deployment.rootPath,
-          publicDirectory: deployment.publicDirectory ?? "public",
-          fallbackRootPath: deploymentFallbackRootPath(domain),
-          forceSsl: false,
-          ...(await deploymentSslCertificatePathsWhenReady(domain))
-        })
+        sysagent.deploymentNginx(
+          buildDeploymentNginxRequest({
+            deploymentId: deployment.id,
+            fqdn: serverName ?? domain.name,
+            upstreamPort: deployment.port,
+            rootPath: deployment.rootPath,
+            framework: deployment.framework,
+            publicDirectory: deployment.publicDirectory,
+            outputDirectory: deployment.outputDirectory,
+            fallbackRootPath: deploymentFallbackRootPath(domain),
+            forceSsl: false,
+            ...(await deploymentSslCertificatePathsWhenReady(domain))
+          })
+        )
       );
       assertLiveResult((nginxResult as { write?: unknown }).write, "Nginx proxy config write");
       assertLiveResult((nginxResult as { enable?: unknown }).enable, "Nginx proxy config enable");
@@ -2087,16 +2108,20 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     const serverName = deploymentServerName(domain);
     const proxyHttpsReady = domain ? await deploymentHttpsReady(domain) : false;
     const nginxResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config", async () =>
-      sysagent.deploymentNginx({
-        deploymentId: deployment.id,
-        serverName,
-        upstreamPort: deployment.port,
-        rootPath: deployment.rootPath,
-        publicDirectory: deployment.publicDirectory ?? "public",
-        fallbackRootPath: deploymentFallbackRootPath(domain),
-        forceSsl: proxyHttpsReady,
-        ...(await deploymentSslCertificatePathsWhenReady(domain))
-      })
+      sysagent.deploymentNginx(
+        buildDeploymentNginxRequest({
+          deploymentId: deployment.id,
+          fqdn: serverName ?? domain!.name,
+          upstreamPort: deployment.port,
+          rootPath: deployment.rootPath,
+          framework: deployment.framework,
+          publicDirectory: deployment.publicDirectory,
+          outputDirectory: deployment.outputDirectory,
+          fallbackRootPath: deploymentFallbackRootPath(domain),
+          forceSsl: proxyHttpsReady,
+          ...(await deploymentSslCertificatePathsWhenReady(domain))
+        })
+      )
     );
     assertLiveResult((nginxResult as { write?: unknown }).write, "Nginx proxy config write");
     assertLiveResult((nginxResult as { enable?: unknown }).enable, "Nginx proxy config enable");
@@ -2126,7 +2151,9 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
             fqdn: serverName ?? domain!.name,
             upstreamPort: deployment.port,
             rootPath: deployment.rootPath,
-            publicDirectory: deployment.publicDirectory ?? "public",
+            framework: deployment.framework,
+            publicDirectory: deployment.publicDirectory,
+            outputDirectory: deployment.outputDirectory,
             fallbackRootPath: deploymentFallbackRootPath(domain),
             forceHttps: true
           })
@@ -2149,7 +2176,9 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
             fqdn: serverName ?? domain!.name,
             upstreamPort: deployment.port,
             rootPath: deployment.rootPath,
-            publicDirectory: deployment.publicDirectory ?? "public",
+            framework: deployment.framework,
+            publicDirectory: deployment.publicDirectory,
+            outputDirectory: deployment.outputDirectory,
             fallbackRootPath: deploymentFallbackRootPath(domain),
             forceHttps: false
           })

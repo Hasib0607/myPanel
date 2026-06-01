@@ -1,4 +1,5 @@
 import type { Job } from "bullmq";
+import type { DeploymentFramework } from "@prisma/client";
 import { prisma } from "./prisma.js";
 import { env } from "../config/env.js";
 import path from "node:path";
@@ -155,12 +156,53 @@ export async function findDeploymentProxyTarget(fqdn: string) {
   return { deployment, domain, subdomainId: null as string | null, includeWww: true };
 }
 
+export function deploymentNginxPublicDirectory(input: {
+  framework: DeploymentFramework;
+  publicDirectory?: string | null;
+  outputDirectory?: string | null;
+}) {
+  if (input.framework === "LARAVEL") return input.publicDirectory ?? "public";
+  return input.outputDirectory ?? input.publicDirectory ?? "dist";
+}
+
+export function buildDeploymentNginxRequest(input: {
+  deploymentId: string;
+  fqdn: string;
+  upstreamPort: number;
+  rootPath: string;
+  framework: DeploymentFramework;
+  publicDirectory?: string | null;
+  outputDirectory?: string | null;
+  fallbackRootPath: string | null;
+  forceSsl: boolean;
+  requireSsl?: boolean;
+  sslCertificate?: string;
+  sslCertificateKey?: string;
+}) {
+  return {
+    deploymentId: input.deploymentId,
+    serverName: input.fqdn,
+    upstreamPort: input.upstreamPort,
+    rootPath: input.rootPath,
+    framework: input.framework,
+    publicDirectory: deploymentNginxPublicDirectory(input),
+    fallbackRootPath: input.fallbackRootPath,
+    forceSsl: input.forceSsl,
+    requireSsl: input.requireSsl ?? false,
+    ...(input.sslCertificate && input.sslCertificateKey
+      ? { sslCertificate: input.sslCertificate, sslCertificateKey: input.sslCertificateKey }
+      : {})
+  };
+}
+
 export async function publishDeploymentProxyNginx(input: {
   deploymentId: string;
   fqdn: string;
   upstreamPort: number;
   rootPath: string;
+  framework: DeploymentFramework;
   publicDirectory?: string | null;
+  outputDirectory?: string | null;
   fallbackRootPath: string | null;
   forceHttps: boolean;
   requireSsl?: boolean;
@@ -172,17 +214,21 @@ export async function publishDeploymentProxyNginx(input: {
     sslEnabled: input.forceHttps
   };
   const httpsReady = input.forceHttps ? await deploymentHttpsReady(bound) : false;
-  return sysagent.deploymentNginx({
-    deploymentId: input.deploymentId,
-    serverName: input.fqdn,
-    upstreamPort: input.upstreamPort,
-    rootPath: input.rootPath,
-    publicDirectory: input.publicDirectory ?? "public",
-    fallbackRootPath: input.fallbackRootPath,
-    forceSsl: input.forceHttps && httpsReady,
-    requireSsl: input.requireSsl ?? false,
-    ...(httpsReady ? deploymentSslCertificatePaths(bound) : {})
-  });
+  return sysagent.deploymentNginx(
+    buildDeploymentNginxRequest({
+      deploymentId: input.deploymentId,
+      fqdn: input.fqdn,
+      upstreamPort: input.upstreamPort,
+      rootPath: input.rootPath,
+      framework: input.framework,
+      publicDirectory: input.publicDirectory,
+      outputDirectory: input.outputDirectory,
+      fallbackRootPath: input.fallbackRootPath,
+      forceSsl: input.forceHttps && httpsReady,
+      requireSsl: input.requireSsl ?? false,
+      ...(httpsReady ? deploymentSslCertificatePaths(bound) : {})
+    })
+  );
 }
 
 export async function ensureAcmeWebroot(domain: BoundDomain | null) {

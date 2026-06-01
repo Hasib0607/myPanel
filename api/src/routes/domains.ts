@@ -6,6 +6,7 @@ import { Prisma } from "@prisma/client";
 import { env } from "../config/env.js";
 import { audit } from "../lib/audit.js";
 import { ensureDomainFileStructure } from "../lib/domainFiles.js";
+import { buildDeploymentNginxRequest } from "../lib/deploymentDomainSsl.js";
 import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
 import { sysagent } from "../lib/sysagent.js";
@@ -341,15 +342,19 @@ async function publishDomainHosting(domainId: string) {
           orderBy: { createdAt: "desc" }
         });
     if (!deployment) throw Object.assign(new Error("Select a deployment before publishing deployment proxy hosting."), { statusCode: 400 });
-    nginxResult = await sysagent.deploymentNginx({
-      deploymentId: deployment.id,
-      serverName: `${domain.name} www.${domain.name}`,
-      upstreamPort: deployment.port,
-      rootPath: deployment.rootPath,
-      publicDirectory: deployment.publicDirectory ?? "public",
-      fallbackRootPath: path.join(env.FILE_MANAGER_ROOT, domain.name, normalizeDocumentRoot(domain.documentRoot)),
-      forceSsl: domain.forceSsl && domain.sslEnabled
-    });
+    nginxResult = await sysagent.deploymentNginx(
+      buildDeploymentNginxRequest({
+        deploymentId: deployment.id,
+        fqdn: `${domain.name} www.${domain.name}`,
+        upstreamPort: deployment.port,
+        rootPath: deployment.rootPath,
+        framework: deployment.framework,
+        publicDirectory: deployment.publicDirectory,
+        outputDirectory: deployment.outputDirectory,
+        fallbackRootPath: path.join(env.FILE_MANAGER_ROOT, domain.name, normalizeDocumentRoot(domain.documentRoot)),
+        forceSsl: domain.forceSsl && domain.sslEnabled
+      })
+    );
   } else if (domain.hostingMode === "REDIRECT") {
     if (!domain.redirectUrl) throw Object.assign(new Error("Set a redirect URL before publishing redirect hosting."), { statusCode: 400 });
     nginxResult = await sysagent.writeRedirectNginxVhost({

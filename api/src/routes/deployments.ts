@@ -9,6 +9,7 @@ import { deployQueue } from "../jobs/queues.js";
 import { detectComposerPlatformIssue, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import { audit } from "../lib/audit.js";
 import { detectDeploymentFiles, detectDeploymentSource } from "../lib/deploymentDetection.js";
+import { buildDeploymentNginxRequest, deploymentFallbackRootPath } from "../lib/deploymentDomainSsl.js";
 import { prisma } from "../lib/prisma.js";
 import { deleteSecret, getSecret, putSecret } from "../lib/secrets.js";
 import { sysagent } from "../lib/sysagent.js";
@@ -753,13 +754,19 @@ async function executeDoctorApproval(deployment: Awaited<ReturnType<typeof findD
   }
   if (approval.actionKey === "rewrite-nginx") {
     const domain = deployment.domainBindings?.find((binding) => binding.role === "primary")?.domain ?? deployment.domainBindings?.[0]?.domain ?? deployment.domain;
-    return sysagent.deploymentNginx({
-      deploymentId: deployment.id,
-      serverName: deploymentServerName(domain),
-      upstreamPort: deployment.port,
-      rootPath: deployment.rootPath,
-      forceSsl: domain?.forceSsl ?? false
-    });
+    return sysagent.deploymentNginx(
+      buildDeploymentNginxRequest({
+        deploymentId: deployment.id,
+        fqdn: deploymentServerName(domain) ?? deployment.slug,
+        upstreamPort: deployment.port,
+        rootPath: deployment.rootPath,
+        framework: deployment.framework,
+        publicDirectory: deployment.publicDirectory,
+        outputDirectory: deployment.outputDirectory,
+        fallbackRootPath: deploymentFallbackRootPath(domain),
+        forceSsl: domain?.forceSsl ?? false
+      })
+    );
   }
   if (approval.actionKey === "database-provision") {
     if (!deployment.dbType || !deployment.dbName || !deployment.dbUser) {

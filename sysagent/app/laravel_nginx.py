@@ -21,6 +21,59 @@ def nginx_proxy_headers(upstream_port: int) -> str:
     )
 
 
+def nginx_upstream_proxy_locations(upstream_port: int) -> str:
+    """Proxy all traffic to the app process (Vite preview, Next.js, Node APIs)."""
+    return (
+        "    location / {\n"
+        f"{nginx_proxy_headers(upstream_port)}"
+        "    }\n"
+    )
+
+
+def nginx_spa_static_locations(public_root: str, upstream_port: int) -> str:
+    """Serve a built SPA from disk; fall back to the upstream for missing routes."""
+    return (
+        f"    root {public_root};\n"
+        "    index index.html;\n"
+        "\n"
+        "    location ~* \\.(?:css|js|mjs|map|ico|gif|jpe?g|png|svg|webp|woff2?|ttf|eot|otf)$ {\n"
+        "        try_files $uri =404;\n"
+        "        expires 7d;\n"
+        "        access_log off;\n"
+        "        add_header Cache-Control \"public\";\n"
+        "    }\n"
+        "\n"
+        "    location / {\n"
+        "        try_files $uri $uri/ /index.html;\n"
+        "    }\n"
+        "\n"
+        "    location @deployment_upstream {\n"
+        f"{nginx_proxy_headers(upstream_port)}"
+        "    }\n"
+    )
+
+
+def nginx_app_locations(
+    *,
+    framework: str | None,
+    public_root: str,
+    upstream_port: int,
+    fallback_error_page: str,
+    fallback_location: str,
+) -> str:
+    normalized = (framework or "").upper()
+    if normalized in {"NODEJS", "NEXTJS", "PYTHON", "GO"}:
+        return nginx_upstream_proxy_locations(upstream_port)
+    if normalized == "STATIC":
+        return nginx_spa_static_locations(public_root, upstream_port)
+    return nginx_laravel_app_locations(
+        public_root=public_root,
+        upstream_port=upstream_port,
+        fallback_error_page=fallback_error_page,
+        fallback_location=fallback_location,
+    )
+
+
 def nginx_laravel_app_locations(
     *,
     public_root: str,

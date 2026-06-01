@@ -23,7 +23,7 @@ from app.deployment_env import (
     write_laravel_env_bundle,
 )
 from app.deployment_commands import normalize_laravel_start_command, parse_deployment_command, resolve_laravel_public_root
-from app.laravel_nginx import nginx_laravel_app_locations
+from app.laravel_nginx import nginx_app_locations
 from app.deployment_health import curl_health_probe
 from app.platform import runtime_tool_install_plan
 from app.nginx_paths import nginx_sites_available, nginx_sites_enabled
@@ -73,6 +73,7 @@ class NginxRequest(BaseModel):
     serverName: str | None = None
     upstreamPort: int = Field(ge=1, le=65535)
     rootPath: str
+    framework: str | None = None
     publicDirectory: str | None = "public"
     fallbackRootPath: str | None = None
     forceSsl: bool = True
@@ -745,7 +746,8 @@ def nginx(body: NginxRequest) -> dict:
                 "    }\n"
             )
 
-        app_locations = nginx_laravel_app_locations(
+        app_locations = nginx_app_locations(
+            framework=body.framework,
             public_root=public_root,
             upstream_port=body.upstreamPort,
             fallback_error_page=fallback_error_page,
@@ -838,10 +840,16 @@ def attach_laravel_diagnostics(result: dict, root_path: str | None, framework: s
     if response_body:
         extras.append(f"HTTP response body:\n{response_body}")
     if nginx_forbidden:
-        extras.append(
-            "Nginx returned 403 before the request reached Laravel (static root / try_files). "
-            "Redeploy to refresh the vhost."
-        )
+        if (framework or "").upper() in {"NODEJS", "NEXTJS", "STATIC"}:
+            extras.append(
+                "Nginx returned 403 before the request reached the app process (wrong static root or vhost). "
+                "Redeploy to refresh the proxy vhost."
+            )
+        else:
+            extras.append(
+                "Nginx returned 403 before the request reached Laravel (static root / try_files). "
+                "Redeploy to refresh the vhost."
+            )
     if tail_text:
         result["laravelLogPath"] = str(laravel_log)
         result["laravelLogTail"] = tail_text
