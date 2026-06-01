@@ -5,7 +5,7 @@ from typing import Callable, TypeVar
 from fastapi import HTTPException
 
 from app.command import run_command
-from app.config import settings
+from app.config import DEPLOYMENT_COMMANDS_LIVE, settings
 
 T = TypeVar("T")
 
@@ -45,7 +45,13 @@ def letsencrypt_certificate_exists(domain: str) -> bool:
     primary = domain.split()[0].strip()
     cert = Path(f"/etc/letsencrypt/live/{primary}/fullchain.pem")
     key = Path(f"/etc/letsencrypt/live/{primary}/privkey.pem")
-    return cert.is_file() and key.is_file()
+    if not cert.is_file() or not key.is_file():
+        return False
+    verify = run_command(
+        ["openssl", "x509", "-in", str(cert), "-noout"],
+        allow_live=DEPLOYMENT_COMMANDS_LIVE,
+    )
+    return verify.get("returncode") == 0
 
 
 def safe_letsencrypt_path(path: str) -> Path:

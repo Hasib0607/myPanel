@@ -32,10 +32,11 @@ import {
   deploymentFallbackRootPath,
   deploymentServerName,
   deploymentSslCertificatePaths,
-  deploymentWantsSsl,
   deploymentHttpsReady,
   deploymentSslCertificatePathsWhenReady,
-  enableDeploymentTlsInDatabase,
+  deploymentSslContactEmail,
+  disableDeploymentTlsInDatabase,
+  syncDeploymentTlsWithCertificate,
   ensureAcmeWebroot,
   ensureParentDomainDeploymentProxy,
   buildDeploymentNginxRequest,
@@ -2217,12 +2218,14 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       assertCommandTree(buildResult, "Build");
     }
 
-    if (domain) {
-      domain = await enableDeploymentTlsInDatabase(domain);
-    }
     await ensureParentDomainDeploymentProxy(deployment.id, domain);
     const serverName = deploymentServerName(domain);
-    const proxyHttpsReady = domain ? await deploymentHttpsReady(domain) : false;
+    let proxyHttpsReady = false;
+    if (domain) {
+      const tlsSync = await syncDeploymentTlsWithCertificate(domain);
+      domain = tlsSync.domain;
+      proxyHttpsReady = tlsSync.httpsReady;
+    }
     const nginxResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config", async () =>
       sysagent.deploymentNginx(
         buildDeploymentNginxRequest({
@@ -2245,13 +2248,13 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     assertLiveResult((nginxResult as { test?: unknown }).test, "Nginx config test");
     assertLiveResult((nginxResult as { reload?: unknown }).reload, "Nginx reload");
 
-    if (domain && deploymentWantsSsl(domain)) {
+    if (domain && !proxyHttpsReady) {
       await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Prepare ACME webroot", () => ensureAcmeWebroot(domain));
       const sslJob = await sslQueue.add("issue", {
         domainId: domain.id.startsWith("subdomain:") ? null : domain.id,
         subdomainId: domain.id.startsWith("subdomain:") ? domain.id.slice("subdomain:".length) : null,
         domain: domain.name,
-        email: `admin@${domain.name}`,
+        email: deploymentSslContactEmail(domain),
         webRoot: deploymentFallbackRootPath(domain) ?? `${env.FILE_MANAGER_ROOT}/${domain.name}/public_html`,
         includeWww: domain.includeWww !== false,
         forceSsl: true,
@@ -2285,6 +2288,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           envVars = await ensureLaravelAppKey(deployment.id, releaseId, appPath, deployment.port, envVars);
         }
       } catch (error) {
+        domain = await disableDeploymentTlsInDatabase(domain);
         await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "SSL certificate issue warning", {
           warning: error instanceof Error ? error.message : String(error)
         }, "warn");
@@ -2307,8 +2311,26 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "SSL request skipped", { reason: domain ? "No domain linked" : "No linked domain" });
     }
 
-    if (domain && (await deploymentHttpsReady(domain))) {
-      envVars = deploymentEnvWithPublicUrl(envVars, domain, true);
+    if (domain) {
+      const tlsSync = await syncDeploymentTlsWithCertificate(domain);
+      domain = tlsSync.domain;
+      await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Finalize deployment proxy vhost", () =>
+        publishDeploymentProxyNginx({
+          deploymentId: deployment.id,
+          fqdn: serverName ?? domain!.name,
+          upstreamPort: deployment.port,
+          rootPath: deployment.rootPath,
+          framework: deployment.framework,
+          startCommand: deployment.startCommand,
+          publicDirectory: deployment.publicDirectory,
+          outputDirectory: deployment.outputDirectory,
+          fallbackRootPath: deploymentFallbackRootPath(domain),
+          forceHttps: tlsSync.httpsReady
+        })
+      );
+      if (tlsSync.httpsReady) {
+        envVars = deploymentEnvWithPublicUrl(envVars, domain, true);
+      }
     }
 
     const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];

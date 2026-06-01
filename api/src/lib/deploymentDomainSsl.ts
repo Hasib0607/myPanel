@@ -93,6 +93,15 @@ export async function ensureParentDomainDeploymentProxy(deploymentId: string, do
   });
 }
 
+export function deploymentSslContactEmail(domain: BoundDomain | null) {
+  if (!domain?.name) return "admin@localhost";
+  const parts = domain.name.split(".").filter(Boolean);
+  if (parts.length >= 2) {
+    return `admin@${parts.slice(-2).join(".")}`;
+  }
+  return `admin@${domain.name}`;
+}
+
 export async function enableDeploymentTlsInDatabase(domain: BoundDomain) {
   if (domain.id.startsWith("subdomain:")) {
     const subdomainId = domain.id.slice("subdomain:".length);
@@ -107,6 +116,43 @@ export async function enableDeploymentTlsInDatabase(domain: BoundDomain) {
     data: { sslEnabled: true, forceSsl: true }
   });
   return { ...domain, sslEnabled: true, forceSsl: true };
+}
+
+export async function disableDeploymentTlsInDatabase(domain: BoundDomain, options?: { clearForceSsl?: boolean }) {
+  const clearForceSsl = options?.clearForceSsl ?? false;
+  if (domain.id.startsWith("subdomain:")) {
+    const subdomainId = domain.id.slice("subdomain:".length);
+    await prisma.subdomain.update({
+      where: { id: subdomainId },
+      data: { sslEnabled: false }
+    });
+    return { ...domain, sslEnabled: false, forceSsl: false };
+  }
+  await prisma.domain.update({
+    where: { id: domain.id },
+    data: clearForceSsl ? { sslEnabled: false, forceSsl: false } : { sslEnabled: false }
+  });
+  return clearForceSsl
+    ? { ...domain, sslEnabled: false, forceSsl: false }
+    : { ...domain, sslEnabled: false };
+}
+
+/** Clear sslEnabled when nginx must stay HTTP-only until a certificate exists. Keeps forceSsl so deploy still issues SSL. */
+export async function clearStaleDeploymentSslEnabled(domain: BoundDomain) {
+  if (!domain.sslEnabled) return domain;
+  return disableDeploymentTlsInDatabase(domain, { clearForceSsl: false });
+}
+
+export async function syncDeploymentTlsWithCertificate(domain: BoundDomain | null) {
+  if (!domain) return { domain, httpsReady: false };
+  const httpsReady = await deploymentHttpsReady(domain);
+  if (httpsReady) {
+    return { domain: await enableDeploymentTlsInDatabase(domain), httpsReady: true };
+  }
+  if (domain.sslEnabled) {
+    return { domain: await clearStaleDeploymentSslEnabled(domain), httpsReady: false };
+  }
+  return { domain, httpsReady: false };
 }
 
 export async function findDeploymentProxyTarget(fqdn: string) {

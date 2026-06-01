@@ -917,6 +917,18 @@ def _curl_public_route(server_name: str, path: str = "/", root_path: str | None 
     scheme = "https" if use_https else "http"
     result = probe(f"{scheme}://{primary}{clean_path}", accept_http_errors=is_laravel)
 
+    # curl 35: SSL handshake failed (e.g. HTTP on 443 or broken cert paths in nginx).
+    if use_https and result.get("returncode") == 35:
+        http_result = probe(f"http://{primary}{clean_path}", accept_http_errors=is_laravel)
+        if http_result.get("returncode") == 0:
+            http_result["degraded"] = True
+            http_result["stderr"] = (
+                "HTTPS handshake failed (invalid SSL response on port 443). "
+                f"HTTP probe succeeded at http://{primary}{clean_path}. Redeploy to refresh nginx SSL or issue a certificate."
+            )
+            return attach_laravel_diagnostics(http_result, root_path, framework)
+        result = http_result
+
     if use_https and result.get("returncode") == 7:
         http_result = probe(f"http://{primary}{clean_path}", accept_http_errors=is_laravel)
         if http_result.get("returncode") == 0:
