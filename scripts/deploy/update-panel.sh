@@ -150,6 +150,27 @@ EOF
   log "Configured non-interactive GitHub credentials from PANEL_UPDATE_GIT_TOKEN"
 }
 
+repair_panel_permissions() {
+  local repair_script="$APP_DIR/scripts/maintenance/repair-panel-permissions.sh"
+  if [[ ! -x "$repair_script" ]]; then
+    return 0
+  fi
+
+  if [[ "$(id -u)" == "0" ]]; then
+    run "$repair_script"
+    return 0
+  fi
+
+  if [[ ! -w "$APP_DIR/.git/objects" || ! -w "$APP_DIR/frontend" || ! -w "$APP_DIR/api" ]]; then
+    log "panel checkout is not writable by $(id -un); attempting permission repair"
+    if "$SUDO_BIN" -n "$repair_script" 2>&1 | tee -a "$LOG_FILE"; then
+      log "panel checkout permission repair completed"
+    else
+      log "panel checkout permission repair failed; git fetch may still fail"
+    fi
+  fi
+}
+
 file_checksum() {
   local path="$1"
   if command -v sha256sum >/dev/null 2>&1; then
@@ -450,6 +471,7 @@ log "starting panel self-update in $APP_DIR on branch $BRANCH"
 write_status "running" "panel self-update started" "$(current_commit)" "$(current_commit_subject)"
 SCRIPT_CHECKSUM_BEFORE_PULL="$(file_checksum "$SCRIPT_PATH")"
 configure_git_auth
+repair_panel_permissions
 
 patch_nginx_websocket() {
   if [[ ! -f "$NGINX_CONF" ]]; then

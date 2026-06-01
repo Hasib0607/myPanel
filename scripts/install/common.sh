@@ -439,6 +439,7 @@ prepare_runtime_directories() {
   setfacl -m "u:$APP_USER:rwx,u:$WEB_GROUP:rwx" /var/www /var/www/deployments || true
   setfacl -d -m "u:$APP_USER:rwx,u:$WEB_GROUP:rwx" /var/www /var/www/deployments || true
   chmod +x "$APP_DIR/scripts/deploy/update-panel.sh"
+  chmod +x "$APP_DIR/scripts/maintenance/repair-panel-permissions.sh" 2>/dev/null || true
   git config --global --add safe.directory "$APP_DIR" || true
 }
 
@@ -669,6 +670,7 @@ write_update_sudoers() {
   SYSTEMCTL_BIN="$(command -v systemctl)"
   write_file /etc/sudoers.d/vps-panel-update <<EOF
 $APP_USER ALL=(root) NOPASSWD: $SYSTEMCTL_BIN --no-block restart vps-panel-sysagent, $SYSTEMCTL_BIN is-active vps-panel-sysagent, $SYSTEMCTL_BIN status vps-panel-sysagent, $SYSTEMCTL_BIN --no-block restart vps-panel-api, $SYSTEMCTL_BIN is-active vps-panel-api, $SYSTEMCTL_BIN status vps-panel-api, $SYSTEMCTL_BIN --no-block restart vps-panel-workers, $SYSTEMCTL_BIN is-active vps-panel-workers, $SYSTEMCTL_BIN status vps-panel-workers, $SYSTEMCTL_BIN --no-block restart vps-panel-guardian, $SYSTEMCTL_BIN is-active vps-panel-guardian, $SYSTEMCTL_BIN status vps-panel-guardian, $SYSTEMCTL_BIN --no-block restart vps-panel-frontend, $SYSTEMCTL_BIN is-active vps-panel-frontend, $SYSTEMCTL_BIN status vps-panel-frontend
+$APP_USER ALL=(root) NOPASSWD: $APP_DIR/scripts/maintenance/repair-panel-permissions.sh
 EOF
   chmod 0440 /etc/sudoers.d/vps-panel-update
   visudo -c -f /etc/sudoers.d/vps-panel-update
