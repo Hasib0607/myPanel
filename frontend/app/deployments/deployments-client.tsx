@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Clipboard, Eye, FolderGit2, GitBranch, Github, History, KeyRound, List, Pencil, Play, Plus, Rocket, Save, Search, Settings2, ShieldCheck, Square, ToggleLeft, ToggleRight, Trash2, Wand2, X } from "lucide-react";
 import { apiDelete, apiDeleteBody, apiGet, apiGetText, apiPatch, apiPost, apiPut } from "@/lib/api";
@@ -1173,6 +1173,15 @@ function GithubModal({ repos, loading, repoSearch, setRepoSearch, connection, gi
 
 function LogsModal({ title, text, onCopy, onClose }: { title: string; text: string; onCopy: () => Promise<void> | void; onClose: () => void }) {
   const [copied, setCopied] = useState(false);
+  const logRef = useRef<HTMLPreElement | null>(null);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      const logEl = logRef.current;
+      if (logEl) logEl.scrollTop = logEl.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [text]);
 
   async function handleCopy() {
     try {
@@ -1194,7 +1203,7 @@ function LogsModal({ title, text, onCopy, onClose }: { title: string; text: stri
           </div>
           <button className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line" onClick={onClose} type="button"><X size={16} /></button>
         </div>
-        <pre className="min-h-0 flex-1 overflow-auto bg-slate-950 p-4 font-mono text-xs leading-5 text-slate-100">{text || "No logs yet."}</pre>
+        <pre ref={logRef} className="min-h-0 flex-1 overflow-auto bg-slate-950 p-4 font-mono text-xs leading-5 text-slate-100">{text || "No logs yet."}</pre>
         <div className="flex justify-end gap-2 border-t border-panel-line p-4">
           <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium hover:bg-slate-50" onClick={handleCopy} type="button"><Clipboard size={15} />{copied ? "Copied" : "Copy logs"}</button>
           <button className="h-9 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white" onClick={onClose} type="button">Close</button>
