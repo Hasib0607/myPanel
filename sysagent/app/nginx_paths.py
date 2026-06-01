@@ -1,6 +1,6 @@
+from __future__ import annotations
 """Resolved Nginx config directory paths for sysagent."""
 
-from __future__ import annotations
 
 from app.config import settings
 from app.platform import current_os, platform_paths

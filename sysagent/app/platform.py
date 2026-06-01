@@ -1,10 +1,10 @@
+from __future__ import annotations
 """OS detection and platform-specific constants for sysagent.
 
 Phase 0 foundation only — routers still use hardcoded Ubuntu paths/commands until
 Phase 1 wires this module in.
 """
 
-from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum

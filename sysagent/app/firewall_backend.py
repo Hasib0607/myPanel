@@ -1,6 +1,6 @@
+from __future__ import annotations
 """OS-aware firewall command builders (UFW on Debian, firewalld on RHEL)."""
 
-from __future__ import annotations
 
 from app.platform import OsReleaseInfo, current_os, firewall_backend, is_rhel, platform_paths
 

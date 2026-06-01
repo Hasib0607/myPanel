@@ -1,3 +1,4 @@
+from __future__ import annotations
 from app.platform import current_os, service_spec
 
 SERVICE_METADATA = {

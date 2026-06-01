@@ -1,3 +1,4 @@
+from __future__ import annotations
 def nginx_proxy_headers(upstream_port: int, *, loopback_host: bool = False) -> str:
     host_header = f"127.0.0.1:{upstream_port}" if loopback_host else "$http_host"
     return (
