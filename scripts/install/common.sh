@@ -25,14 +25,27 @@ detect_vps_ip() {
 : "${DEPLOYMENT_RESERVED_PORTS:=22,25,53,80,443,993,$CPANEL_LOGIN_PORT,$PANEL_LOGIN_PORT,$FRONTEND_PORT,$PANEL_PORT,$SYSAGENT_PORT,5432,6379}"
 : "${DB_NAME:=panel_main}"
 : "${DB_USER:=panel_user}"
-: "${DB_PASSWORD:=$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-24)}"
+if [[ -z "${DB_PASSWORD+x}" ]]; then
+  DB_PASSWORD="$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-24)"
+  DB_PASSWORD_WAS_GENERATED=true
+else
+  DB_PASSWORD_WAS_GENERATED=false
+fi
+export DB_PASSWORD DB_PASSWORD_WAS_GENERATED
 : "${DB_HOST:=localhost}"
 : "${DB_PORT:=5432}"
 : "${DB_CREATE:=true}"
 : "${DATABASE_URL:=postgresql://$DB_USER:$DB_PASSWORD@$DB_HOST:$DB_PORT/$DB_NAME}"
 : "${DIRECT_DATABASE_URL:=$DATABASE_URL}"
 : "${SUPERADMIN_USERNAME:=admin}"
-: "${SUPERADMIN_PASSWORD:=$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-18)}"
+if [[ -z "${SUPERADMIN_PASSWORD+x}" ]]; then
+  SUPERADMIN_PASSWORD="$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-18)"
+  SUPERADMIN_PASSWORD_WAS_GENERATED=true
+else
+  SUPERADMIN_PASSWORD_WAS_GENERATED=false
+fi
+SUPERADMIN_PASSWORD_OUTPUT="$SUPERADMIN_PASSWORD"
+export SUPERADMIN_PASSWORD SUPERADMIN_PASSWORD_WAS_GENERATED SUPERADMIN_PASSWORD_OUTPUT
 : "${VPS_IP:=$(detect_vps_ip)}"
 : "${PANEL_DOMAIN:=}"
 : "${PANEL_PUBLIC_HOST:=${PANEL_DOMAIN:-$VPS_IP}}"
@@ -62,6 +75,15 @@ log() {
 mask_url_secret() {
   local url="$1"
   echo "$url" | sed -E 's#(://[^:/@]+:)[^@]+@#\1****@#'
+}
+
+env_file_value() {
+  local key="$1"
+  local file="${2:-$APP_DIR/.env}"
+  if [[ ! -f "$file" ]]; then
+    return 1
+  fi
+  awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$file"
 }
 
 write_file() {
@@ -282,10 +304,28 @@ install_sysagent_venv() {
 
 write_panel_env() {
   log "Generating secrets"
-  JWT_SECRET="$(openssl rand -base64 48 | tr -d '\n')"
-  TOTP_ENCRYPTION_KEY="$(openssl rand -base64 32 | tr -d '\n')"
-  WEBHOOK_SECRET="$(openssl rand -hex 32)"
-  SUPERADMIN_PASSWORD_HASH="$(runuser -u "$APP_USER" -- env PANEL_ADMIN_PASSWORD="$SUPERADMIN_PASSWORD" bash -lc "cd '$APP_DIR/api' && node -e \"const bcrypt=require('bcrypt'); bcrypt.hash(process.env.PANEL_ADMIN_PASSWORD, 12).then((hash)=>console.log(hash))\"")"
+  local existing_jwt existing_totp existing_webhook existing_admin_hash existing_database_url existing_direct_database_url
+  existing_jwt="$(env_file_value JWT_SECRET || true)"
+  existing_totp="$(env_file_value TOTP_ENCRYPTION_KEY || true)"
+  existing_webhook="$(env_file_value PANEL_UPDATE_WEBHOOK_SECRET || true)"
+  existing_admin_hash="$(env_file_value SUPERADMIN_PASSWORD_HASH || true)"
+  existing_database_url="$(env_file_value DATABASE_URL || true)"
+  existing_direct_database_url="$(env_file_value DIRECT_DATABASE_URL || true)"
+
+  JWT_SECRET="${existing_jwt:-$(openssl rand -base64 48 | tr -d '\n')}"
+  TOTP_ENCRYPTION_KEY="${existing_totp:-$(openssl rand -base64 32 | tr -d '\n')}"
+  WEBHOOK_SECRET="${existing_webhook:-$(openssl rand -hex 32)}"
+  if [[ "$DB_PASSWORD_WAS_GENERATED" == "true" && -n "$existing_database_url" ]]; then
+    DATABASE_URL="$existing_database_url"
+    DIRECT_DATABASE_URL="${existing_direct_database_url:-$existing_database_url}"
+  fi
+  if [[ "$SUPERADMIN_PASSWORD_WAS_GENERATED" == "true" && -n "$existing_admin_hash" ]]; then
+    SUPERADMIN_PASSWORD_HASH="$existing_admin_hash"
+    SUPERADMIN_PASSWORD_OUTPUT="(unchanged; existing admin password kept)"
+  else
+    SUPERADMIN_PASSWORD_HASH="$(runuser -u "$APP_USER" -- env PANEL_ADMIN_PASSWORD="$SUPERADMIN_PASSWORD" bash -lc "cd '$APP_DIR/api' && node -e \"const bcrypt=require('bcrypt'); bcrypt.hash(process.env.PANEL_ADMIN_PASSWORD, 12).then((hash)=>console.log(hash))\"")"
+    SUPERADMIN_PASSWORD_OUTPUT="$SUPERADMIN_PASSWORD"
+  fi
 
   log "Writing environment"
   write_file "$APP_DIR/.env" <<EOF
@@ -668,7 +708,7 @@ print_install_summary() {
 Panel URL: $PANEL_PUBLIC_SCHEME://$PANEL_PUBLIC_HOST:$PANEL_LOGIN_PORT/login
 Account URL: $PANEL_PUBLIC_SCHEME://$PANEL_PUBLIC_HOST:$CPANEL_LOGIN_PORT/login
 Username:  $SUPERADMIN_USERNAME
-Password:  $SUPERADMIN_PASSWORD
+Password:  $SUPERADMIN_PASSWORD_OUTPUT
 
 Webhook URL: $PANEL_PUBLIC_SCHEME://$PANEL_PUBLIC_HOST:$PANEL_LOGIN_PORT/api/v1/webhooks/panel-update
 Webhook secret: $WEBHOOK_SECRET
