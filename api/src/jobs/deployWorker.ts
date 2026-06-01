@@ -6,7 +6,12 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { redis } from "../lib/redis.js";
 import { logger } from "../lib/logger.js";
-import { deploymentHasLaravelArtisan, detectDeploymentSource } from "../lib/deploymentDetection.js";
+import {
+  deploymentHasLaravelArtisan,
+  deploymentRunsLaravel,
+  detectDeploymentFiles,
+  detectDeploymentSource
+} from "../lib/deploymentDetection.js";
 import { requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import {
   deploymentRecoveryAttempts,
@@ -862,7 +867,7 @@ async function optionalPublicRouteWarning(
   const domain = deployment.domain;
   if (!domain) return null;
 
-  if (deployment.framework === "LARAVEL") {
+  if (await deploymentRunsLaravel(deployment.framework, appPath)) {
     await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Prepare Laravel public route check", () =>
       sysagent.deploymentRepairLaravelWritablePaths({ rootPath: appPath })
     );
@@ -978,7 +983,7 @@ async function optionalPublicRouteWarning(
     }
     const routeMeta = publicRoute as { effectiveUrl?: string };
     if (
-      deployment.framework === "LARAVEL"
+      await deploymentRunsLaravel(deployment.framework, appPath)
       && httpsReady
       && routeMeta.effectiveUrl?.toLowerCase().startsWith(`http://${domain.name.toLowerCase()}`)
     ) {
@@ -1459,11 +1464,21 @@ async function reconcileMisdetectedLaravelFramework(
   releaseId: string | undefined,
   appPath: string
 ) {
-  if (deployment.framework !== "LARAVEL" || (await deploymentHasLaravelArtisan(appPath))) {
+  if (await deploymentHasLaravelArtisan(appPath)) {
     return deployment;
   }
 
-  const detection = await detectDeploymentSource(deployment.rootPath, deployment.rootDirectory);
+  if (deployment.framework !== "LARAVEL") {
+    return deployment;
+  }
+
+  let detection = await detectDeploymentSource(deployment.rootPath, deployment.rootDirectory);
+  if (detection.detected === "LARAVEL") {
+    const sourceRoot = path.resolve(deployment.rootPath, deployment.rootDirectory || ".");
+    const files = await fs.readdir(sourceRoot);
+    const packageJson = await fs.readFile(path.join(sourceRoot, "package.json"), "utf8").catch(() => null);
+    detection = detectDeploymentFiles(files, packageJson, null);
+  }
   const updated = await prisma.deployment.update({
     where: { id: deployment.id },
     data: {
@@ -1495,6 +1510,11 @@ async function ensureLaravelAppKey(
   port: number,
   envVars: Record<string, string>
 ) {
+  if (!(await deploymentHasLaravelArtisan(appPath))) {
+    await writeLog(deploymentId, releaseId, "PREFLIGHT", "Skipped Laravel .env sync (no artisan file)", { appPath }, "warn");
+    return envVars;
+  }
+
   const syncResult = await runStep(deploymentId, releaseId, "PREFLIGHT", "Sync Laravel .env", () =>
     sysagent.deploymentSyncLaravelEnv({
       rootPath: appPath,
@@ -1988,7 +2008,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       }
     }
 
-    if (deployment.framework === "LARAVEL") {
+    if (await deploymentRunsLaravel(deployment.framework, appPath)) {
       envVars = await ensureLaravelAppKey(deployment.id, releaseId, appPath, deployment.port, envVars);
       envVars = await ensureLaravelDatabaseConnection(deployment, releaseId, appPath, deployment.port, envVars);
 
@@ -2116,7 +2136,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         assertLiveResult((httpsNginx as { test?: unknown }).test, "Nginx HTTPS config test");
         assertLiveResult((httpsNginx as { reload?: unknown }).reload, "Nginx HTTPS reload");
         envVars = deploymentEnvWithPublicUrl(envVars, domain, true);
-        if (deployment.framework === "LARAVEL") {
+        if (await deploymentRunsLaravel(deployment.framework, appPath)) {
           envVars = await ensureLaravelAppKey(deployment.id, releaseId, appPath, deployment.port, envVars);
         }
       } catch (error) {
@@ -2144,7 +2164,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     }
 
     const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
-    if (deployment.framework === "LARAVEL") {
+    if (await deploymentRunsLaravel(deployment.framework, appPath)) {
       envVars = await ensureLaravelAppKey(deployment.id, releaseId, appPath, deployment.port, envVars);
       await prepareLaravelForStart(deployment.id, releaseId, appPath, deployment.port, envVars);
     }

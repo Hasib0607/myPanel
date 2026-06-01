@@ -347,3 +347,7 @@ export async function deploymentHasLaravelArtisan(appPath: string) {
     return false;
   }
 }
+
+export async function deploymentRunsLaravel(framework: DeploymentFramework, appPath: string) {
+  return framework === "LARAVEL" && await deploymentHasLaravelArtisan(appPath);
+}

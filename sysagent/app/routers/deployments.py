@@ -1079,6 +1079,19 @@ def _ensure_laravel_env(root_path: str, port: int | None, env: dict[str, str] | 
     if not info["allowed"]:
         return blocked_command("Path escapes configured file manager root", ["ensure-laravel-env", root_path], info)
 
+    artisan = Path(root_path) / "artisan"
+    if not artisan.is_file():
+        return {
+            "dryRun": False,
+            "command": ["skipped", "ensure-laravel-env"],
+            "cwd": deployment_cwd(root_path),
+            "stdout": "Skipped Laravel env sync: no artisan file in deployment root",
+            "stderr": "",
+            "returncode": 0,
+            "path": info,
+            "skipped": True,
+        }
+
     try:
         env_path, app_key, needs_key_generate = sync_laravel_env_file(root_path, port, env)
     except (OSError, ValueError) as error:
