@@ -53,7 +53,20 @@ initialize_alma_postgresql() {
   if [[ ! -f /var/lib/pgsql/data/PG_VERSION ]]; then
     postgresql-setup --initdb
   fi
+  if [[ -f /var/lib/pgsql/data/pg_hba.conf ]]; then
+    log "Allowing password auth for local PostgreSQL TCP connections"
+    cp /var/lib/pgsql/data/pg_hba.conf /var/lib/pgsql/data/pg_hba.conf.bak.vps-panel
+    awk '
+      $1 == "host" && $2 == "all" && $3 == "all" && $4 == "127.0.0.1/32" { $5 = "md5" }
+      $1 == "host" && $2 == "all" && $3 == "all" && $4 == "::1/128" { $5 = "md5" }
+      { print }
+    ' /var/lib/pgsql/data/pg_hba.conf > /var/lib/pgsql/data/pg_hba.conf.vps-panel
+    mv /var/lib/pgsql/data/pg_hba.conf.vps-panel /var/lib/pgsql/data/pg_hba.conf
+    chown postgres:postgres /var/lib/pgsql/data/pg_hba.conf
+    chmod 0600 /var/lib/pgsql/data/pg_hba.conf
+  fi
   systemctl enable --now postgresql
+  systemctl restart postgresql
 }
 
 setup_alma_nginx_layout() {
