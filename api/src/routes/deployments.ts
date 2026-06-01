@@ -511,6 +511,9 @@ async function ensureGithubWebhook(deployment: { id: string; slug: string; githu
   }
 
   const webhookUrl = `${env.FRONTEND_URL.replace(/\/$/, "")}/api/v1/webhooks/github`;
+  if (/^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0)(:|\/|$)/i.test(webhookUrl)) {
+    return { configured: false, webhookUrl, reason: "FRONTEND_URL points to localhost; set it to the public panel URL before enabling auto deploy" };
+  }
   const hookBody = {
     name: "web",
     active: true,
@@ -1433,11 +1436,14 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
           }
         });
     const webhook = autoDeployEnabled ? await ensureGithubWebhook(deployment, token) : { configured: false, reason: "Auto deploy disabled" };
+    if (autoDeployEnabled && !webhook.configured) {
+      await prisma.deployment.update({ where: { id: deployment.id }, data: { autoDeployEnabled: false } });
+    }
     await addLog(deployment.id, "QUEUED", existingDeployment ? "GitHub project settings refreshed" : "GitHub project imported", undefined, {
       repository: `${body.githubOwner}/${body.githubRepo}`,
       branch: body.branch,
       rootPath,
-      autoDeployEnabled,
+      autoDeployEnabled: autoDeployEnabled && webhook.configured,
       webhook
     });
     await syncPrimaryBindingTarget(deployment.id, selectedDomainId);
@@ -1461,6 +1467,15 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       }
     });
     await syncPrimaryBindingTarget(deployment.id, selectedDomainId);
+    if (body.autoDeployEnabled && body.sourceProvider === "GITHUB") {
+      const connection = await prisma.gitHubConnection.findUnique({ where: { id: "superadmin" } });
+      const token = connection?.tokenSecretRef ? await getSecret(connection.tokenSecretRef) : null;
+      const webhook = await ensureGithubWebhook(deployment, token);
+      if (!webhook.configured) {
+        await prisma.deployment.update({ where: { id: deployment.id }, data: { autoDeployEnabled: false } });
+      }
+      await addLog(deployment.id, "QUEUED", webhook.configured ? "Auto deploy GitHub webhook configured" : "Auto deploy disabled because GitHub webhook could not be configured", undefined, webhook as Prisma.InputJsonObject);
+    }
     await addLog(deployment.id, "QUEUED", "Project created");
     await audit(request, { action: "CREATE", resource: "deployment", resourceId: deployment.id, description: `Created deployment ${deployment.name}` });
     return reply.code(201).send(await findDeployment(deployment.id));
@@ -1478,7 +1493,26 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     if (body.port !== undefined) await assertDeploymentPortAvailable(body.port, deployment.id);
     const selectedDomainId = body.domainId;
     const bindingTarget = selectedDomainId ? await resolveBindingTarget(selectedDomainId) : null;
-    await prisma.deployment.update({
+    if (body.autoDeployEnabled === true) {
+      const webhookTarget = {
+        id: deployment.id,
+        slug: body.slug ?? deployment.slug,
+        githubOwner: body.githubOwner ?? deployment.githubOwner,
+        githubRepo: body.githubRepo ?? deployment.githubRepo,
+        webhookSecretHash: deployment.webhookSecretHash
+      };
+      if ((body.sourceProvider ?? deployment.sourceProvider) !== "GITHUB" || !webhookTarget.githubOwner || !webhookTarget.githubRepo) {
+        throw app.httpErrors.badRequest("Auto deploy requires a GitHub source with owner and repository configured.");
+      }
+      const connection = await prisma.gitHubConnection.findUnique({ where: { id: "superadmin" } });
+      const token = connection?.tokenSecretRef ? await getSecret(connection.tokenSecretRef) : null;
+      const webhook = await ensureGithubWebhook(webhookTarget, token);
+      if (!webhook.configured) {
+        throw app.httpErrors.badRequest(`Auto deploy could not be enabled: ${webhook.reason ?? "GitHub webhook could not be configured"}`);
+      }
+      await addLog(deployment.id, "QUEUED", "Auto deploy GitHub webhook configured", undefined, webhook as Prisma.InputJsonObject);
+    }
+    const updated = await prisma.deployment.update({
       where: { id: deployment.id },
       data: {
         ...body,
@@ -1487,6 +1521,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       }
     });
     await syncPrimaryBindingTarget(deployment.id, selectedDomainId);
+    await audit(request, { action: "UPDATE", resource: "deployment", resourceId: deployment.id, description: `Updated deployment ${updated.slug}` });
     return findDeployment(deployment.id);
   });
 

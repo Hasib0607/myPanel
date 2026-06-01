@@ -6,6 +6,7 @@ import { z } from "zod";
 import { audit } from "../lib/audit.js";
 import { env } from "../config/env.js";
 import { runGuardianAutoHeal, syncGuardianIncidentsOnly, type GuardianDiagnosis } from "../lib/guardianAutoHeal.js";
+import { startPanelSelfUpdate } from "../lib/panelSelfUpdate.js";
 import { prisma } from "../lib/prisma.js";
 import { sysagent } from "../lib/sysagent.js";
 
@@ -530,5 +531,36 @@ export const guardianRoutes: FastifyPluginAsync = async (app) => {
       actions: result.actions,
       generatedAt: new Date().toISOString()
     });
+  });
+
+  app.post("/panel-update/rebuild", async (request, reply) => {
+    try {
+      const result = await startPanelSelfUpdate("Guardian panel rebuild requested");
+      await audit(request, {
+        action: "DEPLOY",
+        resource: "guardian_panel_update",
+        description: "Guardian panel rebuild/update requested",
+        metadata: result as any
+      });
+      await prisma.guardianNotification.create({
+        data: {
+          level: "INFO",
+          title: "Panel update started",
+          message: "Guardian started the panel self-update script.",
+          metadata: result as any
+        }
+      });
+      return reply.code(202).send(result);
+    } catch (error) {
+      await prisma.guardianNotification.create({
+        data: {
+          level: "CRITICAL",
+          title: "Panel update failed to start",
+          message: error instanceof Error ? error.message : "Could not start panel self-update",
+          metadata: { error: error instanceof Error ? error.message : String(error) } as any
+        }
+      });
+      return reply.code(500).send({ error: error instanceof Error ? error.message : "Could not start panel self-update" });
+    }
   });
 };

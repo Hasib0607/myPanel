@@ -2,7 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { AlertTriangle, CheckCircle2, Clock3, HardDrive, MemoryStick, RadioTower, RefreshCw, ServerCrash, ShieldAlert } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Clock3, HardDrive, MemoryStick, RadioTower, RefreshCw, Rocket, ServerCrash, ShieldAlert } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { apiDelete, apiGet, apiPost } from "@/lib/api";
 
@@ -206,6 +206,7 @@ function Meter({ label, value, detail, icon: Icon }: { label: string; value: num
 export function GuardianClient() {
   const [autoHealResult, setAutoHealResult] = useState<string | null>(null);
   const [autoHealBusy, setAutoHealBusy] = useState(false);
+  const [panelUpdateBusy, setPanelUpdateBusy] = useState(false);
   const [serviceBusy, setServiceBusy] = useState<string | null>(null);
   const [securityNotice, setSecurityNotice] = useState<string | null>(null);
   const [allowCidr, setAllowCidr] = useState("");
@@ -237,6 +238,20 @@ export function GuardianClient() {
       setAutoHealResult(error instanceof Error ? error.message : "Guardian auto-heal failed.");
     } finally {
       setAutoHealBusy(false);
+    }
+  }
+
+  async function runPanelUpdate() {
+    setPanelUpdateBusy(true);
+    setAutoHealResult(null);
+    try {
+      const result = await apiPost<{ pid: number | null }>("/guardian/panel-update/rebuild", {});
+      setAutoHealResult(`Panel update started${result.pid ? ` with pid ${result.pid}` : ""}.`);
+      await overview.refetch();
+    } catch (error) {
+      setAutoHealResult(error instanceof Error ? error.message : "Could not start panel update.");
+    } finally {
+      setPanelUpdateBusy(false);
     }
   }
 
@@ -387,6 +402,15 @@ export function GuardianClient() {
             >
               <ServerCrash size={16} />
               Auto-Heal
+            </button>
+            <button
+              className="flex h-10 items-center gap-2 rounded-md border border-panel-line bg-white px-3 text-sm font-semibold hover:bg-slate-50"
+              disabled={panelUpdateBusy}
+              onClick={runPanelUpdate}
+              type="button"
+            >
+              <Rocket size={16} />
+              Panel Update
             </button>
             <button
               className="flex h-10 items-center gap-2 rounded-md border border-panel-line bg-white px-3 text-sm font-semibold hover:bg-slate-50"
