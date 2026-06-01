@@ -139,6 +139,13 @@ def mysql_exec(sql: str) -> dict:
     return run_command(["mysql", "-NBe", sql])
 
 
+def mysql_user_exec(username: str, password: str, database: str, host: str) -> dict:
+    ensure = ensure_mysql_runtime()
+    if ensure is not None:
+        return ensure
+    return run_command(["mysql", "-u", username, f"-p{password}", "-h", host, database, "-NBe", "SELECT 1;"])
+
+
 def write_temp_sql(sql: str) -> str:
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".sql", prefix="vps-panel-db-", delete=False) as handle:
         handle.write(sql)
@@ -251,14 +258,30 @@ def provision_postgres(database: str, username: str, password: str) -> dict:
 
 
 def provision_mysql(database: str, username: str, password: str) -> dict:
+    host_steps = []
+    for host in ("localhost", "127.0.0.1", "%"):
+        host_steps.extend([
+            f"CREATE USER IF NOT EXISTS {sql_literal(username)}@{sql_literal(host)} IDENTIFIED BY {sql_literal(password)};",
+            f"ALTER USER {sql_literal(username)}@{sql_literal(host)} IDENTIFIED BY {sql_literal(password)};",
+            f"GRANT ALL PRIVILEGES ON {mysql_identifier(database)}.* TO {sql_literal(username)}@{sql_literal(host)};",
+        ])
     sql = " ".join([
         f"CREATE DATABASE IF NOT EXISTS {mysql_identifier(database)};",
-        f"CREATE USER IF NOT EXISTS {sql_literal(username)}@'localhost' IDENTIFIED BY {sql_literal(password)};",
-        f"ALTER USER {sql_literal(username)}@'localhost' IDENTIFIED BY {sql_literal(password)};",
-        f"GRANT ALL PRIVILEGES ON {mysql_identifier(database)}.* TO {sql_literal(username)}@'localhost';",
+        *host_steps,
         "FLUSH PRIVILEGES;",
     ])
-    return {"apply": mysql_exec(sql)}
+    apply = mysql_exec(sql)
+    verify_local = mysql_user_exec(username, password, database, "localhost") if apply.get("returncode") == 0 else {
+        "returncode": 1,
+        "stderr": "Skipped because MySQL grant/password repair failed",
+        "stdout": "",
+    }
+    verify_tcp = mysql_user_exec(username, password, database, "127.0.0.1") if apply.get("returncode") == 0 else {
+        "returncode": 1,
+        "stderr": "Skipped because MySQL grant/password repair failed",
+        "stdout": "",
+    }
+    return {"apply": apply, "verifyLocal": verify_local, "verifyTcp": verify_tcp}
 
 
 @router.get("/overview")

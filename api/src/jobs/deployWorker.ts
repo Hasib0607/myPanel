@@ -1421,9 +1421,8 @@ async function buildDatabaseRuntimeEnv(
       }
     }
   }
-  const host = nextEnv.DB_HOST || "127.0.0.1";
-
   if (deployment.dbType === "MYSQL") {
+    const host = nextEnv.DB_HOST || "localhost";
     const port = nextEnv.DB_PORT || "3306";
     const desiredUrl = password !== null
       ? `mysql://${encodeURIComponent(deployment.dbUser)}:${encodeURIComponent(password)}@${host}:${port}/${encodeURIComponent(deployment.dbName)}`
@@ -1454,6 +1453,7 @@ async function buildDatabaseRuntimeEnv(
     return { envVars: nextEnv, changed };
   }
 
+  const host = nextEnv.DB_HOST || "127.0.0.1";
   const port = nextEnv.DB_PORT || "5432";
   const desiredUrl = password !== null
     ? `postgresql://${encodeURIComponent(deployment.dbUser)}:${encodeURIComponent(password)}@${host}:${port}/${encodeURIComponent(deployment.dbName)}`
