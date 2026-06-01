@@ -38,10 +38,11 @@ One-command install:
 curl -fsSL "https://raw.githubusercontent.com/Hasib0607/myPanel/main/scripts/install/quick.sh" | sudo bash
 ```
 
-Optional, if the repo is private or panel self-update should pull without asking for GitHub credentials:
+For a private repo, clone/pull first with your GitHub token, then run the local shortcut so it does not depend on public raw GitHub:
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/Hasib0607/myPanel/main/scripts/install/quick.sh" | sudo env GITHUB_USER="Hasib0607" GITHUB_TOKEN="github_pat_xxx" bash
+cd /opt/myPanel
+sudo env GITHUB_USER="Hasib0607" GITHUB_TOKEN="github_pat_xxx" bash scripts/install/quick.sh
 ```
 
 Use `PROMPT_SECRETS=true` to avoid putting passwords in shell history, and add `ENABLE_SSL=true SSL_EMAIL=admin@example.com PANEL_DOMAIN=panel.example.com` when the panel domain already points to the server.

@@ -12,6 +12,8 @@ set -Eeuo pipefail
 : "${PANEL_LOGIN_PORT:=8453}"
 : "${CPANEL_LOGIN_PORT:=3138}"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 if [[ -n "${ADMIN_USER:-}" && -z "${SUPERADMIN_USERNAME:-}" ]]; then
   export SUPERADMIN_USERNAME="$ADMIN_USER"
 fi
@@ -30,13 +32,6 @@ fi
 
 export REPO_URL APP_BRANCH APP_DIR DB_NAME DB_USER PANEL_LOGIN_PORT CPANEL_LOGIN_PORT
 export SUPERADMIN_USERNAME="${SUPERADMIN_USERNAME:-admin}"
-
-RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/Hasib0607/myPanel/${APP_BRANCH}/scripts/install}"
-tmp_dir="$(mktemp -d)"
-trap 'rm -rf "$tmp_dir"' EXIT
-
-curl -fsSL "$RAW_BASE/bootstrap.sh" -o "$tmp_dir/bootstrap.sh"
-chmod +x "$tmp_dir/bootstrap.sh"
 
 args=(
   --repo "$REPO_URL"
@@ -63,4 +58,14 @@ args=(
 [[ "${FORCE_STEP:-false}" == "true" ]] && args+=(--force-step)
 [[ "${DRY_RUN:-false}" == "true" ]] && args+=(--dry-run)
 
+if [[ -f "$SCRIPT_DIR/bootstrap.sh" ]]; then
+  exec bash "$SCRIPT_DIR/bootstrap.sh" "${args[@]}"
+fi
+
+RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/Hasib0607/myPanel/${APP_BRANCH}/scripts/install}"
+tmp_dir="$(mktemp -d)"
+trap 'rm -rf "$tmp_dir"' EXIT
+
+curl -fsSL "$RAW_BASE/bootstrap.sh" -o "$tmp_dir/bootstrap.sh"
+chmod +x "$tmp_dir/bootstrap.sh"
 exec bash "$tmp_dir/bootstrap.sh" "${args[@]}"
