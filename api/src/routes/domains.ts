@@ -5,7 +5,7 @@ import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { env } from "../config/env.js";
 import { audit } from "../lib/audit.js";
-import { ensureDomainFileStructure } from "../lib/domainFiles.js";
+import { ensureDomainFileStructure, ensureSubdomainFileStructure } from "../lib/domainFiles.js";
 import { buildDeploymentNginxRequest } from "../lib/deploymentDomainSsl.js";
 import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
@@ -472,6 +472,23 @@ async function createSubdomainForDomain(input: {
     });
   }
 
+  const parentDomain = await prisma.domain.findUniqueOrThrow({ where: { id: input.domainId } });
+  const fileScaffold = await ensureSubdomainFileStructure(parentDomain.name, input.name);
+  let nginxResult = null;
+  let nginxWarning: string | undefined;
+  try {
+    if (input.target === env.VPS_IP || input.target === parentDomain.name || input.target === `${input.name}.${parentDomain.name}`) {
+      nginxResult = await sysagent.writeStaticNginxVhost({
+        name: `domain-${input.name}.${parentDomain.name}`,
+        serverName: `${input.name}.${parentDomain.name}`,
+        rootPath: path.join(env.FILE_MANAGER_ROOT, fileScaffold.relativeRoot, "public_html"),
+        forceHttps: false
+      });
+    }
+  } catch (error) {
+    nginxWarning = error instanceof Error ? error.message : "Subdomain web root publish failed";
+  }
+
   let publishResult: Awaited<ReturnType<typeof publishDomainHosting>> | null = null;
   let publishWarning: string | undefined;
   try {
@@ -488,6 +505,9 @@ async function createSubdomainForDomain(input: {
       name: input.name,
       value: input.target
     },
+    fileScaffold,
+    nginxResult,
+    nginxWarning,
     publishResult,
     publishWarning
   };

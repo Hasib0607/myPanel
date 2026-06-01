@@ -9,7 +9,7 @@ import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { env } from "../config/env.js";
 import { audit } from "../lib/audit.js";
-import { ensureDomainFileStructure } from "../lib/domainFiles.js";
+import { ensureDomainFileStructure, ensureSubdomainFileStructure } from "../lib/domainFiles.js";
 import { sysagent } from "../lib/sysagent.js";
 
 const execFileAsync = promisify(execFile);
@@ -211,6 +211,7 @@ const pathQuery = z.object({ path: z.string() });
 const createSchema = z.object({ parentPath: z.string().default("."), name: z.string(), content: z.string().default("") });
 const folderSchema = z.object({ parentPath: z.string().default("."), name: z.string() });
 const domainScaffoldSchema = z.object({ domain: z.string().trim().toLowerCase() });
+const subdomainScaffoldSchema = z.object({ domain: z.string().trim().toLowerCase(), subdomain: z.string().trim().toLowerCase() });
 const saveSchema = z.object({ path: z.string(), content: z.string(), expectedModifiedAt: z.string().optional() });
 const renameSchema = z.object({ path: z.string(), name: z.string() });
 const copyMoveSchema = z.object({ sourcePath: z.string(), targetParentPath: z.string().default("."), name: z.string().optional(), overwrite: z.boolean().default(false) });
@@ -334,6 +335,19 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
       resource: "file",
       description: `Prepared default file folders for ${scaffold.domain}`,
       metadata: { domain: scaffold.domain, folders: scaffold.folders }
+    });
+    return reply.code(201).send({ root: await statEntry(root), scaffold });
+  });
+
+  app.post("/subdomain-scaffold", async (request, reply) => {
+    const body = subdomainScaffoldSchema.parse(request.body);
+    const scaffold = await ensureSubdomainFileStructure(body.domain, body.subdomain);
+    const root = safePath(scaffold.relativeRoot);
+    await audit(request, {
+      action: "CREATE",
+      resource: "file",
+      description: `Prepared default file folders for ${scaffold.fqdn}`,
+      metadata: { domain: scaffold.domain, subdomain: scaffold.subdomain, folders: scaffold.folders }
     });
     return reply.code(201).send({ root: await statEntry(root), scaffold });
   });

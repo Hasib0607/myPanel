@@ -27,6 +27,14 @@ function assertSafeDomainName(domain: string) {
   }
 }
 
+function assertSafeSubdomainName(subdomain: string) {
+  if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/.test(subdomain)) {
+    const error = new Error("Invalid subdomain folder name");
+    (error as Error & { statusCode?: number }).statusCode = 400;
+    throw error;
+  }
+}
+
 function isPermissionError(error: unknown) {
   return error instanceof Error && "code" in error && ((error as NodeJS.ErrnoException).code === "EACCES" || (error as NodeJS.ErrnoException).code === "EPERM");
 }
@@ -63,6 +71,41 @@ async function createDomainFileStructureLocally(normalizedDomain: string, domain
   };
 }
 
+async function createSubdomainFileStructureLocally(parentDomain: string, subdomain: string, subdomainRoot: string) {
+  await fs.mkdir(subdomainRoot, { recursive: true });
+  await Promise.all(domainDefaultFolders.map((folder) => fs.mkdir(path.join(subdomainRoot, folder), { recursive: true })));
+  await fs.mkdir(path.join(subdomainRoot, "public_html", ".well-known", "acme-challenge"), { recursive: true });
+
+  const fqdn = `${subdomain}.${parentDomain}`;
+  const indexPath = path.join(subdomainRoot, "public_html", "index.html");
+  await fs.writeFile(
+    indexPath,
+    `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>${fqdn}</title>
+  </head>
+  <body>
+    <h1>${fqdn}</h1>
+  </body>
+</html>
+`,
+    { flag: "wx" }
+  ).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "EEXIST") throw error;
+  });
+
+  return {
+    domain: parentDomain,
+    subdomain,
+    fqdn,
+    root: subdomainRoot,
+    relativeRoot: path.posix.join(parentDomain, "subdomains", subdomain),
+    folders: domainDefaultFolders
+  };
+}
+
 export async function ensureDomainFileStructure(domain: string) {
   const normalizedDomain = domain.trim().toLowerCase();
   assertSafeDomainName(normalizedDomain);
@@ -88,6 +131,44 @@ export async function ensureDomainFileStructure(domain: string) {
     }
     return {
       domain: result.domain,
+      root: result.root,
+      relativeRoot: result.relativeRoot,
+      folders: result.folders
+    };
+  }
+}
+
+export async function ensureSubdomainFileStructure(parentDomain: string, subdomain: string) {
+  const normalizedDomain = parentDomain.trim().toLowerCase();
+  const normalizedSubdomain = subdomain.trim().toLowerCase();
+  assertSafeDomainName(normalizedDomain);
+  assertSafeSubdomainName(normalizedSubdomain);
+
+  await ensureDomainFileStructure(normalizedDomain);
+  const root = fileManagerRoot();
+  const relativeRoot = path.posix.join(normalizedDomain, "subdomains", normalizedSubdomain);
+  const subdomainRoot = path.resolve(root, relativeRoot);
+  const insideRoot = subdomainRoot === root || subdomainRoot.startsWith(`${root}${path.sep}`);
+  if (!insideRoot) {
+    const error = new Error("Subdomain folder escapes file manager root");
+    (error as Error & { statusCode?: number }).statusCode = 400;
+    throw error;
+  }
+
+  try {
+    return await createSubdomainFileStructureLocally(normalizedDomain, normalizedSubdomain, subdomainRoot);
+  } catch (error) {
+    if (!isPermissionError(error)) throw error;
+    const result = await sysagent.createSubdomainScaffold({ domain: normalizedDomain, subdomain: normalizedSubdomain });
+    if (result.dryRun) {
+      const dryRunError = new Error("Sysagent live file manager operations are disabled. Set ALLOW_LIVE_FILE_MANAGER=true and restart vps-panel-sysagent.");
+      (dryRunError as Error & { statusCode?: number }).statusCode = 503;
+      throw dryRunError;
+    }
+    return {
+      domain: result.domain,
+      subdomain: result.subdomain,
+      fqdn: result.fqdn,
       root: result.root,
       relativeRoot: result.relativeRoot,
       folders: result.folders

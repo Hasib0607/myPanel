@@ -59,6 +59,7 @@ type Domain = {
   id: string;
   name: string;
   status: "ACTIVE" | "PENDING" | "SUSPENDED";
+  subdomains?: Array<{ id: string; name: string; target: string; sslEnabled: boolean }>;
 };
 
 type DomainListResponse = {
@@ -85,6 +86,13 @@ type DomainScaffoldResponse = {
     relativeRoot: string;
     folders: string[];
   };
+};
+
+type FileRootOption = {
+  id: string;
+  label: string;
+  path: string;
+  hint: string;
 };
 
 function formatBytes(value: number) {
@@ -156,8 +164,20 @@ export function FileManagerClient() {
     queryKey: ["domains", "file-manager"],
     queryFn: () => apiGet<DomainListResponse>("/domains?page=1&pageSize=100")
   });
-  const selectedDomain = domains.data?.items.find((domain) => domain.id === selectedDomainId) ?? null;
-  const domainRootPath = selectedDomain?.name ?? ".";
+  const rootOptions = useMemo<FileRootOption[]>(() => {
+    const items = domains.data?.items ?? [];
+    return items.flatMap((domain) => [
+      { id: `domain:${domain.id}`, label: domain.name, path: domain.name, hint: `/var/www/${domain.name}` },
+      ...(domain.subdomains ?? []).map((subdomain) => ({
+        id: `subdomain:${subdomain.id}`,
+        label: `${subdomain.name}.${domain.name}`,
+        path: `${domain.name}/subdomains/${subdomain.name}`,
+        hint: `/var/www/${domain.name}/subdomains/${subdomain.name}`
+      }))
+    ]);
+  }, [domains.data?.items]);
+  const selectedRoot = rootOptions.find((item) => item.id === selectedDomainId) ?? null;
+  const domainRootPath = selectedRoot?.path ?? ".";
 
   const listPath = `/files/list?${queryString({ path: currentPath, search, sort, direction, page: 1, pageSize: 200 })}`;
 
@@ -207,7 +227,13 @@ export function FileManagerClient() {
   });
 
   const createDomainFolder = useMutation({
-    mutationFn: (domainName: string) => apiPost<DomainScaffoldResponse>("/files/domain-scaffold", { domain: domainName }),
+    mutationFn: (root: FileRootOption) => {
+      if (root.id.startsWith("subdomain:")) {
+        const [domain, , subdomain] = root.path.split("/");
+        return apiPost<DomainScaffoldResponse>("/files/subdomain-scaffold", { domain, subdomain });
+      }
+      return apiPost<DomainScaffoldResponse>("/files/domain-scaffold", { domain: root.path });
+    },
     onSuccess: async (response) => {
       setCurrentPath(response.root.path);
       setSelectedPath(null);
@@ -316,9 +342,9 @@ export function FileManagerClient() {
   }
 
   function selectDomain(domainId: string) {
-    const domain = domains.data?.items.find((item) => item.id === domainId) ?? null;
+    const root = rootOptions.find((item) => item.id === domainId) ?? null;
     setSelectedDomainId(domainId);
-    setCurrentPath(domain?.name ?? ".");
+    setCurrentPath(root?.path ?? ".");
     setSelectedPath(null);
     setSearch("");
     setDraftSearch("");
@@ -329,7 +355,7 @@ export function FileManagerClient() {
     <section className="grid h-[calc(100vh-64px)] grid-cols-[300px_minmax(520px,1fr)_380px] overflow-hidden p-6 lg:h-screen xl:p-8">
       <aside className="min-h-0 rounded-l-md border border-panel-line bg-white">
         <div className="border-b border-panel-line p-4">
-          <div className="truncate text-sm font-semibold">{selectedDomain ? selectedDomain.name : overview.data?.root ?? "File root"}</div>
+          <div className="truncate text-sm font-semibold">{selectedRoot ? selectedRoot.label : overview.data?.root ?? "File root"}</div>
           <div className="mt-1 text-xs text-panel-muted">{overview.data ? `${formatBytes(overview.data.textReadLimit)} editor limit` : "Loading..."}</div>
         </div>
         <div className="h-[calc(100%-73px)] overflow-auto p-3">
@@ -339,7 +365,7 @@ export function FileManagerClient() {
             type="button"
           >
             <Folder size={15} />
-            {selectedDomain ? selectedDomain.name : "root"}
+            {selectedRoot ? selectedRoot.label : "root"}
           </button>
           {tree.data?.children.map((node) => <TreeNode currentPath={currentPath} key={node.path} node={node} onOpen={setCurrentPath} />)}
         </div>
@@ -354,12 +380,12 @@ export function FileManagerClient() {
               value={selectedDomainId}
             >
               <option value="">All files</option>
-              {(domains.data?.items ?? []).map((domain) => (
-                <option key={domain.id} value={domain.id}>{domain.name}</option>
+              {rootOptions.map((root) => (
+                <option key={root.id} value={root.id}>{root.label}</option>
               ))}
             </select>
-            {selectedDomain ? (
-              <span className="text-xs text-panel-muted">Showing /var/www/{selectedDomain.name}</span>
+            {selectedRoot ? (
+              <span className="text-xs text-panel-muted">Showing {selectedRoot.hint}</span>
             ) : (
               <span className="text-xs text-panel-muted">Showing full file root</span>
             )}
@@ -398,7 +424,7 @@ export function FileManagerClient() {
               <option value="asc">Asc</option>
               <option value="desc">Desc</option>
             </select>
-            {list.data?.breadcrumbs.filter((crumb) => !selectedDomain || crumb.path !== ".").map((crumb) => (
+            {list.data?.breadcrumbs.filter((crumb) => !selectedRoot || crumb.path !== ".").map((crumb) => (
               <button className="h-8 rounded-md px-2 text-xs text-panel-muted hover:bg-slate-100" key={crumb.path} onClick={() => setCurrentPath(crumb.path)} type="button">
                 {crumb.name}
               </button>
@@ -407,13 +433,13 @@ export function FileManagerClient() {
         </div>
 
         {lastResult ? <div className="border-b border-panel-line bg-slate-50 px-4 py-2 text-sm text-slate-700">{lastResult}</div> : null}
-        {list.isError && selectedDomain ? (
+        {list.isError && selectedRoot ? (
           <div className="border-b border-panel-line bg-amber-50 px-4 py-3 text-sm text-amber-800">
-            <div className="font-medium">No default folders exist for {selectedDomain.name} yet.</div>
+            <div className="font-medium">No default folders exist for {selectedRoot.label} yet.</div>
             <button
               className="mt-2 h-8 rounded-md border border-amber-300 bg-white px-3 text-xs font-semibold hover:bg-amber-100 disabled:opacity-60"
               disabled={createDomainFolder.isPending}
-              onClick={() => createDomainFolder.mutate(selectedDomain.name)}
+              onClick={() => createDomainFolder.mutate(selectedRoot)}
               type="button"
             >
               Create default folders

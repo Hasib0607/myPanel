@@ -43,6 +43,11 @@ class DomainScaffoldRequest(BaseModel):
     domain: str = Field(pattern=r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
 
 
+class SubdomainScaffoldRequest(BaseModel):
+    domain: str = Field(pattern=r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
+    subdomain: str = Field(pattern=r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$")
+
+
 class AccountScaffoldRequest(BaseModel):
     username: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{2,31}$")
 
@@ -121,6 +126,48 @@ def create_domain_scaffold(body: DomainScaffoldRequest) -> dict:
         "domain": domain,
         "root": str(domain_root),
         "relativeRoot": domain,
+        "folders": DEFAULT_DOMAIN_FOLDERS,
+    }
+
+
+@router.post("/subdomain-scaffold")
+def create_subdomain_scaffold(body: SubdomainScaffoldRequest) -> dict:
+    domain = body.domain.strip().lower()
+    subdomain = body.subdomain.strip().lower()
+    fqdn = f"{subdomain}.{domain}"
+    subdomain_root = safe_path(f"{domain}/subdomains/{subdomain}")
+    if not settings.allow_live_file_manager:
+        return dry_run(["subdomain-scaffold", str(subdomain_root)], subdomain_root)
+
+    subdomain_root.mkdir(parents=True, exist_ok=True)
+    for folder in DEFAULT_DOMAIN_FOLDERS:
+        (subdomain_root / folder).mkdir(parents=True, exist_ok=True)
+    (subdomain_root / "public_html" / ".well-known" / "acme-challenge").mkdir(parents=True, exist_ok=True)
+
+    index_path = subdomain_root / "public_html" / "index.html"
+    if not index_path.exists():
+        index_path.write_text(
+            f"""<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>{fqdn}</title>
+  </head>
+  <body>
+    <h1>{fqdn}</h1>
+  </body>
+</html>
+""",
+            encoding="utf-8",
+        )
+
+    return {
+        "ok": True,
+        "domain": domain,
+        "subdomain": subdomain,
+        "fqdn": fqdn,
+        "root": str(subdomain_root),
+        "relativeRoot": f"{domain}/subdomains/{subdomain}",
         "folders": DEFAULT_DOMAIN_FOLDERS,
     }
 
