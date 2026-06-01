@@ -97,7 +97,7 @@ else
 fi
 
 for url in "http://127.0.0.1:$FRONTEND_PORT/login" "$PANEL_PUBLIC_SCHEME://127.0.0.1:$PANEL_LOGIN_PORT/login" "$PANEL_PUBLIC_SCHEME://127.0.0.1:$CPANEL_LOGIN_PORT/login"; do
-  if curl --fail --silent --show-error --insecure --head "$url" >/dev/null; then
+  if curl --fail --silent --show-error --insecure "$url" >/dev/null; then
     pass "HTTP reachable: $url"
   else
     fail "HTTP unreachable: $url"

@@ -777,9 +777,9 @@ run_smoke_tests() {
   log "Running smoke tests"
   wait_for_http "http://127.0.0.1:$SYSAGENT_PORT/health" "sysagent" || { diagnose_service_failure vps-panel-sysagent; return 1; }
   wait_for_http "http://127.0.0.1:$PANEL_PORT/health" "api" || { diagnose_service_failure vps-panel-api; return 1; }
-  wait_for_head "http://127.0.0.1:$FRONTEND_PORT/login" "frontend" || { diagnose_service_failure vps-panel-frontend; return 1; }
-  wait_for_head "$PANEL_PUBLIC_SCHEME://127.0.0.1:$PANEL_LOGIN_PORT/login" "admin panel listener" || { diagnose_service_failure nginx; return 1; }
-  wait_for_head "$PANEL_PUBLIC_SCHEME://127.0.0.1:$CPANEL_LOGIN_PORT/login" "account panel listener" || { diagnose_service_failure nginx; return 1; }
+  wait_for_http "http://127.0.0.1:$FRONTEND_PORT/login" "frontend" || { diagnose_service_failure vps-panel-frontend; return 1; }
+  wait_for_http "$PANEL_PUBLIC_SCHEME://127.0.0.1:$PANEL_LOGIN_PORT/login" "admin panel listener" || { diagnose_service_failure nginx; return 1; }
+  wait_for_http "$PANEL_PUBLIC_SCHEME://127.0.0.1:$CPANEL_LOGIN_PORT/login" "account panel listener" || { diagnose_service_failure nginx; return 1; }
   redis-cli ping >/dev/null
   if [[ "$DB_CREATE" == "true" && ( "$DB_HOST" == "localhost" || "$DB_HOST" == "127.0.0.1" ) ]]; then
     runuser -u postgres -- psql -d "$DB_NAME" -c "select 1" >/dev/null
