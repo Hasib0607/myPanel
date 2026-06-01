@@ -41,8 +41,10 @@ install_alma_packages() {
 
   if ! command -v node >/dev/null 2>&1 || ! node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 20 || (major === 20 && minor >= 9) ? 0 : 1)'; then
     log "Installing Node.js 22"
+    dnf module reset -y nodejs >/dev/null 2>&1 || true
+    dnf module disable -y nodejs >/dev/null 2>&1 || true
     curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
-    dnf install -y nodejs
+    dnf install -y nodejs --allowerasing
   fi
 }
 
