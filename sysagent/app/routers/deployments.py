@@ -100,6 +100,7 @@ class PublicRouteRequest(BaseModel):
     path: str = "/"
     rootPath: str | None = None
     framework: str | None = None
+    requireHttps: bool = False
 
 
 class GuardianRepairRequest(BaseModel):
@@ -860,7 +861,7 @@ def attach_laravel_diagnostics(result: dict, root_path: str | None, framework: s
     return result
 
 
-def _curl_public_route(server_name: str, path: str = "/", root_path: str | None = None, framework: str | None = None) -> dict:
+def _curl_public_route(server_name: str, path: str = "/", root_path: str | None = None, framework: str | None = None, require_https: bool = False) -> dict:
     primary = server_name.split()[0].strip()
     clean_path = path if path.startswith("/") else f"/{path}"
     is_laravel = (framework or "").upper() == "LARAVEL"
@@ -910,11 +911,10 @@ def _curl_public_route(server_name: str, path: str = "/", root_path: str | None 
             raw["stderr"] = f"HTTP {http_code} from {url}"
         return raw
 
-    result = probe(f"http://{primary}{clean_path}", accept_http_errors=is_laravel)
+    scheme = "https" if require_https else "http"
+    result = probe(f"{scheme}://{primary}{clean_path}", accept_http_errors=is_laravel)
     if result.get("httpCode") in {301, 302, 307, 308} and result.get("effectiveUrl", "").startswith("https://"):
         result = probe(result["effectiveUrl"], accept_http_errors=is_laravel)
-    elif is_laravel and result.get("httpCode", 0) >= 400:
-        result = probe(f"https://{primary}{clean_path}", accept_http_errors=True)
 
     effective_url = result.get("effectiveUrl") or ""
     if effective_url and re.search(r"https?://(localhost|127\.0\.0\.1)(:\d+)?(/|$)", effective_url):
@@ -1363,4 +1363,4 @@ def health(body: HealthRequest) -> dict:
 
 @router.post("/public-route")
 def public_route(body: PublicRouteRequest) -> dict:
-    return _curl_public_route(body.serverName, body.path, body.rootPath, body.framework)
+    return _curl_public_route(body.serverName, body.path, body.rootPath, body.framework, body.requireHttps)

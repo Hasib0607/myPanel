@@ -493,7 +493,7 @@ function deploymentAppPath(rootPath: string, rootDirectory: string | null | unde
   return cleanRootDirectory && cleanRootDirectory !== "." ? path.join(rootPath, cleanRootDirectory) : rootPath;
 }
 
-type BoundDomain = { id: string; name: string; forceSsl: boolean; documentRoot?: string | null; includeWww?: boolean };
+type BoundDomain = { id: string; name: string; forceSsl: boolean; sslEnabled?: boolean; documentRoot?: string | null; includeWww?: boolean };
 
 function deploymentServerName(domain: { name: string; includeWww?: boolean } | null | undefined) {
   if (!domain?.name) return null;
@@ -528,9 +528,18 @@ function deploymentFallbackRootPath(domain: BoundDomain | null) {
   return path.join(env.FILE_MANAGER_ROOT, domain.name, documentRoot);
 }
 
+function deploymentSslCertificatePaths(domain: BoundDomain | null) {
+  if (!domain?.name || !domain.sslEnabled) return {};
+  return {
+    sslCertificate: `/etc/letsencrypt/live/${domain.name}/fullchain.pem`,
+    sslCertificateKey: `/etc/letsencrypt/live/${domain.name}/privkey.pem`
+  };
+}
+
 function deploymentPublicEnv(domain: BoundDomain | null) {
   if (!domain?.name) return {} as Record<string, string>;
-  const url = `https://${domain.name}`;
+  const scheme = domain.sslEnabled ? "https" : "http";
+  const url = `${scheme}://${domain.name}`;
   return {
     APP_URL: url,
     APP_ORIGIN: url,
@@ -561,6 +570,16 @@ function isLocalhostValue(value: string | null | undefined) {
   return Boolean(value && /(^|\/\/|\.)localhost(?::\d+)?(\/|$)|(^|\/\/)127\.0\.0\.1(?::\d+)?(\/|$)|(^|\/\/)0\.0\.0\.0(?::\d+)?(\/|$)/i.test(value));
 }
 
+function isSameDomainPublicUrl(value: string | null | undefined, domain: BoundDomain | null) {
+  if (!value || !domain?.name) return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.hostname === domain.name && (parsed.protocol === "http:" || parsed.protocol === "https:");
+  } catch {
+    return value === domain.name || value === `http://${domain.name}` || value === `https://${domain.name}`;
+  }
+}
+
 function deploymentEnvWithPublicUrl(envVars: Record<string, string>, domain: BoundDomain | null) {
   const publicEnv: Record<string, string> = deploymentPublicEnv(domain);
   const merged: Record<string, string> = { ...publicEnv, ...envVars };
@@ -569,7 +588,7 @@ function deploymentEnvWithPublicUrl(envVars: Record<string, string>, domain: Bou
 
   for (const [key, publicValue] of Object.entries(publicEnv)) {
     const currentValue = merged[key];
-    if (!currentValue || isLocalhostValue(currentValue)) {
+    if (!currentValue || isLocalhostValue(currentValue) || isSameDomainPublicUrl(currentValue, domain)) {
       merged[key] = publicValue;
     }
   }
@@ -796,7 +815,7 @@ async function optionalPublicRouteWarning(
   if (!domain) return null;
 
   let publicRoute = await runStep(deploymentId, releaseId, "HEALTH_CHECK", label, () =>
-    sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain), rootPath: appPath, framework: deployment.framework })
+    sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain), rootPath: appPath, framework: deployment.framework, requireHttps: Boolean(domain.sslEnabled) })
   );
 
   try {
@@ -825,7 +844,7 @@ async function optionalPublicRouteWarning(
     );
     await guardianRepairSleep(5000);
     publicRoute = await runStep(deploymentId, releaseId, "HEALTH_CHECK", `${label} retry after Guardian repair`, () =>
-      sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain), rootPath: appPath, framework: deployment.framework })
+      sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain), rootPath: appPath, framework: deployment.framework, requireHttps: Boolean(domain.sslEnabled) })
     );
   }
 
@@ -1321,7 +1340,8 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
           upstreamPort: deployment.port,
           rootPath: deployment.rootPath,
           fallbackRootPath: deploymentFallbackRootPath(domain),
-          forceSsl: domain.forceSsl
+          forceSsl: domain.forceSsl && Boolean(domain.sslEnabled),
+          ...deploymentSslCertificatePaths(domain)
         })
       );
       assertLiveResult((nginxResult as { write?: unknown }).write, "Nginx proxy config write");
@@ -1567,7 +1587,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         upstreamPort: deployment.port,
         rootPath: deployment.rootPath,
         fallbackRootPath: deploymentFallbackRootPath(domain),
-        forceSsl: domain?.forceSsl ?? false
+        forceSsl: Boolean(domain?.forceSsl && domain.sslEnabled),
+        ...deploymentSslCertificatePaths(domain)
       })
     );
     assertLiveResult((nginxResult as { write?: unknown }).write, "Nginx proxy config write");
@@ -1581,6 +1602,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           domainId: domain.id.startsWith("subdomain:") ? null : domain.id,
           domain: domain.name,
           email: `admin@${domain.name}`,
+          includeWww: !domain.id.startsWith("subdomain:") && domain.includeWww !== false,
+          forceSsl: domain.forceSsl,
           source: "deployment"
         })
       );
@@ -1621,9 +1644,12 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     );
 
     const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, "Public website check", { ...deployment, domain }, appPath, envVars, processManager);
+    if (publicRouteWarning) {
+      throw new Error(publicRouteWarning);
+    }
 
     await markRelease(releaseId, action === "rollback" ? "ROLLED_BACK" : "SUCCEEDED", startedAt);
-    const healthStatus = publicRouteWarning || healthOutcome.degraded ? "DEGRADED" : "HEALTHY";
+    const healthStatus = healthOutcome.degraded ? "DEGRADED" : "HEALTHY";
     await prisma.deployment.update({
       where: { id: deployment.id },
       data: {
@@ -1633,8 +1659,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         lastDeployAt: new Date()
       }
     });
-    await writeLog(deployment.id, releaseId, action === "rollback" ? "ROLLBACK" : "SUCCEEDED", `${action} completed`, { dryRun: false, publicRouteWarning });
-    return { dryRun: false, completed: true, status: "RUNNING", healthStatus, publicRouteWarning };
+    await writeLog(deployment.id, releaseId, action === "rollback" ? "ROLLBACK" : "SUCCEEDED", `${action} completed`, { dryRun: false });
+    return { dryRun: false, completed: true, status: "RUNNING", healthStatus };
   } catch (error) {
     await markRelease(releaseId, "FAILED", startedAt);
     await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "FAILED", healthStatus: "DOWN" } });
