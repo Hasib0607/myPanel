@@ -6,6 +6,7 @@ import { restartDeploymentProcess, runGuardianDeploymentRepair } from "../lib/de
 import { detectDeploymentSource } from "../lib/deploymentDetection.js";
 import { prisma } from "../lib/prisma.js";
 import { sysagent } from "../lib/sysagent.js";
+import { checkPanelRemoteUpdate } from "../lib/panelUpdateMonitor.js";
 import { deployQueue } from "./queues.js";
 
 const staleDeploymentMs = Number(process.env.GUARDIAN_STALE_DEPLOYMENT_MS ?? 15 * 60_000);
@@ -288,6 +289,9 @@ export const guardianWorker = new Worker(
     logger.info("guardian job received", { id: job.id, name: job.name });
     if (job.name === "deployment-watch") {
       return runDeploymentWatch();
+    }
+    if (job.name === "panel-update-watch") {
+      return checkPanelRemoteUpdate();
     }
 
     const diagnosis = await sysagent.guardianDiagnosis() as GuardianDiagnosis;
