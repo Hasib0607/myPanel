@@ -431,6 +431,9 @@ def supervisor_start(body: ProcessRequest, start_command: list[str]) -> dict:
         ensure = _ensure_laravel_env(body.rootPath, body.port, body.env)
         if ensure.get("returncode") != 0:
             return ensure
+        writable = repair_laravel_writable_paths(LaravelWritablePathsRequest(rootPath=body.rootPath))
+        if writable.get("returncode") != 0:
+            return writable
 
     reset_runtime_logs(log_dir)
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -1214,6 +1217,7 @@ def repair_laravel_writable_paths(body: LaravelWritablePathsRequest) -> dict:
         return blocked_command("Path escapes configured file manager root", ["laravel-repair", root], info)
 
     paths = [
+        f"{root}/public",
         f"{root}/bootstrap/cache",
         f"{root}/storage",
         f"{root}/storage/app",
@@ -1228,8 +1232,8 @@ def repair_laravel_writable_paths(body: LaravelWritablePathsRequest) -> dict:
     ]
 
     mkdir = run_command(["mkdir", "-p", *paths], timeout=120, allow_live=DEPLOYMENT_COMMANDS_LIVE)
-    chown = run_command(["chown", "-R", "panel:panel", f"{root}/storage", f"{root}/bootstrap/cache"], timeout=120, allow_live=DEPLOYMENT_COMMANDS_LIVE) if mkdir.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because directory creation failed"}
-    chmod = run_command(["chmod", "-R", "ug+rwX", f"{root}/storage", f"{root}/bootstrap/cache"], timeout=120, allow_live=DEPLOYMENT_COMMANDS_LIVE) if mkdir.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because directory creation failed"}
+    chown = run_command(["chown", "-R", "panel:panel", f"{root}/public", f"{root}/storage", f"{root}/bootstrap/cache"], timeout=120, allow_live=DEPLOYMENT_COMMANDS_LIVE) if mkdir.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because directory creation failed"}
+    chmod = run_command(["chmod", "-R", "ug+rwX", f"{root}/public", f"{root}/storage", f"{root}/bootstrap/cache"], timeout=120, allow_live=DEPLOYMENT_COMMANDS_LIVE) if mkdir.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because directory creation failed"}
     failed = any(step.get("returncode") != 0 for step in [mkdir, chown, chmod])
     return {
         "dryRun": any(step.get("dryRun") for step in [mkdir, chown, chmod]),
