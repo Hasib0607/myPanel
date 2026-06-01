@@ -71,6 +71,19 @@ type DeploymentDatabaseRuntime = {
   dbPasswordSecretRef?: string | null;
 };
 
+const deploymentLocks = new Map<string, Promise<unknown>>();
+
+async function runDeploymentExclusive<T>(deploymentId: string, task: () => Promise<T>) {
+  const previous = deploymentLocks.get(deploymentId) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(task);
+  let tracked: Promise<unknown>;
+  tracked = next.finally(() => {
+    if (deploymentLocks.get(deploymentId) === tracked) deploymentLocks.delete(deploymentId);
+  });
+  deploymentLocks.set(deploymentId, tracked);
+  return next;
+}
+
 const defaultProcessManagerByFramework: Record<DeploymentFramework, DeploymentProcessManager> = {
   LARAVEL: "SUPERVISOR",
   NEXTJS: "PM2",
@@ -2585,11 +2598,13 @@ export const deployWorker = new Worker(
       return { ignored: true, reason: "missing deployment id" };
     }
 
-    if (["start", "stop", "restart"].includes(job.name)) {
-      return processLifecycleAction(job.name, data.deploymentId, data.releaseId);
-    }
+    return runDeploymentExclusive(data.deploymentId, async () => {
+      if (["start", "stop", "restart"].includes(job.name)) {
+        return processLifecycleAction(job.name, data.deploymentId!, data.releaseId);
+      }
 
-    return processDeploy(job.name, data.deploymentId, data.releaseId);
+      return processDeploy(job.name, data.deploymentId!, data.releaseId);
+    });
   },
-  { connection: redis }
+  { connection: redis, concurrency: env.DEPLOY_WORKER_CONCURRENCY }
 );
