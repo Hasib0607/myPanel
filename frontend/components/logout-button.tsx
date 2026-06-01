@@ -15,7 +15,7 @@ export function LogoutButton() {
   return (
     <button
       aria-label="Log out"
-      className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-slate-600 hover:bg-slate-100"
+      className="flex h-9 w-9 items-center justify-center rounded-md border border-white/15 bg-white/10 text-current hover:bg-white/15"
       onClick={logout}
       title="Log out"
       type="button"

@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, List, Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { Eye, KeyRound, List, Plus, RefreshCw, Save, Trash2, X } from "lucide-react";
 import { apiDelete, apiGet, apiPost, apiPut } from "@/lib/api";
 import type { Deployment, DeploymentEnvVar } from "../../deployment-types";
 import { ProjectTabs, ResultNotice } from "../../deployment-ui";
@@ -51,6 +51,8 @@ export function DeploymentEnvClient({ project }: { project: string }) {
   const [notice, setNotice] = useState("");
   const [listOpen, setListOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  const [revealedValues, setRevealedValues] = useState<Record<string, string>>({});
+  const [draftValues, setDraftValues] = useState<Record<string, string>>({});
 
   const detail = useQuery({ queryKey: ["deployment", project], queryFn: () => apiGet<Deployment>(`/deployments/${project}`) });
   const env = useQuery({
@@ -75,6 +77,32 @@ export function DeploymentEnvClient({ project }: { project: string }) {
       await invalidate();
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not save variable")
+  });
+
+  const reveal = useMutation({
+    mutationFn: (itemKey: string) => apiGet<{ key: string; value: string; isSecret: boolean }>(`/deployments/${project}/env/${encodeURIComponent(itemKey)}/reveal`),
+    onSuccess: (result) => setRevealedValues((current) => ({ ...current, [result.key]: result.value })),
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not reveal variable")
+  });
+
+  const saveLine = useMutation({
+    mutationFn: ({ item, nextValue }: { item: DeploymentEnvVar; nextValue: string }) =>
+      apiPut<DeploymentEnvVar>(`/deployments/${project}/env/${encodeURIComponent(item.key)}`, { value: normalizeEnvValue(nextValue), isSecret: item.isSecret }),
+    onSuccess: async (item) => {
+      setNotice(`${item.key} updated.`);
+      setDraftValues((current) => {
+        const next = { ...current };
+        delete next[item.key];
+        return next;
+      });
+      setRevealedValues((current) => {
+        const next = { ...current };
+        delete next[item.key];
+        return next;
+      });
+      await invalidate();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not update variable")
   });
 
   const saveBulk = useMutation({
@@ -170,8 +198,22 @@ export function DeploymentEnvClient({ project }: { project: string }) {
                     <div className="flex items-start gap-3 border-b border-panel-line p-3 last:border-b-0" key={item.key}>
                       <div className="min-w-0 flex-1">
                         <div className="font-mono text-sm font-semibold">{item.key}</div>
-                        <div className="mt-1 break-all font-mono text-xs text-panel-muted">{item.masked ? item.secretRef ?? "[secret]" : item.value}</div>
+                        <input
+                          className="mt-2 h-9 w-full rounded-md border border-panel-line px-3 font-mono text-xs text-panel-ink"
+                          onChange={(event) => setDraftValues((current) => ({ ...current, [item.key]: event.target.value }))}
+                          placeholder={item.masked ? item.secretRef ?? "[secret]" : "value"}
+                          type={item.masked && revealedValues[item.key] === undefined ? "password" : "text"}
+                          value={draftValues[item.key] ?? revealedValues[item.key] ?? item.value ?? ""}
+                        />
                       </div>
+                      <button className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md border border-panel-line px-2 text-xs hover:bg-slate-50 disabled:opacity-50" disabled={reveal.variables === item.key} onClick={() => reveal.mutate(item.key)} type="button">
+                        <Eye size={13} />
+                        {reveal.variables === item.key ? "..." : "View"}
+                      </button>
+                      <button className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md border border-panel-line px-2 text-xs hover:bg-slate-50 disabled:opacity-50" disabled={saveLine.variables?.item.key === item.key} onClick={() => saveLine.mutate({ item, nextValue: draftValues[item.key] ?? revealedValues[item.key] ?? item.value ?? "" })} type="button">
+                        <Save size={13} />
+                        Save
+                      </button>
                       <button className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md border border-panel-line px-2 text-xs text-panel-danger hover:bg-red-50" onClick={() => remove.mutate(item.key)} type="button">
                         <Trash2 size={13} />
                         Delete

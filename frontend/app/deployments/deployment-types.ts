@@ -31,11 +31,14 @@ export type DeploymentRelease = {
   id: string;
   status: ReleaseStatus;
   commitSha: string | null;
+  commitMessage?: string | null;
+  commitAuthor?: string | null;
   sourcePath: string | null;
   startedAt: string | null;
   finishedAt: string | null;
   durationMs: number | null;
   createdAt: string;
+  logs?: DeploymentLog[];
 };
 
 export type DeploymentLog = {

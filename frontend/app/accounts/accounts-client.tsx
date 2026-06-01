@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import Link from "next/link";
 import { KeyRound, Plus, RefreshCw, Trash2, UserRound } from "lucide-react";
+import { ConfirmModal } from "@/components/confirm-modal";
 import { apiDelete, apiGet, apiPatch, apiPost } from "@/lib/api";
 
 type Account = {
@@ -44,6 +45,7 @@ export function AccountsClient() {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
   const [notice, setNotice] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<Account | null>(null);
   const accounts = useQuery({
     queryKey: ["accounts", search, status],
     queryFn: () => apiGet<{ items: Account[] }>(`/accounts?search=${encodeURIComponent(search)}${status ? `&status=${status}` : ""}`)
@@ -96,14 +98,15 @@ export function AccountsClient() {
     mutationFn: (id: string) => apiDelete(`/accounts/${id}?linkedResourceAction=unassign`),
     onSuccess: async () => {
       setNotice("Account deleted.");
+      setDeleteTarget(null);
       await refresh();
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not delete account.")
   });
 
   return (
-    <section className="grid grid-cols-[360px_1fr] gap-6 p-8">
-      <div className="rounded-md border border-panel-line bg-white">
+    <section className="grid gap-6 p-6 xl:grid-cols-[360px_1fr] xl:p-8">
+      <div className="rounded-md border border-panel-line bg-white shadow-sm">
         <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Create Account</div>
         <div className="space-y-3 p-4">
           <Input label="Username" value={draft.username} onChange={(username) => setDraft({ ...draft, username: cleanUsername(username) })} />
@@ -149,7 +152,7 @@ export function AccountsClient() {
         </div>
       </div>
 
-      <div className="rounded-md border border-panel-line bg-white">
+      <div className="overflow-hidden rounded-md border border-panel-line bg-white shadow-sm">
         <div className="flex items-center justify-between border-b border-panel-line px-4 py-3">
           <div className="text-sm font-semibold">Hosting Accounts</div>
           <div className="flex items-center gap-2">
@@ -164,42 +167,76 @@ export function AccountsClient() {
             </button>
           </div>
         </div>
-        <div className="divide-y divide-panel-line">
-          {(accounts.data?.items ?? []).map((account) => (
-            <div className="grid grid-cols-[1fr_auto] gap-4 px-4 py-3" key={account.id}>
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <UserRound size={16} />
-                  <Link className="font-semibold text-panel-accent hover:underline" href={`/accounts/${account.id}`}>{account.username}</Link>
-                  <span className={`rounded-md px-2 py-0.5 text-xs font-semibold ${account.status === "ACTIVE" ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-panel-danger"}`}>{account.status}</span>
-                </div>
-                <div className="mt-1 text-sm text-panel-muted">{account.email || "No email"} · {account.ownerName || "No owner"}</div>
-                <div className="mt-1 truncate font-mono text-xs text-panel-muted">{account.homeRoot}</div>
-                <div className="mt-2 flex flex-wrap gap-2 text-xs text-panel-muted">
-                  <span>{account._count?.domains ?? 0} domains</span>
-                  <span>{account._count?.deployments ?? 0} deployments</span>
-                  <span>{account._count?.mailAccounts ?? 0} mailboxes</span>
-                  <span>{account.diskLimitMb ?? "-"} MB</span>
-                  <span>{account.deploymentLimit ?? "-"} deploy limit</span>
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <button className="rounded-md border border-panel-line p-2 hover:bg-slate-50" onClick={() => resetPassword.mutate(account.id)} type="button" title="Reset password">
-                  <KeyRound size={15} />
-                </button>
-                <button className="rounded-md border border-panel-line px-3 py-2 text-sm hover:bg-slate-50" onClick={() => updateStatus.mutate({ id: account.id, status: account.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE" })} type="button">
-                  {account.status === "ACTIVE" ? "Suspend" : "Activate"}
-                </button>
-                <button className="rounded-md border border-red-200 p-2 text-panel-danger hover:bg-red-50" onClick={() => window.confirm("Delete account and unassign linked resources?") ? deleteAccount.mutate(account.id) : undefined} type="button" title="Delete">
-                  <Trash2 size={15} />
-                </button>
-              </div>
-            </div>
-          ))}
+        <div>
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50 text-left text-xs text-panel-muted">
+              <tr>
+                <th className="px-4 py-3">Account</th>
+                <th className="px-4 py-3">Owner</th>
+                <th className="px-4 py-3">Usage</th>
+                <th className="px-4 py-3">Limits</th>
+                <th className="px-4 py-3">Status</th>
+                <th className="px-4 py-3 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(accounts.data?.items ?? []).map((account) => (
+                <tr className="border-t border-panel-line" key={account.id}>
+                  <td className="px-4 py-3">
+                    <div className="flex min-w-56 items-center gap-2">
+                      <UserRound className="text-panel-muted" size={16} />
+                      <div className="min-w-0">
+                        <Link className="block truncate font-semibold text-panel-accent hover:underline" href={`/accounts/${account.id}`}>{account.username}</Link>
+                        <div className="mt-1 truncate font-mono text-xs text-panel-muted">{account.homeRoot}</div>
+                      </div>
+                    </div>
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="font-medium">{account.ownerName || "No owner"}</div>
+                    <div className="mt-1 text-xs text-panel-muted">{account.email || "No email"}</div>
+                  </td>
+                  <td className="px-4 py-3 text-xs text-panel-muted">
+                    <div>{account._count?.domains ?? 0} domains</div>
+                    <div>{account._count?.deployments ?? 0} deployments</div>
+                    <div>{account._count?.mailAccounts ?? 0} mailboxes</div>
+                  </td>
+                  <td className="px-4 py-3 text-xs text-panel-muted">
+                    <div>{account.diskLimitMb ?? "-"} MB disk</div>
+                    <div>{account.deploymentLimit ?? "-"} deploy limit</div>
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className={`rounded-md px-2 py-1 text-xs font-semibold ${account.status === "ACTIVE" ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-panel-danger"}`}>{account.status}</span>
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="flex justify-end gap-2">
+                      <button className="rounded-md border border-panel-line p-2 hover:bg-slate-50" onClick={() => resetPassword.mutate(account.id)} type="button" title="Reset password">
+                        <KeyRound size={15} />
+                      </button>
+                      <button className="rounded-md border border-panel-line px-3 py-2 text-sm hover:bg-slate-50" onClick={() => updateStatus.mutate({ id: account.id, status: account.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE" })} type="button">
+                        {account.status === "ACTIVE" ? "Suspend" : "Activate"}
+                      </button>
+                      <button className="rounded-md border border-red-200 p-2 text-panel-danger hover:bg-red-50" onClick={() => setDeleteTarget(account)} type="button" title="Delete">
+                        <Trash2 size={15} />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
           {accounts.isLoading ? <div className="p-8 text-sm text-panel-muted">Loading accounts...</div> : null}
           {!accounts.isLoading && !(accounts.data?.items ?? []).length ? <div className="p-8 text-sm text-panel-muted">No accounts created yet.</div> : null}
         </div>
       </div>
+      <ConfirmModal
+        confirmLabel="Delete account"
+        message={`This will delete ${deleteTarget?.username ?? "this account"} and unassign linked resources. This action cannot be undone.`}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={() => deleteTarget ? deleteAccount.mutate(deleteTarget.id) : undefined}
+        open={Boolean(deleteTarget)}
+        pending={deleteAccount.isPending}
+        title="Delete hosting account?"
+      />
     </section>
   );
 }

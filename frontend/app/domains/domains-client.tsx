@@ -4,6 +4,7 @@ import Link from "next/link";
 import { Fragment, FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Eye, Globe2, ListPlus, Mail, Network, Plus, Search, Settings2, ShieldCheck, Split, Trash2, X } from "lucide-react";
+import { ConfirmModal } from "@/components/confirm-modal";
 import { PageHeader } from "@/components/page-header";
 import { apiDeleteBody, apiGet, apiPatch, apiPost } from "@/lib/api";
 
@@ -111,6 +112,7 @@ export function DomainsClient() {
   const [bulkPublish, setBulkPublish] = useState(true);
   const [bulkSkipExisting, setBulkSkipExisting] = useState(true);
   const [bulkResults, setBulkResults] = useState<BulkDomainResponse | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Domain | null>(null);
   const normalizedNewDomain = normalizeDomainInput(newDomain);
   const parsedBulkDomains = useMemo(() => {
     const domains = bulkText
@@ -185,6 +187,7 @@ export function DomainsClient() {
     onSuccess: async () => {
       setError("");
       setNotice("Domain deleted.");
+      setDeleteTarget(null);
       await queryClient.invalidateQueries({ queryKey: ["domains"] });
       await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
@@ -314,7 +317,7 @@ export function DomainsClient() {
           </div>
         }
       />
-      <section className="p-8">
+      <section className="p-6 xl:p-8">
         <form className="mb-4 flex gap-3" onSubmit={submitSearch}>
           <div className="relative">
             <Search className="absolute left-3 top-3 text-panel-muted" size={16} />
@@ -432,12 +435,7 @@ export function DomainsClient() {
                         <button
                           className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line text-panel-danger hover:bg-red-50 disabled:opacity-60"
                           disabled={deleteDomain.isPending}
-                          onClick={() => {
-                            if (window.confirm(`Delete ${domain.name}? This removes its DNS, mail accounts, and deployment metadata.`)) {
-                              setNotice("");
-                              deleteDomain.mutate(domain);
-                            }
-                          }}
+                          onClick={() => setDeleteTarget(domain)}
                           title="Delete domain"
                           type="button"
                         >
@@ -656,6 +654,19 @@ export function DomainsClient() {
           </div>
         </div>
       ) : null}
+      <ConfirmModal
+        confirmLabel="Delete domain"
+        message={`This removes ${deleteTarget?.name ?? "this domain"} with its DNS records, mail accounts, subdomains, and deployment metadata.`}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={() => {
+          if (!deleteTarget) return;
+          setNotice("");
+          deleteDomain.mutate(deleteTarget);
+        }}
+        open={Boolean(deleteTarget)}
+        pending={deleteDomain.isPending}
+        title="Delete domain?"
+      />
     </>
   );
 }

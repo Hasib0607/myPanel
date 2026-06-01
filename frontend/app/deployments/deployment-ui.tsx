@@ -70,9 +70,10 @@ export function healthBadge(status: DeploymentHealthStatus) {
   );
 }
 
-export function ProjectTabs({ project, active }: { project: string; active: "overview" | "logs" | "env" | "database" | "settings" }) {
+export function ProjectTabs({ project, active }: { project: string; active: "overview" | "history" | "logs" | "env" | "database" | "settings" }) {
   const tabs = [
     { key: "overview", label: "Overview", href: `/deployments/${project}/overview` },
+    { key: "history", label: "Deploy History", href: `/deployments/${project}/history` },
     { key: "logs", label: "Logs", href: `/deployments/${project}/logs` },
     { key: "env", label: "Environment", href: `/deployments/${project}/env` },
     { key: "database", label: "Database", href: `/deployments/${project}/database` },

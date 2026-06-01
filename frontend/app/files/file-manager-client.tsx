@@ -21,6 +21,7 @@ import {
   Upload
 } from "lucide-react";
 import { apiDeleteBody, apiGet, apiPatch, apiPost } from "@/lib/api";
+import { ConfirmModal } from "@/components/confirm-modal";
 import Link from "next/link";
 
 type FileEntry = {
@@ -149,6 +150,7 @@ export function FileManagerClient() {
   const [lastResult, setLastResult] = useState("");
   const [imagePreview, setImagePreview] = useState("");
   const [selectedDomainId, setSelectedDomainId] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null);
 
   const domains = useQuery({
     queryKey: ["domains", "file-manager"],
@@ -229,6 +231,7 @@ export function FileManagerClient() {
     mutationFn: (paths: string[]) => apiDeleteBody<{ ok: true; removed: string[] }>("/files/delete", { paths }),
     onSuccess: async () => {
       setSelectedPath(null);
+      setDeleteTarget(null);
       setLastResult("Deleted.");
       await invalidateFiles();
     },
@@ -323,7 +326,7 @@ export function FileManagerClient() {
   }
 
   return (
-    <section className="grid h-[calc(100vh-81px)] grid-cols-[300px_minmax(520px,1fr)_380px] overflow-hidden p-8">
+    <section className="grid h-[calc(100vh-64px)] grid-cols-[300px_minmax(520px,1fr)_380px] overflow-hidden p-6 lg:h-screen xl:p-8">
       <aside className="min-h-0 rounded-l-md border border-panel-line bg-white">
         <div className="border-b border-panel-line p-4">
           <div className="truncate text-sm font-semibold">{selectedDomain ? selectedDomain.name : overview.data?.root ?? "File root"}</div>
@@ -486,9 +489,7 @@ export function FileManagerClient() {
                   const name = window.prompt("Rename to", selectedEntry.name);
                   if (name && name !== selectedEntry.name) renameItem.mutate({ path: selectedEntry.path, name });
                 }} type="button"><Settings2 size={15} /> Rename</button>
-                <button className="flex h-9 items-center justify-center gap-2 rounded-md border border-panel-line px-2 text-sm text-panel-danger hover:bg-red-50" onClick={() => {
-                  if (window.confirm(`Delete ${selectedEntry.name}?`)) deleteItems.mutate([selectedEntry.path]);
-                }} type="button"><Trash2 size={15} /> Delete</button>
+                <button className="flex h-9 items-center justify-center gap-2 rounded-md border border-panel-line px-2 text-sm text-panel-danger hover:bg-red-50" onClick={() => setDeleteTarget(selectedEntry)} type="button"><Trash2 size={15} /> Delete</button>
               </div>
 
               <div className="grid grid-cols-2 gap-2 text-xs">
@@ -547,6 +548,15 @@ export function FileManagerClient() {
 
         </div>
       </aside>
+      <ConfirmModal
+        confirmLabel="Delete item"
+        message={`This will permanently delete ${deleteTarget?.name ?? "the selected item"} from the file manager.`}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={() => deleteTarget ? deleteItems.mutate([deleteTarget.path]) : undefined}
+        open={Boolean(deleteTarget)}
+        pending={deleteItems.isPending}
+        title="Delete file item?"
+      />
     </section>
   );
 }

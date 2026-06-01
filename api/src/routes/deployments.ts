@@ -1640,6 +1640,14 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     return env.map((item) => ({ ...item, value: item.isSecret ? null : item.value, masked: item.isSecret }));
   });
 
+  app.get("/:deploymentId/env/:key/reveal", async (request) => {
+    const { deploymentId, key } = z.object({ deploymentId: z.string(), key: z.string() }).parse(request.params);
+    const deployment = await findDeployment(deploymentId);
+    const item = await prisma.deploymentEnvVar.findUniqueOrThrow({ where: { deploymentId_key: { deploymentId: deployment.id, key } } });
+    const value = item.isSecret && item.secretRef ? await getSecret(item.secretRef) : item.value;
+    return { key: item.key, value: value ?? "", isSecret: item.isSecret };
+  });
+
   app.put("/:deploymentId/env/:key", async (request) => {
     const { deploymentId, key } = z.object({ deploymentId: z.string(), key: z.string() }).parse(request.params);
     const body = envVarSchema.omit({ key: true }).parse(request.body);

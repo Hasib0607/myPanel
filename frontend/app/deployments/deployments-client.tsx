@@ -2,9 +2,9 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Clipboard, FolderGit2, GitBranch, Github, KeyRound, List, Pencil, Play, Plus, Search, Settings2, Square, Trash2, Wand2, X } from "lucide-react";
+import { CheckCircle2, Clipboard, Eye, FolderGit2, GitBranch, Github, History, KeyRound, List, Pencil, Play, Plus, Save, Search, Settings2, Square, ToggleLeft, ToggleRight, Trash2, Wand2, X } from "lucide-react";
 import { apiDelete, apiDeleteBody, apiGet, apiGetText, apiPatch, apiPost, apiPut } from "@/lib/api";
-import type { Deployment, DeploymentDomainBinding, DeploymentEnvVar, DeploymentFramework, DeploymentListResponse, DetectionResponse, PreflightResponse, QueueResponse, DeploymentSourceProvider } from "./deployment-types";
+import type { Deployment, DeploymentDomainBinding, DeploymentEnvVar, DeploymentFramework, DeploymentListResponse, DeploymentRelease, DetectionResponse, PreflightResponse, QueueResponse, DeploymentSourceProvider } from "./deployment-types";
 import { frameworkOptions, sourceOptions } from "./deployment-types";
 import { ResultNotice, actionIcon, formatDate, healthBadge, queryString, statusBadge } from "./deployment-ui";
 
@@ -235,7 +235,7 @@ export function DeploymentsClient() {
   const [draftSearch, setDraftSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [sourceFilter, setSourceFilter] = useState("");
-  const [activeTab, setActiveTab] = useState<"overview" | "domains" | "env" | "settings">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "domains" | "history" | "env" | "settings">("overview");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [repoPickerOpen, setRepoPickerOpen] = useState(false);
@@ -257,6 +257,7 @@ export function DeploymentsClient() {
   const [logText, setLogText] = useState("");
   const [logTitle, setLogTitle] = useState("");
   const [notice, setNotice] = useState("");
+  const [revealedEnvValues, setRevealedEnvValues] = useState<Record<string, string>>({});
 
   const deployments = useQuery({
     queryKey: ["deployments", search, statusFilter, sourceFilter],
@@ -270,6 +271,12 @@ export function DeploymentsClient() {
   const githubConnection = useQuery({ enabled: repoPickerOpen, queryKey: ["deployments-github-connection"], queryFn: () => apiGet<{ connected: boolean; username: string | null; scopes: string[] }>("/deployments/github/connection") });
 
   const selected = useMemo(() => (deployments.data?.items ?? []).find((item) => item.id === selectedId) ?? deployments.data?.items?.[0] ?? null, [deployments.data?.items, selectedId]);
+  const releases = useQuery({
+    enabled: Boolean(selected?.slug),
+    queryKey: ["deployment-releases", selected?.slug],
+    queryFn: () => apiGet<DeploymentRelease[]>(`/deployments/${selected!.slug}/releases`),
+    refetchInterval: activeTab === "history" ? 5000 : false
+  });
 
   useEffect(() => {
     if (!selectedId && deployments.data?.items?.[0]) setSelectedId(deployments.data.items[0].id);
@@ -285,6 +292,7 @@ export function DeploymentsClient() {
     if (selected?.slug) {
       await queryClient.invalidateQueries({ queryKey: ["deployment", selected.slug] });
       await queryClient.invalidateQueries({ queryKey: ["deployment-env", selected.slug] });
+      await queryClient.invalidateQueries({ queryKey: ["deployment-releases", selected.slug] });
     }
   };
 
@@ -343,6 +351,25 @@ export function DeploymentsClient() {
       if (variables.name === "deploy") setActiveTab("overview");
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Action failed")
+  });
+
+  const toggleAutoDeploy = useMutation({
+    mutationFn: (deployment: Deployment) => apiPatch<Deployment>(`/deployments/${deployment.slug}`, { autoDeployEnabled: !deployment.autoDeployEnabled }),
+    onSuccess: async (deployment) => {
+      setNotice(`Auto deploy ${deployment.autoDeployEnabled ? "enabled" : "disabled"} for ${deployment.name}.`);
+      await invalidateDeployments();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not update auto deploy")
+  });
+
+  const rollbackRelease = useMutation({
+    mutationFn: ({ deployment, releaseId }: { deployment: Deployment; releaseId: string }) => apiPost<QueueResponse>(`/deployments/${deployment.slug}/rollback`, { releaseId }),
+    onSuccess: async (_result, variables) => {
+      setNotice(`Rollback queued for ${variables.deployment.name}.`);
+      setActiveTab("history");
+      await invalidateDeployments();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not jump to release")
   });
 
   const openLogs = useMutation({
@@ -445,6 +472,27 @@ export function DeploymentsClient() {
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not save env")
   });
 
+  const revealEnv = useMutation({
+    mutationFn: async (key: string) => apiGet<{ key: string; value: string; isSecret: boolean }>(`/deployments/${selected!.slug}/env/${encodeURIComponent(key)}/reveal`),
+    onSuccess: (result) => setRevealedEnvValues((current) => ({ ...current, [result.key]: result.value })),
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not reveal env value")
+  });
+
+  const saveEnvLine = useMutation({
+    mutationFn: ({ item, value }: { item: DeploymentEnvVar; value: string }) =>
+      apiPut<DeploymentEnvVar>(`/deployments/${selected!.slug}/env/${encodeURIComponent(item.key)}`, { value: normalizeEnvValue(value), isSecret: item.isSecret }),
+    onSuccess: async (item) => {
+      setNotice(`${item.key} updated.`);
+      setRevealedEnvValues((current) => {
+        const next = { ...current };
+        delete next[item.key];
+        return next;
+      });
+      await invalidateDeployments();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not update env")
+  });
+
   const removeEnv = useMutation({
     mutationFn: (key: string) => apiDelete(`/deployments/${selected?.slug}/env/${encodeURIComponent(key)}`),
     onSuccess: async () => {
@@ -511,6 +559,7 @@ export function DeploymentsClient() {
   const tabs = [
     { key: "overview", label: "Overview" },
     { key: "domains", label: "Domains" },
+    { key: "history", label: "Deploy History" },
     { key: "env", label: "Environment" },
     { key: "settings", label: "Settings" }
   ] as const;
@@ -572,6 +621,15 @@ export function DeploymentsClient() {
                     ))}
                     <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium hover:bg-slate-50 disabled:opacity-50" disabled={openLogs.isPending} onClick={() => openLogs.mutate({ deployment: selected, type: "build" })} type="button"><Clipboard size={15} />Build log</button>
                     <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium hover:bg-slate-50 disabled:opacity-50" disabled={openLogs.isPending} onClick={() => openLogs.mutate({ deployment: selected, type: "running" })} type="button"><Clipboard size={15} />Running log</button>
+                    <button
+                      className={`flex h-9 items-center gap-2 rounded-md border px-3 text-sm font-medium disabled:opacity-50 ${selected.autoDeployEnabled ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-panel-line text-panel-muted hover:bg-slate-50"}`}
+                      disabled={toggleAutoDeploy.isPending}
+                      onClick={() => toggleAutoDeploy.mutate(selected)}
+                      type="button"
+                    >
+                      {selected.autoDeployEnabled ? <ToggleRight size={16} /> : <ToggleLeft size={16} />}
+                      Auto deploy {selected.autoDeployEnabled ? "on" : "off"}
+                    </button>
                     <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium hover:bg-slate-50" onClick={openEdit} type="button"><Pencil size={15} />Edit</button>
                   </div>
                 </div>
@@ -583,7 +641,8 @@ export function DeploymentsClient() {
               <div className="min-h-0 flex-1 overflow-auto p-5">
                 {activeTab === "overview" ? <OverviewPanel deployment={selected} /> : null}
                 {activeTab === "domains" ? <DomainsPanel deployment={selected} domains={domainOptions(domains.data?.items ?? [])} domainToAdd={domainToAdd} setDomainToAdd={setDomainToAdd} addDomain={() => addDomain.mutate()} setPrimary={(binding) => setPrimaryDomain.mutate(binding)} removeDomain={(binding) => removeDomain.mutate(binding)} /> : null}
-                {activeTab === "env" ? <EnvPanel deployment={selected} envKey={envKey} envValue={envValue} envSecret={envSecret} bulkEnvText={bulkEnvText} bulkEnvSecret={bulkEnvSecret} setEnvKey={setEnvKey} setEnvValue={setEnvValue} setEnvSecret={setEnvSecret} setBulkEnvText={setBulkEnvText} setBulkEnvSecret={setBulkEnvSecret} saveEnv={(onSuccess) => saveEnv.mutate(undefined, { onSuccess })} saveBulkEnv={(onSuccess) => saveBulkEnv.mutate(undefined, { onSuccess })} savingEnv={saveEnv.isPending} savingBulkEnv={saveBulkEnv.isPending} removeEnv={(key) => removeEnv.mutate(key)} clearDatabaseEnvOverrides={() => clearDatabaseEnvOverrides.mutate()} clearingDatabaseEnvOverrides={clearDatabaseEnvOverrides.isPending} /> : null}
+                {activeTab === "history" ? <HistoryPanel deployment={selected} releases={releases.data ?? selected.releases ?? []} loading={releases.isLoading} onRefresh={() => releases.refetch()} onJump={(release) => rollbackRelease.mutate({ deployment: selected, releaseId: release.id })} jumping={rollbackRelease.isPending} /> : null}
+                {activeTab === "env" ? <EnvPanel deployment={selected} envKey={envKey} envValue={envValue} envSecret={envSecret} bulkEnvText={bulkEnvText} bulkEnvSecret={bulkEnvSecret} revealedValues={revealedEnvValues} revealingKey={revealEnv.variables} savingLineKey={saveEnvLine.variables?.item.key} setEnvKey={setEnvKey} setEnvValue={setEnvValue} setEnvSecret={setEnvSecret} setBulkEnvText={setBulkEnvText} setBulkEnvSecret={setBulkEnvSecret} saveEnv={(onSuccess) => saveEnv.mutate(undefined, { onSuccess })} saveBulkEnv={(onSuccess) => saveBulkEnv.mutate(undefined, { onSuccess })} savingEnv={saveEnv.isPending} savingBulkEnv={saveBulkEnv.isPending} revealEnv={(key) => revealEnv.mutate(key)} saveEnvLine={(item, value) => saveEnvLine.mutate({ item, value })} removeEnv={(key) => removeEnv.mutate(key)} clearDatabaseEnvOverrides={() => clearDatabaseEnvOverrides.mutate()} clearingDatabaseEnvOverrides={clearDatabaseEnvOverrides.isPending} /> : null}
                 {activeTab === "settings" ? <SettingsPanel deployment={selected} deleteText={deleteText} setDeleteText={setDeleteText} onEdit={openEdit} onDelete={() => deleteProject.mutate()} deleting={deleteProject.isPending} /> : null}
               </div>
             </div>
@@ -689,6 +748,60 @@ function DomainsPanel({ deployment, domains, domainToAdd, setDomainToAdd, addDom
   return <div className="space-y-4"><div className="flex gap-2"><select className="h-10 min-w-72 rounded-md border border-panel-line px-2 text-sm" onChange={(event) => setDomainToAdd(event.target.value)} value={domainToAdd}><option value="">Select domain</option>{domains.filter((domain) => !boundIds.has(domain.id)).map((domain) => <option key={domain.id} value={domain.id}>{domain.name}</option>)}</select><button className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={!domainToAdd} onClick={addDomain} type="button"><Plus size={15} />Add domain</button></div><div className="overflow-hidden rounded-md border border-panel-line">{(deployment.domainBindings ?? []).map((binding) => <div className="flex items-center justify-between border-b border-panel-line p-3 last:border-b-0" key={binding.id}><div><div className="font-semibold">{deploymentBindingName(binding)}</div><div className="text-xs text-panel-muted">{binding.role}</div></div><div className="flex gap-2"><button className="h-8 rounded-md border border-panel-line px-2 text-xs" disabled={binding.role === "primary"} onClick={() => setPrimary(binding)} type="button">Make primary</button><button className="h-8 rounded-md border border-panel-line px-2 text-xs text-panel-danger" onClick={() => removeDomain(binding)} type="button">Remove</button></div></div>)}{(deployment.domainBindings ?? []).length === 0 ? <div className="p-8 text-center text-sm text-panel-muted">No domains attached.</div> : null}</div></div>;
 }
 
+function HistoryPanel({ deployment, releases, loading, jumping, onRefresh, onJump }: { deployment: Deployment; releases: DeploymentRelease[]; loading?: boolean; jumping?: boolean; onRefresh: () => void; onJump: (release: DeploymentRelease) => void }) {
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between rounded-md border border-panel-line bg-slate-50 p-4">
+        <div>
+          <div className="flex items-center gap-2 text-sm font-semibold"><History size={16} />Deploy History</div>
+          <div className="mt-1 text-xs text-panel-muted">Project wise releases for {deployment.name}. Jump queues rollback to the selected older deploy.</div>
+        </div>
+        <button className="h-9 rounded-md border border-panel-line bg-white px-3 text-sm font-semibold hover:bg-slate-50" onClick={onRefresh} type="button">Refresh</button>
+      </div>
+      <div className="overflow-hidden rounded-md border border-panel-line">
+        <table className="w-full text-sm">
+          <thead className="bg-slate-50 text-left text-xs text-panel-muted">
+            <tr>
+              <th className="px-4 py-3">Release</th>
+              <th className="px-4 py-3">Commit</th>
+              <th className="px-4 py-3">Started</th>
+              <th className="px-4 py-3">Finished</th>
+              <th className="px-4 py-3">Duration</th>
+              <th className="px-4 py-3 text-right">Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {releases.map((release) => (
+              <tr className="border-t border-panel-line" key={release.id}>
+                <td className="px-4 py-3">
+                  <div className="flex items-center gap-2">{statusBadge(release.status)}<span className="font-mono text-xs text-panel-muted">{release.id.slice(-8)}</span></div>
+                  {release.commitAuthor ? <div className="mt-1 text-xs text-panel-muted">{release.commitAuthor}</div> : null}
+                </td>
+                <td className="max-w-md px-4 py-3">
+                  <div className="font-mono text-xs font-semibold">{release.commitSha ? release.commitSha.slice(0, 12) : "-"}</div>
+                  {release.commitMessage ? <div className="mt-1 truncate text-xs text-panel-muted">{release.commitMessage}</div> : null}
+                </td>
+                <td className="px-4 py-3 text-xs text-panel-muted">{formatDate(release.startedAt ?? release.createdAt)}</td>
+                <td className="px-4 py-3 text-xs text-panel-muted">{formatDate(release.finishedAt)}</td>
+                <td className="px-4 py-3 text-xs text-panel-muted">{release.durationMs ? `${Math.round(release.durationMs / 1000)}s` : "-"}</td>
+                <td className="px-4 py-3">
+                  <div className="flex justify-end">
+                    <button className="h-8 rounded-md border border-panel-line px-3 text-xs font-semibold hover:bg-slate-50 disabled:opacity-50" disabled={jumping || release.status !== "SUCCEEDED"} onClick={() => onJump(release)} type="button">
+                      Jump
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {loading ? <div className="p-8 text-center text-sm text-panel-muted">Loading history...</div> : null}
+        {!loading && releases.length === 0 ? <div className="p-8 text-center text-sm text-panel-muted">No deploy history yet.</div> : null}
+      </div>
+    </div>
+  );
+}
+
 function EnvPanel({
   deployment,
   envKey,
@@ -696,6 +809,9 @@ function EnvPanel({
   envSecret,
   bulkEnvText,
   bulkEnvSecret,
+  revealedValues,
+  revealingKey,
+  savingLineKey,
   setEnvKey,
   setEnvValue,
   setEnvSecret,
@@ -703,6 +819,8 @@ function EnvPanel({
   setBulkEnvSecret,
   saveEnv,
   saveBulkEnv,
+  revealEnv,
+  saveEnvLine,
   savingEnv,
   savingBulkEnv,
   removeEnv,
@@ -715,6 +833,9 @@ function EnvPanel({
   envSecret: boolean;
   bulkEnvText: string;
   bulkEnvSecret: boolean;
+  revealedValues: Record<string, string>;
+  revealingKey?: string;
+  savingLineKey?: string;
   setEnvKey: (value: string) => void;
   setEnvValue: (value: string) => void;
   setEnvSecret: (value: boolean) => void;
@@ -722,6 +843,8 @@ function EnvPanel({
   setBulkEnvSecret: (value: boolean) => void;
   saveEnv: (onSuccess?: () => void) => void;
   saveBulkEnv: (onSuccess?: () => void) => void;
+  revealEnv: (key: string) => void;
+  saveEnvLine: (item: DeploymentEnvVar, value: string) => void;
   savingEnv?: boolean;
   savingBulkEnv?: boolean;
   removeEnv: (key: string) => void;
@@ -760,7 +883,12 @@ function EnvPanel({
           clearingDatabaseEnvOverrides={clearingDatabaseEnvOverrides}
           clearDatabaseEnvOverrides={clearDatabaseEnvOverrides}
           onClose={() => setListOpen(false)}
+          revealedValues={revealedValues}
+          revealingKey={revealingKey}
           removeEnv={removeEnv}
+          saveEnvLine={saveEnvLine}
+          savingLineKey={savingLineKey}
+          revealEnv={revealEnv}
         />
       ) : null}
 
@@ -791,15 +919,26 @@ function EnvListModal({
   deployment,
   onClose,
   removeEnv,
+  revealEnv,
+  saveEnvLine,
+  revealedValues,
+  revealingKey,
+  savingLineKey,
   clearDatabaseEnvOverrides,
   clearingDatabaseEnvOverrides
 }: {
   deployment: Deployment;
   onClose: () => void;
   removeEnv: (key: string) => void;
+  revealEnv: (key: string) => void;
+  saveEnvLine: (item: DeploymentEnvVar, value: string) => void;
+  revealedValues: Record<string, string>;
+  revealingKey?: string;
+  savingLineKey?: string;
   clearDatabaseEnvOverrides: () => void;
   clearingDatabaseEnvOverrides?: boolean;
 }) {
+  const [draftValues, setDraftValues] = useState<Record<string, string>>({});
   const hasDatabaseOverrides = (deployment.env ?? []).some(
     (item) => item.key === "DB_PASSWORD" || item.key === "DATABASE_URL"
   );
@@ -837,10 +976,32 @@ function EnvListModal({
               <div className="flex items-start gap-3 border-b border-panel-line p-3 last:border-b-0" key={item.key}>
                 <div className="min-w-0 flex-1">
                   <div className="font-mono text-sm font-semibold">{item.key}</div>
-                  <div className="mt-1 break-all font-mono text-xs text-panel-muted">
-                    {item.isSecret ? item.secretRef ?? "[secret]" : item.value}
-                  </div>
+                  <input
+                    className="mt-2 h-9 w-full rounded-md border border-panel-line px-3 font-mono text-xs text-panel-ink"
+                    onChange={(event) => setDraftValues((current) => ({ ...current, [item.key]: event.target.value }))}
+                    placeholder={item.isSecret ? item.secretRef ?? "[secret]" : "value"}
+                    type={item.isSecret && revealedValues[item.key] === undefined ? "password" : "text"}
+                    value={draftValues[item.key] ?? revealedValues[item.key] ?? item.value ?? ""}
+                  />
                 </div>
+                <button
+                  className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md border border-panel-line px-2 text-xs hover:bg-slate-50 disabled:opacity-50"
+                  disabled={revealingKey === item.key}
+                  onClick={() => revealEnv(item.key)}
+                  type="button"
+                >
+                  <Eye size={13} />
+                  {revealingKey === item.key ? "..." : "View"}
+                </button>
+                <button
+                  className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md border border-panel-line px-2 text-xs hover:bg-slate-50 disabled:opacity-50"
+                  disabled={savingLineKey === item.key}
+                  onClick={() => saveEnvLine(item, draftValues[item.key] ?? revealedValues[item.key] ?? item.value ?? "")}
+                  type="button"
+                >
+                  <Save size={13} />
+                  Save
+                </button>
                 <button
                   className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md border border-panel-line px-2 text-xs text-panel-danger hover:bg-red-50"
                   onClick={() => removeEnv(item.key)}
