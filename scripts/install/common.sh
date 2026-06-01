@@ -86,6 +86,37 @@ env_file_value() {
   awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$file"
 }
 
+database_password_from_url() {
+  local url="$1"
+  python3 - "$url" <<'PY'
+import sys
+from urllib.parse import unquote, urlparse
+
+parsed = urlparse(sys.argv[1])
+print(unquote(parsed.password or ""))
+PY
+}
+
+sync_database_credentials_from_existing_env() {
+  if [[ "$DB_PASSWORD_WAS_GENERATED" != "true" ]]; then
+    return
+  fi
+  local existing_database_url existing_direct_database_url existing_password
+  existing_database_url="$(env_file_value DATABASE_URL || true)"
+  if [[ -z "$existing_database_url" ]]; then
+    return
+  fi
+  existing_direct_database_url="$(env_file_value DIRECT_DATABASE_URL || true)"
+  existing_password="$(database_password_from_url "$existing_database_url")"
+  if [[ -z "$existing_password" ]]; then
+    return
+  fi
+  DATABASE_URL="$existing_database_url"
+  DIRECT_DATABASE_URL="${existing_direct_database_url:-$existing_database_url}"
+  DB_PASSWORD="$existing_password"
+  export DATABASE_URL DIRECT_DATABASE_URL DB_PASSWORD
+}
+
 write_file() {
   local path="$1"
   install -d -m 0755 "$(dirname "$path")"
@@ -196,6 +227,7 @@ run_preflight_checks() {
 
 validate_database_connection() {
   log "Checking database connectivity"
+  sync_database_credentials_from_existing_env
   if [[ "$DB_CREATE" == "true" && ( "$DB_HOST" == "localhost" || "$DB_HOST" == "127.0.0.1" ) ]]; then
     runuser -u postgres -- psql -d "$DB_NAME" -c "select 1" >/dev/null
   else
@@ -304,6 +336,7 @@ install_sysagent_venv() {
 
 write_panel_env() {
   log "Generating secrets"
+  sync_database_credentials_from_existing_env
   local existing_jwt existing_totp existing_webhook existing_admin_hash existing_database_url existing_direct_database_url
   existing_jwt="$(env_file_value JWT_SECRET || true)"
   existing_totp="$(env_file_value TOTP_ENCRYPTION_KEY || true)"
@@ -647,6 +680,7 @@ create_postgresql_database() {
     log "Skipping PostgreSQL database creation for remote DB_HOST=$DB_HOST"
     return
   fi
+  sync_database_credentials_from_existing_env
   require_db_identifier "$DB_NAME" "DB_NAME"
   require_db_identifier "$DB_USER" "DB_USER"
   local db_password_sql="${DB_PASSWORD//\'/\'\'}"
