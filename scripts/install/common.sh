@@ -245,11 +245,19 @@ configure_app_git_credentials() {
   fi
 }
 
+repair_app_workspace_permissions() {
+  if [[ -d "$APP_DIR" ]]; then
+    log "Repairing app workspace permissions"
+    chown -R "$APP_USER:$APP_USER" "$APP_DIR"
+  fi
+}
+
 sync_app_repo() {
   log "Preparing app directory"
   configure_app_git_credentials
   install -d -m 0755 "$APP_DIR"
   chown "$APP_USER:$APP_USER" "$APP_DIR"
+  repair_app_workspace_permissions
   if [[ -d "$APP_DIR/.git" ]]; then
     runuser -u "$APP_USER" -- git -C "$APP_DIR" fetch origin "$APP_BRANCH"
     runuser -u "$APP_USER" -- git -C "$APP_DIR" checkout "$APP_BRANCH"
@@ -360,6 +368,7 @@ prepare_runtime_directories() {
 
 build_application() {
   log "Building application"
+  repair_app_workspace_permissions
   if [[ "$DB_CREATE" == "true" && ( "$DB_HOST" == "localhost" || "$DB_HOST" == "127.0.0.1" ) ]]; then
     create_postgresql_database
   fi
