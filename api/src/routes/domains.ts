@@ -346,6 +346,7 @@ async function publishDomainHosting(domainId: string) {
       serverName: `${domain.name} www.${domain.name}`,
       upstreamPort: deployment.port,
       rootPath: deployment.rootPath,
+      publicDirectory: deployment.publicDirectory ?? "public",
       fallbackRootPath: path.join(env.FILE_MANAGER_ROOT, domain.name, normalizeDocumentRoot(domain.documentRoot)),
       forceSsl: domain.forceSsl && domain.sslEnabled
     });

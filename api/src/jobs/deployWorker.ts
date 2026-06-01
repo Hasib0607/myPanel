@@ -53,6 +53,15 @@ const deploymentWorkerInclude = Prisma.validator<Prisma.DeploymentInclude>()({
 
 type DeploymentWithWorkerRelations = Prisma.DeploymentGetPayload<{ include: typeof deploymentWorkerInclude }>;
 
+type DeploymentDatabaseRuntime = {
+  id: string;
+  port: number;
+  dbType?: "POSTGRESQL" | "MYSQL" | null;
+  dbName?: string | null;
+  dbUser?: string | null;
+  dbPasswordSecretRef?: string | null;
+};
+
 const defaultProcessManagerByFramework: Record<DeploymentFramework, DeploymentProcessManager> = {
   LARAVEL: "SUPERVISOR",
   NEXTJS: "PM2",
@@ -522,6 +531,7 @@ function deploymentPublicEnv(domain: BoundDomain | null, httpsReady = false) {
   const url = `${scheme}://${domain.name}`;
   return {
     APP_URL: url,
+    ASSET_URL: url,
     APP_ORIGIN: url,
     AUTH_URL: url,
     BASE_URL: url,
@@ -1200,6 +1210,14 @@ async function prepareLaravelForStart(
       env: envVars
     })
   );
+
+  await runStep(deploymentId, releaseId, "BUILDING", "Link Laravel public storage", () =>
+    sysagent.deploymentBuild({
+      rootPath: appPath,
+      command: "php artisan storage:link",
+      env: envVars
+    })
+  ).catch(() => undefined);
 }
 
 async function autoRepairLaravelWritablePaths(deploymentId: string, releaseId: string | undefined, appPath: string, errorText: string) {
@@ -1454,6 +1472,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
           serverName,
           upstreamPort: deployment.port,
           rootPath: deployment.rootPath,
+          publicDirectory: deployment.publicDirectory ?? "public",
           fallbackRootPath: deploymentFallbackRootPath(domain),
           forceSsl: false,
           ...(await deploymentSslCertificatePathsWhenReady(domain))
@@ -1704,6 +1723,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         serverName,
         upstreamPort: deployment.port,
         rootPath: deployment.rootPath,
+        publicDirectory: deployment.publicDirectory ?? "public",
         fallbackRootPath: deploymentFallbackRootPath(domain),
         forceSsl: false,
         ...(await deploymentSslCertificatePathsWhenReady(domain))
@@ -1737,6 +1757,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
             fqdn: serverName ?? domain!.name,
             upstreamPort: deployment.port,
             rootPath: deployment.rootPath,
+            publicDirectory: deployment.publicDirectory ?? "public",
             fallbackRootPath: deploymentFallbackRootPath(domain),
             forceHttps: true
           })
@@ -1755,6 +1776,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
             fqdn: serverName ?? domain!.name,
             upstreamPort: deployment.port,
             rootPath: deployment.rootPath,
+            publicDirectory: deployment.publicDirectory ?? "public",
             fallbackRootPath: deploymentFallbackRootPath(domain),
             forceHttps: false
           })

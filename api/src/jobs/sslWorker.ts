@@ -54,6 +54,7 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
       fqdn: serverName,
       upstreamPort: proxyTarget.deployment.port,
       rootPath: proxyTarget.deployment.rootPath,
+      publicDirectory: proxyTarget.deployment.publicDirectory ?? "public",
       fallbackRootPath: deploymentFallbackRootPath(bound),
       forceHttps,
       requireSsl: true
@@ -84,6 +85,7 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
       fqdn: deploymentServerName({ name: domainName, includeWww: true }) ?? domainName,
       upstreamPort: deployment.port,
       rootPath: deployment.rootPath,
+      publicDirectory: deployment.publicDirectory ?? "public",
       fallbackRootPath: `${env.FILE_MANAGER_ROOT}/${domainName}/${domain.documentRoot || "public_html"}`,
       forceHttps,
       requireSsl: true

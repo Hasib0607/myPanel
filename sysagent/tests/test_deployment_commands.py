@@ -1,10 +1,13 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 from app.deployment_commands import (
     deployment_path_allowed,
     is_allowed_deploy_executable,
     normalize_laravel_start_command,
     parse_deployment_command,
+    resolve_laravel_public_root,
 )
 
 
@@ -30,6 +33,14 @@ class DeploymentCommandTests(unittest.TestCase):
 
     def test_deployment_path_allowed_under_file_manager_root(self) -> None:
         self.assertTrue(deployment_path_allowed("/var/www/deployments/example-app", "/var/www"))
+
+    def test_resolve_laravel_public_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            public = root / "public"
+            public.mkdir()
+            (public / "css").mkdir()
+            self.assertEqual(Path(resolve_laravel_public_root(str(root), "public")).resolve(), public.resolve())
 
 
 if __name__ == "__main__":

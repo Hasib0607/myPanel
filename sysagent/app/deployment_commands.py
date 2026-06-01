@@ -49,6 +49,18 @@ def normalize_laravel_start_command(command: str | None, port: int | None) -> st
     return cleaned
 
 
+def resolve_laravel_public_root(root_path: str, public_directory: str | None = "public") -> str:
+    root = Path(root_path).resolve()
+    pub = (public_directory or "public").strip().strip("/")
+    if pub in {"", "."}:
+        return str(root)
+    candidate = root / pub
+    if candidate.is_dir():
+        return str(candidate)
+    default_public = root / "public"
+    return str(default_public if default_public.is_dir() else root)
+
+
 def deployment_path_allowed(root_path: str, file_manager_root: str) -> bool:
     root = Path(file_manager_root).resolve()
     target = Path(root_path).resolve()

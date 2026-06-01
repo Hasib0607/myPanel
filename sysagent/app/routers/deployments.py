@@ -22,7 +22,7 @@ from app.deployment_env import (
     write_env_file,
     write_laravel_env_bundle,
 )
-from app.deployment_commands import normalize_laravel_start_command, parse_deployment_command
+from app.deployment_commands import normalize_laravel_start_command, parse_deployment_command, resolve_laravel_public_root
 from app.deployment_health import curl_health_probe
 from app.platform import runtime_tool_install_plan
 from app.nginx_paths import nginx_sites_available, nginx_sites_enabled
@@ -72,11 +72,64 @@ class NginxRequest(BaseModel):
     serverName: str | None = None
     upstreamPort: int = Field(ge=1, le=65535)
     rootPath: str
+    publicDirectory: str | None = "public"
     fallbackRootPath: str | None = None
     forceSsl: bool = True
     sslCertificate: str | None = None
     sslCertificateKey: str | None = None
     requireSsl: bool = False
+
+
+def _nginx_proxy_headers(upstream_port: int) -> str:
+    return (
+        "        proxy_http_version 1.1;\n"
+        f"        proxy_pass http://127.0.0.1:{upstream_port};\n"
+        "        proxy_set_header Host $http_host;\n"
+        "        proxy_set_header X-Forwarded-Host $host;\n"
+        "        proxy_set_header X-Forwarded-Port $server_port;\n"
+        "        proxy_set_header Forwarded \"proto=$scheme;host=$http_host\";\n"
+        "        proxy_set_header X-Real-IP $remote_addr;\n"
+        "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+        "        proxy_set_header X-Forwarded-Proto $scheme;\n"
+        "        proxy_set_header Upgrade $http_upgrade;\n"
+        "        proxy_set_header Connection \"upgrade\";\n"
+        "        proxy_connect_timeout 10s;\n"
+        "        proxy_send_timeout 60s;\n"
+        "        proxy_read_timeout 60s;\n"
+        f"        proxy_redirect http://localhost:{upstream_port}/ $scheme://$host/;\n"
+        f"        proxy_redirect https://localhost:{upstream_port}/ https://$host/;\n"
+        f"        proxy_redirect http://127.0.0.1:{upstream_port}/ $scheme://$host/;\n"
+        f"        proxy_redirect https://127.0.0.1:{upstream_port}/ https://$host/;\n"
+    )
+
+
+def _nginx_laravel_app_locations(
+    *,
+    public_root: str,
+    upstream_port: int,
+    fallback_error_page: str,
+    fallback_location: str,
+) -> str:
+    return (
+        f"    root {public_root};\n"
+        "\n"
+        "    location ~* \\.(?:css|js|mjs|map|ico|gif|jpe?g|png|svg|webp|woff2?|ttf|eot|otf)$ {\n"
+        "        try_files $uri =404;\n"
+        "        expires 7d;\n"
+        "        access_log off;\n"
+        "        add_header Cache-Control \"public\";\n"
+        "    }\n"
+        "\n"
+        f"    location / {{\n"
+        f"{fallback_error_page}"
+        "        try_files $uri $uri/ @deployment_upstream;\n"
+        "    }\n"
+        "\n"
+        "    location @deployment_upstream {\n"
+        f"{_nginx_proxy_headers(upstream_port)}"
+        "    }\n"
+        f"{fallback_location}"
+    )
 
 
 class HealthRequest(BaseModel):
@@ -716,6 +769,7 @@ def nginx(body: NginxRequest) -> dict:
 
         server_name = body.serverName
         config_name = nginx_config_name(body.deploymentId, server_name)
+        public_root = resolve_laravel_public_root(body.rootPath, body.publicDirectory)
         fallback_root = safe_web_root(body.fallbackRootPath) if body.fallbackRootPath else None
         ssl_certificate = safe_letsencrypt_path(body.sslCertificate) if body.sslCertificate else None
         ssl_certificate_key = safe_letsencrypt_path(body.sslCertificateKey) if body.sslCertificateKey else None
@@ -742,30 +796,11 @@ def nginx(body: NginxRequest) -> dict:
                 "    }\n"
             )
 
-        http_location = (
-            f"{acme_location(server_name)}"
-            "    location / {\n"
-            f"        proxy_pass http://127.0.0.1:{body.upstreamPort};\n"
-            "        proxy_http_version 1.1;\n"
-            "        proxy_set_header Host $http_host;\n"
-            "        proxy_set_header X-Forwarded-Host $host;\n"
-            "        proxy_set_header X-Forwarded-Port $server_port;\n"
-            "        proxy_set_header Forwarded \"proto=$scheme;host=$http_host\";\n"
-            "        proxy_set_header X-Real-IP $remote_addr;\n"
-            "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
-            "        proxy_set_header X-Forwarded-Proto $scheme;\n"
-            "        proxy_set_header Upgrade $http_upgrade;\n"
-            "        proxy_set_header Connection \"upgrade\";\n"
-            "        proxy_connect_timeout 10s;\n"
-            "        proxy_send_timeout 60s;\n"
-            "        proxy_read_timeout 60s;\n"
-            f"        proxy_redirect http://localhost:{body.upstreamPort}/ $scheme://$host/;\n"
-            f"        proxy_redirect https://localhost:{body.upstreamPort}/ https://$host/;\n"
-            f"        proxy_redirect http://127.0.0.1:{body.upstreamPort}/ $scheme://$host/;\n"
-            f"        proxy_redirect https://127.0.0.1:{body.upstreamPort}/ https://$host/;\n"
-            f"{fallback_error_page}"
-            "    }\n"
-            f"{fallback_location}"
+        app_locations = _nginx_laravel_app_locations(
+            public_root=public_root,
+            upstream_port=body.upstreamPort,
+            fallback_error_page=fallback_error_page,
+            fallback_location=fallback_location,
         )
         if body.forceSsl and has_ssl:
             http_location = (
@@ -774,6 +809,8 @@ def nginx(body: NginxRequest) -> dict:
                 "        return 301 https://$host$request_uri;\n"
                 "    }\n"
             )
+        else:
+            http_location = f"{acme_location(server_name)}{app_locations}"
 
         config = f"""
 server {{
@@ -793,28 +830,7 @@ server {{
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_prefer_server_ciphers off;
 
-{acme_location(server_name)}    location / {{
-        proxy_pass http://127.0.0.1:{body.upstreamPort};
-        proxy_http_version 1.1;
-        proxy_set_header Host $http_host;
-        proxy_set_header X-Forwarded-Host $host;
-        proxy_set_header X-Forwarded-Port $server_port;
-        proxy_set_header Forwarded "proto=$scheme;host=$http_host";
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_connect_timeout 10s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
-        proxy_redirect http://localhost:{body.upstreamPort}/ $scheme://$host/;
-        proxy_redirect https://localhost:{body.upstreamPort}/ https://$host/;
-        proxy_redirect http://127.0.0.1:{body.upstreamPort}/ $scheme://$host/;
-        proxy_redirect https://127.0.0.1:{body.upstreamPort}/ https://$host/;
-{fallback_error_page.rstrip()}
-    }}
-{fallback_location}
+{acme_location(server_name)}{app_locations}
 }}
 """
         info = path_info(body.rootPath)
@@ -1256,6 +1272,11 @@ def guardian_repair(body: GuardianRepairRequest) -> dict:
         steps["cacheClear"] = guarded_deployment_command(body.rootPath, "php artisan cache:clear", env=env or None)
         steps["routeClear"] = guarded_deployment_command(body.rootPath, "php artisan route:clear", env=env or None)
         steps["viewClear"] = guarded_deployment_command(body.rootPath, "php artisan view:clear", env=env or None)
+        steps["storageLink"] = guarded_deployment_command(body.rootPath, "php artisan storage:link", env=env or None)
+        if steps["storageLink"].get("returncode") != 0:
+            stderr = (steps["storageLink"].get("stderr") or "").lower()
+            if "already exists" in stderr or "exists" in stderr:
+                steps["storageLink"]["returncode"] = 0
 
     failed = [name for name, step in steps.items() if step.get("returncode", 0) != 0]
     app_key = steps.get("env", {}).get("appKey") if framework == "LARAVEL" else None

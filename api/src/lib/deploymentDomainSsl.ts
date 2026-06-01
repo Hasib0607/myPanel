@@ -160,6 +160,7 @@ export async function publishDeploymentProxyNginx(input: {
   fqdn: string;
   upstreamPort: number;
   rootPath: string;
+  publicDirectory?: string | null;
   fallbackRootPath: string | null;
   forceHttps: boolean;
   requireSsl?: boolean;
@@ -176,6 +177,7 @@ export async function publishDeploymentProxyNginx(input: {
     serverName: input.fqdn,
     upstreamPort: input.upstreamPort,
     rootPath: input.rootPath,
+    publicDirectory: input.publicDirectory ?? "public",
     fallbackRootPath: input.fallbackRootPath,
     forceSsl: input.forceHttps && httpsReady,
     requireSsl: input.requireSsl ?? false,
