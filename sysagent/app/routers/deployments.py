@@ -69,6 +69,16 @@ class ProcessRequest(BaseModel):
     logDir: str | None = None
 
 
+def normalize_process_root(body: ProcessRequest) -> ProcessRequest:
+    root = Path(body.rootPath).resolve()
+    parent = root.parent
+    if root.name == "public" and not root.exists() and (parent / "artisan").is_file():
+        return body.model_copy(update={"rootPath": str(parent)})
+    if root.name == "public" and not (root / "artisan").is_file() and (parent / "artisan").is_file():
+        return body.model_copy(update={"rootPath": str(parent)})
+    return body
+
+
 class NginxRequest(BaseModel):
     deploymentId: str
     serverName: str | None = None
@@ -678,6 +688,7 @@ def migrate(body: CommandRequest) -> dict:
 
 @router.post("/process")
 def process(body: ProcessRequest) -> dict:
+    body = normalize_process_root(body)
     manager = (body.processManager or "NONE").upper()
     if manager == "PM2":
         if body.action in {"start", "restart"}:
