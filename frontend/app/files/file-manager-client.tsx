@@ -182,11 +182,19 @@ export function FileManagerClient() {
   const listPath = `/files/list?${queryString({ path: currentPath, search, sort, direction, page: 1, pageSize: 200 })}`;
 
   const overview = useQuery({ queryKey: ["files-overview"], queryFn: () => apiGet<Overview>("/files/overview") });
-  const list = useQuery({ queryKey: ["files-list", currentPath, search, sort, direction], queryFn: () => apiGet<ListResponse>(listPath) });
-  const tree = useQuery({ queryKey: ["files-tree", domainRootPath], queryFn: () => apiGet<TreeResponse>(`/files/tree?${queryString({ path: domainRootPath, depth: 4 })}`) });
+  const list = useQuery({ queryKey: ["files-list", currentPath, search, sort, direction], queryFn: () => apiGet<ListResponse>(listPath), enabled: Boolean(selectedRoot) });
+  const tree = useQuery({ queryKey: ["files-tree", domainRootPath], queryFn: () => apiGet<TreeResponse>(`/files/tree?${queryString({ path: domainRootPath, depth: 4 })}`), enabled: Boolean(selectedRoot) });
 
   const selectedEntry = useMemo(() => list.data?.items.find((item) => item.path === selectedPath) ?? null, [list.data?.items, selectedPath]);
   const canEdit = selectedEntry?.type === "file" && selectedEntry.kind === "text";
+
+  useEffect(() => {
+    if (selectedDomainId || rootOptions.length === 0) return;
+    const firstRoot = rootOptions[0];
+    setSelectedDomainId(firstRoot.id);
+    setCurrentPath(firstRoot.path);
+    setSelectedPath(null);
+  }, [rootOptions, selectedDomainId]);
 
   const invalidateFiles = async () => {
     await queryClient.invalidateQueries({ queryKey: ["files-list"] });
@@ -355,19 +363,30 @@ export function FileManagerClient() {
     <section className="grid h-[calc(100vh-64px)] grid-cols-[300px_minmax(520px,1fr)_380px] overflow-hidden p-6 lg:h-screen xl:p-8">
       <aside className="min-h-0 rounded-l-md border border-panel-line bg-white">
         <div className="border-b border-panel-line p-4">
-          <div className="truncate text-sm font-semibold">{selectedRoot ? selectedRoot.label : overview.data?.root ?? "File root"}</div>
+          <div className="truncate text-sm font-semibold">{selectedRoot ? selectedRoot.label : "Web roots"}</div>
           <div className="mt-1 text-xs text-panel-muted">{overview.data ? `${formatBytes(overview.data.textReadLimit)} editor limit` : "Loading..."}</div>
         </div>
         <div className="h-[calc(100%-73px)] overflow-auto p-3">
-          <button
-            className={`mb-2 flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-slate-100 ${currentPath === domainRootPath ? "bg-slate-100 font-semibold" : ""}`}
-            onClick={() => setCurrentPath(domainRootPath)}
-            type="button"
-          >
-            <Folder size={15} />
-            {selectedRoot ? selectedRoot.label : "root"}
-          </button>
-          {tree.data?.children.map((node) => <TreeNode currentPath={currentPath} key={node.path} node={node} onOpen={setCurrentPath} />)}
+          {rootOptions.length === 0 && !domains.isLoading ? (
+            <div className="rounded-md border border-dashed border-panel-line p-3 text-xs text-panel-muted">No domains or subdomains found.</div>
+          ) : null}
+          {rootOptions.map((root) => (
+            <div className="mb-1" key={root.id}>
+              <button
+                className={`flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-slate-100 ${selectedDomainId === root.id && currentPath === root.path ? "bg-slate-100 font-semibold" : ""}`}
+                onClick={() => selectDomain(root.id)}
+                type="button"
+              >
+                <Folder size={15} />
+                <span className="truncate">{root.label}</span>
+              </button>
+              {selectedDomainId === root.id && tree.data?.children.length ? (
+                <div className="ml-4 border-l border-panel-line pl-2">
+                  {tree.data.children.map((node) => <TreeNode currentPath={currentPath} key={node.path} node={node} onOpen={setCurrentPath} />)}
+                </div>
+              ) : null}
+            </div>
+          ))}
         </div>
       </aside>
 
@@ -379,7 +398,7 @@ export function FileManagerClient() {
               onChange={(event) => selectDomain(event.target.value)}
               value={selectedDomainId}
             >
-              <option value="">All files</option>
+              <option value="" disabled>{domains.isLoading ? "Loading roots..." : "Select web root"}</option>
               {rootOptions.map((root) => (
                 <option key={root.id} value={root.id}>{root.label}</option>
               ))}
@@ -387,7 +406,7 @@ export function FileManagerClient() {
             {selectedRoot ? (
               <span className="text-xs text-panel-muted">Showing {selectedRoot.hint}</span>
             ) : (
-              <span className="text-xs text-panel-muted">Showing full file root</span>
+              <span className="text-xs text-panel-muted">Choose a domain or subdomain root</span>
             )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
