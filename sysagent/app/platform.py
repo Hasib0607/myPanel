@@ -415,7 +415,7 @@ PLATFORM_PATHS: dict[OsFamily, PlatformPaths] = {
     ),
 }
 
-RUNTIME_TOOL_KEYS = frozenset({"composer", "golang", "php_runtime", "php82_runtime", "php_gd", "php_redis", "python_runtime", "nodejs_runtime", "supervisor", "pnpm", "yarn", "uv", "pm2"})
+RUNTIME_TOOL_KEYS = frozenset({"composer", "golang", "php_runtime", "php82_runtime", "php_gd", "php_redis", "php_soap", "python_runtime", "nodejs_runtime", "supervisor", "pnpm", "yarn", "uv", "pm2"})
 
 
 def _resolve_family(info: OsReleaseInfo | None = None) -> OsFamily:
@@ -545,6 +545,46 @@ def php82_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
     )
 
 
+def php_soap_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
+    family = _resolve_family(info)
+    if family is OsFamily.DEBIAN:
+        return PackageInstallPlan(
+            key="php_soap",
+            packages=("php8.2-soap",),
+            steps=(
+                InstallStep(
+                    "Refresh APT package index before installing PHP SOAP",
+                    ("apt-get", "update"),
+                    env=package_install_env(info),
+                    on_failure="continue",
+                ),
+                InstallStep(
+                    "Install PHP 8.2 SOAP extension",
+                    tuple(package_install_command(["php8.2-soap"], info)),
+                    env=package_install_env(info),
+                ),
+                InstallStep(
+                    "Restart PHP 8.2 FPM after SOAP install",
+                    ("systemctl", "restart", "php8.2-fpm"),
+                    on_failure="continue",
+                ),
+            ),
+            fallback_steps=(
+                InstallStep(
+                    "Install PHP SOAP extension from default PHP package",
+                    tuple(package_install_command(["php-soap"], info)),
+                    env=package_install_env(info),
+                ),
+            ),
+            notes="Installs ext-soap for the PHP CLI used by Composer, with php-soap fallback for non-8.2 defaults.",
+        )
+    return PackageInstallPlan(
+        key="php_soap",
+        packages=("php-soap",),
+        steps=(_single_package_install_step("php_soap", info),),
+    )
+
+
 def mysql_database_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
     packages = tuple(packages_for("mysql_database", info))
     service = service_spec("mysql_database", info)
@@ -585,6 +625,8 @@ def install_plan_for(key: str, info: OsReleaseInfo | None = None) -> PackageInst
         return mysql_database_install_plan(info)
     if key == "php82_runtime":
         return php82_install_plan(info)
+    if key == "php_soap":
+        return php_soap_install_plan(info)
     if key == "dovecot":
         return dovecot_install_plan(info)
 

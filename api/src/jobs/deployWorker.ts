@@ -2115,11 +2115,15 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       const installCommandText = renderDeploymentCommand(deployment.installCommand, deployment.port);
       const runsComposer = deployment.packageManager === "COMPOSER" || /\bcomposer\b/i.test(installCommandText ?? "");
       if (runsComposer) {
-        await ensureComposerDeclaredPlatformExtensions(deployment.id, releaseId, appPath).catch(async (error) => {
+        try {
+          await ensureComposerDeclaredPlatformExtensions(deployment.id, releaseId, appPath);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
           await writeLog(deployment.id, releaseId, "PREFLIGHT", "Composer PHP extension preflight failed", {
-            error: error instanceof Error ? error.message : String(error)
+            error: detail
           }, "error");
-        });
+          throw new Error(`Composer PHP extension preflight failed before dependency install: ${detail}`);
+        }
       }
       const runDependencyInstall = () => runStep(deployment.id, releaseId, "INSTALLING", "Dependency install", () =>
         sysagent.deploymentInstall({
