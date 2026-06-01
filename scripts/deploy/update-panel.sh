@@ -171,6 +171,28 @@ repair_panel_permissions() {
   fi
 }
 
+normalize_known_self_update_dirty_files() {
+  local dirty_paths=""
+  dirty_paths="$(git status --porcelain | awk '{print $2}')"
+  if [[ -z "$dirty_paths" ]]; then
+    return 0
+  fi
+
+  local path=""
+  while IFS= read -r path; do
+    case "$path" in
+      scripts/maintenance/repair-panel-permissions.sh)
+        ;;
+      *)
+        return 0
+        ;;
+    esac
+  done <<< "$dirty_paths"
+
+  log "normalizing known self-update permission changes before dirty worktree check"
+  run git checkout "origin/$BRANCH" -- scripts/maintenance/repair-panel-permissions.sh
+}
+
 file_checksum() {
   local path="$1"
   if command -v sha256sum >/dev/null 2>&1; then
@@ -496,6 +518,7 @@ patch_nginx_websocket() {
 }
 
 run git fetch origin "$BRANCH"
+normalize_known_self_update_dirty_files
 
 DIRTY_FILES="$(git status --porcelain)"
 if [[ -n "$DIRTY_FILES" ]]; then
