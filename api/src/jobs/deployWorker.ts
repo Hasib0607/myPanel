@@ -752,6 +752,11 @@ async function runHealthCheckWithGuardianRecovery(
 }
 
 async function assertPublicRouteResult(result: unknown, label: string, deployment: { slug: string; domain?: { name: string } | null }, appPath?: string) {
+  const value = result as { degraded?: boolean; httpCode?: number; stderr?: string };
+  if (value?.degraded) {
+    throw new Error(value.stderr ?? `${label} returned HTTP ${value.httpCode ?? "error"}`);
+  }
+
   const message = liveResultFailureMessage(result, label);
   if (!message) return;
 
@@ -800,6 +805,8 @@ async function optionalPublicRouteWarning(
   } catch (error) {
     const firstMessage = error instanceof Error ? error.message : "Public route check failed";
     await writeLog(deploymentId, releaseId, "HEALTH_CHECK", `${label} failed; running Guardian public-route repair`, { warning: firstMessage }, "warn");
+
+    envVars = await ensureLaravelAppKey(deploymentId, releaseId, appPath, deployment.port, envVars);
 
     await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Guardian public-route repair", () =>
       runGuardianDeploymentRepair({ rootPath: appPath, framework: deployment.framework, envVars })

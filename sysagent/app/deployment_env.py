@@ -96,10 +96,28 @@ def read_existing_env_values(path: Path) -> dict[str, str]:
     return values
 
 
-def sync_laravel_env_file(root_path: str, port: int | None, env: dict[str, str] | None) -> tuple[Path, str | None, bool]:
-    env_path = Path(root_path).resolve() / ".env"
-    process_env, needs_key_generate = prepare_laravel_env_for_sync(root_path, port, env)
+def write_laravel_env_bundle(root_path: str, process_env: dict[str, str]) -> Path:
+    root = Path(root_path).resolve()
+    env_path = root / ".env"
+    runtime_env = root / ".panel" / "runtime.env"
     write_env_file(env_path, process_env)
+    write_env_file(runtime_env, process_env)
+    return env_path
+
+
+def clear_laravel_bootstrap_config_cache(root_path: str) -> None:
+    cache_dir = Path(root_path).resolve() / "bootstrap" / "cache"
+    if not cache_dir.is_dir():
+        return
+    for name in ("config.php", "routes-v7.php", "packages.php", "services.php"):
+        cached = cache_dir / name
+        if cached.is_file():
+            cached.unlink()
+
+
+def sync_laravel_env_file(root_path: str, port: int | None, env: dict[str, str] | None) -> tuple[Path, str | None, bool]:
+    process_env, needs_key_generate = prepare_laravel_env_for_sync(root_path, port, env)
+    env_path = write_laravel_env_bundle(root_path, process_env)
     return env_path, process_env.get("APP_KEY"), needs_key_generate
 
 
@@ -134,9 +152,6 @@ def prepare_supervisor_runtime(
     runtime_env = panel_dir / "runtime.env"
     wrapper = panel_dir / "run.sh"
     process_env, _needs_key_generate = prepare_laravel_env_for_sync(str(cwd), port, env)
-    write_env_file(runtime_env, process_env)
+    laravel_env_path = write_laravel_env_bundle(str(cwd), process_env)
     write_supervisor_wrapper(wrapper, runtime_env, str(cwd), start_command)
-    laravel_env_path = None
-    if is_laravel_artisan_command(start_command):
-        laravel_env_path, _, _ = sync_laravel_env_file(str(cwd), port, env)
     return wrapper, runtime_env, laravel_env_path

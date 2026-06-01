@@ -60,12 +60,19 @@ class DeploymentEnvTests(unittest.TestCase):
     def test_format_dotenv_line_keeps_base64_app_key_unquoted(self) -> None:
         self.assertEqual(format_dotenv_line("APP_KEY", VALID_APP_KEY), f"APP_KEY={VALID_APP_KEY}")
 
-    def test_sync_laravel_env_file_flags_missing_key_for_generation(self) -> None:
+    def test_sync_writes_runtime_env_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            env_path, app_key, needs_generate = sync_laravel_env_file(str(Path(tmp)), 10002, {"APP_ENV": "production"})
-            self.assertTrue(env_path.is_file())
-            self.assertIsNone(app_key)
-            self.assertTrue(needs_generate)
+            root = Path(tmp)
+            env_path, app_key, needs_generate = sync_laravel_env_file(
+                str(root),
+                10002,
+                {"APP_KEY": VALID_APP_KEY, "APP_ENV": "production"},
+            )
+            runtime_env = root / ".panel" / "runtime.env"
+            self.assertFalse(needs_generate)
+            self.assertEqual(env_path.resolve(), (root / ".env").resolve())
+            self.assertTrue(runtime_env.is_file())
+            self.assertIn(f"APP_KEY={VALID_APP_KEY}", runtime_env.read_text(encoding="utf-8"))
 
     def test_prepare_supervisor_runtime_writes_wrapper_and_laravel_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

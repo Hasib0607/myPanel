@@ -12,11 +12,14 @@ from pydantic import BaseModel, Field
 from app.command import run_command, run_install_plan
 from app.config import DEPLOYMENT_COMMANDS_LIVE, settings
 from app.deployment_env import (
+    clear_laravel_bootstrap_config_cache,
     is_laravel_artisan_command,
     is_valid_laravel_app_key,
+    prepare_laravel_env_for_sync,
     prepare_supervisor_runtime,
     read_existing_env_values,
     sync_laravel_env_file,
+    write_laravel_env_bundle,
 )
 from app.deployment_commands import normalize_laravel_start_command, parse_deployment_command
 from app.deployment_health import curl_health_probe
@@ -860,32 +863,67 @@ def attach_laravel_diagnostics(result: dict, root_path: str | None, framework: s
 def _curl_public_route(server_name: str, path: str = "/", root_path: str | None = None, framework: str | None = None) -> dict:
     primary = server_name.split()[0].strip()
     clean_path = path if path.startswith("/") else f"/{path}"
-    result = run_command([
-        "curl",
-        "-fsSL",
-        "-H", "Accept-Language: en-US,en;q=0.9,bn;q=0.8",
-        "-H", "User-Agent: VPS-Panel-Healthcheck/1.0",
-        "--retry", "5",
-        "--retry-delay", "2",
-        "--retry-connrefused",
-        "--connect-timeout", "5",
-        "--max-time", "30",
-        "--resolve", f"{primary}:80:127.0.0.1",
-        "--resolve", f"{primary}:443:127.0.0.1",
-        "-w", "\n__effective_url=%{url_effective}",
-        f"http://{primary}{clean_path}",
-    ], allow_live=DEPLOYMENT_COMMANDS_LIVE)
-    stdout = result.get("stdout") or ""
-    marker = "\n__effective_url="
-    effective_url = stdout.rsplit(marker, 1)[1].strip() if marker in stdout else ""
+    is_laravel = (framework or "").upper() == "LARAVEL"
+
+    def probe(url: str, *, accept_http_errors: bool) -> dict:
+        command = [
+            "curl",
+            "-sS",
+            "-H", "Accept-Language: en-US,en;q=0.9,bn;q=0.8",
+            "-H", "User-Agent: VPS-Panel-Healthcheck/1.0",
+            "-H", f"Host: {primary}",
+            "-H", f"X-Forwarded-Host: {primary}",
+            "-H", "X-Forwarded-Proto: https",
+            "--retry", "5",
+            "--retry-delay", "2",
+            "--retry-connrefused",
+            "--connect-timeout", "5",
+            "--max-time", "30",
+            "--resolve", f"{primary}:80:127.0.0.1",
+            "--resolve", f"{primary}:443:127.0.0.1",
+            "-w", "\n__http_code=%{http_code}\n__effective_url=%{url_effective}",
+            url,
+        ]
+        raw = run_command(command, allow_live=DEPLOYMENT_COMMANDS_LIVE)
+        stdout = raw.get("stdout") or ""
+        http_code = 0
+        effective_url = ""
+        if "__http_code=" in stdout:
+            body, _, trailer = stdout.partition("\n__http_code=")
+            code_part, _, effective_part = trailer.partition("\n__effective_url=")
+            try:
+                http_code = int(code_part.strip())
+            except ValueError:
+                http_code = 0
+            effective_url = effective_part.strip()
+            raw["stdout"] = body
+        raw["httpCode"] = http_code
+        raw["effectiveUrl"] = effective_url
+        if raw.get("returncode") != 0:
+            return raw
+        if http_code >= 400 and accept_http_errors:
+            raw["degraded"] = True
+            raw["returncode"] = 0
+            raw["stderr"] = f"HTTP {http_code} from {url}"
+        elif http_code >= 400:
+            raw["returncode"] = 22
+            raw["stderr"] = f"HTTP {http_code} from {url}"
+        return raw
+
+    result = probe(f"http://{primary}{clean_path}", accept_http_errors=is_laravel)
+    if result.get("httpCode") in {301, 302, 307, 308} and result.get("effectiveUrl", "").startswith("https://"):
+        result = probe(result["effectiveUrl"], accept_http_errors=is_laravel)
+    elif is_laravel and result.get("httpCode", 0) >= 400:
+        result = probe(f"https://{primary}{clean_path}", accept_http_errors=True)
+
+    effective_url = result.get("effectiveUrl") or ""
     if effective_url and re.search(r"https?://(localhost|127\.0\.0\.1)(:\d+)?(/|$)", effective_url):
         result["returncode"] = 1
         result["stderr"] = (
             f"Public route resolved to internal URL {effective_url}. "
             "The app is generating localhost redirects; redeploy after clearing HOST/HOSTNAME env or set the app public URL to the domain."
         )
-    result["effectiveUrl"] = effective_url
-    if result.get("returncode") != 0:
+    if result.get("returncode") != 0 or result.get("degraded"):
         return attach_laravel_diagnostics(result, root_path, framework)
     return result
 
@@ -1083,18 +1121,31 @@ def _ensure_laravel_env(root_path: str, port: int | None, env: dict[str, str] | 
                 "keyGenerate": key_generate,
             }
 
+    process_env, _ = prepare_laravel_env_for_sync(root_path, port, env)
+    if app_key:
+        process_env["APP_KEY"] = app_key
+    env_path = write_laravel_env_bundle(root_path, process_env)
+    clear_laravel_bootstrap_config_cache(root_path)
+    config_clear = guarded_deployment_command(
+        root_path,
+        "php artisan config:clear",
+        env=process_env or None,
+    )
+
     return {
         "dryRun": False,
         "command": ["write-file", str(env_path)],
         "cwd": deployment_cwd(root_path),
         "stdout": f"Synced {env_path}",
         "stderr": "",
-        "returncode": 0,
+        "returncode": 0 if config_clear.get("returncode", 0) == 0 else 1,
         "path": info,
         "envPath": str(env_path),
+        "runtimeEnvPath": str(Path(root_path).resolve() / ".panel" / "runtime.env"),
         "appKey": app_key,
         "keyGenerated": bool(needs_key_generate and key_generate and key_generate.get("returncode") == 0),
         "keyGenerate": key_generate,
+        "configClear": config_clear,
     }
 
 
@@ -1150,7 +1201,9 @@ def guardian_repair(body: GuardianRepairRequest) -> dict:
         if port_raw and str(port_raw).isdigit():
             port = int(port_raw)
         steps["env"] = _ensure_laravel_env(body.rootPath, port, env)
-        if steps["env"].get("appKey"):
+        if steps["env"].get("returncode") != 0:
+            failed = ["env"]
+        elif steps["env"].get("appKey"):
             env["APP_KEY"] = steps["env"]["appKey"]
         steps["writablePaths"] = repair_laravel_writable_paths(LaravelWritablePathsRequest(rootPath=body.rootPath))
         steps["optimizeClear"] = guarded_deployment_command(body.rootPath, "php artisan optimize:clear", env=env or None)
