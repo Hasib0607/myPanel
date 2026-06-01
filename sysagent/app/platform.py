@@ -32,6 +32,20 @@ EPEL_INSTALL_COMMAND = ("dnf", "install", "-y", EPEL_PACKAGE)
 
 RHEL_CERTBOT_PACKAGES = ("certbot", "python3-certbot-nginx")
 RHEL_COMPOSER_PACKAGES = ("composer", "php-cli")
+RHEL_PHP_RUNTIME_PACKAGES = (
+    "php",
+    "php-cli",
+    "php-fpm",
+    "php-mysqlnd",
+    "php-pgsql",
+    "php-xml",
+    "php-mbstring",
+    "php-curl",
+    "php-zip",
+    "php-gd",
+    "php-soap",
+    "unzip",
+)
 DEBIAN_DOVECOT_PACKAGES = ("dovecot-core", "dovecot-imapd", "dovecot-lmtpd")
 RHEL_DOVECOT_PACKAGES = ("dovecot",)
 DOVECOT_RHEL_NOTES = (
@@ -334,19 +348,7 @@ PACKAGE_SETS: dict[OsFamily, dict[str, tuple[str, ...]]] = {
         "postgresql": ("postgresql-server", "postgresql-contrib"),
         "mysql_database": ("mariadb", "mariadb-server"),
         "certbot": RHEL_CERTBOT_PACKAGES,
-        "php_runtime": (
-            "php",
-            "php-fpm",
-            "php-pgsql",
-            "php-mysqlnd",
-            "php-xml",
-            "php-mbstring",
-            "php-curl",
-            "php-zip",
-            "php-gd",
-            "php-redis",
-            "php-soap",
-        ),
+        "php_runtime": RHEL_PHP_RUNTIME_PACKAGES,
         "php_gd": ("php-gd",),
         "php_redis": ("php-redis",),
         "php_soap": ("php-soap",),
@@ -523,6 +525,8 @@ def composer_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPl
 
 def php82_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
     family = _resolve_family(info)
+    if family is OsFamily.RHEL:
+        return php_runtime_install_plan(info)
     if family is not OsFamily.DEBIAN:
         raise KeyError("PHP 8.2 auto-upgrade is currently supported on Debian/Ubuntu hosts only")
 
@@ -542,6 +546,35 @@ def php82_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
             "Uses the Ondrej PHP repository to install PHP 8.2 packages, then switches the CLI default "
             "to php8.2 so Composer and artisan use the newer runtime."
         ),
+    )
+
+
+def php_runtime_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
+    family = _resolve_family(info)
+    packages = tuple(packages_for("php_runtime", info))
+    if family is OsFamily.RHEL:
+        return PackageInstallPlan(
+            key="php_runtime",
+            packages=packages,
+            steps=(
+                InstallStep(
+                    "Install PHP runtime, FPM, common Laravel extensions, SOAP, and unzip",
+                    tuple(package_install_command(list(packages), info)),
+                    env=package_install_env(info),
+                ),
+                InstallStep(
+                    "Enable and start PHP-FPM",
+                    ("systemctl", "enable", "--now", "php-fpm"),
+                    on_failure="continue",
+                ),
+            ),
+            notes="AlmaLinux/RHEL PHP runtime for Laravel deployments, including php-soap and unzip.",
+        )
+    return PackageInstallPlan(
+        key="php_runtime",
+        packages=packages,
+        steps=(_single_package_install_step("php_runtime", info),),
+        notes="Installs PHP runtime and common Laravel extensions.",
     )
 
 
@@ -581,7 +614,14 @@ def php_soap_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPl
     return PackageInstallPlan(
         key="php_soap",
         packages=("php-soap",),
-        steps=(_single_package_install_step("php_soap", info),),
+        steps=(
+            _single_package_install_step("php_soap", info),
+            InstallStep(
+                "Restart PHP-FPM after SOAP install",
+                ("systemctl", "restart", "php-fpm"),
+                on_failure="continue",
+            ),
+        ),
     )
 
 
@@ -625,6 +665,8 @@ def install_plan_for(key: str, info: OsReleaseInfo | None = None) -> PackageInst
         return mysql_database_install_plan(info)
     if key == "php82_runtime":
         return php82_install_plan(info)
+    if key == "php_runtime":
+        return php_runtime_install_plan(info)
     if key == "php_soap":
         return php_soap_install_plan(info)
     if key == "dovecot":
