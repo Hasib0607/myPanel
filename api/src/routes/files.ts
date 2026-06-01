@@ -78,6 +78,29 @@ function safeChild(parentPath: string, name: string) {
   return safePath(path.posix.join(toRelative(parentPath), name));
 }
 
+function domainOrSubdomainRoot(relativePath: string) {
+  const parts = relativePath.split("/").filter(Boolean);
+  if (parts.length >= 3 && parts[1] === "subdomains") {
+    return { domain: parts[0], subdomain: parts[2] };
+  }
+  if (parts.length >= 1 && parts[0]?.includes(".")) {
+    return { domain: parts[0] };
+  }
+  return null;
+}
+
+async function ensureParentFolderReady(parentPath: string) {
+  const parent = safePath(parentPath);
+  const rootInfo = domainOrSubdomainRoot(toRelative(parent));
+  if (rootInfo?.subdomain) {
+    await ensureSubdomainFileStructure(rootInfo.domain, rootInfo.subdomain);
+  } else if (rootInfo?.domain) {
+    await ensureDomainFileStructure(rootInfo.domain);
+  }
+  await fs.mkdir(parent, { recursive: true });
+  return parent;
+}
+
 function fileKind(name: string, isDirectory: boolean) {
   if (isDirectory) return "directory";
   const extension = path.extname(name).toLowerCase();
@@ -302,7 +325,7 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
 
   app.post("/files", { bodyLimit: textReadLimit + 4096 }, async (request, reply) => {
     const body = createSchema.parse(request.body);
-    const parent = safePath(body.parentPath);
+    const parent = await ensureParentFolderReady(body.parentPath);
     const file = safeChild(parent, body.name);
     try {
       await fs.writeFile(file, body.content, { encoding: "utf8", flag: "wx" });
@@ -315,7 +338,7 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
 
   app.post("/folders", async (request, reply) => {
     const body = folderSchema.parse(request.body);
-    const parent = safePath(body.parentPath);
+    const parent = await ensureParentFolderReady(body.parentPath);
     const folder = safeChild(parent, body.name);
     try {
       await fs.mkdir(folder, { recursive: false });
@@ -411,7 +434,7 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
 
   app.post("/upload", { bodyLimit: uploadLimit * 1.4 }, async (request, reply) => {
     const body = uploadSchema.parse(request.body);
-    const parent = safePath(body.parentPath);
+    const parent = await ensureParentFolderReady(body.parentPath);
     const file = safeChild(parent, body.name);
     const buffer = Buffer.from(body.contentBase64, "base64");
     if (buffer.byteLength > uploadLimit) throw app.httpErrors.payloadTooLarge("Upload is too large");

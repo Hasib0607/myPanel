@@ -195,10 +195,11 @@ def create_file(body: CreateFileRequest) -> dict:
     assert_safe_name(body.name)
     parent = safe_path(body.parentPath)
     target = safe_path(f"{body.parentPath.rstrip('/')}/{body.name}")
-    if not target.parent.samefile(parent):
+    if target.parent != parent:
         raise HTTPException(status_code=400, detail="Path escapes parent folder")
     if not settings.allow_live_file_manager:
         return dry_run(["write-file", str(target)], target)
+    parent.mkdir(parents=True, exist_ok=True)
     if target.exists() and not body.overwrite:
         raise HTTPException(status_code=409, detail="Target already exists")
 
@@ -214,11 +215,12 @@ def create_folder(body: CreateFolderRequest) -> dict:
     assert_safe_name(body.name)
     parent = safe_path(body.parentPath)
     target = safe_path(f"{body.parentPath.rstrip('/')}/{body.name}")
-    if not target.parent.samefile(parent):
+    if target.parent != parent:
         raise HTTPException(status_code=400, detail="Path escapes parent folder")
     if not settings.allow_live_file_manager:
         return dry_run(["mkdir", str(target)], target)
 
+    parent.mkdir(parents=True, exist_ok=True)
     target.mkdir(parents=False, exist_ok=False)
     return {"ok": True, "path": str(target)}
 
