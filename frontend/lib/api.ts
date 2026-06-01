@@ -34,6 +34,9 @@ async function fetchJson<T>(path: string, init: RequestInit): Promise<T> {
 
   const data = await response.json().catch(() => null);
   if (!response.ok) {
+    if (response.status === 401 && typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
+      window.location.assign("/api/v1/auth/logout?next=/login");
+    }
     throw new Error(data?.error ?? `API request failed: ${response.status}`);
   }
   return data as T;

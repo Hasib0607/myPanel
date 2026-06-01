@@ -19,6 +19,12 @@ const twoFactorLoginSchema = z.object({
 });
 
 export const authRoutes: FastifyPluginAsync = async (app) => {
+  function clearAuthCookies(reply: any) {
+    reply.clearCookie("panel_session", { path: "/" });
+    reply.clearCookie("account_session", { path: "/" });
+    reply.clearCookie(csrfCookieName, { path: "/" });
+  }
+
   function setCsrfCookie(reply: any) {
     const csrfToken = createCsrfToken();
     reply.setCookie(csrfCookieName, csrfToken, {
@@ -161,11 +167,15 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.post("/logout", async (request, reply) => {
-    reply.clearCookie("panel_session", { path: "/" });
-    reply.clearCookie("account_session", { path: "/" });
-    reply.clearCookie(csrfCookieName, { path: "/" });
+    clearAuthCookies(reply);
     await audit(request, { action: "LOGOUT", resource: "auth", description: "User logged out" });
     return { ok: true };
+  });
+
+  app.get("/logout", async (request, reply) => {
+    clearAuthCookies(reply);
+    const next = typeof (request.query as any)?.next === "string" ? (request.query as any).next : "/login";
+    return reply.redirect(next.startsWith("/") ? next : "/login");
   });
 
   app.get("/me", async (request: any, reply) => {
