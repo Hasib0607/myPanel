@@ -1103,6 +1103,26 @@ async function optionalPublicRouteWarning(
         warning = await assertPublicRouteResult(publicRoute, label, deployment, appPath);
       }
     }
+    if (warning && isMissingLaravelPublicEntrypoint(warning)) {
+      await autoRepairLaravelWritablePaths(deploymentId, releaseId, appPath, warning).catch(() => false);
+      await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Restart after Laravel public/index.php repair", () =>
+        restartDeploymentProcess({
+          deploymentId,
+          slug: deployment.slug,
+          appPath,
+          port: deployment.port,
+          processManager,
+          startCommand: renderStartCommand(deployment),
+          envVars,
+          logDir: deploymentLogDir(deployment.slug)
+        })
+      );
+      await guardianRepairSleep(5000);
+      publicRoute = await runStep(deploymentId, releaseId, "HEALTH_CHECK", `${label} retry after Laravel public/index.php repair`, () =>
+        sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain), rootPath: appPath, framework: deployment.framework, requireHttps: httpsReady })
+      );
+      warning = await assertPublicRouteResult(publicRoute, label, deployment, appPath);
+    }
     if (warning && isPublicRouteHttp403(warning) && deployment.framework === "NODEJS" && nodeStartUsesVitePreview(deployment.startCommand)) {
       const current = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: deploymentWorkerInclude });
       const reconciled = await reconcileNodeProductionStartCommand(current, releaseId);
@@ -1508,7 +1528,14 @@ function isLaravelWritablePathIssue(text: string) {
   return lower.includes("please provide a valid cache path")
     || lower.includes("bootstrap/cache")
     || lower.includes("storage/framework")
+    || isMissingLaravelPublicEntrypoint(text)
     || lower.includes("laravel package discovery failed");
+}
+
+function isMissingLaravelPublicEntrypoint(text: string) {
+  const lower = text.toLowerCase();
+  return lower.includes("public/index.php")
+    || /provided cwd\s+["'][^"']+\/public["']\s+does not exist/i.test(text);
 }
 
 function isPhpRedisClassMissing(text: string) {

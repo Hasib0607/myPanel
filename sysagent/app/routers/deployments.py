@@ -177,6 +177,36 @@ class SyncEnvFileRequest(BaseModel):
     env: dict[str, str] | None = None
 
 
+LARAVEL_PUBLIC_INDEX = """<?php
+
+use Illuminate\\Contracts\\Http\\Kernel;
+use Illuminate\\Http\\Request;
+
+define('LARAVEL_START', microtime(true));
+
+if (file_exists($maintenance = __DIR__.'/../storage/framework/maintenance.php')) {
+    require $maintenance;
+}
+
+require __DIR__.'/../vendor/autoload.php';
+
+$app = require_once __DIR__.'/../bootstrap/app.php';
+
+if (method_exists($app, 'handleRequest')) {
+    $app->handleRequest(Request::capture());
+    return;
+}
+
+$kernel = $app->make(Kernel::class);
+
+$response = $kernel->handle(
+    $request = Request::capture()
+)->send();
+
+$kernel->terminate($request, $response);
+"""
+
+
 def path_is_within(root: Path, target: Path) -> bool:
     try:
         target.relative_to(root)
@@ -1292,6 +1322,50 @@ def sync_laravel_env(body: SyncEnvFileRequest) -> dict:
     return _ensure_laravel_env(body.rootPath, body.port, body.env)
 
 
+def ensure_laravel_public_index(root_path: str) -> dict:
+    root = Path(root_path).resolve()
+    index_path = root / "public" / "index.php"
+    if not (root / "artisan").is_file():
+        return {
+            "dryRun": False,
+            "command": ["skipped", "laravel-public-index"],
+            "stdout": "Skipped public/index.php repair: no artisan file in deployment root",
+            "stderr": "",
+            "returncode": 0,
+            "skipped": True,
+        }
+    if index_path.is_file():
+        return {
+            "dryRun": False,
+            "command": ["verify-file", str(index_path)],
+            "stdout": "Laravel public/index.php already exists",
+            "stderr": "",
+            "returncode": 0,
+            "created": False,
+        }
+    try:
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        index_path.write_text(LARAVEL_PUBLIC_INDEX, encoding="utf-8")
+        index_path.chmod(0o664)
+        make_panel_owned(index_path)
+        return {
+            "dryRun": False,
+            "command": ["write-file", str(index_path)],
+            "stdout": f"Created missing Laravel front controller at {index_path}",
+            "stderr": "",
+            "returncode": 0,
+            "created": True,
+        }
+    except OSError as error:
+        return {
+            "dryRun": False,
+            "command": ["write-file", str(index_path)],
+            "stdout": "",
+            "stderr": str(error),
+            "returncode": 1,
+        }
+
+
 @router.post("/laravel/repair-writable-paths")
 def repair_laravel_writable_paths(body: LaravelWritablePathsRequest) -> dict:
     root = str(Path(body.rootPath).resolve())
@@ -1315,14 +1389,16 @@ def repair_laravel_writable_paths(body: LaravelWritablePathsRequest) -> dict:
     ]
 
     mkdir = run_command(["mkdir", "-p", *paths], timeout=120, allow_live=DEPLOYMENT_COMMANDS_LIVE)
+    public_index = ensure_laravel_public_index(root) if mkdir.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because directory creation failed"}
     chown = run_command(["chown", "-R", "panel:panel", f"{root}/public", f"{root}/storage", f"{root}/bootstrap/cache"], timeout=120, allow_live=DEPLOYMENT_COMMANDS_LIVE) if mkdir.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because directory creation failed"}
     chmod = run_command(["chmod", "-R", "ug+rwX", f"{root}/public", f"{root}/storage", f"{root}/bootstrap/cache"], timeout=120, allow_live=DEPLOYMENT_COMMANDS_LIVE) if mkdir.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because directory creation failed"}
-    failed = any(step.get("returncode") != 0 for step in [mkdir, chown, chmod])
+    failed = any(step.get("returncode") != 0 for step in [mkdir, public_index, chown, chmod])
     return {
-        "dryRun": any(step.get("dryRun") for step in [mkdir, chown, chmod]),
+        "dryRun": any(step.get("dryRun") for step in [mkdir, public_index, chown, chmod]),
         "returncode": 1 if failed else 0,
         "paths": paths,
         "mkdir": mkdir,
+        "publicIndex": public_index,
         "chown": chown,
         "chmod": chmod,
     }
