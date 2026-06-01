@@ -27,6 +27,28 @@ def is_valid_laravel_app_key(value: str | None) -> bool:
     return bool(LARAVEL_APP_KEY.fullmatch(str(value).strip()))
 
 
+def normalize_database_charset_env(process_env: dict[str, str]) -> dict[str, str]:
+    """Laravel MySQL uses utf8mb4; PostgreSQL client_encoding must be UTF8, not utf8mb4."""
+    connection = (process_env.get("DB_CONNECTION") or "").strip().lower()
+    database_url = (process_env.get("DATABASE_URL") or "").strip().lower()
+    is_postgres = connection in {"pgsql", "postgres", "postgresql"} or database_url.startswith(
+        ("postgres://", "postgresql://")
+    )
+    is_mysql = connection in {"mysql", "mariadb"} or database_url.startswith(("mysql://", "mariadb://"))
+
+    if is_postgres:
+        if (process_env.get("DB_CHARSET") or "").lower() in {"", "utf8mb4"}:
+            process_env["DB_CHARSET"] = "utf8"
+        if process_env.get("DB_COLLATION"):
+            process_env["DB_COLLATION"] = ""
+    elif is_mysql:
+        if (process_env.get("DB_CHARSET") or "").lower() in {"", "utf8"}:
+            process_env["DB_CHARSET"] = "utf8mb4"
+        if not process_env.get("DB_COLLATION"):
+            process_env["DB_COLLATION"] = "utf8mb4_unicode_ci"
+    return process_env
+
+
 def resolve_laravel_app_key(process_env: dict[str, str], existing: dict[str, str]) -> str | None:
     for candidate in (process_env.get("APP_KEY"), existing.get("APP_KEY")):
         if is_valid_laravel_app_key(candidate):
@@ -50,8 +72,8 @@ def prepare_laravel_env_for_sync(
     resolved = resolve_laravel_app_key(process_env, existing)
     if resolved:
         process_env["APP_KEY"] = resolved
-        return process_env, False
-    return process_env, True
+        return normalize_database_charset_env(process_env), False
+    return normalize_database_charset_env(process_env), True
 
 
 def format_dotenv_line(key: str, value: str) -> str:

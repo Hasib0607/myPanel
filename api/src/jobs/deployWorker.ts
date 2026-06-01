@@ -770,16 +770,7 @@ async function runHealthCheckWithGuardianRecovery(
   throw lastError ?? new Error(`${label} failed`);
 }
 
-async function assertPublicRouteResult(result: unknown, label: string, deployment: { slug: string; domain?: { name: string } | null }, appPath?: string) {
-  const value = result as { degraded?: boolean; httpCode?: number; stderr?: string };
-  if (value?.degraded) {
-    return value.stderr ?? `${label} returned HTTP ${value.httpCode ?? "error"}`;
-  }
-
-  const message = liveResultFailureMessage(result, label);
-  if (!message) return null;
-
-  let runtimeText = "";
+async function deploymentRuntimeLogTail(deployment: { slug: string }, appPath?: string) {
   try {
     const logs = await sysagent.deploymentRuntimeLogs({
       name: deployment.slug,
@@ -787,10 +778,24 @@ async function assertPublicRouteResult(result: unknown, label: string, deploymen
       rootPath: appPath,
       lines: 80
     });
-    runtimeText = logs.text ? `\n\nRunning log tail:\n${logs.text}` : "";
+    return logs.text ? `\n\nRunning log tail:\n${logs.text}` : "";
   } catch {
-    runtimeText = "";
+    return "";
   }
+}
+
+async function assertPublicRouteResult(result: unknown, label: string, deployment: { slug: string; domain?: { name: string } | null }, appPath?: string) {
+  const value = result as { degraded?: boolean; httpCode?: number; stderr?: string };
+  if (value?.degraded) {
+    const runtimeText = await deploymentRuntimeLogTail(deployment, appPath);
+    const base = value.stderr ?? `${label} returned HTTP ${value.httpCode ?? "error"}`;
+    return `${base}${runtimeText}`;
+  }
+
+  const message = liveResultFailureMessage(result, label);
+  if (!message) return null;
+
+  const runtimeText = await deploymentRuntimeLogTail(deployment, appPath);
 
   const diagnosticText = runtimeText.replace(/server running on \[[^\]]+\]/ig, "");
   const localhostProxyMatch = diagnosticText.match(/https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?[^\s)"]*/i);
@@ -814,6 +819,36 @@ async function optionalPublicRouteWarning(
   const domain = deployment.domain;
   if (!domain) return null;
 
+  if (deployment.framework === "LARAVEL") {
+    await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Prepare Laravel public route check", () =>
+      sysagent.deploymentRepairLaravelWritablePaths({ rootPath: appPath })
+    );
+    envVars = await ensureLaravelAppKey(deploymentId, releaseId, appPath, deployment.port, envVars);
+    await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Guardian preflight repair", () =>
+      runGuardianDeploymentRepair({ rootPath: appPath, framework: deployment.framework, envVars })
+    ).then(async (repair) => {
+      const repairedKey = (repair as { appKey?: string }).appKey;
+      if (repairedKey) {
+        envVars.APP_KEY = repairedKey;
+        await upsertDeploymentEnvValue(deploymentId, "APP_KEY", repairedKey);
+      }
+      return repair;
+    });
+    await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Guardian preflight process restart", () =>
+      restartDeploymentProcess({
+        deploymentId,
+        slug: deployment.slug,
+        appPath,
+        port: deployment.port,
+        processManager,
+        startCommand: renderStartCommand(deployment),
+        envVars,
+        logDir: deploymentLogDir(deployment.slug)
+      })
+    );
+    await guardianRepairSleep(5000);
+  }
+
   let publicRoute = await runStep(deploymentId, releaseId, "HEALTH_CHECK", label, () =>
     sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain), rootPath: appPath, framework: deployment.framework, requireHttps: Boolean(domain.sslEnabled) })
   );
@@ -826,6 +861,14 @@ async function optionalPublicRouteWarning(
     await writeLog(deploymentId, releaseId, "HEALTH_CHECK", `${label} failed; running Guardian public-route repair`, { warning: firstMessage }, "warn");
 
     envVars = await ensureLaravelAppKey(deploymentId, releaseId, appPath, deployment.port, envVars);
+    const repairedCharset = await autoRepairPostgresEncoding(deploymentId, releaseId, firstMessage, envVars).catch(() => null);
+    if (repairedCharset) {
+      envVars = repairedCharset;
+      await ensureLaravelAppKey(deploymentId, releaseId, appPath, deployment.port, envVars);
+    }
+    if (isLaravelWritablePathIssue(firstMessage)) {
+      await autoRepairLaravelWritablePaths(deploymentId, releaseId, appPath, firstMessage).catch(() => false);
+    }
 
     await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Guardian public-route repair", () =>
       runGuardianDeploymentRepair({ rootPath: appPath, framework: deployment.framework, envVars })

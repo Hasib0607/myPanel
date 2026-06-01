@@ -6,6 +6,7 @@ from app.deployment_env import (
     format_dotenv_line,
     is_laravel_artisan_command,
     is_valid_laravel_app_key,
+    normalize_database_charset_env,
     normalize_process_env,
     prepare_laravel_env_for_sync,
     resolve_laravel_app_key,
@@ -27,6 +28,13 @@ class DeploymentEnvTests(unittest.TestCase):
         self.assertTrue(is_valid_laravel_app_key(VALID_APP_KEY))
         self.assertFalse(is_valid_laravel_app_key(COMPLEX_APP_KEY))
         self.assertFalse(is_valid_laravel_app_key(""))
+
+    def test_normalize_database_charset_env_for_postgres(self) -> None:
+        env = normalize_database_charset_env(
+            {"DB_CONNECTION": "pgsql", "DB_CHARSET": "utf8mb4", "DB_COLLATION": "utf8mb4_unicode_ci"}
+        )
+        self.assertEqual(env["DB_CHARSET"], "utf8")
+        self.assertEqual(env["DB_COLLATION"], "")
 
     def test_prepare_laravel_env_for_sync_rejects_invalid_panel_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -19,6 +19,7 @@ from app.deployment_env import (
     prepare_supervisor_runtime,
     read_existing_env_values,
     sync_laravel_env_file,
+    write_env_file,
     write_laravel_env_bundle,
 )
 from app.deployment_commands import normalize_laravel_start_command, parse_deployment_command
@@ -837,13 +838,12 @@ def _curl_once(url: str, *, accept_http_errors: bool = False) -> dict:
     return curl_health_probe(url, accept_http_errors=accept_http_errors)
 
 
-def _tail_text(path: Path, lines: int = 120) -> str:
+def _tail_text(path: Path, lines: int = 25) -> str:
     if not path.exists():
         return ""
     all_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    recent_errors = [line for line in all_lines if "production.ERROR:" in line or "MissingAppKeyException" in line]
-    if recent_errors:
-        return "\n".join(recent_errors[-lines:])
+    if not all_lines:
+        return ""
     return "\n".join(all_lines[-lines:])
 
 
@@ -856,11 +856,19 @@ def attach_laravel_diagnostics(result: dict, root_path: str | None, framework: s
         return result
     laravel_log = root / "storage" / "logs" / "laravel.log"
     tail_text = _tail_text(laravel_log)
-    if not tail_text:
+    response_body = (result.get("stdout") or "").strip()
+    if len(response_body) > 1200:
+        response_body = response_body[:1200] + "\n…"
+    extras: list[str] = []
+    if response_body:
+        extras.append(f"HTTP response body:\n{response_body}")
+    if tail_text:
+        result["laravelLogPath"] = str(laravel_log)
+        result["laravelLogTail"] = tail_text
+        extras.append(f"Laravel log tail ({laravel_log}):\n{tail_text}")
+    if not extras:
         return result
-    result["laravelLogPath"] = str(laravel_log)
-    result["laravelLogTail"] = tail_text
-    suffix = f"\n\nLaravel log tail ({laravel_log}):\n{tail_text}"
+    suffix = "\n\n" + "\n\n".join(extras)
     result["stderr"] = f"{result.get('stderr') or ''}{suffix}".strip()
     return result
 
@@ -1093,6 +1101,9 @@ def _ensure_laravel_env(root_path: str, port: int | None, env: dict[str, str] | 
 
     key_generate: dict | None = None
     if needs_key_generate:
+        if not env_path.is_file():
+            stub_env = {"APP_ENV": (env or {}).get("APP_ENV", "production")}
+            write_env_file(env_path, stub_env)
         runtime_env = read_existing_env_values(env_path)
         key_generate = guarded_deployment_command(
             root_path,
