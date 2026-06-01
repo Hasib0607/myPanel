@@ -991,13 +991,23 @@ def attach_laravel_diagnostics(result: dict, root_path: str | None, framework: s
     return result
 
 
+def _server_primary_ip() -> str | None:
+    result = run_command(["hostname", "-I"], allow_live=DEPLOYMENT_COMMANDS_LIVE)
+    if result.get("returncode") != 0:
+        return None
+    for token in (result.get("stdout") or "").split():
+        if token and not token.startswith("127."):
+            return token
+    return None
+
+
 def _curl_public_route(server_name: str, path: str = "/", root_path: str | None = None, framework: str | None = None, require_https: bool = False) -> dict:
     primary = server_name.split()[0].strip()
     clean_path = path if path.startswith("/") else f"/{path}"
     is_laravel = (framework or "").upper() == "LARAVEL"
     use_https = require_https and letsencrypt_certificate_exists(primary)
 
-    def probe(url: str, *, accept_http_errors: bool) -> dict:
+    def probe(url: str, *, accept_http_errors: bool, loopback: bool, insecure_tls: bool = False) -> dict:
         command = [
             "curl",
             "-sS",
@@ -1011,11 +1021,16 @@ def _curl_public_route(server_name: str, path: str = "/", root_path: str | None 
             "--retry-connrefused",
             "--connect-timeout", "5",
             "--max-time", "30",
-            "--resolve", f"{primary}:80:127.0.0.1",
-            "--resolve", f"{primary}:443:127.0.0.1",
             "-w", "\n__http_code=%{http_code}\n__effective_url=%{url_effective}",
             url,
         ]
+        if insecure_tls:
+            command[1:1] = ["-k"]
+        if loopback:
+            command[1:1] = [
+                "--resolve", f"{primary}:80:127.0.0.1",
+                "--resolve", f"{primary}:443:127.0.0.1",
+            ]
         raw = run_command(command, allow_live=DEPLOYMENT_COMMANDS_LIVE)
         stdout = raw.get("stdout") or ""
         http_code = 0
@@ -1031,6 +1046,7 @@ def _curl_public_route(server_name: str, path: str = "/", root_path: str | None 
             raw["stdout"] = body
         raw["httpCode"] = http_code
         raw["effectiveUrl"] = effective_url
+        raw["probeMode"] = "loopback" if loopback else "dns"
         if raw.get("returncode") != 0:
             return raw
         if http_code >= 400 and accept_http_errors:
@@ -1043,11 +1059,11 @@ def _curl_public_route(server_name: str, path: str = "/", root_path: str | None 
         return raw
 
     scheme = "https" if use_https else "http"
-    result = probe(f"{scheme}://{primary}{clean_path}", accept_http_errors=is_laravel)
+    result = probe(f"{scheme}://{primary}{clean_path}", accept_http_errors=is_laravel, loopback=True)
 
     # curl 35: SSL handshake failed (e.g. HTTP on 443 or broken cert paths in nginx).
     if use_https and result.get("returncode") == 35:
-        http_result = probe(f"http://{primary}{clean_path}", accept_http_errors=is_laravel)
+        http_result = probe(f"http://{primary}{clean_path}", accept_http_errors=is_laravel, loopback=True)
         if http_result.get("returncode") == 0:
             http_result["degraded"] = True
             http_result["stderr"] = (
@@ -1058,7 +1074,7 @@ def _curl_public_route(server_name: str, path: str = "/", root_path: str | None 
         result = http_result
 
     if use_https and result.get("returncode") == 7:
-        http_result = probe(f"http://{primary}{clean_path}", accept_http_errors=is_laravel)
+        http_result = probe(f"http://{primary}{clean_path}", accept_http_errors=is_laravel, loopback=True)
         if http_result.get("returncode") == 0:
             http_result["degraded"] = True
             http_result["stderr"] = (
@@ -1069,7 +1085,7 @@ def _curl_public_route(server_name: str, path: str = "/", root_path: str | None 
         result = http_result
 
     if result.get("httpCode") in {301, 302, 307, 308} and result.get("effectiveUrl", "").startswith("https://"):
-        result = probe(result["effectiveUrl"], accept_http_errors=is_laravel)
+        result = probe(result["effectiveUrl"], accept_http_errors=is_laravel, loopback=True)
 
     effective_url = result.get("effectiveUrl") or ""
     if effective_url and re.search(r"https?://(localhost|127\.0\.0\.1)(:\d+)?(/|$)", effective_url):
@@ -1080,6 +1096,59 @@ def _curl_public_route(server_name: str, path: str = "/", root_path: str | None 
         )
     if result.get("returncode") != 0 or result.get("degraded"):
         return attach_laravel_diagnostics(result, root_path, framework)
+
+    if use_https and result.get("returncode") == 0:
+        dns_probe = probe(f"https://{primary}{clean_path}", accept_http_errors=is_laravel, loopback=False)
+        server_ip = _server_primary_ip()
+        ip_probe = None
+        if server_ip:
+            ip_probe = probe(
+                f"https://{server_ip}{clean_path}",
+                accept_http_errors=is_laravel,
+                loopback=False,
+                insecure_tls=True,
+            )
+        result["loopbackProbe"] = {"httpCode": result.get("httpCode"), "returncode": result.get("returncode")}
+        result["dnsProbe"] = {
+            "httpCode": dns_probe.get("httpCode"),
+            "returncode": dns_probe.get("returncode"),
+            "stderr": dns_probe.get("stderr"),
+        }
+        if server_ip:
+            result["serverIpProbe"] = {
+                "serverIp": server_ip,
+                "httpCode": ip_probe.get("httpCode") if ip_probe else None,
+                "returncode": ip_probe.get("returncode") if ip_probe else None,
+                "stderr": ip_probe.get("stderr") if ip_probe else None,
+            }
+        dns_failed_ssl = dns_probe.get("returncode") == 35
+        ip_failed_ssl = bool(ip_probe and ip_probe.get("returncode") == 35)
+        if dns_failed_ssl or ip_failed_ssl:
+            result["degraded"] = True
+            result["returncode"] = 0
+            hints = [
+                "Local nginx HTTPS on 127.0.0.1:443 works, but the public internet path does not.",
+                "Point DNS A record for this hostname to this VPS IP"
+                + (f" ({server_ip})" if server_ip else "")
+                + ", set Cloudflare to DNS only (grey cloud) or SSL Full, and disable browser VPN while testing.",
+            ]
+            if dns_failed_ssl and not ip_failed_ssl and server_ip:
+                hints.append(
+                    f"DNS may not point to this server yet (public DNS SSL failed; direct VPS IP probe returncode={ip_probe.get('returncode')})."
+                )
+            elif ip_failed_ssl:
+                hints.append(
+                    "Port 443 on this server's public IP is not serving valid TLS (another service may own 443, or nginx is not listening on the public interface)."
+                )
+            result["stderr"] = " ".join(hints)
+            return attach_laravel_diagnostics(result, root_path, framework)
+        if dns_probe.get("returncode") not in {0, None} and dns_probe.get("httpCode", 0) >= 400:
+            result["degraded"] = True
+            result["stderr"] = (
+                f"Public DNS HTTPS check returned HTTP {dns_probe.get('httpCode')} "
+                f"(local loopback check was {result.get('httpCode')})."
+            )
+
     return result
 
 
