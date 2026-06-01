@@ -30,6 +30,7 @@ WATCHED_SERVICE_DEFS = [
     {"key": "panel-api", "name": "Panel API", "unit": "vps-panel-api", "ports": [4000]},
     {"key": "panel-frontend", "name": "Panel Frontend", "unit": "vps-panel-frontend", "ports": [3000]},
     {"key": "panel-workers", "name": "Panel Workers", "unit": "vps-panel-workers", "ports": []},
+    {"key": "panel-guardian", "name": "Panel Guardian", "unit": "vps-panel-guardian", "ports": []},
     {"key": "sysagent", "name": "System Agent", "unit": "vps-panel-sysagent", "ports": [5000]},
 ]
 
@@ -53,6 +54,7 @@ SAFE_RESTART_UNITS = {
     "panel-api": "vps-panel-api",
     "panel-frontend": "vps-panel-frontend",
     "panel-workers": "vps-panel-workers",
+    "panel-guardian": "vps-panel-guardian",
 }
 
 

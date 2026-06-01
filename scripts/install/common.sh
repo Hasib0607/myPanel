@@ -288,7 +288,7 @@ PANEL_UPDATE_STATUS_FILE=/var/log/vps-panel/self-update-status.json
 PANEL_UPDATE_LOG_FILE=/var/log/vps-panel/self-update.log
 PANEL_UPDATE_PID_FILE=/tmp/vps-panel-self-update.pid
 PANEL_UPDATE_API_SERVICE=vps-panel-api
-PANEL_UPDATE_SERVICES=vps-panel-sysagent vps-panel-workers vps-panel-frontend vps-panel-api
+PANEL_UPDATE_SERVICES=vps-panel-sysagent vps-panel-workers vps-panel-guardian vps-panel-frontend vps-panel-api
 PANEL_UPDATE_DIRTY_STRATEGY=fail
 PANEL_UPDATE_COMMAND_TIMEOUT=30
 PANEL_UPDATE_SYSTEMCTL_NO_BLOCK=true
@@ -381,6 +381,24 @@ User=$APP_USER
 WorkingDirectory=$APP_DIR/api
 EnvironmentFile=$APP_DIR/.env
 ExecStart=/usr/bin/npm run start:workers
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  write_file /etc/systemd/system/vps-panel-guardian.service <<EOF
+[Unit]
+Description=VPS Panel Guardian Scheduler
+After=network.target postgresql.service ${REDIS_SERVICE}.service vps-panel-workers.service vps-panel-sysagent.service
+
+[Service]
+Type=simple
+User=$APP_USER
+WorkingDirectory=$APP_DIR/api
+EnvironmentFile=$APP_DIR/.env
+ExecStart=/usr/bin/npm run guardian
 Restart=always
 RestartSec=3
 
@@ -548,7 +566,7 @@ write_update_sudoers() {
   log "Writing sudoers for panel self-update"
   SYSTEMCTL_BIN="$(command -v systemctl)"
   write_file /etc/sudoers.d/vps-panel-update <<EOF
-$APP_USER ALL=(root) NOPASSWD: $SYSTEMCTL_BIN --no-block restart vps-panel-sysagent, $SYSTEMCTL_BIN is-active vps-panel-sysagent, $SYSTEMCTL_BIN status vps-panel-sysagent, $SYSTEMCTL_BIN --no-block restart vps-panel-api, $SYSTEMCTL_BIN is-active vps-panel-api, $SYSTEMCTL_BIN status vps-panel-api, $SYSTEMCTL_BIN --no-block restart vps-panel-workers, $SYSTEMCTL_BIN is-active vps-panel-workers, $SYSTEMCTL_BIN status vps-panel-workers, $SYSTEMCTL_BIN --no-block restart vps-panel-frontend, $SYSTEMCTL_BIN is-active vps-panel-frontend, $SYSTEMCTL_BIN status vps-panel-frontend
+$APP_USER ALL=(root) NOPASSWD: $SYSTEMCTL_BIN --no-block restart vps-panel-sysagent, $SYSTEMCTL_BIN is-active vps-panel-sysagent, $SYSTEMCTL_BIN status vps-panel-sysagent, $SYSTEMCTL_BIN --no-block restart vps-panel-api, $SYSTEMCTL_BIN is-active vps-panel-api, $SYSTEMCTL_BIN status vps-panel-api, $SYSTEMCTL_BIN --no-block restart vps-panel-workers, $SYSTEMCTL_BIN is-active vps-panel-workers, $SYSTEMCTL_BIN status vps-panel-workers, $SYSTEMCTL_BIN --no-block restart vps-panel-guardian, $SYSTEMCTL_BIN is-active vps-panel-guardian, $SYSTEMCTL_BIN status vps-panel-guardian, $SYSTEMCTL_BIN --no-block restart vps-panel-frontend, $SYSTEMCTL_BIN is-active vps-panel-frontend, $SYSTEMCTL_BIN status vps-panel-frontend
 EOF
   chmod 0440 /etc/sudoers.d/vps-panel-update
   visudo -c -f /etc/sudoers.d/vps-panel-update
@@ -596,7 +614,7 @@ SQL
 start_core_services() {
   log "Starting services"
   systemctl daemon-reload
-  systemctl enable --now vps-panel-sysagent vps-panel-api vps-panel-workers vps-panel-frontend nginx "$BIND_SYSTEMD_SERVICE" "$REDIS_SERVICE" postgresql
+  systemctl enable --now vps-panel-sysagent vps-panel-api vps-panel-workers vps-panel-guardian vps-panel-frontend nginx "$BIND_SYSTEMD_SERVICE" "$REDIS_SERVICE" postgresql
   nginx -t
   systemctl reload nginx
 }
@@ -614,7 +632,7 @@ run_smoke_tests() {
   else
     psql "$DATABASE_URL" -c "select 1" >/dev/null
   fi
-  systemctl is-active --quiet vps-panel-sysagent vps-panel-api vps-panel-workers vps-panel-frontend nginx "$REDIS_SERVICE" postgresql
+  systemctl is-active --quiet vps-panel-sysagent vps-panel-api vps-panel-workers vps-panel-guardian vps-panel-frontend nginx "$REDIS_SERVICE" postgresql
 }
 
 print_install_summary() {
