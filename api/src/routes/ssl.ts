@@ -88,11 +88,23 @@ async function assertARecordPointsToVps(hostname: string) {
   return records;
 }
 
+async function optionalARecordPointsToVps(hostname: string) {
+  try {
+    const records = await resolvePublicA(hostname);
+    const ok = records.includes(env.VPS_IP);
+    return { host: hostname, records, ok, skipped: !ok };
+  } catch {
+    return { host: hostname, records: [] as string[], ok: false, skipped: true };
+  }
+}
+
 async function runSslPreflight(domain: { name: string }, includeWww: boolean) {
-  const hosts = [domain.name, ...(includeWww ? [`www.${domain.name}`] : [])];
-  const dnsChecks = await Promise.all(hosts.map(async (host) => ({ host, records: await assertARecordPointsToVps(host) })));
+  const apexCheck = { host: domain.name, records: await assertARecordPointsToVps(domain.name), ok: true, skipped: false };
+  const wwwCheck = includeWww ? await optionalARecordPointsToVps(`www.${domain.name}`) : null;
+  const effectiveIncludeWww = Boolean(wwwCheck?.ok);
+  const dnsChecks = [apexCheck, ...(wwwCheck ? [wwwCheck] : [])];
   const webRoot = path.join(env.FILE_MANAGER_ROOT, domain.name, "public_html");
-  const preflight = await sysagent.sslPreflight({ domain: domain.name, webRoot, includeWww });
+  const preflight = await sysagent.sslPreflight({ domain: domain.name, webRoot, includeWww: effectiveIncludeWww });
 
   if (!commandSucceeded(preflight.certbot)) {
     const detail = commandFailureDetail(preflight.certbot);
@@ -105,7 +117,7 @@ async function runSslPreflight(domain: { name: string }, includeWww: boolean) {
     throw Object.assign(new Error(`HTTP ACME challenge failed for ${domain.name}. Publish the domain first and keep port 80 open.${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
   }
 
-  return { dnsChecks, preflight, webRoot };
+  return { dnsChecks, preflight, webRoot, includeWww: effectiveIncludeWww };
 }
 
 export const sslRoutes: FastifyPluginAsync = async (app) => {
@@ -147,7 +159,7 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
       domain: domain.name,
       email: body.email ?? `admin@${domain.name}`,
       webRoot: preflight.webRoot,
-      includeWww: body.includeWww,
+      includeWww: preflight.includeWww,
       forceSsl: domain.forceSsl
     });
 
@@ -167,10 +179,11 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const body = sslActionSchema.parse(request.body ?? {});
     const domain = await prisma.domain.findUniqueOrThrow({ where: { id: domainId } });
-    await runSslPreflight(domain, body.includeWww);
+    const preflight = await runSslPreflight(domain, body.includeWww);
     const job = await sslQueue.add("renew", {
       domainId,
       domain: domain.name,
+      includeWww: preflight.includeWww,
       forceSsl: domain.forceSsl
     });
 

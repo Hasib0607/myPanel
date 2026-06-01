@@ -34,12 +34,16 @@ type NginxPublishResult = {
   [key: string]: unknown;
 };
 
-async function writeHttpsVhost(domainName: string, domainId: string | null | undefined, forceHttps: boolean) {
+function sslServerName(domainName: string, includeWww: boolean) {
+  return includeWww ? `${domainName} www.${domainName}` : domainName;
+}
+
+async function writeHttpsVhost(domainName: string, domainId: string | null | undefined, forceHttps: boolean, includeWww: boolean) {
   const proxyTarget = await findDeploymentProxyTarget(domainName);
   if (proxyTarget) {
     const serverName = deploymentServerName({
       name: domainName,
-      includeWww: proxyTarget.includeWww
+      includeWww: includeWww && proxyTarget.includeWww !== false
     }) ?? domainName;
     const bound = {
       id: domainName,
@@ -47,7 +51,7 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
       forceSsl: forceHttps,
       sslEnabled: true,
       documentRoot: proxyTarget.domain.documentRoot,
-      includeWww: proxyTarget.includeWww
+      includeWww: includeWww && proxyTarget.includeWww !== false
     };
     const result = await publishDeploymentProxyNginx({
       deploymentId: proxyTarget.deployment.id,
@@ -85,7 +89,7 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
     if (!deployment) throw new Error(`No deployment selected for ${domainName} HTTPS proxy`);
     result = await publishDeploymentProxyNginx({
       deploymentId: deployment.id,
-      fqdn: deploymentServerName({ name: domainName, includeWww: true }) ?? domainName,
+      fqdn: sslServerName(domainName, includeWww),
       upstreamPort: deployment.port,
       rootPath: deployment.rootPath,
       framework: deployment.framework,
@@ -100,7 +104,7 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
     if (!domain.redirectUrl) throw new Error(`No redirect URL selected for ${domainName}`);
     result = await sysagent.writeRedirectNginxVhost({
       name: `domain-${domainName}`,
-      serverName: `${domainName} www.${domainName}`,
+      serverName: sslServerName(domainName, includeWww),
       redirectUrl: domain.redirectUrl,
       requireSsl: true,
       ...certificatePaths(domainName)
@@ -108,7 +112,7 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
   } else {
     result = await sysagent.writeStaticNginxVhost({
       name: `domain-${domainName}`,
-      serverName: `${domainName} www.${domainName}`,
+      serverName: sslServerName(domainName, includeWww),
       rootPath: `${env.FILE_MANAGER_ROOT}/${domainName}/${domain?.documentRoot || "public_html"}`,
       forceHttps,
       requireSsl: true,
@@ -148,18 +152,19 @@ export const sslWorker = new Worker(
     logger.info("ssl job received", { id: job.id, name: job.name, data: job.data });
 
     if (job.name === "issue") {
+      const includeWww = job.data.includeWww ?? true;
       const result = await sysagent.issueCertificate({
         domain: job.data.domain,
         email: job.data.email,
         webRoot: job.data.webRoot ?? `${env.FILE_MANAGER_ROOT}/${job.data.domain}/public_html`,
-        includeWww: job.data.includeWww ?? true
+        includeWww
       });
       assertLiveCommandSucceeded("Certbot issue", result);
 
       const domain = job.data.domainId
         ? await prisma.domain.findUnique({ where: { id: job.data.domainId }, select: { forceSsl: true } })
         : null;
-      const vhost = await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true);
+      const vhost = await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true, includeWww);
       await markSslIssued(job);
 
       await redis.del("domain_list", `ssl_expiry:${job.data.domain}`);
@@ -173,7 +178,7 @@ export const sslWorker = new Worker(
       const domain = job.data.domainId
         ? await prisma.domain.findUnique({ where: { id: job.data.domainId }, select: { forceSsl: true } })
         : null;
-      const vhost = await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true);
+      const vhost = await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true, job.data.includeWww ?? true);
       await markSslIssued(job);
 
       await redis.del("domain_list", `ssl_expiry:${job.data.domain}`);

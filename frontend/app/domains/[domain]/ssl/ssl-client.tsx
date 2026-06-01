@@ -43,7 +43,8 @@ type SslJobStatus = {
 
 type SslPreflight = {
   webRoot: string;
-  dnsChecks: Array<{ host: string; records: string[] }>;
+  includeWww: boolean;
+  dnsChecks: Array<{ host: string; records: string[]; ok?: boolean; skipped?: boolean }>;
 };
 
 export function SslClient({ domainId }: { domainId: string }) {
@@ -139,7 +140,10 @@ export function SslClient({ domainId }: { domainId: string }) {
 
           {preflight.data ? (
             <div className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
-              SSL readiness check passed for {preflight.data.dnsChecks.map((check) => check.host).join(", ")}.
+              SSL readiness check passed for {preflight.data.dnsChecks.filter((check) => !check.skipped).map((check) => check.host).join(", ")}.
+              {preflight.data.dnsChecks.some((check) => check.skipped)
+                ? ` Skipped ${preflight.data.dnsChecks.filter((check) => check.skipped).map((check) => check.host).join(", ")} because DNS is not pointed to this VPS.`
+                : ""}
             </div>
           ) : null}
 
@@ -185,7 +189,7 @@ export function SslClient({ domainId }: { domainId: string }) {
           </div>
 
           <div className="rounded-md border border-dashed border-panel-line p-4 text-sm text-panel-muted">
-            Live SSL uses Certbot webroot validation, then writes a 443 Nginx vhost after the certificate succeeds. Port 80 and 443 must be open and the domain A records must point to this VPS.
+            Live SSL uses Certbot webroot validation, then writes a 443 Nginx vhost after the certificate succeeds. The root domain A record must point to this VPS. The www host is included only when its A record also points here.
           </div>
         </div>
       </section>

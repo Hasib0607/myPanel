@@ -1,5 +1,6 @@
 import { Worker } from "bullmq";
 import { DeploymentFramework, DeploymentPackageManager, DeploymentProcessManager, DeploymentRuntime, Prisma } from "@prisma/client";
+import dns from "node:dns/promises";
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -144,6 +145,16 @@ function deploymentPortPolicyError(port: number) {
     return `Deployment port ${port} is reserved for panel or system services`;
   }
   return null;
+}
+
+async function wwwPointsToThisVps(domain: BoundDomain) {
+  if (!deploymentCertbotIncludeWww(domain)) return false;
+  try {
+    const records = await dns.resolve4(`www.${domain.name}`);
+    return records.includes(env.VPS_IP);
+  } catch {
+    return false;
+  }
 }
 
 async function nextAvailableDeploymentPort(excludeDeploymentId?: string, blockedPorts = new Set<number>()) {
@@ -851,7 +862,8 @@ async function repairDeploymentSslAccess(
   },
   domain: BoundDomain
 ) {
-  const serverName = deploymentServerName(domain);
+  const includeWww = await wwwPointsToThisVps(domain);
+  const serverName = deploymentServerName({ ...domain, includeWww });
   if (!serverName) return null;
 
   const sslPaths = await deploymentSslCertificatePathsWhenReady(domain);
@@ -881,13 +893,14 @@ async function repairDeploymentSslAccess(
   }
 
   try {
+    const includeWww = await wwwPointsToThisVps(domain);
     await runStep(deploymentId, releaseId, "CONFIGURING_PROXY", "ACME preflight before SSL repair", async () => {
       await ensureAcmeWebroot(domain);
       const webRoot = deploymentFallbackRootPath(domain) ?? `${env.FILE_MANAGER_ROOT}/${domain.name}/public_html`;
       const preflight = await sysagent.sslPreflight({
         domain: domain.name,
         webRoot,
-        includeWww: deploymentCertbotIncludeWww(domain)
+        includeWww
       });
       const checks = (preflight as { checks?: Array<{ returncode?: number }> }).checks ?? [];
       const failed = checks.filter((check) => check.returncode !== 0);
@@ -903,7 +916,7 @@ async function repairDeploymentSslAccess(
       domain: domain.name,
       email: deploymentSslContactEmail(domain),
       webRoot: deploymentFallbackRootPath(domain) ?? `${env.FILE_MANAGER_ROOT}/${domain.name}/public_html`,
-      includeWww: deploymentCertbotIncludeWww(domain),
+      includeWww,
       forceSsl: true,
       source: "deployment-repair"
     });
@@ -2428,13 +2441,14 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
 
     if (domain && !proxyHttpsReady) {
       await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Prepare ACME webroot", () => ensureAcmeWebroot(domain));
+      const includeWww = await wwwPointsToThisVps(domain);
       const sslJob = await sslQueue.add("issue", {
         domainId: domain.id.startsWith("subdomain:") ? null : domain.id,
         subdomainId: domain.id.startsWith("subdomain:") ? domain.id.slice("subdomain:".length) : null,
         domain: domain.name,
         email: deploymentSslContactEmail(domain),
         webRoot: deploymentFallbackRootPath(domain) ?? `${env.FILE_MANAGER_ROOT}/${domain.name}/public_html`,
-        includeWww: deploymentCertbotIncludeWww(domain),
+        includeWww,
         forceSsl: true,
         source: "deployment"
       });
@@ -2447,7 +2461,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         const httpsNginx = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx HTTPS proxy config", () =>
           publishDeploymentProxyNginx({
             deploymentId: deployment.id,
-            fqdn: serverName ?? domain!.name,
+            fqdn: deploymentServerName({ ...domain!, includeWww }) ?? domain!.name,
             upstreamPort: deployment.port,
             rootPath: deployment.rootPath,
             framework: deployment.framework,
