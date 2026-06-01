@@ -23,6 +23,7 @@ from app.deployment_env import (
     write_laravel_env_bundle,
 )
 from app.deployment_commands import normalize_laravel_start_command, parse_deployment_command, resolve_laravel_public_root
+from app.laravel_nginx import nginx_laravel_app_locations
 from app.deployment_health import curl_health_probe
 from app.platform import runtime_tool_install_plan
 from app.nginx_paths import nginx_sites_available, nginx_sites_enabled
@@ -78,58 +79,6 @@ class NginxRequest(BaseModel):
     sslCertificate: str | None = None
     sslCertificateKey: str | None = None
     requireSsl: bool = False
-
-
-def _nginx_proxy_headers(upstream_port: int) -> str:
-    return (
-        "        proxy_http_version 1.1;\n"
-        f"        proxy_pass http://127.0.0.1:{upstream_port};\n"
-        "        proxy_set_header Host $http_host;\n"
-        "        proxy_set_header X-Forwarded-Host $host;\n"
-        "        proxy_set_header X-Forwarded-Port $server_port;\n"
-        "        proxy_set_header Forwarded \"proto=$scheme;host=$http_host\";\n"
-        "        proxy_set_header X-Real-IP $remote_addr;\n"
-        "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
-        "        proxy_set_header X-Forwarded-Proto $scheme;\n"
-        "        proxy_set_header Upgrade $http_upgrade;\n"
-        "        proxy_set_header Connection \"upgrade\";\n"
-        "        proxy_connect_timeout 10s;\n"
-        "        proxy_send_timeout 60s;\n"
-        "        proxy_read_timeout 60s;\n"
-        f"        proxy_redirect http://localhost:{upstream_port}/ $scheme://$host/;\n"
-        f"        proxy_redirect https://localhost:{upstream_port}/ https://$host/;\n"
-        f"        proxy_redirect http://127.0.0.1:{upstream_port}/ $scheme://$host/;\n"
-        f"        proxy_redirect https://127.0.0.1:{upstream_port}/ https://$host/;\n"
-    )
-
-
-def _nginx_laravel_app_locations(
-    *,
-    public_root: str,
-    upstream_port: int,
-    fallback_error_page: str,
-    fallback_location: str,
-) -> str:
-    return (
-        f"    root {public_root};\n"
-        "\n"
-        "    location ~* \\.(?:css|js|mjs|map|ico|gif|jpe?g|png|svg|webp|woff2?|ttf|eot|otf)$ {\n"
-        "        try_files $uri =404;\n"
-        "        expires 7d;\n"
-        "        access_log off;\n"
-        "        add_header Cache-Control \"public\";\n"
-        "    }\n"
-        "\n"
-        f"    location / {{\n"
-        f"{fallback_error_page}"
-        "        try_files $uri $uri/ @deployment_upstream;\n"
-        "    }\n"
-        "\n"
-        "    location @deployment_upstream {\n"
-        f"{_nginx_proxy_headers(upstream_port)}"
-        "    }\n"
-        f"{fallback_location}"
-    )
 
 
 class HealthRequest(BaseModel):
@@ -796,7 +745,7 @@ def nginx(body: NginxRequest) -> dict:
                 "    }\n"
             )
 
-        app_locations = _nginx_laravel_app_locations(
+        app_locations = nginx_laravel_app_locations(
             public_root=public_root,
             upstream_port=body.upstreamPort,
             fallback_error_page=fallback_error_page,
@@ -867,6 +816,11 @@ def _tail_text(path: Path, lines: int = 25) -> str:
     return "\n".join(all_lines[-lines:])
 
 
+def _nginx_forbidden_response(stdout: str) -> bool:
+    lower = stdout.lower()
+    return "403 forbidden" in lower and "nginx" in lower
+
+
 def attach_laravel_diagnostics(result: dict, root_path: str | None, framework: str | None = None) -> dict:
     if (framework or "").upper() != "LARAVEL" or not root_path:
         return result
@@ -875,13 +829,19 @@ def attach_laravel_diagnostics(result: dict, root_path: str | None, framework: s
     if not info["allowed"]:
         return result
     laravel_log = root / "storage" / "logs" / "laravel.log"
-    tail_text = _tail_text(laravel_log)
     response_body = (result.get("stdout") or "").strip()
+    nginx_forbidden = _nginx_forbidden_response(response_body)
+    tail_text = "" if nginx_forbidden else _tail_text(laravel_log)
     if len(response_body) > 1200:
         response_body = response_body[:1200] + "\n…"
     extras: list[str] = []
     if response_body:
         extras.append(f"HTTP response body:\n{response_body}")
+    if nginx_forbidden:
+        extras.append(
+            "Nginx returned 403 before the request reached Laravel (static root / try_files). "
+            "Redeploy to refresh the vhost."
+        )
     if tail_text:
         result["laravelLogPath"] = str(laravel_log)
         result["laravelLogTail"] = tail_text

@@ -772,6 +772,36 @@ async function deploymentRuntimeLogTail(deployment: { slug: string }, appPath?: 
   }
 }
 
+function isNginxStaticRootForbidden(warning: string) {
+  return /HTTP 403/i.test(warning) && /403 Forbidden/i.test(warning) && /nginx/i.test(warning);
+}
+
+function isMissingLaravelAppKeyWarning(warning: string) {
+  return /MissingAppKeyException/i.test(warning) || /No application encryption key has been specified/i.test(warning);
+}
+
+async function republishDeploymentNginxVhost(
+  deploymentId: string,
+  releaseId: string | undefined,
+  deployment: { id: string; port: number; rootPath: string; publicDirectory?: string | null },
+  domain: BoundDomain
+) {
+  const serverName = deploymentServerName(domain);
+  if (!serverName) return;
+  const httpsReady = await deploymentHttpsReady(domain);
+  await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Republish nginx vhost", () =>
+    publishDeploymentProxyNginx({
+      deploymentId: deployment.id,
+      fqdn: serverName,
+      upstreamPort: deployment.port,
+      rootPath: deployment.rootPath,
+      publicDirectory: deployment.publicDirectory ?? "public",
+      fallbackRootPath: deploymentFallbackRootPath(domain),
+      forceHttps: httpsReady
+    })
+  );
+}
+
 async function assertPublicRouteResult(result: unknown, label: string, deployment: { slug: string; domain?: { name: string } | null }, appPath?: string) {
   const value = result as { degraded?: boolean; httpCode?: number; stderr?: string };
   if (value?.degraded) {
@@ -799,7 +829,7 @@ async function optionalPublicRouteWarning(
   deploymentId: string,
   releaseId: string | undefined,
   label: string,
-  deployment: { id: string; slug: string; framework: DeploymentFramework; port: number; startCommand: string | null; processManager: DeploymentProcessManager | null; domain?: BoundDomain | null; dbType?: "POSTGRESQL" | "MYSQL" | null; dbName?: string | null; dbUser?: string | null; dbPasswordSecretRef?: string | null },
+  deployment: { id: string; slug: string; rootPath: string; publicDirectory?: string | null; framework: DeploymentFramework; port: number; startCommand: string | null; processManager: DeploymentProcessManager | null; domain?: BoundDomain | null; dbType?: "POSTGRESQL" | "MYSQL" | null; dbName?: string | null; dbUser?: string | null; dbPasswordSecretRef?: string | null },
   appPath: string,
   envVars: Record<string, string>,
   processManager: DeploymentProcessManager
@@ -889,6 +919,34 @@ async function optionalPublicRouteWarning(
         );
         warning = await assertPublicRouteResult(publicRoute, label, deployment, appPath);
       }
+    }
+    if (warning && isNginxStaticRootForbidden(warning)) {
+      await republishDeploymentNginxVhost(deploymentId, releaseId, deployment, domain);
+      await guardianRepairSleep(2000);
+      publicRoute = await runStep(deploymentId, releaseId, "HEALTH_CHECK", `${label} retry after nginx static-root fix`, () =>
+        sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain), rootPath: appPath, framework: deployment.framework, requireHttps: httpsReady })
+      );
+      warning = await assertPublicRouteResult(publicRoute, label, deployment, appPath);
+    }
+    if (warning && isMissingLaravelAppKeyWarning(warning)) {
+      envVars = await ensureLaravelAppKey(deploymentId, releaseId, appPath, deployment.port, envVars);
+      await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Restart after APP_KEY repair", () =>
+        restartDeploymentProcess({
+          deploymentId,
+          slug: deployment.slug,
+          appPath,
+          port: deployment.port,
+          processManager,
+          startCommand: renderStartCommand(deployment),
+          envVars,
+          logDir: deploymentLogDir(deployment.slug)
+        })
+      );
+      await guardianRepairSleep(5000);
+      publicRoute = await runStep(deploymentId, releaseId, "HEALTH_CHECK", `${label} retry after APP_KEY repair`, () =>
+        sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain), rootPath: appPath, framework: deployment.framework, requireHttps: httpsReady })
+      );
+      warning = await assertPublicRouteResult(publicRoute, label, deployment, appPath);
     }
     return warning;
   } catch (error) {
