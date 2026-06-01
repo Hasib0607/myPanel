@@ -28,7 +28,18 @@ from app.laravel_nginx import nginx_app_locations
 from app.deployment_health import curl_health_probe
 from app.platform import runtime_tool_install_plan
 from app.nginx_paths import nginx_sites_available, nginx_sites_enabled
-from app.nginx_manager import acme_location, letsencrypt_certificate_exists, publish_nginx_config, safe_letsencrypt_path, safe_web_root
+from app.nginx_manager import (
+    acme_location,
+    letsencrypt_certificate_exists,
+    publish_nginx_config,
+    remove_conflicting_configs,
+    remove_insecure_port443_configs,
+    safe_letsencrypt_path,
+    safe_web_root,
+    server_name_tokens,
+    _config_has_insecure_port443,
+    _config_has_server_name,
+)
 from app.supervisor_utils import (
     ensure_supervisord_running,
     format_supervisor_step_error,
@@ -723,6 +734,25 @@ def process(body: ProcessRequest) -> dict:
     return guarded_command(body.rootPath, command)
 
 
+def _nginx_scan_dirs() -> list[str]:
+    scan_dirs = [nginx_sites_enabled()]
+    conf_d = Path("/etc/nginx/conf.d")
+    if conf_d.is_dir():
+        scan_dirs.append(str(conf_d))
+    available_dir = Path(nginx_sites_available())
+    if available_dir.is_dir():
+        scan_dirs.append(str(available_dir))
+    return scan_dirs
+
+
+def _scrub_hostname_nginx_configs(config_name: str, server_name: str) -> dict:
+    scan_dirs = _nginx_scan_dirs()
+    return {
+        "removedConflicts": remove_conflicting_configs(config_name, server_name, *scan_dirs),
+        "removedInsecurePort443": remove_insecure_port443_configs(config_name, server_name, *scan_dirs),
+    }
+
+
 @router.post("/nginx")
 def nginx(body: NginxRequest) -> dict:
     try:
@@ -735,6 +765,7 @@ def nginx(body: NginxRequest) -> dict:
 
         server_name = body.serverName
         config_name = nginx_config_name(body.deploymentId, server_name)
+        scrubbed = _scrub_hostname_nginx_configs(config_name, server_name) if settings.allow_live_nginx else {"removedConflicts": [], "removedInsecurePort443": []}
         public_root = resolve_laravel_public_root(body.rootPath, body.publicDirectory)
         fallback_root = safe_web_root(body.fallbackRootPath) if body.fallbackRootPath else None
         ssl_certificate = safe_letsencrypt_path(body.sslCertificate) if body.sslCertificate else None
@@ -815,11 +846,63 @@ server {{
             **result,
             "path": info,
             "serverName": server_name,
+            "scrubbed": scrubbed,
         }
     except HTTPException:
         raise
     except Exception as error:
         return blocked_command(f"Nginx deployment vhost failed: {error}", ["write-nginx", body.serverName or body.deploymentId], path_info(body.rootPath))
+
+
+@router.post("/public-access-diagnose")
+def public_access_diagnose(body: PublicRouteRequest) -> dict:
+    primary = body.serverName.split()[0].strip()
+    tokens = server_name_tokens(body.serverName)
+    claiming: list[dict] = []
+    for scan_dir in _nginx_scan_dirs():
+        enabled_dir = Path(scan_dir)
+        if not enabled_dir.is_dir():
+            continue
+        for conf_path in enabled_dir.iterdir():
+            try:
+                target = conf_path.resolve() if conf_path.is_symlink() else conf_path
+                if not any(_config_has_server_name(target, token) for token in tokens):
+                    continue
+                claiming.append({
+                    "file": conf_path.name,
+                    "path": str(conf_path),
+                    "insecurePort443": _config_has_insecure_port443(target),
+                })
+            except OSError:
+                continue
+    cert_exists = letsencrypt_certificate_exists(primary)
+    port443 = run_command(["ss", "-ltnp"], allow_live=DEPLOYMENT_COMMANDS_LIVE)
+    http_probe = _curl_public_route(body.serverName, body.path, body.rootPath, body.framework, require_https=False)
+    https_probe = _curl_public_route(body.serverName, body.path, body.rootPath, body.framework, require_https=True)
+    return {
+        "domain": primary,
+        "certificateExists": cert_exists,
+        "claimingConfigs": claiming,
+        "port443Listeners": port443.get("stdout", ""),
+        "httpProbe": http_probe,
+        "httpsProbe": https_probe,
+    }
+
+
+@router.post("/public-access-repair")
+def public_access_repair(body: NginxRequest) -> dict:
+    if not body.serverName:
+        return {"skipped": True, "reason": "No serverName provided"}
+    config_name = nginx_config_name(body.deploymentId, body.serverName)
+    scrubbed = _scrub_hostname_nginx_configs(config_name, body.serverName)
+    primary = body.serverName.split()[0].strip()
+    has_cert = letsencrypt_certificate_exists(primary)
+    repaired = nginx(body.model_copy(update={"forceSsl": has_cert and body.forceSsl}))
+    return {
+        **repaired,
+        "scrubbed": scrubbed,
+        "certificateExists": has_cert,
+    }
 
 
 def _curl_once(url: str, *, accept_http_errors: bool = False) -> dict:

@@ -264,6 +264,9 @@ def publish_nginx_config(name: str, config: str, sites_available: str, sites_ena
         conf_d = Path("/etc/nginx/conf.d")
         if conf_d.is_dir():
             scan_dirs.append(str(conf_d))
+        available_dir = Path(sites_available)
+        if available_dir.is_dir() and str(available_dir) not in scan_dirs:
+            scan_dirs.append(str(available_dir))
         removed = run_live_step(
             "remove conflicting configs",
             lambda: remove_conflicting_configs(name, server_name, *scan_dirs),

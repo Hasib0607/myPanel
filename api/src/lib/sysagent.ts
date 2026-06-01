@@ -125,6 +125,10 @@ export const sysagent = {
     request<SysagentCommandResult & { exists: boolean; enabled: boolean; expectedUpstream: string; containsExpectedUpstream: boolean; availablePath: string; enabledPath: string }>("/deployments/nginx-inspect", { method: "POST", body: JSON.stringify(body) }),
   deploymentPublicRoute: (body: unknown) =>
     request<SysagentCommandResult>("/deployments/public-route", { method: "POST", body: JSON.stringify(body) }),
+  deploymentPublicAccessDiagnose: (body: unknown) =>
+    request("/deployments/public-access-diagnose", { method: "POST", body: JSON.stringify(body) }),
+  deploymentPublicAccessRepair: (body: unknown) =>
+    request("/deployments/public-access-repair", { method: "POST", body: JSON.stringify(body) }),
   certificateExists: (domain: string) =>
     request<{ domain: string; exists: boolean; certificate: string; privateKey: string }>(`/ssl/certificate-exists/${encodeURIComponent(domain.split(" ")[0] ?? domain)}`),
   ensureAcmeWebroot: (body: { domain: string; webRoot?: string | null }) =>

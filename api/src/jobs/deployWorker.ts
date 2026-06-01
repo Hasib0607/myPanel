@@ -817,6 +817,96 @@ function isPublicRouteHttp403(warning: string) {
   return /HTTP 403/i.test(warning);
 }
 
+function isSslProtocolPublicRouteIssue(result: unknown, warning: string | null | undefined) {
+  const route = result as { returncode?: number; stderr?: string; httpCode?: number };
+  const text = `${warning ?? ""} ${route.stderr ?? ""}`;
+  return route.returncode === 35
+    || /SSL handshake failed|invalid SSL response|ERR_SSL_PROTOCOL|SSL_PROTOCOL_ERROR/i.test(text);
+}
+
+async function repairDeploymentSslAccess(
+  deploymentId: string,
+  releaseId: string | undefined,
+  deployment: {
+    id: string;
+    port: number;
+    rootPath: string;
+    framework: DeploymentFramework;
+    startCommand?: string | null;
+    publicDirectory?: string | null;
+    outputDirectory?: string | null;
+  },
+  domain: BoundDomain
+) {
+  const serverName = deploymentServerName(domain);
+  if (!serverName) return null;
+
+  const sslPaths = await deploymentSslCertificatePathsWhenReady(domain);
+  const repairResult = await runStep(deploymentId, releaseId, "CONFIGURING_PROXY", "Repair public nginx and SSL listeners", () =>
+    sysagent.deploymentPublicAccessRepair(
+      buildDeploymentNginxRequest({
+        deploymentId: deployment.id,
+        fqdn: serverName,
+        upstreamPort: deployment.port,
+        rootPath: deployment.rootPath,
+        framework: deployment.framework,
+        startCommand: deployment.startCommand,
+        publicDirectory: deployment.publicDirectory,
+        outputDirectory: deployment.outputDirectory,
+        fallbackRootPath: deploymentFallbackRootPath(domain),
+        forceSsl: false,
+        ...sslPaths
+      })
+    )
+  );
+  assertLiveResult((repairResult as { test?: unknown }).test, "Public access repair nginx test");
+  assertLiveResult((repairResult as { reload?: unknown }).reload, "Public access repair nginx reload");
+
+  if (await deploymentHttpsReady(domain)) {
+    await republishDeploymentNginxVhost(deploymentId, releaseId, deployment, domain);
+    return null;
+  }
+
+  try {
+    await runStep(deploymentId, releaseId, "CONFIGURING_PROXY", "ACME preflight before SSL repair", async () => {
+      await ensureAcmeWebroot(domain);
+      const webRoot = deploymentFallbackRootPath(domain) ?? `${env.FILE_MANAGER_ROOT}/${domain.name}/public_html`;
+      const preflight = await sysagent.sslPreflight({
+        domain: domain.name,
+        webRoot,
+        includeWww: deploymentCertbotIncludeWww(domain)
+      });
+      const checks = (preflight as { checks?: Array<{ returncode?: number }> }).checks ?? [];
+      const failed = checks.filter((check) => check.returncode !== 0);
+      if (failed.length > 0) {
+        throw new Error(`ACME HTTP challenge is not reachable for ${domain.name}. Point DNS A record to this VPS, then redeploy.`);
+      }
+      return preflight;
+    });
+
+    const sslJob = await sslQueue.add("issue", {
+      domainId: domain.id.startsWith("subdomain:") ? null : domain.id,
+      subdomainId: domain.id.startsWith("subdomain:") ? domain.id.slice("subdomain:".length) : null,
+      domain: domain.name,
+      email: deploymentSslContactEmail(domain),
+      webRoot: deploymentFallbackRootPath(domain) ?? `${env.FILE_MANAGER_ROOT}/${domain.name}/public_html`,
+      includeWww: deploymentCertbotIncludeWww(domain),
+      forceSsl: true,
+      source: "deployment-repair"
+    });
+    await runStep(deploymentId, releaseId, "CONFIGURING_PROXY", "SSL repair issue", async () => {
+      await waitForQueueJob(sslJob);
+      return { jobId: sslJob.id, completed: true };
+    });
+    await syncDeploymentTlsWithCertificate(domain);
+    await republishDeploymentNginxVhost(deploymentId, releaseId, deployment, domain);
+    return null;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return `${detail} Open http://${domain.name}/ until HTTPS is fixed.`;
+  }
+}
+
 function isMissingLaravelAppKeyWarning(warning: string) {
   return /MissingAppKeyException/i.test(warning) || /No application encryption key has been specified/i.test(warning);
 }
@@ -1039,6 +1129,15 @@ async function optionalPublicRouteWarning(
         sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain), rootPath: appPath, framework: deployment.framework, requireHttps: httpsReady })
       );
       warning = await assertPublicRouteResult(publicRoute, label, deployment, appPath);
+    }
+    if (warning && isSslProtocolPublicRouteIssue(publicRoute, warning)) {
+      const sslRepairWarning = await repairDeploymentSslAccess(deploymentId, releaseId, deployment, domain);
+      await guardianRepairSleep(2000);
+      const retryHttpsReady = await deploymentHttpsReady(domain);
+      publicRoute = await runStep(deploymentId, releaseId, "HEALTH_CHECK", `${label} retry after SSL/nginx repair`, () =>
+        sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain), rootPath: appPath, framework: deployment.framework, requireHttps: retryHttpsReady })
+      );
+      warning = (await assertPublicRouteResult(publicRoute, label, deployment, appPath)) ?? sslRepairWarning;
     }
     if (warning && isMissingLaravelAppKeyWarning(warning)) {
       envVars = await ensureLaravelAppKey(deploymentId, releaseId, appPath, deployment.port, envVars);
@@ -2355,23 +2454,42 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
 
     if (domain) {
       const tlsSync = await syncDeploymentTlsWithCertificate(domain);
-      domain = tlsSync.domain;
+      const activeDomain = tlsSync.domain ?? domain;
+      domain = activeDomain;
       await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Finalize deployment proxy vhost", () =>
         publishDeploymentProxyNginx({
           deploymentId: deployment.id,
-          fqdn: serverName ?? domain!.name,
+          fqdn: serverName ?? activeDomain.name,
           upstreamPort: deployment.port,
           rootPath: deployment.rootPath,
           framework: deployment.framework,
           startCommand: deployment.startCommand,
           publicDirectory: deployment.publicDirectory,
           outputDirectory: deployment.outputDirectory,
-          fallbackRootPath: deploymentFallbackRootPath(domain),
+          fallbackRootPath: deploymentFallbackRootPath(activeDomain),
           forceHttps: tlsSync.httpsReady
         })
       );
-      if (tlsSync.httpsReady) {
-        envVars = deploymentEnvWithPublicUrl(envVars, domain, true);
+      const diagnose = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Public access diagnose", () =>
+        sysagent.deploymentPublicAccessDiagnose({
+          serverName: serverName ?? activeDomain.name,
+          rootPath: appPath,
+          framework: deployment.framework
+        })
+      );
+      if (!tlsSync.httpsReady) {
+        envVars = deploymentEnvWithPublicUrl(envVars, activeDomain, false);
+        await repairDeploymentSslAccess(deployment.id, releaseId, deployment, activeDomain).catch((error) =>
+          writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "Automatic SSL repair skipped", {
+            warning: error instanceof Error ? error.message : String(error)
+          }, "warn")
+        );
+        await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "HTTPS not active yet", {
+          publicUrl: `http://${activeDomain.name}/`,
+          diagnose: JSON.parse(JSON.stringify(diagnose)) as Prisma.InputJsonValue
+        }, "warn");
+      } else {
+        envVars = deploymentEnvWithPublicUrl(envVars, activeDomain, true);
       }
     }
 
