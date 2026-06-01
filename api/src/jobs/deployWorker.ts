@@ -675,6 +675,10 @@ async function runHealthCheckWithGuardianRecovery(
     healthUrl: string | null;
     startCommand: string | null;
     processManager: DeploymentProcessManager | null;
+    dbType?: "POSTGRESQL" | "MYSQL" | null;
+    dbName?: string | null;
+    dbUser?: string | null;
+    dbPasswordSecretRef?: string | null;
   },
   releaseId: string | undefined,
   appPath: string,
@@ -719,6 +723,11 @@ async function runHealthCheckWithGuardianRecovery(
         error: lastError.message,
         health: health as Prisma.InputJsonValue
       }, "warn");
+
+      const repairedDatabaseEnv = await autoRepairDatabaseAccess(deployment, releaseId, appPath, lastError.message, envVars).catch(() => null);
+      if (repairedDatabaseEnv) {
+        envVars = repairedDatabaseEnv;
+      }
 
       await runStep(deployment.id, releaseId, "HEALTH_CHECK", "Guardian deployment repair", async () =>
         runGuardianDeploymentRepair({ rootPath: appPath, framework: deployment.framework, envVars })
@@ -790,7 +799,7 @@ async function optionalPublicRouteWarning(
   deploymentId: string,
   releaseId: string | undefined,
   label: string,
-  deployment: { id: string; slug: string; framework: DeploymentFramework; port: number; startCommand: string | null; processManager: DeploymentProcessManager | null; domain?: BoundDomain | null },
+  deployment: { id: string; slug: string; framework: DeploymentFramework; port: number; startCommand: string | null; processManager: DeploymentProcessManager | null; domain?: BoundDomain | null; dbType?: "POSTGRESQL" | "MYSQL" | null; dbName?: string | null; dbUser?: string | null; dbPasswordSecretRef?: string | null },
   appPath: string,
   envVars: Record<string, string>,
   processManager: DeploymentProcessManager
@@ -835,6 +844,29 @@ async function optionalPublicRouteWarning(
 
   try {
     let warning = await assertPublicRouteResult(publicRoute, label, deployment, appPath);
+    if (warning && isMysqlAccessDenied(warning)) {
+      const repairedEnv = await autoRepairDatabaseAccess(deployment, releaseId, appPath, warning, envVars);
+      if (repairedEnv) {
+        envVars = repairedEnv;
+        await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Restart after database credential repair", () =>
+          restartDeploymentProcess({
+            deploymentId,
+            slug: deployment.slug,
+            appPath,
+            port: deployment.port,
+            processManager,
+            startCommand: renderStartCommand(deployment),
+            envVars,
+            logDir: deploymentLogDir(deployment.slug)
+          })
+        );
+        await guardianRepairSleep(5000);
+        publicRoute = await runStep(deploymentId, releaseId, "HEALTH_CHECK", `${label} retry after database credential repair`, () =>
+          sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain), rootPath: appPath, framework: deployment.framework, requireHttps: httpsReady })
+        );
+        warning = await assertPublicRouteResult(publicRoute, label, deployment, appPath);
+      }
+    }
     if (warning && isPhpRedisClassMissing(warning)) {
       const repairedEnv = await autoRepairLaravelRedis(deploymentId, releaseId, appPath, deployment.port, warning, envVars);
       if (repairedEnv) {
@@ -871,6 +903,10 @@ async function optionalPublicRouteWarning(
     }
     if (isLaravelWritablePathIssue(firstMessage)) {
       await autoRepairLaravelWritablePaths(deploymentId, releaseId, appPath, firstMessage).catch(() => false);
+    }
+    const repairedDatabaseEnv = await autoRepairDatabaseAccess(deployment, releaseId, appPath, firstMessage, envVars).catch(() => null);
+    if (repairedDatabaseEnv) {
+      envVars = repairedDatabaseEnv;
     }
     const repairedRedis = await autoRepairLaravelRedis(deploymentId, releaseId, appPath, deployment.port, firstMessage, envVars).catch(() => null);
     if (repairedRedis) {
@@ -1118,6 +1154,35 @@ function isLaravelWritablePathIssue(text: string) {
 
 function isPhpRedisClassMissing(text: string) {
   return /class\s+["']redis["']\s+not\s+found/i.test(text);
+}
+
+function isMysqlAccessDenied(text: string) {
+  const lower = text.toLowerCase();
+  return (lower.includes("sqlstate[hy000] [1045]") || lower.includes("access denied for user"))
+    && lower.includes("using password");
+}
+
+async function autoRepairDatabaseAccess(
+  deployment: DeploymentDatabaseRuntime,
+  releaseId: string | undefined,
+  appPath: string,
+  errorText: string,
+  envVars: Record<string, string>
+) {
+  if (!isMysqlAccessDenied(errorText)) return null;
+  if (!deployment.dbType || !deployment.dbName || !deployment.dbUser) return null;
+
+  await writeLog(deployment.id, releaseId, "PREFLIGHT", "Database access denied detected; repairing deployment credentials", {
+    dbType: deployment.dbType,
+    dbName: deployment.dbName,
+    dbUser: deployment.dbUser,
+    evidence: errorText.slice(0, 4000)
+  }, "warn");
+
+  const repaired = await buildDatabaseRuntimeEnv(deployment, envVars);
+  const nextEnv = repaired.envVars;
+  await ensureLaravelAppKey(deployment.id, releaseId, appPath, deployment.port, nextEnv);
+  return nextEnv;
 }
 
 async function autoRepairLaravelRedis(
