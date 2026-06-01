@@ -93,6 +93,21 @@ export function DeploymentEnvClient({ project }: { project: string }) {
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not delete variable")
   });
 
+  const clearDatabaseOverrides = useMutation({
+    mutationFn: () => apiPost<{ ok: true; removed: string[] }>(`/deployments/${project}/env/clear-database-overrides`, {}),
+    onSuccess: async (result) => {
+      setNotice(
+        result.removed.length
+          ? `Removed ${result.removed.join(", ")}. Redeploy to apply the panel-managed database password.`
+          : "No manual database env overrides were stored."
+      );
+      await invalidate();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not clear database overrides")
+  });
+
+  const hasDatabaseOverrides = (env.data ?? []).some((item) => item.key === "DB_PASSWORD" || item.key === "DATABASE_URL");
+
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     saveOne.mutate();
@@ -112,29 +127,45 @@ export function DeploymentEnvClient({ project }: { project: string }) {
           </div>
           <div className="p-4">
             {notice ? <ResultNotice message={notice} ok={!/could|error|failed/i.test(notice)} /> : null}
-            <div className="mt-4 overflow-hidden rounded-md border border-panel-line">
+            {detail.data?.dbType && hasDatabaseOverrides ? (
+              <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950">
+                <div className="font-semibold">Database password is managed by the panel</div>
+                <p className="mt-1 text-xs leading-5 text-amber-900">
+                  Clear manual <span className="font-mono">DB_PASSWORD</span> / <span className="font-mono">DATABASE_URL</span> values, then redeploy.
+                </p>
+                <button
+                  className="mt-3 h-8 rounded-md border border-amber-300 bg-white px-3 text-xs font-semibold disabled:opacity-60"
+                  disabled={clearDatabaseOverrides.isPending}
+                  onClick={() => clearDatabaseOverrides.mutate()}
+                  type="button"
+                >
+                  {clearDatabaseOverrides.isPending ? "Clearing..." : "Clear database env overrides"}
+                </button>
+              </div>
+            ) : null}
+            <div className="mt-4 overflow-x-auto rounded-md border border-panel-line">
               {(env.data ?? []).length > 0 ? (
-                <table className="w-full text-sm">
+                <table className="min-w-full text-sm">
                   <thead className="bg-slate-50 text-left text-xs uppercase text-panel-muted">
                     <tr>
                       <th className="px-4 py-3">Key</th>
                       <th className="px-4 py-3">Value</th>
                       <th className="px-4 py-3">Updated</th>
-                      <th className="px-4 py-3">Action</th>
+                      <th className="sticky right-0 bg-slate-50 px-4 py-3">Action</th>
                     </tr>
                   </thead>
                   <tbody>
                     {(env.data ?? []).map((item) => (
                       <tr className="border-t border-panel-line" key={item.key}>
                         <td className="px-4 py-3 font-mono text-xs font-semibold">{item.key}</td>
-                        <td className="max-w-0 px-4 py-3">
-                          <div className="flex min-w-0 items-center gap-2">
-                            {item.masked ? <EyeOff size={14} /> : null}
-                            <span className="truncate font-mono text-xs">{item.masked ? item.secretRef ?? "[secret]" : item.value}</span>
+                        <td className="max-w-md px-4 py-3">
+                          <div className="flex min-w-0 items-start gap-2">
+                            {item.masked ? <EyeOff size={14} className="mt-0.5 shrink-0" /> : null}
+                            <span className="break-all font-mono text-xs">{item.masked ? item.secretRef ?? "[secret]" : item.value}</span>
                           </div>
                         </td>
-                        <td className="px-4 py-3 text-xs text-panel-muted">{new Date(item.updatedAt).toLocaleString()}</td>
-                        <td className="px-4 py-3">
+                        <td className="whitespace-nowrap px-4 py-3 text-xs text-panel-muted">{new Date(item.updatedAt).toLocaleString()}</td>
+                        <td className="sticky right-0 bg-white px-4 py-3">
                           <button className="flex h-8 items-center gap-2 rounded-md border border-panel-line px-2 text-xs text-panel-danger hover:bg-red-50" onClick={() => remove.mutate(item.key)} type="button"><Trash2 size={13} />Delete</button>
                         </td>
                       </tr>

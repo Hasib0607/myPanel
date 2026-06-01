@@ -454,6 +454,19 @@ export function DeploymentsClient() {
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not remove env")
   });
 
+  const clearDatabaseEnvOverrides = useMutation({
+    mutationFn: () => apiPost<{ ok: true; removed: string[] }>(`/deployments/${selected!.slug}/env/clear-database-overrides`, {}),
+    onSuccess: async (result) => {
+      setNotice(
+        result.removed.length
+          ? `Removed ${result.removed.join(", ")}. Redeploy so the panel-managed database password is applied.`
+          : "No manual database env overrides were stored in the panel."
+      );
+      await invalidateDeployments();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not clear database env overrides")
+  });
+
   const saveBulkEnv = useMutation({
     mutationFn: () => {
       if (!selected) throw new Error("Select a project first");
@@ -576,7 +589,7 @@ export function DeploymentsClient() {
               <div className="min-h-0 flex-1 overflow-auto p-5">
                 {activeTab === "overview" ? <OverviewPanel deployment={selected} /> : null}
                 {activeTab === "domains" ? <DomainsPanel deployment={selected} domains={domainOptions(domains.data?.items ?? [])} domainToAdd={domainToAdd} setDomainToAdd={setDomainToAdd} addDomain={() => addDomain.mutate()} setPrimary={(binding) => setPrimaryDomain.mutate(binding)} removeDomain={(binding) => removeDomain.mutate(binding)} /> : null}
-                {activeTab === "env" ? <EnvPanel deployment={selected} envKey={envKey} envValue={envValue} envSecret={envSecret} bulkEnvText={bulkEnvText} bulkEnvSecret={bulkEnvSecret} setEnvKey={setEnvKey} setEnvValue={setEnvValue} setEnvSecret={setEnvSecret} setBulkEnvText={setBulkEnvText} setBulkEnvSecret={setBulkEnvSecret} saveEnv={() => saveEnv.mutate()} saveBulkEnv={() => saveBulkEnv.mutate()} savingEnv={saveEnv.isPending} savingBulkEnv={saveBulkEnv.isPending} removeEnv={(key) => removeEnv.mutate(key)} /> : null}
+                {activeTab === "env" ? <EnvPanel deployment={selected} envKey={envKey} envValue={envValue} envSecret={envSecret} bulkEnvText={bulkEnvText} bulkEnvSecret={bulkEnvSecret} setEnvKey={setEnvKey} setEnvValue={setEnvValue} setEnvSecret={setEnvSecret} setBulkEnvText={setBulkEnvText} setBulkEnvSecret={setBulkEnvSecret} saveEnv={() => saveEnv.mutate()} saveBulkEnv={() => saveBulkEnv.mutate()} savingEnv={saveEnv.isPending} savingBulkEnv={saveBulkEnv.isPending} removeEnv={(key) => removeEnv.mutate(key)} clearDatabaseEnvOverrides={() => clearDatabaseEnvOverrides.mutate()} clearingDatabaseEnvOverrides={clearDatabaseEnvOverrides.isPending} /> : null}
                 {activeTab === "settings" ? <SettingsPanel deployment={selected} deleteText={deleteText} setDeleteText={setDeleteText} onEdit={openEdit} onDelete={() => deleteProject.mutate()} deleting={deleteProject.isPending} /> : null}
               </div>
             </div>
@@ -682,14 +695,146 @@ function DomainsPanel({ deployment, domains, domainToAdd, setDomainToAdd, addDom
   return <div className="space-y-4"><div className="flex gap-2"><select className="h-10 min-w-72 rounded-md border border-panel-line px-2 text-sm" onChange={(event) => setDomainToAdd(event.target.value)} value={domainToAdd}><option value="">Select domain</option>{domains.filter((domain) => !boundIds.has(domain.id)).map((domain) => <option key={domain.id} value={domain.id}>{domain.name}</option>)}</select><button className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={!domainToAdd} onClick={addDomain} type="button"><Plus size={15} />Add domain</button></div><div className="overflow-hidden rounded-md border border-panel-line">{(deployment.domainBindings ?? []).map((binding) => <div className="flex items-center justify-between border-b border-panel-line p-3 last:border-b-0" key={binding.id}><div><div className="font-semibold">{deploymentBindingName(binding)}</div><div className="text-xs text-panel-muted">{binding.role}</div></div><div className="flex gap-2"><button className="h-8 rounded-md border border-panel-line px-2 text-xs" disabled={binding.role === "primary"} onClick={() => setPrimary(binding)} type="button">Make primary</button><button className="h-8 rounded-md border border-panel-line px-2 text-xs text-panel-danger" onClick={() => removeDomain(binding)} type="button">Remove</button></div></div>)}{(deployment.domainBindings ?? []).length === 0 ? <div className="p-8 text-center text-sm text-panel-muted">No domains attached.</div> : null}</div></div>;
 }
 
-function EnvPanel({ deployment, envKey, envValue, envSecret, bulkEnvText, bulkEnvSecret, setEnvKey, setEnvValue, setEnvSecret, setBulkEnvText, setBulkEnvSecret, saveEnv, saveBulkEnv, savingEnv, savingBulkEnv, removeEnv }: { deployment: Deployment; envKey: string; envValue: string; envSecret: boolean; bulkEnvText: string; bulkEnvSecret: boolean; setEnvKey: (value: string) => void; setEnvValue: (value: string) => void; setEnvSecret: (value: boolean) => void; setBulkEnvText: (value: string) => void; setBulkEnvSecret: (value: boolean) => void; saveEnv: () => void; saveBulkEnv: () => void; savingEnv?: boolean; savingBulkEnv?: boolean; removeEnv: (key: string) => void }) {
+function EnvPanel({
+  deployment,
+  envKey,
+  envValue,
+  envSecret,
+  bulkEnvText,
+  bulkEnvSecret,
+  setEnvKey,
+  setEnvValue,
+  setEnvSecret,
+  setBulkEnvText,
+  setBulkEnvSecret,
+  saveEnv,
+  saveBulkEnv,
+  savingEnv,
+  savingBulkEnv,
+  removeEnv,
+  clearDatabaseEnvOverrides,
+  clearingDatabaseEnvOverrides
+}: {
+  deployment: Deployment;
+  envKey: string;
+  envValue: string;
+  envSecret: boolean;
+  bulkEnvText: string;
+  bulkEnvSecret: boolean;
+  setEnvKey: (value: string) => void;
+  setEnvValue: (value: string) => void;
+  setEnvSecret: (value: boolean) => void;
+  setBulkEnvText: (value: string) => void;
+  setBulkEnvSecret: (value: boolean) => void;
+  saveEnv: () => void;
+  saveBulkEnv: () => void;
+  savingEnv?: boolean;
+  savingBulkEnv?: boolean;
+  removeEnv: (key: string) => void;
+  clearDatabaseEnvOverrides: () => void;
+  clearingDatabaseEnvOverrides?: boolean;
+}) {
   let bulkCount = 0;
   try {
     bulkCount = parseBulkEnvItems(bulkEnvText, bulkEnvSecret).length;
   } catch {
     bulkCount = 0;
   }
-  return <div className="grid grid-cols-[1fr_360px] gap-5"><div className="overflow-hidden rounded-md border border-panel-line">{(deployment.env ?? []).map((item) => <div className="flex items-center justify-between border-b border-panel-line p-3 last:border-b-0" key={item.key}><div><div className="font-mono text-sm font-semibold">{item.key}</div><div className="mt-1 max-w-xl truncate font-mono text-xs text-panel-muted">{item.isSecret ? item.secretRef ?? "[secret]" : item.value}</div></div><button className="h-8 rounded-md border border-panel-line px-2 text-xs text-panel-danger" onClick={() => removeEnv(item.key)} type="button"><Trash2 size={13} /></button></div>)}{(deployment.env ?? []).length === 0 ? <div className="p-8 text-center text-sm text-panel-muted">No environment variables.</div> : null}</div><div className="space-y-4"><div className="rounded-md border border-panel-line p-4"><div className="mb-3 flex items-center gap-2 text-sm font-semibold"><KeyRound size={16} />Add env</div><div className="space-y-3"><input className="h-9 w-full rounded-md border border-panel-line px-3 font-mono text-sm" onChange={(event) => setEnvKey(event.target.value.toUpperCase())} placeholder="KEY" value={envKey} /><textarea className="h-28 w-full rounded-md border border-panel-line p-3 font-mono text-sm" onChange={(event) => setEnvValue(event.target.value)} placeholder="value" value={envValue} /><label className="flex items-center gap-2 text-sm text-panel-muted"><input checked={envSecret} onChange={(event) => setEnvSecret(event.target.checked)} type="checkbox" /> Store as secret</label><button className="h-10 w-full rounded-md bg-panel-accent text-sm font-semibold text-white disabled:opacity-60" disabled={!envKey.trim() || savingEnv} onClick={saveEnv} type="button">{savingEnv ? "Saving..." : "Save variable"}</button></div></div><div className="rounded-md border border-panel-line p-4"><div className="mb-3 flex items-center gap-2 text-sm font-semibold"><Plus size={16} />Bulk env</div><div className="space-y-3"><textarea className="h-40 w-full rounded-md border border-panel-line p-3 font-mono text-xs" onChange={(event) => setBulkEnvText(event.target.value)} placeholder={`{\n  APP_NAME: "eBitans",\n  APP_ENV: "production",\n  DB_HOST: "127.0.0.1"\n}\n\nor\n\nAPP_NAME=eBitans\nAPP_ENV=production`} value={bulkEnvText} /><label className="flex items-center gap-2 text-sm text-panel-muted"><input checked={bulkEnvSecret} onChange={(event) => setBulkEnvSecret(event.target.checked)} type="checkbox" /> Store all imported values as secret</label><div className="text-xs text-panel-muted">{bulkCount > 0 ? `${bulkCount} variables ready to import.` : "Paste a JS object or KEY=value block."}</div><button className="h-10 w-full rounded-md border border-panel-line text-sm font-semibold disabled:opacity-60" disabled={!bulkCount || savingBulkEnv} onClick={saveBulkEnv} type="button">{savingBulkEnv ? "Importing..." : "Import env block"}</button></div></div></div></div>;
+
+  const hasDatabaseOverrides = (deployment.env ?? []).some(
+    (item) => item.key === "DB_PASSWORD" || item.key === "DATABASE_URL"
+  );
+
+  return (
+    <div className="grid grid-cols-[1fr_360px] gap-5">
+      <div className="space-y-3">
+        {deployment.dbType && hasDatabaseOverrides ? (
+          <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950">
+            <div className="font-semibold">Database password is managed by the panel</div>
+            <p className="mt-1 text-xs leading-5 text-amber-900">
+              Remove manual <span className="font-mono">DB_PASSWORD</span> / <span className="font-mono">DATABASE_URL</span> overrides here, then redeploy.
+              The panel stores the real password in a secret and syncs MySQL automatically.
+            </p>
+            <button
+              className="mt-3 h-8 rounded-md border border-amber-300 bg-white px-3 text-xs font-semibold text-amber-950 disabled:opacity-60"
+              disabled={clearingDatabaseEnvOverrides}
+              onClick={clearDatabaseEnvOverrides}
+              type="button"
+            >
+              {clearingDatabaseEnvOverrides ? "Clearing..." : "Clear database env overrides"}
+            </button>
+          </div>
+        ) : null}
+        <div className="overflow-hidden rounded-md border border-panel-line">
+          {(deployment.env ?? []).map((item) => (
+            <div className="flex items-start gap-3 border-b border-panel-line p-3 last:border-b-0" key={item.key}>
+              <div className="min-w-0 flex-1">
+                <div className="font-mono text-sm font-semibold">{item.key}</div>
+                <div className="mt-1 break-all font-mono text-xs text-panel-muted">
+                  {item.isSecret ? item.secretRef ?? "[secret]" : item.value}
+                </div>
+                {item.key === "DB_PASSWORD" && deployment.dbType ? (
+                  <div className="mt-1 text-xs text-amber-800">Use “Clear database env overrides” instead of keeping a manual password.</div>
+                ) : null}
+              </div>
+              <button
+                className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md border border-panel-line px-2 text-xs text-panel-danger hover:bg-red-50"
+                onClick={() => removeEnv(item.key)}
+                type="button"
+              >
+                <Trash2 size={13} />
+                Delete
+              </button>
+            </div>
+          ))}
+          {(deployment.env ?? []).length === 0 ? (
+            <div className="p-8 text-center text-sm text-panel-muted">No environment variables.</div>
+          ) : null}
+        </div>
+      </div>
+      <div className="space-y-4">
+        <div className="rounded-md border border-panel-line p-4">
+          <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
+            <KeyRound size={16} />
+            Add env
+          </div>
+          <div className="space-y-3">
+            <input className="h-9 w-full rounded-md border border-panel-line px-3 font-mono text-sm" onChange={(event) => setEnvKey(event.target.value.toUpperCase())} placeholder="KEY" value={envKey} />
+            <textarea className="h-28 w-full rounded-md border border-panel-line p-3 font-mono text-sm" onChange={(event) => setEnvValue(event.target.value)} placeholder="value" value={envValue} />
+            <label className="flex items-center gap-2 text-sm text-panel-muted">
+              <input checked={envSecret} onChange={(event) => setEnvSecret(event.target.checked)} type="checkbox" />
+              Store as secret
+            </label>
+            <button className="h-10 w-full rounded-md bg-panel-accent text-sm font-semibold text-white disabled:opacity-60" disabled={!envKey.trim() || savingEnv} onClick={saveEnv} type="button">
+              {savingEnv ? "Saving..." : "Save variable"}
+            </button>
+          </div>
+        </div>
+        <div className="rounded-md border border-panel-line p-4">
+          <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
+            <Plus size={16} />
+            Bulk env
+          </div>
+          <div className="space-y-3">
+            <textarea
+              className="h-40 w-full rounded-md border border-panel-line p-3 font-mono text-xs"
+              onChange={(event) => setBulkEnvText(event.target.value)}
+              placeholder={`{\n  APP_NAME: "eBitans",\n  APP_ENV: "production",\n  DB_HOST: "127.0.0.1"\n}\n\nor\n\nAPP_NAME=eBitans\nAPP_ENV=production`}
+              value={bulkEnvText}
+            />
+            <label className="flex items-center gap-2 text-sm text-panel-muted">
+              <input checked={bulkEnvSecret} onChange={(event) => setBulkEnvSecret(event.target.checked)} type="checkbox" />
+              Store all imported values as secret
+            </label>
+            <div className="text-xs text-panel-muted">{bulkCount > 0 ? `${bulkCount} variables ready to import.` : "Paste a JS object or KEY=value block."}</div>
+            <button className="h-10 w-full rounded-md border border-panel-line text-sm font-semibold disabled:opacity-60" disabled={!bulkCount || savingBulkEnv} onClick={saveBulkEnv} type="button">
+              {savingBulkEnv ? "Importing..." : "Import env block"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function SettingsPanel({ deployment, deleteText, setDeleteText, onEdit, onDelete, deleting }: { deployment: Deployment; deleteText: string; setDeleteText: (value: string) => void; onEdit: () => void; onDelete: () => void; deleting?: boolean }) {

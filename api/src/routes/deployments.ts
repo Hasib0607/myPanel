@@ -1671,6 +1671,33 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     return { ok: true };
   });
 
+  app.post("/:deploymentId/env/clear-database-overrides", async (request) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const deployment = await findDeployment(deploymentId);
+    if (!deployment.dbType || !deployment.dbName || !deployment.dbUser) {
+      throw new Error("This deployment does not use a panel-managed database");
+    }
+    const removed: string[] = [];
+    for (const key of ["DB_PASSWORD", "DATABASE_URL"] as const) {
+      const existing = await prisma.deploymentEnvVar.findUnique({
+        where: { deploymentId_key: { deploymentId: deployment.id, key } }
+      });
+      if (!existing) continue;
+      if (key === "DB_PASSWORD" && existing.secretRef) continue;
+      if (existing.secretRef) await deleteSecret(existing.secretRef);
+      await prisma.deploymentEnvVar.delete({ where: { deploymentId_key: { deploymentId: deployment.id, key } } });
+      removed.push(key);
+    }
+    await audit(request, {
+      action: "UPDATE",
+      resource: "deployment_env",
+      resourceId: deployment.id,
+      description: `Cleared database env overrides for ${deployment.slug}`,
+      metadata: { removed }
+    });
+    return { ok: true, removed };
+  });
+
   app.get("/:deploymentId/releases", async (request) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const deployment = await findDeployment(deploymentId);
