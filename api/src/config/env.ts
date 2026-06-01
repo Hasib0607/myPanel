@@ -13,7 +13,7 @@ const envSchema = z.object({
   CPANEL_LOGIN_PORT: z.string().default("3138"),
   DEPLOYMENT_PORT_START: z.coerce.number().int().min(1024).max(65535).default(10000),
   DEPLOYMENT_PORT_END: z.coerce.number().int().min(1024).max(65535).default(19999),
-  DEPLOYMENT_RESERVED_PORTS: z.string().default("22,25,53,80,443,993,3000,3010,3138,4000,5000,5432,6379,8453"),
+  DEPLOYMENT_RESERVED_PORTS: z.string().default("22,25,53,80,110,143,443,465,587,993,995,3000,3010,3138,4000,5000,5432,6379,8453"),
   DEPLOYMENT_LOG_ROOT: z.string().default("/var/log/vps-panel/deployments"),
   PANEL_UPDATE_WEBHOOK_SECRET: z.string().optional(),
   PANEL_UPDATE_REPO_FULL_NAME: z.string().optional(),

@@ -27,7 +27,7 @@ install_alma_packages() {
   log "Installing AlmaLinux packages"
   dnf install -y \
     ca-certificates curl gnupg2 git nginx firewalld \
-    postgresql-server postgresql-contrib redis bind bind-utils \
+    postgresql-server postgresql-contrib redis bind bind-utils postfix dovecot \
     php php-cli php-fpm php-mysqlnd php-pgsql php-xml php-mbstring php-curl php-zip php-gd php-soap \
     python3 python3-pip unzip zip openssl \
     gcc gcc-c++ make automake autoconf libtool acl lsof psmisc \
@@ -83,7 +83,7 @@ EOF
 }
 
 enable_alma_base_services() {
-  systemctl enable --now redis named nginx
+  systemctl enable --now redis named nginx postfix dovecot
   systemctl enable --now php-fpm || true
 }
 
@@ -112,6 +112,13 @@ firewall-cmd --permanent --add-port="${CPANEL_LOGIN_PORT}/tcp"
 firewall-cmd --permanent --add-service=http
 firewall-cmd --permanent --add-service=https
 firewall-cmd --permanent --add-service=dns
+firewall-cmd --permanent --add-service=smtp
+firewall-cmd --permanent --add-service=imap
+firewall-cmd --permanent --add-service=imaps
+firewall-cmd --permanent --add-service=pop3
+firewall-cmd --permanent --add-service=pop3s
+firewall-cmd --permanent --add-port=465/tcp
+firewall-cmd --permanent --add-port=587/tcp
 firewall-cmd --reload
 
 log "Applying SELinux settings for Nginx reverse proxy"

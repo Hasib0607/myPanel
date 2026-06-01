@@ -49,7 +49,7 @@ echo
 if [[ -d "$APP_DIR/.git" ]]; then pass "App directory $APP_DIR exists"; else fail "Missing $APP_DIR"; fi
 if [[ -f "$APP_DIR/.env" ]]; then pass "Environment file present"; else fail "Missing $APP_DIR/.env"; fi
 
-for unit in vps-panel-sysagent vps-panel-api vps-panel-workers vps-panel-frontend nginx postgresql "$REDIS_SERVICE"; do
+for unit in vps-panel-sysagent vps-panel-api vps-panel-workers vps-panel-frontend nginx postgresql "$REDIS_SERVICE" postfix dovecot; do
   if systemctl is-active --quiet "$unit"; then
     pass "Service active: $unit"
   else
