@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 import shlex
 import subprocess
+import base64
+import os
 from pathlib import Path
 from urllib.parse import quote_plus
 
@@ -27,6 +29,10 @@ def is_valid_laravel_app_key(value: str | None) -> bool:
     if not value or not str(value).strip():
         return False
     return bool(LARAVEL_APP_KEY.fullmatch(str(value).strip()))
+
+
+def generate_laravel_app_key() -> str:
+    return "base64:" + base64.b64encode(os.urandom(32)).decode("ascii")
 
 
 def php_redis_extension_loaded() -> bool:

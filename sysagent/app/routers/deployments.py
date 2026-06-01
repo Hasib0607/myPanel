@@ -13,6 +13,7 @@ from app.command import run_command, run_install_plan
 from app.config import DEPLOYMENT_COMMANDS_LIVE, settings
 from app.deployment_env import (
     clear_laravel_bootstrap_config_cache,
+    generate_laravel_app_key,
     is_laravel_artisan_command,
     is_valid_laravel_app_key,
     prepare_laravel_env_for_sync,
@@ -1128,6 +1129,7 @@ def _ensure_laravel_env(root_path: str, port: int | None, env: dict[str, str] | 
         }
 
     key_generate: dict | None = None
+    key_generated_by_panel = False
     if needs_key_generate:
         if not env_path.is_file():
             stub_env = {"APP_ENV": (env or {}).get("APP_ENV", "production")}
@@ -1138,31 +1140,13 @@ def _ensure_laravel_env(root_path: str, port: int | None, env: dict[str, str] | 
             "php artisan key:generate --force",
             env=runtime_env or None,
         )
-        if key_generate.get("returncode") != 0:
-            return {
-                "dryRun": False,
-                "command": ["php", "artisan", "key:generate", "--force"],
-                "cwd": deployment_cwd(root_path),
-                "stdout": key_generate.get("stdout") or "",
-                "stderr": key_generate.get("stderr") or "Failed to generate Laravel APP_KEY",
-                "returncode": 1,
-                "path": info,
-                "envPath": str(env_path),
-                "keyGenerate": key_generate,
-            }
         env_path, app_key, _ = sync_laravel_env_file(root_path, port, env)
         if not is_valid_laravel_app_key(app_key):
-            return {
-                "dryRun": False,
-                "command": ["php", "artisan", "key:generate", "--force"],
-                "cwd": deployment_cwd(root_path),
-                "stdout": key_generate.get("stdout") or "",
-                "stderr": "APP_KEY was not written to .env after key:generate",
-                "returncode": 1,
-                "path": info,
-                "envPath": str(env_path),
-                "keyGenerate": key_generate,
-            }
+            app_key = generate_laravel_app_key()
+            key_generated_by_panel = True
+            next_env = dict(env or {})
+            next_env["APP_KEY"] = app_key
+            env_path, app_key, _ = sync_laravel_env_file(root_path, port, next_env)
 
     process_env, _ = prepare_laravel_env_for_sync(root_path, port, env)
     if app_key:
@@ -1199,7 +1183,8 @@ def _ensure_laravel_env(root_path: str, port: int | None, env: dict[str, str] | 
         "envPath": str(env_path),
         "runtimeEnvPath": str(Path(root_path).resolve() / ".panel" / "runtime.env"),
         "appKey": app_key,
-        "keyGenerated": bool(needs_key_generate and key_generate and key_generate.get("returncode") == 0),
+        "keyGenerated": bool(needs_key_generate and ((key_generate and key_generate.get("returncode") == 0) or key_generated_by_panel)),
+        "keyGeneratedByPanel": key_generated_by_panel,
         "keyGenerate": key_generate,
         "configClear": config_clear,
     }
