@@ -20,6 +20,18 @@ import { prisma } from "../lib/prisma.js";
 import { deleteSecret, getSecret } from "../lib/secrets.js";
 import { sysagent } from "../lib/sysagent.js";
 import { sslQueue } from "./queues.js";
+import {
+  type BoundDomain,
+  boundDomainFromBinding,
+  deploymentFallbackRootPath,
+  deploymentServerName,
+  deploymentSslCertificatePaths,
+  deploymentWantsSsl,
+  enableDeploymentTlsInDatabase,
+  ensureParentDomainDeploymentProxy,
+  publishDeploymentProxyNginx,
+  waitForQueueJob
+} from "../lib/deploymentDomainSsl.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -493,47 +505,12 @@ function deploymentAppPath(rootPath: string, rootDirectory: string | null | unde
   return cleanRootDirectory && cleanRootDirectory !== "." ? path.join(rootPath, cleanRootDirectory) : rootPath;
 }
 
-type BoundDomain = { id: string; name: string; forceSsl: boolean; sslEnabled?: boolean; documentRoot?: string | null; includeWww?: boolean };
-
-function deploymentServerName(domain: { name: string; includeWww?: boolean } | null | undefined) {
-  if (!domain?.name) return null;
-  if (domain.includeWww === false) return domain.name;
-  return `${domain.name} www.${domain.name}`;
-}
-
-function boundDomainFromBinding(binding: { domain?: BoundDomain | null; subdomain?: { id: string; name: string; sslEnabled: boolean; domain: { name: string; documentRoot?: string | null } } | null }) {
-  if (binding.subdomain) {
-    return {
-      id: `subdomain:${binding.subdomain.id}`,
-      name: `${binding.subdomain.name}.${binding.subdomain.domain.name}`,
-      forceSsl: binding.subdomain.sslEnabled,
-      documentRoot: binding.subdomain.domain.documentRoot,
-      includeWww: false
-    };
-  }
-  return binding.domain ?? null;
-}
-
-function deploymentDomain(deployment: { domain?: BoundDomain | null; domainBindings?: Array<{ role: string; domain?: BoundDomain | null; subdomain?: { id: string; name: string; sslEnabled: boolean; domain: { name: string; documentRoot?: string | null } } | null }> }) {
+function deploymentDomain(deployment: { domain?: BoundDomain | null; domainBindings?: Array<{ role: string; domain?: BoundDomain | null; subdomain?: { id: string; name: string; sslEnabled: boolean; domainId: string; domain: { name: string; documentRoot?: string | null } } | null }> }) {
   const primary = deployment.domainBindings?.find((binding) => binding.role === "primary");
   return (primary ? boundDomainFromBinding(primary) : null)
     ?? (deployment.domainBindings?.[0] ? boundDomainFromBinding(deployment.domainBindings[0]) : null)
     ?? deployment.domain
     ?? null;
-}
-
-function deploymentFallbackRootPath(domain: BoundDomain | null) {
-  if (!domain?.name) return null;
-  const documentRoot = (domain.documentRoot || "public_html").replace(/^\/+|\/+$/g, "") || "public_html";
-  return path.join(env.FILE_MANAGER_ROOT, domain.name, documentRoot);
-}
-
-function deploymentSslCertificatePaths(domain: BoundDomain | null) {
-  if (!domain?.name || !domain.sslEnabled) return {};
-  return {
-    sslCertificate: `/etc/letsencrypt/live/${domain.name}/fullchain.pem`,
-    sslCertificateKey: `/etc/letsencrypt/live/${domain.name}/privkey.pem`
-  };
 }
 
 function deploymentPublicEnv(domain: BoundDomain | null) {
@@ -626,17 +603,6 @@ async function normalizePostgresRuntimeEnv(deploymentId: string, envVars: Record
   }
 
   return { envVars: normalized, changed };
-}
-
-async function ensureDeploymentDomainProxy(deploymentId: string, domain: BoundDomain | null) {
-  if (!domain || domain.id.startsWith("subdomain:")) return;
-  await prisma.domain.update({
-    where: { id: domain.id },
-    data: {
-      hostingMode: "DEPLOYMENT_PROXY",
-      hostingDeploymentId: deploymentId
-    }
-  });
 }
 
 async function assertHealthResult(
@@ -1448,7 +1414,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
     const runtimeEnvVars = deploymentEnvWithPublicUrl(envVars, domain);
 
     if (processAction !== "stop" && domain) {
-      await ensureDeploymentDomainProxy(deployment.id, domain);
+      await ensureParentDomainDeploymentProxy(deployment.id, domain);
       const serverName = deploymentServerName(domain);
       const nginxResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config", () =>
         sysagent.deploymentNginx({
@@ -1457,7 +1423,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
           upstreamPort: deployment.port,
           rootPath: deployment.rootPath,
           fallbackRootPath: deploymentFallbackRootPath(domain),
-          forceSsl: domain.forceSsl && Boolean(domain.sslEnabled),
+          forceSsl: deploymentWantsSsl(domain),
           ...deploymentSslCertificatePaths(domain)
         })
       );
@@ -1576,7 +1542,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     }
 
     const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
-    const domain = deploymentDomain(deployment);
+    let domain = deploymentDomain(deployment);
     let envVars = deploymentEnvWithPublicUrl(await resolveEnvVars(deployment.env), domain);
     const databaseRuntime = await buildDatabaseRuntimeEnv(deployment, envVars);
     envVars = databaseRuntime.envVars;
@@ -1695,7 +1661,10 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       assertCommandTree(buildResult, "Build");
     }
 
-    await ensureDeploymentDomainProxy(deployment.id, domain);
+    if (domain) {
+      domain = await enableDeploymentTlsInDatabase(domain);
+    }
+    await ensureParentDomainDeploymentProxy(deployment.id, domain);
     const serverName = deploymentServerName(domain);
     const nginxResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config", () =>
       sysagent.deploymentNginx({
@@ -1704,7 +1673,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         upstreamPort: deployment.port,
         rootPath: deployment.rootPath,
         fallbackRootPath: deploymentFallbackRootPath(domain),
-        forceSsl: Boolean(domain?.forceSsl && domain.sslEnabled),
+        forceSsl: deploymentWantsSsl(domain),
         ...deploymentSslCertificatePaths(domain)
       })
     );
@@ -1713,19 +1682,44 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     assertLiveResult((nginxResult as { test?: unknown }).test, "Nginx config test");
     assertLiveResult((nginxResult as { reload?: unknown }).reload, "Nginx reload");
 
-    if (domain?.forceSsl) {
-      await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "SSL request", () =>
-        sslQueue.add("issue", {
-          domainId: domain.id.startsWith("subdomain:") ? null : domain.id,
-          domain: domain.name,
-          email: `admin@${domain.name}`,
-          includeWww: !domain.id.startsWith("subdomain:") && domain.includeWww !== false,
-          forceSsl: domain.forceSsl,
-          source: "deployment"
-        })
-      );
+    if (domain && deploymentWantsSsl(domain)) {
+      const sslJob = await sslQueue.add("issue", {
+        domainId: domain.id.startsWith("subdomain:") ? null : domain.id,
+        subdomainId: domain.id.startsWith("subdomain:") ? domain.id.slice("subdomain:".length) : null,
+        domain: domain.name,
+        email: `admin@${domain.name}`,
+        webRoot: deploymentFallbackRootPath(domain) ?? `${env.FILE_MANAGER_ROOT}/${domain.name}/public_html`,
+        includeWww: domain.includeWww !== false,
+        forceSsl: true,
+        source: "deployment"
+      });
+      try {
+        await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "SSL certificate issue", async () => {
+          await waitForQueueJob(sslJob);
+          return { queued: true, jobId: sslJob.id, completed: true };
+        });
+        domain = { ...domain, sslEnabled: true, forceSsl: true };
+        const httpsNginx = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx HTTPS proxy config", () =>
+          publishDeploymentProxyNginx({
+            deploymentId: deployment.id,
+            fqdn: serverName ?? domain!.name,
+            upstreamPort: deployment.port,
+            rootPath: deployment.rootPath,
+            fallbackRootPath: deploymentFallbackRootPath(domain),
+            forceHttps: true
+          })
+        );
+        assertLiveResult((httpsNginx as { write?: unknown }).write, "Nginx HTTPS proxy config write");
+        assertLiveResult((httpsNginx as { enable?: unknown }).enable, "Nginx HTTPS proxy config enable");
+        assertLiveResult((httpsNginx as { test?: unknown }).test, "Nginx HTTPS config test");
+        assertLiveResult((httpsNginx as { reload?: unknown }).reload, "Nginx HTTPS reload");
+      } catch (error) {
+        await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "SSL certificate issue warning", {
+          warning: error instanceof Error ? error.message : String(error)
+        }, "warn");
+      }
     } else {
-      await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "SSL request skipped", { reason: domain ? "Force SSL is disabled" : "No linked domain" });
+      await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "SSL request skipped", { reason: domain ? "No domain linked" : "No linked domain" });
     }
 
     const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];

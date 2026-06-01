@@ -144,6 +144,7 @@ function serializeDomainBinding(binding: any) {
         id,
         name: subdomainFqdn(binding.subdomain),
         forceSsl: binding.subdomain.sslEnabled,
+        sslEnabled: binding.subdomain.sslEnabled,
         documentRoot: binding.subdomain.domain.documentRoot,
         includeWww: false
       }
@@ -591,6 +592,7 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
   if (lower.includes("prisma") && (lower.includes("migration") || lower.includes("p100") || lower.includes("database"))) return { message: "Prisma/database migration failed. Check DATABASE_URL, database grants, and migration state.", repairAction: "redeploy", category: "prisma_migration" };
   if (lower.includes("client_encoding") && lower.includes("utf8mb4") && (lower.includes("postgres") || lower.includes("pgsql"))) return { message: "PostgreSQL deployment is using a MySQL charset value. Set DB_CHARSET=utf8 and clear DB_COLLATION, then redeploy.", repairAction: "request-approval", category: "postgres_charset" };
   if (/class\s+["']redis["']\s+not\s+found/i.test(text)) return { message: "Laravel is configured to use Redis but the PHP redis extension is not installed. Install php-redis on the VPS or set CACHE_DRIVER=file and SESSION_DRIVER=file, then redeploy.", repairAction: "request-approval", category: "php_redis_extension" };
+  if (lower.includes("not secure") || (lower.includes("certificate") && lower.includes("invalid"))) return { message: "HTTPS is not active for this domain. Redeploy to issue Let's Encrypt SSL, or use Deployment Doctor to queue an SSL certificate.", repairAction: "redeploy", category: "ssl_missing" };
   if (lower.includes("please provide a valid cache path") || lower.includes("bootstrap/cache") || lower.includes("storage/framework")) return { message: "Laravel writable/cache directories are missing or not writable. Repair the Laravel storage/bootstrap cache paths, then redeploy.", repairAction: "request-approval", category: "laravel_writable_paths" };
   if (lower.includes("artisan package:discover") || lower.includes("laravel package discovery")) return { message: "Laravel package discovery failed while bootstrapping the app. Check the deployment environment values and the package discovery error output, then redeploy.", repairAction: "request-approval", category: "laravel_package_discovery" };
   const composerPlatform = detectComposerPlatformIssue(text);

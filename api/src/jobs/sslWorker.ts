@@ -4,6 +4,12 @@ import { logger } from "../lib/logger.js";
 import { env } from "../config/env.js";
 import { prisma } from "../lib/prisma.js";
 import { sysagent, type SysagentCommandResult } from "../lib/sysagent.js";
+import {
+  deploymentFallbackRootPath,
+  deploymentServerName,
+  findDeploymentProxyTarget,
+  publishDeploymentProxyNginx
+} from "../lib/deploymentDomainSsl.js";
 
 function assertLiveCommandSucceeded(action: string, result: SysagentCommandResult) {
   if (result.dryRun) {
@@ -29,6 +35,34 @@ type NginxPublishResult = {
 };
 
 async function writeHttpsVhost(domainName: string, domainId: string | null | undefined, forceHttps: boolean) {
+  const proxyTarget = await findDeploymentProxyTarget(domainName);
+  if (proxyTarget) {
+    const serverName = deploymentServerName({
+      name: domainName,
+      includeWww: proxyTarget.includeWww
+    }) ?? domainName;
+    const bound = {
+      id: domainName,
+      name: domainName,
+      forceSsl: forceHttps,
+      sslEnabled: true,
+      documentRoot: proxyTarget.domain.documentRoot,
+      includeWww: proxyTarget.includeWww
+    };
+    const result = await publishDeploymentProxyNginx({
+      deploymentId: proxyTarget.deployment.id,
+      fqdn: serverName,
+      upstreamPort: proxyTarget.deployment.port,
+      rootPath: proxyTarget.deployment.rootPath,
+      fallbackRootPath: deploymentFallbackRootPath(bound),
+      forceHttps,
+      requireSsl: true
+    });
+    assertLiveCommandSucceeded("Nginx certificate vhost test", result.test as SysagentCommandResult);
+    assertLiveCommandSucceeded("Nginx certificate vhost reload", result.reload as SysagentCommandResult);
+    return result;
+  }
+
   const domain = domainId
     ? await prisma.domain.findUnique({
         where: { id: domainId },
@@ -45,16 +79,15 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
       ? await prisma.deployment.findUnique({ where: { id: domain.hostingDeploymentId } })
       : domain.deploymentBindings[0]?.deployment ?? domain.deployments[0] ?? null;
     if (!deployment) throw new Error(`No deployment selected for ${domainName} HTTPS proxy`);
-    result = await sysagent.deploymentNginx({
+    result = await publishDeploymentProxyNginx({
       deploymentId: deployment.id,
-      serverName: `${domainName} www.${domainName}`,
+      fqdn: deploymentServerName({ name: domainName, includeWww: true }) ?? domainName,
       upstreamPort: deployment.port,
       rootPath: deployment.rootPath,
       fallbackRootPath: `${env.FILE_MANAGER_ROOT}/${domainName}/${domain.documentRoot || "public_html"}`,
-      forceSsl: forceHttps,
-      requireSsl: true,
-      ...certificatePaths(domainName)
-    });
+      forceHttps,
+      requireSsl: true
+    }) as NginxPublishResult;
   } else if (domain?.hostingMode === "REDIRECT") {
     if (!domain.redirectUrl) throw new Error(`No redirect URL selected for ${domainName}`);
     result = await sysagent.writeRedirectNginxVhost({
@@ -80,6 +113,27 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
   return result;
 }
 
+async function markSslIssued(job: { data: { domainId?: string | null; subdomainId?: string | null; forceSsl?: boolean } }) {
+  if (job.data.subdomainId) {
+    await prisma.subdomain.update({
+      where: { id: job.data.subdomainId },
+      data: { sslEnabled: true }
+    });
+    return;
+  }
+  if (job.data.domainId) {
+    const domain = await prisma.domain.findUnique({ where: { id: job.data.domainId }, select: { forceSsl: true } });
+    await prisma.domain.update({
+      where: { id: job.data.domainId },
+      data: {
+        sslEnabled: true,
+        sslExpiry: new Date(Date.now() + 90 * 86_400_000),
+        forceSsl: domain?.forceSsl ?? job.data.forceSsl ?? true
+      }
+    });
+  }
+}
+
 export const sslWorker = new Worker(
   "ssl",
   async (job) => {
@@ -98,17 +152,7 @@ export const sslWorker = new Worker(
         ? await prisma.domain.findUnique({ where: { id: job.data.domainId }, select: { forceSsl: true } })
         : null;
       const vhost = await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true);
-
-      if (job.data.domainId) {
-        await prisma.domain.update({
-          where: { id: job.data.domainId },
-          data: {
-            sslEnabled: true,
-            sslExpiry: new Date(Date.now() + 90 * 86_400_000),
-            forceSsl: domain?.forceSsl ?? job.data.forceSsl ?? true
-          }
-        });
-      }
+      await markSslIssued(job);
 
       await redis.del("domain_list", `ssl_expiry:${job.data.domain}`);
       return { certbot: result, nginx: vhost };
@@ -122,16 +166,7 @@ export const sslWorker = new Worker(
         ? await prisma.domain.findUnique({ where: { id: job.data.domainId }, select: { forceSsl: true } })
         : null;
       const vhost = await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true);
-
-      if (job.data.domainId) {
-        await prisma.domain.update({
-          where: { id: job.data.domainId },
-          data: {
-            sslEnabled: true,
-            sslExpiry: new Date(Date.now() + 90 * 86_400_000)
-          }
-        });
-      }
+      await markSslIssued(job);
 
       await redis.del("domain_list", `ssl_expiry:${job.data.domain}`);
       return { certbot: result, nginx: vhost };
