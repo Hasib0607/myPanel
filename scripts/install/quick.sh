@@ -11,6 +11,7 @@ set -Eeuo pipefail
 : "${DB_USER:=panel_user}"
 : "${PANEL_LOGIN_PORT:=8453}"
 : "${CPANEL_LOGIN_PORT:=3138}"
+: "${FORCE_STEP:=true}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

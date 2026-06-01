@@ -123,7 +123,7 @@ if command -v getenforce >/dev/null 2>&1 && [[ "$(getenforce)" != "Disabled" ]];
   fi
 fi
 
-run_step start_core_services start_core_services
+start_core_services
 run_step run_smoke_tests run_smoke_tests
 log "Running post-install validation"
 bash "$SCRIPT_DIR/validate-install.sh" || log "Validation reported failures — review output above"
