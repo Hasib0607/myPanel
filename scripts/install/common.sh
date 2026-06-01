@@ -233,8 +233,21 @@ ensure_app_user() {
   fi
 }
 
+configure_app_git_credentials() {
+  log "Configuring persistent Git credentials for $APP_USER"
+  git config --global credential.helper store || true
+  git config --global --add safe.directory "$APP_DIR" || true
+  runuser -u "$APP_USER" -- git config --global credential.helper store || true
+  runuser -u "$APP_USER" -- git config --global --add safe.directory "$APP_DIR" || true
+
+  if [[ -f /root/.git-credentials && ! -f "/home/$APP_USER/.git-credentials" ]]; then
+    install -o "$APP_USER" -g "$APP_USER" -m 0600 /root/.git-credentials "/home/$APP_USER/.git-credentials" || true
+  fi
+}
+
 sync_app_repo() {
   log "Preparing app directory"
+  configure_app_git_credentials
   install -d -m 0755 "$APP_DIR"
   chown "$APP_USER:$APP_USER" "$APP_DIR"
   if [[ -d "$APP_DIR/.git" ]]; then

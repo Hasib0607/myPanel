@@ -128,6 +128,8 @@ run_timeout() {
 
 configure_git_auth() {
   export GIT_TERMINAL_PROMPT=0
+  git config --global credential.helper store >/dev/null 2>&1 || true
+  git config --global --add safe.directory "$APP_DIR" >/dev/null 2>&1 || true
 
   if [[ -z "${PANEL_UPDATE_GIT_TOKEN:-}" ]]; then
     log "No PANEL_UPDATE_GIT_TOKEN configured; using existing git credential helper/SSH auth"
