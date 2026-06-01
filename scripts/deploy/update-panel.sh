@@ -150,6 +150,22 @@ EOF
   log "Configured non-interactive GitHub credentials from PANEL_UPDATE_GIT_TOKEN"
 }
 
+handoff_to_isolated_service() {
+  if [[ "${PANEL_UPDATE_ISOLATED:-false}" == "true" ]]; then
+    return 0
+  fi
+
+  log "panel self-update is running inside another service context; handing off to vps-panel-self-update.service"
+  if [[ "$(id -u)" == "0" ]]; then
+    systemctl start vps-panel-self-update
+  else
+    "$SUDO_BIN" -n "$SYSTEMCTL_BIN" start vps-panel-self-update
+  fi
+  write_status "running" "panel self-update handed off to vps-panel-self-update.service" "$(current_commit)" "$(current_commit_subject)"
+  rm -f "$PID_FILE"
+  exit 0
+}
+
 repair_panel_permissions() {
   local repair_script="$APP_DIR/scripts/maintenance/repair-panel-permissions.sh"
   if [[ ! -x "$repair_script" ]]; then
@@ -493,6 +509,7 @@ log "starting panel self-update in $APP_DIR on branch $BRANCH"
 write_status "running" "panel self-update started" "$(current_commit)" "$(current_commit_subject)"
 SCRIPT_CHECKSUM_BEFORE_PULL="$(file_checksum "$SCRIPT_PATH")"
 configure_git_auth
+handoff_to_isolated_service
 repair_panel_permissions
 
 patch_nginx_websocket() {

@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import path from "node:path";
@@ -134,23 +134,10 @@ async function spawnPanelUpdate() {
       });
       child.unref();
     });
-    return { service: panelUpdateService };
-  } catch {
-    // Older installs may not have the self-update systemd unit yet.
+    return { service: panelUpdateService, pid: null };
+  } catch (error) {
+    throw new Error(`Could not start ${panelUpdateService}. Run the installer to write the service and sudoers policy. ${error instanceof Error ? error.message : ""}`.trim());
   }
-
-  const child = spawn("bash", [script], {
-    cwd: appDir,
-    detached: true,
-    stdio: "ignore",
-    env: {
-      ...process.env,
-      PANEL_UPDATE_WORKDIR: appDir,
-      PANEL_UPDATE_BRANCH: env.PANEL_UPDATE_BRANCH
-    }
-  });
-  child.unref();
-  return { pid: child.pid };
 }
 
 async function startPanelUpdate(source: string, commit = "", commitSubject = "") {

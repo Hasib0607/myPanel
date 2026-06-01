@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -49,26 +49,13 @@ export async function startPanelSelfUpdate(source: string) {
       state: "running",
       message: `panel update service ${panelUpdateService} started`
     });
-    return { accepted: true, queued: true, service: panelUpdateService, script };
-  } catch {
-    // Older installs may not have the self-update systemd unit yet.
+    return { accepted: true, queued: true, service: panelUpdateService, pid: null, script };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Could not start panel self-update service";
+    await writePanelUpdateStatus({
+      state: "failed",
+      message: `panel update service ${panelUpdateService} failed to start: ${message}`
+    });
+    throw new Error(`Could not start ${panelUpdateService}. Run the installer to write the service and sudoers policy.`);
   }
-
-  const child = spawn("bash", [script], {
-    cwd: appDir,
-    detached: true,
-    stdio: "ignore",
-    env: {
-      ...process.env,
-      PANEL_UPDATE_WORKDIR: appDir,
-      PANEL_UPDATE_BRANCH: env.PANEL_UPDATE_BRANCH
-    }
-  });
-  child.unref();
-  await writePanelUpdateStatus({
-    state: "running",
-    message: `panel update process started with pid ${child.pid ?? "unknown"}`,
-    pid: child.pid ?? null
-  });
-  return { accepted: true, queued: true, pid: child.pid ?? null, script };
 }
