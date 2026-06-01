@@ -27,6 +27,7 @@ SCRIPT_REEXECUTED="${PANEL_UPDATE_SCRIPT_REEXECUTED:-false}"
 FINAL_API_RESTART_REQUESTED="false"
 FINAL_COMMIT=""
 FINAL_COMMIT_SUBJECT=""
+GIT_ASKPASS_FILE=""
 
 mkdir -p "$(dirname "$LOG_FILE")"
 mkdir -p "$(dirname "$STATUS_FILE")"
@@ -102,7 +103,14 @@ on_term() {
 
 trap on_error ERR
 trap on_term TERM
-trap 'rm -f "$PID_FILE"' EXIT
+cleanup() {
+  rm -f "$PID_FILE"
+  if [[ -n "$GIT_ASKPASS_FILE" ]]; then
+    rm -f "$GIT_ASKPASS_FILE"
+  fi
+}
+
+trap cleanup EXIT
 
 run() {
   log "+ $*"
@@ -116,6 +124,28 @@ run_timeout() {
   else
     "$@" 2>&1 | tee -a "$LOG_FILE"
   fi
+}
+
+configure_git_auth() {
+  export GIT_TERMINAL_PROMPT=0
+
+  if [[ -z "${PANEL_UPDATE_GIT_TOKEN:-}" ]]; then
+    log "No PANEL_UPDATE_GIT_TOKEN configured; using existing git credential helper/SSH auth"
+    return 0
+  fi
+
+  GIT_ASKPASS_FILE="$(mktemp)"
+  cat > "$GIT_ASKPASS_FILE" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  *Username*) printf '%s\n' "${PANEL_UPDATE_GIT_USERNAME:-x-access-token}" ;;
+  *Password*) printf '%s\n' "$PANEL_UPDATE_GIT_TOKEN" ;;
+  *) printf '%s\n' "$PANEL_UPDATE_GIT_TOKEN" ;;
+esac
+EOF
+  chmod 0700 "$GIT_ASKPASS_FILE"
+  export GIT_ASKPASS="$GIT_ASKPASS_FILE"
+  log "Configured non-interactive GitHub credentials from PANEL_UPDATE_GIT_TOKEN"
 }
 
 file_checksum() {
@@ -417,6 +447,7 @@ printf '%s\n' "$$" > "$PID_FILE"
 log "starting panel self-update in $APP_DIR on branch $BRANCH"
 write_status "running" "panel self-update started" "$(current_commit)" "$(current_commit_subject)"
 SCRIPT_CHECKSUM_BEFORE_PULL="$(file_checksum "$SCRIPT_PATH")"
+configure_git_auth
 
 patch_nginx_websocket() {
   if [[ ! -f "$NGINX_CONF" ]]; then
