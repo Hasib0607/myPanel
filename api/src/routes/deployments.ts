@@ -584,6 +584,16 @@ function commandDetail(value: unknown) {
   return result?.stderr || result?.reason || result?.stdout || (typeof result?.returncode === "number" ? `exit ${result.returncode}` : "");
 }
 
+function commandTreeFailure(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  if (commandFailed(value)) return commandDetail(value);
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    if (!nested || typeof nested !== "object") continue;
+    if (commandFailed(nested)) return `${key}: ${commandDetail(nested)}`;
+  }
+  return null;
+}
+
 function knownErrorHint(text: string): { message: string; repairAction: "set-node-memory" | "sync-public-env" | "redeploy" | "restart" | "request-approval"; category: string } | null {
   const lower = text.toLowerCase();
   if (lower.includes("eresolve") || lower.includes("unable to resolve dependency tree") || lower.includes("peer dep")) return { message: "NPM dependency resolution failed. Review peer dependencies or use a compatible lockfile before redeploying.", repairAction: "redeploy", category: "npm_peer_dependency" };
@@ -745,12 +755,28 @@ async function executeDoctorApproval(deployment: Awaited<ReturnType<typeof findD
     if (!deployment.dbType || !deployment.dbName || !deployment.dbUser) {
       throw new Error("Deployment database metadata is incomplete");
     }
-    return sysagent.provisionDatabase({
+    const result = await sysagent.provisionDatabase({
       engine: deployment.dbType,
       database: deployment.dbName,
       username: deployment.dbUser,
       passwordSecretRef: deployment.dbPasswordSecretRef
-    });
+    }) as { password?: string; result?: unknown };
+    const failure = commandTreeFailure(result.result);
+    if (failure) throw new Error(`Database provision failed: ${failure}`);
+    const secretRef = deployment.dbPasswordSecretRef ?? `deployment:${deployment.id}:database-password`;
+    if (result.password) {
+      await putSecret({
+        ref: secretRef,
+        value: result.password,
+        kind: "DATABASE_PASSWORD",
+        label: `${deployment.dbUser}@${deployment.dbName}`,
+        metadata: { deploymentId: deployment.id, engine: deployment.dbType, database: deployment.dbName, username: deployment.dbUser }
+      });
+      if (deployment.dbPasswordSecretRef !== secretRef) {
+        await prisma.deployment.update({ where: { id: deployment.id }, data: { dbPasswordSecretRef: secretRef } });
+      }
+    }
+    return result;
   }
   if (approval.actionKey === "normalize-postgres-charset") {
     const changed = [];
@@ -2019,7 +2045,25 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       database: deployment.dbName,
       username: deployment.dbUser,
       passwordSecretRef: deployment.dbPasswordSecretRef
-    });
+    }) as { password?: string; result?: unknown };
+    const failure = commandTreeFailure(result.result);
+    if (failure) throw app.httpErrors.internalServerError(`Database provision failed: ${failure}`);
+    const secretRef = deployment.dbPasswordSecretRef ?? `deployment:${deployment.id}:database-password`;
+    if (result.password) {
+      await putSecret({
+        ref: secretRef,
+        value: result.password,
+        kind: "DATABASE_PASSWORD",
+        label: `${deployment.dbUser}@${deployment.dbName}`,
+        metadata: { deploymentId: deployment.id, engine: deployment.dbType, database: deployment.dbName, username: deployment.dbUser }
+      });
+      if (deployment.dbPasswordSecretRef !== secretRef) {
+        await prisma.deployment.update({
+          where: { id: deployment.id },
+          data: { dbPasswordSecretRef: secretRef }
+        });
+      }
+    }
     await addLog(deployment.id, "PREFLIGHT", "Database provisioning requested", undefined, { result: result as any });
     await audit(request, { action: "APPLY", resource: "database", resourceId: deployment.id, description: `Provisioned database metadata for ${deployment.slug}`, metadata: { result: result as any } });
     return reply.code(202).send({ dryRunResult: result });

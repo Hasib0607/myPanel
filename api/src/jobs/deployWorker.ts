@@ -17,7 +17,7 @@ import {
 } from "../lib/deploymentGuardianRepair.js";
 import { env } from "../config/env.js";
 import { prisma } from "../lib/prisma.js";
-import { deleteSecret, getSecret } from "../lib/secrets.js";
+import { deleteSecret, getSecret, putSecret } from "../lib/secrets.js";
 import { sysagent } from "../lib/sysagent.js";
 import { sslQueue } from "./queues.js";
 import {
@@ -1305,7 +1305,34 @@ async function buildDatabaseRuntimeEnv(
 
   if (!deployment.dbType || !deployment.dbName || !deployment.dbUser) return { envVars: nextEnv, changed };
 
-  const password = deployment.dbPasswordSecretRef ? await getSecret(deployment.dbPasswordSecretRef) : null;
+  const secretRef = deployment.dbPasswordSecretRef ?? `deployment:${deployment.id}:database-password`;
+  let password = deployment.dbPasswordSecretRef ? await getSecret(deployment.dbPasswordSecretRef) : null;
+  const protectedUsers = new Set(["root", "mysql", "mariadb.sys", "postgres"]);
+  if (!protectedUsers.has(deployment.dbUser)) {
+    const provision = await sysagent.provisionDatabase({
+      engine: deployment.dbType,
+      database: deployment.dbName,
+      username: deployment.dbUser,
+      password: password ?? undefined
+    }) as { password?: string; result?: unknown };
+    assertCommandTree(provision.result, "Database provision/grant");
+    if (provision.password) {
+      password = provision.password;
+      await putSecret({
+        ref: secretRef,
+        value: provision.password,
+        kind: "DATABASE_PASSWORD",
+        label: `${deployment.dbUser}@${deployment.dbName}`,
+        metadata: { deploymentId: deployment.id, engine: deployment.dbType, database: deployment.dbName, username: deployment.dbUser }
+      });
+      if (deployment.dbPasswordSecretRef !== secretRef) {
+        await prisma.deployment.update({
+          where: { id: deployment.id },
+          data: { dbPasswordSecretRef: secretRef }
+        });
+      }
+    }
+  }
   const host = nextEnv.DB_HOST || "127.0.0.1";
 
   if (deployment.dbType === "MYSQL") {
