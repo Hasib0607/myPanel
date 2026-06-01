@@ -840,7 +840,11 @@ def _curl_once(url: str, *, accept_http_errors: bool = False) -> dict:
 def _tail_text(path: Path, lines: int = 120) -> str:
     if not path.exists():
         return ""
-    return "\n".join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:])
+    all_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    recent_errors = [line for line in all_lines if "production.ERROR:" in line or "MissingAppKeyException" in line]
+    if recent_errors:
+        return "\n".join(recent_errors[-lines:])
+    return "\n".join(all_lines[-lines:])
 
 
 def attach_laravel_diagnostics(result: dict, root_path: str | None, framework: str | None = None) -> dict:
@@ -1131,14 +1135,27 @@ def _ensure_laravel_env(root_path: str, port: int | None, env: dict[str, str] | 
         "php artisan config:clear",
         env=process_env or None,
     )
+    if not is_valid_laravel_app_key(app_key):
+        return {
+            "dryRun": False,
+            "command": ["verify-app-key", str(env_path)],
+            "cwd": deployment_cwd(root_path),
+            "stdout": "",
+            "stderr": "Laravel APP_KEY is missing or invalid after env sync",
+            "returncode": 1,
+            "path": info,
+            "envPath": str(env_path),
+            "appKey": app_key,
+            "configClear": config_clear,
+        }
 
     return {
         "dryRun": False,
         "command": ["write-file", str(env_path)],
         "cwd": deployment_cwd(root_path),
         "stdout": f"Synced {env_path}",
-        "stderr": "",
-        "returncode": 0 if config_clear.get("returncode", 0) == 0 else 1,
+        "stderr": (config_clear.get("stderr") or "").strip(),
+        "returncode": 0,
         "path": info,
         "envPath": str(env_path),
         "runtimeEnvPath": str(Path(root_path).resolve() / ".panel" / "runtime.env"),

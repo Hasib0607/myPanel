@@ -60,6 +60,30 @@ class DeploymentEnvTests(unittest.TestCase):
     def test_format_dotenv_line_keeps_base64_app_key_unquoted(self) -> None:
         self.assertEqual(format_dotenv_line("APP_KEY", VALID_APP_KEY), f"APP_KEY={VALID_APP_KEY}")
 
+    def test_sync_skips_write_when_app_key_must_be_generated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".env").write_text(f"APP_KEY={VALID_APP_KEY}\n", encoding="utf-8")
+            env_path, app_key, needs_generate = sync_laravel_env_file(
+                str(root),
+                10002,
+                {"APP_KEY": COMPLEX_APP_KEY, "APP_ENV": "production"},
+            )
+            self.assertFalse(needs_generate)
+            self.assertEqual(app_key, VALID_APP_KEY)
+            self.assertIn(f"APP_KEY={VALID_APP_KEY}", env_path.read_text(encoding="utf-8"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env_path, app_key, needs_generate = sync_laravel_env_file(
+                str(root),
+                10002,
+                {"APP_KEY": COMPLEX_APP_KEY},
+            )
+            self.assertTrue(needs_generate)
+            self.assertIsNone(app_key)
+            self.assertFalse(env_path.exists())
+
     def test_sync_writes_runtime_env_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -117,7 +117,9 @@ def clear_laravel_bootstrap_config_cache(root_path: str) -> None:
 
 def sync_laravel_env_file(root_path: str, port: int | None, env: dict[str, str] | None) -> tuple[Path, str | None, bool]:
     process_env, needs_key_generate = prepare_laravel_env_for_sync(root_path, port, env)
-    env_path = write_laravel_env_bundle(root_path, process_env)
+    env_path = Path(root_path).resolve() / ".env"
+    if not needs_key_generate:
+        env_path = write_laravel_env_bundle(root_path, process_env)
     return env_path, process_env.get("APP_KEY"), needs_key_generate
 
 
@@ -151,7 +153,9 @@ def prepare_supervisor_runtime(
     panel_dir = cwd / ".panel"
     runtime_env = panel_dir / "runtime.env"
     wrapper = panel_dir / "run.sh"
-    process_env, _needs_key_generate = prepare_laravel_env_for_sync(str(cwd), port, env)
+    process_env, needs_key_generate = prepare_laravel_env_for_sync(str(cwd), port, env)
+    if needs_key_generate:
+        raise ValueError("Laravel APP_KEY is missing or invalid; sync Laravel env before starting the process")
     laravel_env_path = write_laravel_env_bundle(str(cwd), process_env)
     write_supervisor_wrapper(wrapper, runtime_env, str(cwd), start_command)
     return wrapper, runtime_env, laravel_env_path

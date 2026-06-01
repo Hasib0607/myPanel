@@ -773,11 +773,11 @@ async function runHealthCheckWithGuardianRecovery(
 async function assertPublicRouteResult(result: unknown, label: string, deployment: { slug: string; domain?: { name: string } | null }, appPath?: string) {
   const value = result as { degraded?: boolean; httpCode?: number; stderr?: string };
   if (value?.degraded) {
-    throw new Error(value.stderr ?? `${label} returned HTTP ${value.httpCode ?? "error"}`);
+    return value.stderr ?? `${label} returned HTTP ${value.httpCode ?? "error"}`;
   }
 
   const message = liveResultFailureMessage(result, label);
-  if (!message) return;
+  if (!message) return null;
 
   let runtimeText = "";
   try {
@@ -819,8 +819,8 @@ async function optionalPublicRouteWarning(
   );
 
   try {
-    await assertPublicRouteResult(publicRoute, label, deployment, appPath);
-    return null;
+    const warning = await assertPublicRouteResult(publicRoute, label, deployment, appPath);
+    return warning;
   } catch (error) {
     const firstMessage = error instanceof Error ? error.message : "Public route check failed";
     await writeLog(deploymentId, releaseId, "HEALTH_CHECK", `${label} failed; running Guardian public-route repair`, { warning: firstMessage }, "warn");
@@ -849,9 +849,11 @@ async function optionalPublicRouteWarning(
   }
 
   try {
-    await assertPublicRouteResult(publicRoute, label, deployment, appPath);
-    await writeLog(deploymentId, releaseId, "HEALTH_CHECK", `${label} recovered after Guardian repair`);
-    return null;
+    const warning = await assertPublicRouteResult(publicRoute, label, deployment, appPath);
+    if (!warning) {
+      await writeLog(deploymentId, releaseId, "HEALTH_CHECK", `${label} recovered after Guardian repair`);
+    }
+    return warning;
   } catch (error) {
     const message = error instanceof Error ? error.message : "Public route check failed";
     await writeLog(deploymentId, releaseId, "HEALTH_CHECK", `${label} warning`, { warning: message }, "warn");
@@ -1644,12 +1646,9 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     );
 
     const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, "Public website check", { ...deployment, domain }, appPath, envVars, processManager);
-    if (publicRouteWarning) {
-      throw new Error(publicRouteWarning);
-    }
 
     await markRelease(releaseId, action === "rollback" ? "ROLLED_BACK" : "SUCCEEDED", startedAt);
-    const healthStatus = healthOutcome.degraded ? "DEGRADED" : "HEALTHY";
+    const healthStatus = publicRouteWarning || healthOutcome.degraded ? "DEGRADED" : "HEALTHY";
     await prisma.deployment.update({
       where: { id: deployment.id },
       data: {
@@ -1659,8 +1658,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         lastDeployAt: new Date()
       }
     });
-    await writeLog(deployment.id, releaseId, action === "rollback" ? "ROLLBACK" : "SUCCEEDED", `${action} completed`, { dryRun: false });
-    return { dryRun: false, completed: true, status: "RUNNING", healthStatus };
+    await writeLog(deployment.id, releaseId, action === "rollback" ? "ROLLBACK" : "SUCCEEDED", `${action} completed`, { dryRun: false, publicRouteWarning });
+    return { dryRun: false, completed: true, status: "RUNNING", healthStatus, publicRouteWarning };
   } catch (error) {
     await markRelease(releaseId, "FAILED", startedAt);
     await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "FAILED", healthStatus: "DOWN" } });
