@@ -26,6 +26,7 @@ import { firewallRoutes } from "./routes/firewall.js";
 import { guardianRoutes } from "./routes/guardian.js";
 import { mailRoutes } from "./routes/mail.js";
 import { packageRoutes } from "./routes/packages.js";
+import { settingsRoutes } from "./routes/settings.js";
 import { sslRoutes } from "./routes/ssl.js";
 import { twoFactorRoutes } from "./routes/twoFactor.js";
 import { whmMigrationRoutes } from "./routes/whmMigration.js";
@@ -123,6 +124,7 @@ export function buildApp() {
   app.register(accountRoutes, { prefix: "/api/v1/accounts" });
   app.register(accountPanelRoutes, { prefix: "/api/v1/account" });
   app.register(packageRoutes, { prefix: "/api/v1/packages" });
+  app.register(settingsRoutes, { prefix: "/api/v1/settings" });
   app.register(auditRoutes, { prefix: "/api/v1/audit" });
   app.register(twoFactorRoutes, { prefix: "/api/v1/auth/2fa" });
   app.register(dashboardRoutes, { prefix: "/api/v1/dashboard" });

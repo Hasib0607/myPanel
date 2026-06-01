@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Archive, Blocks, Database, Gauge, Globe2, HardDrive, Inbox, Lock, Network, Package, Radar, ServerCog, Shield, SquareTerminal, Users, Zap } from "lucide-react";
+import { Archive, Blocks, Database, Gauge, Globe2, HardDrive, Inbox, Lock, Network, Package, Radar, ServerCog, Settings, Shield, SquareTerminal, Users, Zap } from "lucide-react";
 import { LogoutButton } from "@/components/logout-button";
 
 const nav = [
@@ -20,7 +20,8 @@ const nav = [
   { href: "/databases", label: "Databases", icon: Database },
   { href: "/backups", label: "Backups", icon: Archive },
   { href: "/terminal", label: "Terminal", icon: SquareTerminal },
-  { href: "/security", label: "Security", icon: Lock }
+  { href: "/security", label: "Security", icon: Lock },
+  { href: "/settings", label: "Settings", icon: Settings }
 ];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
