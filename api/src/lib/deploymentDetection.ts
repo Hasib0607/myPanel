@@ -113,6 +113,31 @@ function isNodeFrontendPackage(pkg: PackageJson) {
   );
 }
 
+function resolveNodeStartCommand(
+  packageManager: DeploymentPackageManager,
+  pkg: PackageJson,
+  outputDirectory: string | null,
+  options?: { vite?: boolean; cra?: boolean }
+) {
+  const scripts = pkg.scripts ?? {};
+  const run = (script: string) => packageRun(packageManager, script);
+
+  if (scripts.start) {
+    return run("start");
+  }
+  if (pkg.main) {
+    return `node ${pkg.main}`;
+  }
+  if (scripts.preview) {
+    return `${run("preview")} -- --host 127.0.0.1 --port {PORT}`;
+  }
+  if (options?.vite || scripts.build) {
+    const output = outputDirectory || (options?.cra ? "build" : "dist");
+    return `npx serve -s ${output} -l {PORT}`;
+  }
+  return null;
+}
+
 function nodeJsDetection(
   files: string[],
   names: Set<string>,
@@ -120,15 +145,12 @@ function nodeJsDetection(
   pkg: PackageJson,
   reason: string,
   confidence: number,
-  outputDirectory: string | null
+  outputDirectory: string | null,
+  options?: { vite?: boolean; cra?: boolean }
 ): DeploymentDetection {
   const scripts = pkg.scripts ?? {};
   const hasScriptName = (name: string) => Boolean(scripts[name]);
-  const startCommand = hasScriptName("start")
-    ? packageRun(packageManager, "start")
-    : pkg.main
-      ? `node ${pkg.main}`
-      : null;
+  const startCommand = resolveNodeStartCommand(packageManager, pkg, outputDirectory, options);
 
   return {
     detected: "NODEJS",
@@ -205,8 +227,9 @@ export function detectDeploymentFiles(
   }
 
   const viteDetected = names.has("vite.config.js") || names.has("vite.config.ts") || names.has("vite.config.mjs") || (pkg ? hasDependency(pkg, "vite") : false);
+  const craDetected = pkg ? hasDependency(pkg, "react-scripts") : false;
   if (viteDetected && pkg) {
-    return nodeJsDetection(files, names, packageManager, pkg, "Found Vite markers", 0.9, "dist");
+    return nodeJsDetection(files, names, packageManager, pkg, "Found Vite markers", 0.9, "dist", { vite: true });
   }
 
   if (pkg && isNodeFrontendPackage(pkg)) {
@@ -217,19 +240,27 @@ export function detectDeploymentFiles(
       pkg,
       "Found package.json with React/Vite/Node frontend markers",
       0.92,
-      hasPkgScript("build") ? "dist" : null
+      craDetected ? "build" : hasPkgScript("build") ? "dist" : "dist",
+      { cra: craDetected }
     );
   }
 
-  if (pkg && (hasPkgScript("start") || pkg.main)) {
+  if (pkg && (hasPkgScript("start") || pkg.main || hasPkgScript("build") || hasPkgScript("preview"))) {
     return nodeJsDetection(
       files,
       names,
       packageManager,
       pkg,
-      hasPkgScript("start") ? "Found package.json with a start script" : "Found package.json with a main entry",
-      hasPkgScript("start") ? 0.84 : 0.6,
-      hasPkgScript("build") ? "dist" : null
+      hasPkgScript("start")
+        ? "Found package.json with a start script"
+        : hasPkgScript("preview")
+          ? "Found package.json with a preview script"
+          : hasPkgScript("build")
+            ? "Found package.json with a build script"
+            : "Found package.json with a main entry",
+      hasPkgScript("start") ? 0.84 : 0.78,
+      hasPkgScript("build") ? (craDetected ? "build" : "dist") : null,
+      { cra: craDetected }
     );
   }
 

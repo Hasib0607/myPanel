@@ -1416,6 +1416,44 @@ async function applyLaravelAppKeyFromSync(
   return envVars;
 }
 
+async function reconcileMissingStartCommand(
+  deployment: DeploymentWithWorkerRelations,
+  releaseId: string | undefined
+) {
+  if (deployment.framework === "STATIC" || deployment.startCommand?.trim()) {
+    return deployment;
+  }
+
+  const detection = await detectDeploymentSource(deployment.rootPath, deployment.rootDirectory);
+  const startCommand = detection.suggestions.startCommand;
+  if (!startCommand) {
+    return deployment;
+  }
+
+  const updated = await prisma.deployment.update({
+    where: { id: deployment.id },
+    data: {
+      framework: detection.detected,
+      runtime: detection.suggestions.runtime,
+      packageManager: detection.suggestions.packageManager,
+      installCommand: detection.suggestions.installCommand,
+      buildCommand: detection.suggestions.buildCommand,
+      startCommand,
+      outputDirectory: detection.suggestions.outputDirectory,
+      processManager: detection.suggestions.processManager ?? "PM2"
+    },
+    include: deploymentWorkerInclude
+  });
+
+  await writeLog(deployment.id, releaseId, "PREFLIGHT", "Applied detected start command", {
+    framework: detection.detected,
+    startCommand,
+    processManager: updated.processManager
+  });
+
+  return updated;
+}
+
 async function reconcileMisdetectedLaravelFramework(
   deployment: DeploymentWithWorkerRelations,
   releaseId: string | undefined,
@@ -1896,6 +1934,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
 
     const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
     deployment = await reconcileMisdetectedLaravelFramework(deployment, releaseId, appPath);
+    deployment = await reconcileMissingStartCommand(deployment, releaseId);
     await assertRuntimeToolsInstalled(deployment.id, releaseId, deployment);
 
     if (deployment.processManager === "NONE" && deployment.framework !== "STATIC") {

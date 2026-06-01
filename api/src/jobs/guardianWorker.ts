@@ -3,6 +3,7 @@ import { redis } from "../lib/redis.js";
 import { logger } from "../lib/logger.js";
 import { expireGuardianIpBlocks, runGuardianAutoHeal, syncGuardianIncidentsOnly, type GuardianDiagnosis } from "../lib/guardianAutoHeal.js";
 import { restartDeploymentProcess, runGuardianDeploymentRepair } from "../lib/deploymentGuardianRepair.js";
+import { detectDeploymentSource } from "../lib/deploymentDetection.js";
 import { prisma } from "../lib/prisma.js";
 import { sysagent } from "../lib/sysagent.js";
 import { deployQueue } from "./queues.js";
@@ -113,6 +114,34 @@ function renderStartCommand(deployment: { framework: string; startCommand: strin
   return deployment.startCommand?.replaceAll("{PORT}", String(deployment.port)).replaceAll("$PORT", String(deployment.port)) ?? null;
 }
 
+async function guardianSyncRuntimeIfMissingStart(
+  deployment: Awaited<ReturnType<typeof prisma.deployment.findMany>>[number]
+) {
+  if (deployment.framework === "STATIC" || deployment.startCommand?.trim()) {
+    return deployment;
+  }
+
+  const detection = await detectDeploymentSource(deployment.rootPath, deployment.rootDirectory);
+  const startCommand = detection.suggestions.startCommand;
+  if (!startCommand) {
+    return deployment;
+  }
+
+  return prisma.deployment.update({
+    where: { id: deployment.id },
+    data: {
+      framework: detection.detected,
+      runtime: detection.suggestions.runtime,
+      packageManager: detection.suggestions.packageManager,
+      installCommand: detection.suggestions.installCommand,
+      buildCommand: detection.suggestions.buildCommand,
+      startCommand,
+      outputDirectory: detection.suggestions.outputDirectory,
+      processManager: detection.suggestions.processManager ?? "PM2"
+    }
+  });
+}
+
 async function guardianInlineDeploymentRepair(
   deployment: Awaited<ReturnType<typeof prisma.deployment.findMany>>[number] & {
     env?: Array<{ key: string; value: string | null; secretRef: string | null }>;
@@ -211,6 +240,9 @@ async function runDeploymentWatch() {
         const shouldRedeploy = stalePending || deployment.status === "FAILED";
         const shouldRestart = !shouldRedeploy && deployment.status === "RUNNING";
         if (shouldRedeploy || shouldRestart) {
+          if (shouldRedeploy && !deployment.startCommand?.trim() && deployment.framework !== "STATIC") {
+            await guardianSyncRuntimeIfMissingStart(deployment);
+          }
           autoRepair = await queueGuardianDeployRepair(
             deployment,
             shouldRedeploy ? "deploy" : "restart",

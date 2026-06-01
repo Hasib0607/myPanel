@@ -12,7 +12,7 @@ type RuntimeToolInput = {
 
 export type RuntimeInstallTarget = {
   actionKey: string;
-  tool: "composer" | "php" | "php82" | "php-gd" | "python" | "nodejs" | "pnpm" | "yarn" | "uv" | "go" | "supervisor" | "pm2";
+  tool: "composer" | "php" | "php82" | "php-gd" | "php-soap" | "python" | "nodejs" | "pnpm" | "yarn" | "uv" | "go" | "supervisor" | "pm2";
   label: string;
   command: string;
   reason: string;
@@ -143,6 +143,14 @@ const installTargetCatalog: RuntimeInstallTarget[] = [
     executables: ["php"]
   },
   {
+    actionKey: "install-php-soap",
+    tool: "php-soap",
+    label: "Install PHP SOAP extension",
+    command: "Install the PHP SOAP extension via panel runtime-tools",
+    reason: "Composer reported that the SOAP extension is required by this deployment.",
+    executables: ["php"]
+  },
+  {
     actionKey: "install-python",
     tool: "python",
     label: "Install Python runtime",
@@ -255,6 +263,9 @@ export function runtimeInstallTargetsForComposerPlatformIssue(text: string) {
 
   if (issue.missingExtensions.includes("gd")) {
     addTarget(targets.some((item) => item.actionKey === "install-php82") ? "install-php82" : "install-php-gd");
+  }
+  if (issue.missingExtensions.includes("soap")) {
+    addTarget(targets.some((item) => item.actionKey === "install-php82") ? "install-php82" : "install-php-soap");
   }
 
   return targets;

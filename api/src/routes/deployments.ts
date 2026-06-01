@@ -594,7 +594,7 @@ function commandTreeFailure(value: unknown): string | null {
   return null;
 }
 
-function knownErrorHint(text: string): { message: string; repairAction: "set-node-memory" | "sync-public-env" | "redeploy" | "restart" | "request-approval"; category: string } | null {
+function knownErrorHint(text: string): { message: string; repairAction: "set-node-memory" | "sync-public-env" | "sync-runtime" | "redeploy" | "restart" | "request-approval"; category: string } | null {
   const lower = text.toLowerCase();
   if (lower.includes("eresolve") || lower.includes("unable to resolve dependency tree") || lower.includes("peer dep")) return { message: "NPM dependency resolution failed. Review peer dependencies or use a compatible lockfile before redeploying.", repairAction: "redeploy", category: "npm_peer_dependency" };
   if (lower.includes("package-lock.json") && lower.includes("yarn.lock")) return { message: "Multiple lockfiles detected. Keep one package manager lockfile to avoid inconsistent installs.", repairAction: "redeploy", category: "lockfile_conflict" };
@@ -620,10 +620,12 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
     return { message: `Composer lockfile requires PHP ${requiredPhpVersion}+ but the VPS CLI runtime is ${currentPhpVersion}. Upgrade PHP on the VPS, then redeploy.`, repairAction: "request-approval", category: "php_runtime_version" };
   }
   if (composerPlatform?.missingExtensions.includes("gd")) return { message: "Composer is missing the PHP GD extension. Install/enable GD on the VPS, then redeploy.", repairAction: "request-approval", category: "php_extension_gd" };
+  if (composerPlatform?.missingExtensions.includes("soap")) return { message: "Composer is missing the PHP SOAP extension. Install/enable SOAP on the VPS, then redeploy.", repairAction: "request-approval", category: "php_extension_soap" };
   if (lower.includes("composer") && (lower.includes("ext-") || lower.includes("requires php extension"))) return { message: "Composer is missing a required PHP extension. Install the extension on the VPS, then redeploy.", repairAction: "request-approval", category: "php_extension" };
   if ((lower.includes("no such file or directory") || lower.includes("command not found") || lower.includes("unsupported deployment executable")) && (lower.includes("composer") || lower.includes("php") || lower.includes("python") || lower.includes("pip") || lower.includes("uv") || lower.includes("uvicorn") || lower.includes("gunicorn") || lower.includes("node") || lower.includes("npm") || lower.includes("pnpm") || lower.includes("yarn") || lower.includes("next") || lower.includes("vite") || lower.includes("pm2") || lower.includes("supervisor"))) {
     return { message: "A required runtime tool is missing on the VPS. Use Deployment Doctor to request approval for the missing tool install, then redeploy.", repairAction: "request-approval", category: "missing_runtime_tool" };
   }
+  if (lower.includes("no runnable start command")) return { message: "Vite/React apps need preview or static serve. Sync runtime from package.json, then redeploy.", repairAction: "sync-runtime", category: "missing_start_command" };
   if (lower.includes("cannot find module") || lower.includes("module_not_found")) return { message: "Missing package or wrong build output. Run dependency install, verify package.json, then redeploy.", repairAction: "redeploy", category: "missing_module" };
   if (lower.includes("eaddrinuse") || lower.includes("address already in use")) return { message: "Port conflict. Let the doctor redeploy so the worker can move the app to a free managed port.", repairAction: "redeploy", category: "port_conflict" };
   if (lower.includes("heap out of memory") || lower.includes("javascript heap out of memory") || lower.includes("sigkill") || lower.includes("killed")) return { message: "Server memory pressure. Add a Node memory cap and redeploy; if it repeats, add swap on the VPS.", repairAction: "set-node-memory", category: "memory" };
@@ -725,6 +727,7 @@ async function executeDoctorApproval(deployment: Awaited<ReturnType<typeof findD
       "install-php": "php",
       "install-php82": "php82",
       "install-php-gd": "php-gd",
+      "install-php-soap": "php-soap",
       "install-php-redis": "php-redis",
       "install-python": "python",
       "install-nodejs": "nodejs",
@@ -1077,7 +1080,7 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
     });
   }
   const composerRepairTargets = runtimeInstallTargetsForComposerPlatformIssue(recentErrors);
-  if (hint?.category === "php_extension" || hint?.category === "php_extension_gd" || hint?.category === "php_runtime_version") {
+  if (hint?.category === "php_extension" || hint?.category === "php_extension_gd" || hint?.category === "php_extension_soap" || hint?.category === "php_runtime_version") {
     for (const target of composerRepairTargets) {
       riskyActions.push({
         key: target.actionKey,
