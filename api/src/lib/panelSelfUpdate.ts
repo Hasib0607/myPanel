@@ -1,7 +1,11 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 import { env } from "../config/env.js";
+
+const execFileAsync = promisify(execFile);
+const panelUpdateService = "vps-panel-self-update";
 
 function configuredPanelUpdateScript() {
   const appDir = path.resolve(env.PANEL_UPDATE_WORKDIR);
@@ -30,6 +34,26 @@ export async function startPanelSelfUpdate(source: string) {
     state: "queued",
     message: `${source}; starting panel update`
   });
+
+  try {
+    await execFileAsync("sudo", ["-n", "systemctl", "start", panelUpdateService], {
+      cwd: appDir,
+      timeout: 5000,
+      env: {
+        ...process.env,
+        PANEL_UPDATE_WORKDIR: appDir,
+        PANEL_UPDATE_BRANCH: env.PANEL_UPDATE_BRANCH
+      }
+    });
+    await writePanelUpdateStatus({
+      state: "running",
+      message: `panel update service ${panelUpdateService} started`
+    });
+    return { accepted: true, queued: true, service: panelUpdateService, script };
+  } catch {
+    // Older installs may not have the self-update systemd unit yet.
+  }
+
   const child = spawn("bash", [script], {
     cwd: appDir,
     detached: true,

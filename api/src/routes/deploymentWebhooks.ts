@@ -12,6 +12,8 @@ import { audit } from "../lib/audit.js";
 import { prisma } from "../lib/prisma.js";
 import { getSecret } from "../lib/secrets.js";
 
+const panelUpdateService = "vps-panel-self-update";
+
 type ParsedJsonWithRaw = {
   payload: unknown;
   rawBody: Buffer;
@@ -114,8 +116,29 @@ function configuredPanelUpdateScript() {
   return { appDir, script };
 }
 
-function spawnPanelUpdate() {
+async function spawnPanelUpdate() {
   const { appDir, script } = configuredPanelUpdateScript();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const child = execFile("sudo", ["-n", "systemctl", "start", panelUpdateService], {
+        cwd: appDir,
+        timeout: 5000,
+        env: {
+          ...process.env,
+          PANEL_UPDATE_WORKDIR: appDir,
+          PANEL_UPDATE_BRANCH: env.PANEL_UPDATE_BRANCH
+        }
+      }, (error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+      child.unref();
+    });
+    return { service: panelUpdateService };
+  } catch {
+    // Older installs may not have the self-update systemd unit yet.
+  }
+
   const child = spawn("bash", [script], {
     cwd: appDir,
     detached: true,
@@ -127,7 +150,7 @@ function spawnPanelUpdate() {
     }
   });
   child.unref();
-  return child.pid;
+  return { pid: child.pid };
 }
 
 async function startPanelUpdate(source: string, commit = "", commitSubject = "") {
@@ -138,17 +161,17 @@ async function startPanelUpdate(source: string, commit = "", commitSubject = "")
     commit,
     commitSubject
   });
-  const pid = spawnPanelUpdate();
-  if (pid) {
+  const result = await spawnPanelUpdate();
+  if (result.pid || result.service) {
     await writePanelUpdateStatus({
       state: "running",
-      message: `panel update process started with pid ${pid}`,
+      message: result.service ? `panel update service ${result.service} started` : `panel update process started with pid ${result.pid ?? "unknown"}`,
       commit,
       commitSubject,
-      pid
+      pid: result.pid
     });
   }
-  return pid;
+  return result.pid;
 }
 
 async function writePanelUpdateStatus(status: PanelUpdateStatus) {

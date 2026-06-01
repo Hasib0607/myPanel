@@ -549,6 +549,24 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 EOF
+
+  write_file /etc/systemd/system/vps-panel-self-update.service <<EOF
+[Unit]
+Description=VPS Panel Self Update
+After=network.target
+
+[Service]
+Type=simple
+User=$APP_USER
+WorkingDirectory=$APP_DIR
+EnvironmentFile=$APP_DIR/.env
+ExecStart=/usr/bin/bash $APP_DIR/scripts/deploy/update-panel.sh
+KillMode=process
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+EOF
 }
 
 write_panel_nginx_config() {
@@ -670,6 +688,7 @@ write_update_sudoers() {
   SYSTEMCTL_BIN="$(command -v systemctl)"
   write_file /etc/sudoers.d/vps-panel-update <<EOF
 $APP_USER ALL=(root) NOPASSWD: $SYSTEMCTL_BIN --no-block restart vps-panel-sysagent, $SYSTEMCTL_BIN is-active vps-panel-sysagent, $SYSTEMCTL_BIN status vps-panel-sysagent, $SYSTEMCTL_BIN --no-block restart vps-panel-api, $SYSTEMCTL_BIN is-active vps-panel-api, $SYSTEMCTL_BIN status vps-panel-api, $SYSTEMCTL_BIN --no-block restart vps-panel-workers, $SYSTEMCTL_BIN is-active vps-panel-workers, $SYSTEMCTL_BIN status vps-panel-workers, $SYSTEMCTL_BIN --no-block restart vps-panel-guardian, $SYSTEMCTL_BIN is-active vps-panel-guardian, $SYSTEMCTL_BIN status vps-panel-guardian, $SYSTEMCTL_BIN --no-block restart vps-panel-frontend, $SYSTEMCTL_BIN is-active vps-panel-frontend, $SYSTEMCTL_BIN status vps-panel-frontend
+$APP_USER ALL=(root) NOPASSWD: $SYSTEMCTL_BIN start vps-panel-self-update, $SYSTEMCTL_BIN is-active vps-panel-self-update, $SYSTEMCTL_BIN status vps-panel-self-update
 $APP_USER ALL=(root) NOPASSWD: $APP_DIR/scripts/maintenance/repair-panel-permissions.sh
 EOF
   chmod 0440 /etc/sudoers.d/vps-panel-update
