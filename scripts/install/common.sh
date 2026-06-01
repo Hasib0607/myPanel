@@ -343,6 +343,9 @@ prepare_runtime_directories() {
 
 build_application() {
   log "Building application"
+  if [[ "$DB_CREATE" == "true" && ( "$DB_HOST" == "localhost" || "$DB_HOST" == "127.0.0.1" ) ]]; then
+    create_postgresql_database
+  fi
   runuser -u "$APP_USER" -- bash -lc "cd '$APP_DIR/api' && npm run prisma:generate && npx prisma migrate deploy && npm run build"
   runuser -u "$APP_USER" -- bash -lc "cd '$APP_DIR/frontend' && npm run build"
 }
@@ -577,6 +580,7 @@ END
 SELECT 'CREATE DATABASE $DB_NAME OWNER $DB_USER'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '$DB_NAME')\gexec
 ALTER DATABASE $DB_NAME OWNER TO $DB_USER;
+GRANT CONNECT, TEMPORARY ON DATABASE $DB_NAME TO $DB_USER;
 GRANT ALL PRIVILEGES ON DATABASE $DB_NAME TO $DB_USER;
 SQL
   runuser -u postgres -- psql -v ON_ERROR_STOP=1 -d "$DB_NAME" <<SQL
