@@ -854,7 +854,30 @@ async function optionalPublicRouteWarning(
   );
 
   try {
-    const warning = await assertPublicRouteResult(publicRoute, label, deployment, appPath);
+    let warning = await assertPublicRouteResult(publicRoute, label, deployment, appPath);
+    if (warning && isPhpRedisClassMissing(warning)) {
+      const repairedEnv = await autoRepairLaravelRedis(deploymentId, releaseId, appPath, deployment.port, warning, envVars);
+      if (repairedEnv) {
+        envVars = repairedEnv;
+        await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Restart after Redis driver repair", () =>
+          restartDeploymentProcess({
+            deploymentId,
+            slug: deployment.slug,
+            appPath,
+            port: deployment.port,
+            processManager,
+            startCommand: renderStartCommand(deployment),
+            envVars,
+            logDir: deploymentLogDir(deployment.slug)
+          })
+        );
+        await guardianRepairSleep(5000);
+        publicRoute = await runStep(deploymentId, releaseId, "HEALTH_CHECK", `${label} retry after Redis repair`, () =>
+          sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain), rootPath: appPath, framework: deployment.framework, requireHttps: Boolean(domain.sslEnabled) })
+        );
+        warning = await assertPublicRouteResult(publicRoute, label, deployment, appPath);
+      }
+    }
     return warning;
   } catch (error) {
     const firstMessage = error instanceof Error ? error.message : "Public route check failed";
@@ -868,6 +891,10 @@ async function optionalPublicRouteWarning(
     }
     if (isLaravelWritablePathIssue(firstMessage)) {
       await autoRepairLaravelWritablePaths(deploymentId, releaseId, appPath, firstMessage).catch(() => false);
+    }
+    const repairedRedis = await autoRepairLaravelRedis(deploymentId, releaseId, appPath, deployment.port, firstMessage, envVars).catch(() => null);
+    if (repairedRedis) {
+      envVars = repairedRedis;
     }
 
     await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Guardian public-route repair", () =>
@@ -1106,6 +1133,51 @@ function isLaravelWritablePathIssue(text: string) {
     || lower.includes("bootstrap/cache")
     || lower.includes("storage/framework")
     || lower.includes("laravel package discovery failed");
+}
+
+function isPhpRedisClassMissing(text: string) {
+  return /class\s+["']redis["']\s+not\s+found/i.test(text);
+}
+
+async function autoRepairLaravelRedis(
+  deploymentId: string,
+  releaseId: string | undefined,
+  appPath: string,
+  port: number,
+  errorText: string,
+  envVars: Record<string, string>
+) {
+  if (!isPhpRedisClassMissing(errorText)) return null;
+
+  await writeLog(deploymentId, releaseId, "HEALTH_CHECK", "PHP Redis extension missing for Laravel", {
+    evidence: errorText.slice(0, 2000)
+  }, "warn");
+
+  try {
+    await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Install PHP Redis extension", () =>
+      sysagent.deploymentInstallRuntimeTool({ tool: "php-redis" })
+    );
+  } catch (error) {
+    await writeLog(deploymentId, releaseId, "HEALTH_CHECK", "PHP Redis extension install skipped", {
+      warning: error instanceof Error ? error.message : String(error)
+    }, "warn");
+  }
+
+  const fallbackDrivers: Record<string, string> = {
+    CACHE_DRIVER: "file",
+    CACHE_STORE: "file",
+    SESSION_DRIVER: "file",
+    QUEUE_CONNECTION: "sync",
+    BROADCAST_DRIVER: "log"
+  };
+  for (const [key, value] of Object.entries(fallbackDrivers)) {
+    if ((envVars[key] || "").toLowerCase() === "redis" || (envVars[key] || "").toLowerCase() === "phpredis") {
+      envVars[key] = value;
+      await upsertDeploymentEnvValue(deploymentId, key, value);
+    }
+  }
+
+  return ensureLaravelAppKey(deploymentId, releaseId, appPath, port, envVars);
 }
 
 async function applyLaravelAppKeyFromSync(

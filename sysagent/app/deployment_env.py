@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import shlex
+import subprocess
 from pathlib import Path
 
 VALID_ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -25,6 +26,39 @@ def is_valid_laravel_app_key(value: str | None) -> bool:
     if not value or not str(value).strip():
         return False
     return bool(LARAVEL_APP_KEY.fullmatch(str(value).strip()))
+
+
+def php_redis_extension_loaded() -> bool:
+    try:
+        proc = subprocess.run(
+            ["php", "-r", "echo class_exists('Redis') ? '1' : '0';"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        return proc.stdout.strip() == "1"
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def normalize_laravel_redis_env(process_env: dict[str, str], *, redis_loaded: bool | None = None) -> dict[str, str]:
+    """Use file/sync drivers when the PHP redis extension is not available."""
+    if redis_loaded if redis_loaded is not None else php_redis_extension_loaded():
+        return process_env
+
+    redis_values = {"redis", "phpredis"}
+    driver_defaults = {
+        "CACHE_DRIVER": "file",
+        "CACHE_STORE": "file",
+        "SESSION_DRIVER": "file",
+        "QUEUE_CONNECTION": "sync",
+        "BROADCAST_DRIVER": "log",
+    }
+    for key, fallback in driver_defaults.items():
+        if (process_env.get(key) or "").strip().lower() in redis_values:
+            process_env[key] = fallback
+    return process_env
 
 
 def normalize_database_charset_env(process_env: dict[str, str]) -> dict[str, str]:
@@ -72,8 +106,8 @@ def prepare_laravel_env_for_sync(
     resolved = resolve_laravel_app_key(process_env, existing)
     if resolved:
         process_env["APP_KEY"] = resolved
-        return normalize_database_charset_env(process_env), False
-    return normalize_database_charset_env(process_env), True
+        return normalize_laravel_redis_env(normalize_database_charset_env(process_env)), False
+    return normalize_laravel_redis_env(normalize_database_charset_env(process_env)), True
 
 
 def format_dotenv_line(key: str, value: str) -> str:

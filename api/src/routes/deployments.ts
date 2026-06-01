@@ -590,6 +590,7 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
   if (lower.includes("unsupported engine") || lower.includes("node version") || lower.includes("requires node")) return { message: "Node version mismatch. Set a compatible runtime version or update the app engines field.", repairAction: "redeploy", category: "node_version" };
   if (lower.includes("prisma") && (lower.includes("migration") || lower.includes("p100") || lower.includes("database"))) return { message: "Prisma/database migration failed. Check DATABASE_URL, database grants, and migration state.", repairAction: "redeploy", category: "prisma_migration" };
   if (lower.includes("client_encoding") && lower.includes("utf8mb4") && (lower.includes("postgres") || lower.includes("pgsql"))) return { message: "PostgreSQL deployment is using a MySQL charset value. Set DB_CHARSET=utf8 and clear DB_COLLATION, then redeploy.", repairAction: "request-approval", category: "postgres_charset" };
+  if (/class\s+["']redis["']\s+not\s+found/i.test(text)) return { message: "Laravel is configured to use Redis but the PHP redis extension is not installed. Install php-redis on the VPS or set CACHE_DRIVER=file and SESSION_DRIVER=file, then redeploy.", repairAction: "request-approval", category: "php_redis_extension" };
   if (lower.includes("please provide a valid cache path") || lower.includes("bootstrap/cache") || lower.includes("storage/framework")) return { message: "Laravel writable/cache directories are missing or not writable. Repair the Laravel storage/bootstrap cache paths, then redeploy.", repairAction: "request-approval", category: "laravel_writable_paths" };
   if (lower.includes("artisan package:discover") || lower.includes("laravel package discovery")) return { message: "Laravel package discovery failed while bootstrapping the app. Check the deployment environment values and the package discovery error output, then redeploy.", repairAction: "request-approval", category: "laravel_package_discovery" };
   const composerPlatform = detectComposerPlatformIssue(text);
@@ -708,6 +709,7 @@ async function executeDoctorApproval(deployment: Awaited<ReturnType<typeof findD
       "install-php": "php",
       "install-php82": "php82",
       "install-php-gd": "php-gd",
+      "install-php-redis": "php-redis",
       "install-python": "python",
       "install-nodejs": "nodejs",
       "install-pnpm": "pnpm",
@@ -1030,6 +1032,15 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
       label: "Normalize PostgreSQL Laravel charset env",
       command: "Set DB_CHARSET=utf8 and clear DB_COLLATION for PostgreSQL deployments",
       reason: "Laravel is sending a MySQL-only utf8mb4 client_encoding to PostgreSQL.",
+      approvalRequired: true
+    });
+  }
+  if (hint?.category === "php_redis_extension") {
+    riskyActions.push({
+      key: "install-php-redis",
+      label: "Install PHP Redis extension",
+      command: "Install php-redis via panel runtime-tools",
+      reason: "Laravel is configured for Redis but PHP cannot load the Redis class.",
       approvalRequired: true
     });
   }

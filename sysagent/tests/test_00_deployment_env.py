@@ -7,6 +7,7 @@ from app.deployment_env import (
     is_laravel_artisan_command,
     is_valid_laravel_app_key,
     normalize_database_charset_env,
+    normalize_laravel_redis_env,
     normalize_process_env,
     prepare_laravel_env_for_sync,
     resolve_laravel_app_key,
@@ -28,6 +29,21 @@ class DeploymentEnvTests(unittest.TestCase):
         self.assertTrue(is_valid_laravel_app_key(VALID_APP_KEY))
         self.assertFalse(is_valid_laravel_app_key(COMPLEX_APP_KEY))
         self.assertFalse(is_valid_laravel_app_key(""))
+
+    def test_normalize_laravel_redis_env_without_extension(self) -> None:
+        env = normalize_laravel_redis_env(
+            {
+                "CACHE_DRIVER": "redis",
+                "CACHE_STORE": "redis",
+                "SESSION_DRIVER": "redis",
+                "QUEUE_CONNECTION": "redis",
+            },
+            redis_loaded=False,
+        )
+        self.assertEqual(env["CACHE_DRIVER"], "file")
+        self.assertEqual(env["CACHE_STORE"], "file")
+        self.assertEqual(env["SESSION_DRIVER"], "file")
+        self.assertEqual(env["QUEUE_CONNECTION"], "sync")
 
     def test_normalize_database_charset_env_for_postgres(self) -> None:
         env = normalize_database_charset_env(

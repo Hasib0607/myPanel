@@ -116,6 +116,7 @@ DEBIAN_PHP82_PACKAGES = (
     "php8.2-curl",
     "php8.2-zip",
     "php8.2-gd",
+    "php8.2-redis",
 )
 DEBIAN_PHP82_REPO_PACKAGES = ("software-properties-common", "ca-certificates", "apt-transport-https")
 DEBIAN_PHP82_REPO_STEPS = (
@@ -282,9 +283,11 @@ PACKAGE_SETS: dict[OsFamily, dict[str, tuple[str, ...]]] = {
             "php-curl",
             "php-zip",
             "php-gd",
+            "php-redis",
         ),
         "php82_runtime": DEBIAN_PHP82_PACKAGES,
         "php_gd": ("php-gd",),
+        "php_redis": ("php-redis",),
         "python_runtime": ("python3", "python3-venv", "python3-pip"),
         "nodejs_runtime": ("nodejs", "npm"),
         "supervisor": ("supervisor",),
@@ -338,8 +341,10 @@ PACKAGE_SETS: dict[OsFamily, dict[str, tuple[str, ...]]] = {
             "php-curl",
             "php-zip",
             "php-gd",
+            "php-redis",
         ),
         "php_gd": ("php-gd",),
+        "php_redis": ("php-redis",),
         "python_runtime": ("python3", "python3-pip"),
         "nodejs_runtime": ("nodejs", "npm"),
         "supervisor": ("supervisor",),
@@ -405,7 +410,7 @@ PLATFORM_PATHS: dict[OsFamily, PlatformPaths] = {
     ),
 }
 
-RUNTIME_TOOL_KEYS = frozenset({"composer", "golang", "php_runtime", "php82_runtime", "php_gd", "python_runtime", "nodejs_runtime", "supervisor", "pnpm", "yarn", "uv", "pm2"})
+RUNTIME_TOOL_KEYS = frozenset({"composer", "golang", "php_runtime", "php82_runtime", "php_gd", "php_redis", "python_runtime", "nodejs_runtime", "supervisor", "pnpm", "yarn", "uv", "pm2"})
 
 
 def _resolve_family(info: OsReleaseInfo | None = None) -> OsFamily:
@@ -649,7 +654,14 @@ def runtime_tool_install_plan(tool: str, info: OsReleaseInfo | None = None) -> P
     if tool == "php82":
         return php82_install_plan(info)
 
-    package_key = {"php": "php_runtime", "php-gd": "php_gd", "python": "python_runtime", "go": "golang", "nodejs": "nodejs_runtime"}.get(tool, tool)
+    package_key = {
+        "php": "php_runtime",
+        "php-gd": "php_gd",
+        "php-redis": "php_redis",
+        "python": "python_runtime",
+        "go": "golang",
+        "nodejs": "nodejs_runtime",
+    }.get(tool, tool)
     if package_key not in PACKAGE_SETS[_resolve_family(info)]:
         raise KeyError(f"Unknown runtime tool '{tool}'")
     return install_plan_for(package_key, info)
