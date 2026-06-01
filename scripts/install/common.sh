@@ -715,17 +715,66 @@ start_core_services() {
   log "Starting services"
   systemctl daemon-reload
   systemctl enable --now vps-panel-sysagent vps-panel-api vps-panel-workers vps-panel-guardian vps-panel-frontend nginx "$BIND_SYSTEMD_SERVICE" "$REDIS_SERVICE" postgresql
+  systemctl restart vps-panel-sysagent vps-panel-api vps-panel-workers vps-panel-guardian vps-panel-frontend
   nginx -t
   systemctl reload nginx
 }
 
+wait_for_http() {
+  local url="$1"
+  local label="$2"
+  local attempts="${3:-45}"
+  local delay="${4:-1}"
+  local attempt=1
+  while (( attempt <= attempts )); do
+    if curl --fail --silent --show-error "$url" >/dev/null; then
+      return 0
+    fi
+    if (( attempt == 1 || attempt % 5 == 0 )); then
+      log "Waiting for $label at $url ($attempt/$attempts)"
+    fi
+    sleep "$delay"
+    attempt=$((attempt + 1))
+  done
+  log "$label did not become healthy at $url"
+  return 1
+}
+
+wait_for_head() {
+  local url="$1"
+  local label="$2"
+  local attempts="${3:-45}"
+  local delay="${4:-1}"
+  local attempt=1
+  while (( attempt <= attempts )); do
+    if curl --fail --silent --show-error --insecure --head "$url" >/dev/null; then
+      return 0
+    fi
+    if (( attempt == 1 || attempt % 5 == 0 )); then
+      log "Waiting for $label at $url ($attempt/$attempts)"
+    fi
+    sleep "$delay"
+    attempt=$((attempt + 1))
+  done
+  log "$label did not become healthy at $url"
+  return 1
+}
+
+diagnose_service_failure() {
+  local service="$1"
+  log "---- systemctl status $service ----"
+  systemctl status "$service" --no-pager -l || true
+  log "---- journalctl -u $service ----"
+  journalctl -u "$service" -n 80 --no-pager || true
+}
+
 run_smoke_tests() {
   log "Running smoke tests"
-  curl --fail --silent --show-error "http://127.0.0.1:$SYSAGENT_PORT/health" >/dev/null
-  curl --fail --silent --show-error "http://127.0.0.1:$PANEL_PORT/health" >/dev/null
-  curl --fail --silent --show-error --head "http://127.0.0.1:$FRONTEND_PORT/login" >/dev/null
-  curl --fail --silent --show-error --insecure --head "$PANEL_PUBLIC_SCHEME://127.0.0.1:$PANEL_LOGIN_PORT/login" >/dev/null
-  curl --fail --silent --show-error --insecure --head "$PANEL_PUBLIC_SCHEME://127.0.0.1:$CPANEL_LOGIN_PORT/login" >/dev/null
+  wait_for_http "http://127.0.0.1:$SYSAGENT_PORT/health" "sysagent" || { diagnose_service_failure vps-panel-sysagent; return 1; }
+  wait_for_http "http://127.0.0.1:$PANEL_PORT/health" "api" || { diagnose_service_failure vps-panel-api; return 1; }
+  wait_for_head "http://127.0.0.1:$FRONTEND_PORT/login" "frontend" || { diagnose_service_failure vps-panel-frontend; return 1; }
+  wait_for_head "$PANEL_PUBLIC_SCHEME://127.0.0.1:$PANEL_LOGIN_PORT/login" "admin panel listener" || { diagnose_service_failure nginx; return 1; }
+  wait_for_head "$PANEL_PUBLIC_SCHEME://127.0.0.1:$CPANEL_LOGIN_PORT/login" "account panel listener" || { diagnose_service_failure nginx; return 1; }
   redis-cli ping >/dev/null
   if [[ "$DB_CREATE" == "true" && ( "$DB_HOST" == "localhost" || "$DB_HOST" == "127.0.0.1" ) ]]; then
     runuser -u postgres -- psql -d "$DB_NAME" -c "select 1" >/dev/null
