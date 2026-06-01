@@ -722,9 +722,16 @@ async function runHealthCheckWithGuardianRecovery(
         health: health as Prisma.InputJsonValue
       }, "warn");
 
-      await runStep(deployment.id, releaseId, "HEALTH_CHECK", "Guardian deployment repair", () =>
+      await runStep(deployment.id, releaseId, "HEALTH_CHECK", "Guardian deployment repair", async () =>
         runGuardianDeploymentRepair({ rootPath: appPath, framework: deployment.framework, envVars })
-      );
+      ).then(async (repair) => {
+        const repairedKey = (repair as { appKey?: string }).appKey;
+        if (repairedKey) {
+          envVars.APP_KEY = repairedKey;
+          await upsertDeploymentEnvValue(deployment.id, "APP_KEY", repairedKey);
+        }
+        return repair;
+      });
       await runStep(deployment.id, releaseId, "HEALTH_CHECK", "Guardian process restart", () =>
         restartDeploymentProcess({
           deploymentId: deployment.id,
@@ -1030,25 +1037,47 @@ function isLaravelWritablePathIssue(text: string) {
     || lower.includes("laravel package discovery failed");
 }
 
+async function applyLaravelAppKeyFromSync(
+  deploymentId: string,
+  envVars: Record<string, string>,
+  syncResult: unknown
+) {
+  const appKey = (syncResult as { appKey?: string }).appKey;
+  if (appKey && appKey !== envVars.APP_KEY) {
+    envVars.APP_KEY = appKey;
+    await upsertDeploymentEnvValue(deploymentId, "APP_KEY", appKey);
+  }
+  return envVars;
+}
+
+async function ensureLaravelAppKey(
+  deploymentId: string,
+  releaseId: string | undefined,
+  appPath: string,
+  port: number,
+  envVars: Record<string, string>
+) {
+  const syncResult = await runStep(deploymentId, releaseId, "PREFLIGHT", "Sync Laravel .env", () =>
+    sysagent.deploymentSyncLaravelEnv({
+      rootPath: appPath,
+      port,
+      env: envVars
+    })
+  );
+  assertCommandTree(syncResult, "Sync Laravel .env");
+  return applyLaravelAppKeyFromSync(deploymentId, envVars, syncResult);
+}
+
 async function prepareLaravelForStart(
   deploymentId: string,
   releaseId: string | undefined,
   appPath: string,
+  port: number,
   envVars: Record<string, string>
 ) {
   await runStep(deploymentId, releaseId, "BUILDING", "Prepare Laravel runtime paths", () =>
     sysagent.deploymentRepairLaravelWritablePaths({ rootPath: appPath })
   );
-
-  if (!envVars.APP_KEY?.trim()) {
-    await runStep(deploymentId, releaseId, "BUILDING", "Generate Laravel APP_KEY", () =>
-      sysagent.deploymentBuild({
-        rootPath: appPath,
-        command: "php artisan key:generate --force",
-        env: envVars
-      })
-    );
-  }
 
   await runStep(deploymentId, releaseId, "BUILDING", "Clear Laravel config cache", () =>
     sysagent.deploymentBuild({
@@ -1452,14 +1481,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     }
 
     if (deployment.framework === "LARAVEL") {
-      const envSyncResult = await runStep(deployment.id, releaseId, "PREFLIGHT", "Sync Laravel .env", () =>
-        sysagent.deploymentSyncLaravelEnv({
-          rootPath: appPath,
-          port: deployment.port,
-          env: envVars
-        })
-      );
-      assertCommandTree(envSyncResult, "Sync Laravel .env");
+      envVars = await ensureLaravelAppKey(deployment.id, releaseId, appPath, deployment.port, envVars);
 
       const optimizeClearResult = await runStep(deployment.id, releaseId, "INSTALLING", "Laravel cache clear", () =>
         sysagent.deploymentBuild({
@@ -1561,7 +1583,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
 
     const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
     if (deployment.framework === "LARAVEL") {
-      await prepareLaravelForStart(deployment.id, releaseId, appPath, envVars);
+      envVars = await ensureLaravelAppKey(deployment.id, releaseId, appPath, deployment.port, envVars);
+      await prepareLaravelForStart(deployment.id, releaseId, appPath, deployment.port, envVars);
     }
     const startResult = await runLiveDeploymentProcess(
       deployment.id,

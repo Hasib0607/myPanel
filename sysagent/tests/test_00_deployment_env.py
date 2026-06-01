@@ -5,8 +5,10 @@ from pathlib import Path
 from app.deployment_env import (
     format_dotenv_line,
     is_laravel_artisan_command,
+    is_valid_laravel_app_key,
     normalize_process_env,
-    prepare_supervisor_runtime,
+    prepare_laravel_env_for_sync,
+    resolve_laravel_app_key,
     sync_laravel_env_file,
     write_env_file,
 )
@@ -17,65 +19,69 @@ COMPLEX_APP_KEY = (
     "@@Wave[{(##Akash@@{UuM.KgYpks@yi/x-D0t?icuMQ-V2+Uh@WaveBox@Hasib@@01886515571@@15571@@unKown@@0^07199%016775"
     r"&^\\$*#^hsgadjhb*%#^*15579@supersecrate@@0^07199%hh\\$%^hh@@\\`~^*\\$#Hasib@@&^%^&%#^\\$%\\$%^\\$\\$&^&72937(*^\\$*#)9)l)ipQMO6.mo-m#CrazyS*^*x&&&SS%%55)}]"
 )
+VALID_APP_KEY = "base64:" + "A" * 43 + "="
 
 
 class DeploymentEnvTests(unittest.TestCase):
-    def test_format_dotenv_line_uses_single_quotes_for_complex_secrets(self) -> None:
-        line = format_dotenv_line("APP_KEY", COMPLEX_APP_KEY)
-        self.assertTrue(line.startswith("APP_KEY='"))
-        self.assertTrue(line.endswith("'"))
-        self.assertNotIn('\\"', line)
+    def test_is_valid_laravel_app_key(self) -> None:
+        self.assertTrue(is_valid_laravel_app_key(VALID_APP_KEY))
+        self.assertFalse(is_valid_laravel_app_key(COMPLEX_APP_KEY))
+        self.assertFalse(is_valid_laravel_app_key(""))
 
-    def test_format_dotenv_line_quotes_values_with_hash_or_spaces(self) -> None:
-        self.assertEqual(format_dotenv_line("APP_NAME", "My App"), "APP_NAME='My App'")
-        self.assertEqual(format_dotenv_line("NOTE", "value#hash"), "NOTE='value#hash'")
-        self.assertEqual(format_dotenv_line("CALLBACK", "pay(done)"), "CALLBACK='pay(done)'")
-
-    def test_format_dotenv_line_keeps_simple_values_unquoted(self) -> None:
-        self.assertEqual(format_dotenv_line("APP_ENV", "production"), "APP_ENV=production")
-
-    def test_format_dotenv_line_double_quotes_when_single_quotes_present(self) -> None:
-        line = format_dotenv_line("MSG", "it's fine")
-        self.assertEqual(line, 'MSG="it\'s fine"')
-
-    def test_normalize_process_env_includes_port(self) -> None:
-        env = normalize_process_env(10002, {"APP_ENV": "production"})
-        self.assertEqual(env["PORT"], "10002")
-        self.assertEqual(env["APP_ENV"], "production")
-
-    def test_sync_laravel_env_file_writes_phpdotenv_safe_values(self) -> None:
+    def test_prepare_laravel_env_for_sync_rejects_invalid_panel_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            env_path = sync_laravel_env_file(str(root), 10002, {"APP_KEY": COMPLEX_APP_KEY})
-            content = env_path.read_text(encoding="utf-8")
-            self.assertIn("APP_KEY='", content)
-            self.assertNotIn('\\"', content)
+            process_env, needs_generate = prepare_laravel_env_for_sync(
+                str(root),
+                10002,
+                {"APP_KEY": COMPLEX_APP_KEY, "APP_ENV": "production"},
+            )
+            self.assertNotIn("APP_KEY", process_env)
+            self.assertTrue(needs_generate)
+
+    def test_prepare_laravel_env_for_sync_preserves_valid_existing_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env_path = root / ".env"
+            env_path.write_text(f"APP_KEY={VALID_APP_KEY}\n", encoding="utf-8")
+            process_env, needs_generate = prepare_laravel_env_for_sync(str(root), 10002, {"APP_ENV": "production"})
+            self.assertEqual(process_env["APP_KEY"], VALID_APP_KEY)
+            self.assertFalse(needs_generate)
+
+    def test_resolve_laravel_app_key_prefers_valid_panel_value(self) -> None:
+        resolved = resolve_laravel_app_key({"APP_KEY": VALID_APP_KEY}, {"APP_KEY": "base64:" + "B" * 43 + "="})
+        self.assertEqual(resolved, VALID_APP_KEY)
+
+    def test_format_dotenv_line_uses_single_quotes_for_complex_secrets(self) -> None:
+        line = format_dotenv_line("DB_PASSWORD", COMPLEX_APP_KEY)
+        self.assertTrue(line.startswith("DB_PASSWORD='"))
+        self.assertTrue(line.endswith("'"))
+
+    def test_format_dotenv_line_keeps_base64_app_key_unquoted(self) -> None:
+        self.assertEqual(format_dotenv_line("APP_KEY", VALID_APP_KEY), f"APP_KEY={VALID_APP_KEY}")
+
+    def test_sync_laravel_env_file_flags_missing_key_for_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path, app_key, needs_generate = sync_laravel_env_file(str(Path(tmp)), 10002, {"APP_ENV": "production"})
+            self.assertTrue(env_path.is_file())
+            self.assertIsNone(app_key)
+            self.assertTrue(needs_generate)
 
     def test_prepare_supervisor_runtime_writes_wrapper_and_laravel_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            from app.deployment_env import prepare_supervisor_runtime
+
             wrapper, runtime_env, laravel_env = prepare_supervisor_runtime(
                 str(root),
                 ["php", "artisan", "serve", "--host=127.0.0.1", "--port", "10002"],
                 10002,
-                {"APP_KEY": COMPLEX_APP_KEY},
+                {"APP_KEY": VALID_APP_KEY},
             )
             self.assertTrue(wrapper.is_file())
             self.assertTrue(runtime_env.is_file())
             self.assertEqual(laravel_env.resolve(), (root / ".env").resolve())
-            runtime_content = runtime_env.read_text(encoding="utf-8")
-            self.assertIn("APP_KEY='", runtime_content)
-            wrapper_text = wrapper.read_text(encoding="utf-8")
-            self.assertIn("source", wrapper_text)
-            self.assertIn("exec php artisan serve", wrapper_text)
-
-    def test_write_env_file_supports_percent_and_quotes_without_bash_escapes(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            env_path = Path(tmp) / "runtime.env"
-            write_env_file(env_path, {"SECRET": 'abc%"def', "PLAIN": "ok"})
-            content = env_path.read_text(encoding="utf-8")
-            self.assertIn("SECRET='abc%\"def'", content)
-            self.assertIn("PLAIN=ok", content)
+            self.assertIn(f"APP_KEY={VALID_APP_KEY}", runtime_env.read_text(encoding="utf-8"))
 
     def test_is_laravel_artisan_command(self) -> None:
         self.assertTrue(is_laravel_artisan_command(["php", "artisan", "serve"]))

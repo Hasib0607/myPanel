@@ -7,6 +7,7 @@ from pathlib import Path
 VALID_ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Runtime env files are sourced by bash; keep only shell-boring token chars unquoted.
 UNQUOTED_DOTENV_VALUE = re.compile(r"^[A-Za-z0-9_./:@%+=,-]+$")
+LARAVEL_APP_KEY = re.compile(r"^base64:[A-Za-z0-9+/]{43}=$")
 
 
 def normalize_process_env(port: int | None, env: dict[str, str] | None) -> dict[str, str]:
@@ -18,6 +19,39 @@ def normalize_process_env(port: int | None, env: dict[str, str] | None) -> dict[
             if VALID_ENV_KEY.match(key):
                 merged[key] = str(value)
     return merged
+
+
+def is_valid_laravel_app_key(value: str | None) -> bool:
+    if not value or not str(value).strip():
+        return False
+    return bool(LARAVEL_APP_KEY.fullmatch(str(value).strip()))
+
+
+def resolve_laravel_app_key(process_env: dict[str, str], existing: dict[str, str]) -> str | None:
+    for candidate in (process_env.get("APP_KEY"), existing.get("APP_KEY")):
+        if is_valid_laravel_app_key(candidate):
+            return str(candidate).strip()
+    return None
+
+
+def prepare_laravel_env_for_sync(
+    root_path: str,
+    port: int | None,
+    env: dict[str, str] | None,
+) -> tuple[dict[str, str], bool]:
+    env_path = Path(root_path).resolve() / ".env"
+    process_env = normalize_process_env(port, env)
+    existing = read_existing_env_values(env_path)
+
+    panel_key = process_env.get("APP_KEY", "")
+    if panel_key and not is_valid_laravel_app_key(panel_key):
+        process_env.pop("APP_KEY", None)
+
+    resolved = resolve_laravel_app_key(process_env, existing)
+    if resolved:
+        process_env["APP_KEY"] = resolved
+        return process_env, False
+    return process_env, True
 
 
 def format_dotenv_line(key: str, value: str) -> str:
@@ -62,16 +96,11 @@ def read_existing_env_values(path: Path) -> dict[str, str]:
     return values
 
 
-def sync_laravel_env_file(root_path: str, port: int | None, env: dict[str, str] | None) -> Path:
+def sync_laravel_env_file(root_path: str, port: int | None, env: dict[str, str] | None) -> tuple[Path, str | None, bool]:
     env_path = Path(root_path).resolve() / ".env"
-    process_env = normalize_process_env(port, env)
-    existing = read_existing_env_values(env_path)
-    # key:generate writes APP_KEY into .env. Preserve it on restart when the UI/env
-    # store does not yet have an APP_KEY, otherwise Laravel falls back into HTTP 500.
-    if not process_env.get("APP_KEY") and existing.get("APP_KEY"):
-        process_env["APP_KEY"] = existing["APP_KEY"]
+    process_env, needs_key_generate = prepare_laravel_env_for_sync(root_path, port, env)
     write_env_file(env_path, process_env)
-    return env_path
+    return env_path, process_env.get("APP_KEY"), needs_key_generate
 
 
 def is_laravel_artisan_command(start_command: list[str]) -> bool:
@@ -104,10 +133,10 @@ def prepare_supervisor_runtime(
     panel_dir = cwd / ".panel"
     runtime_env = panel_dir / "runtime.env"
     wrapper = panel_dir / "run.sh"
-    process_env = normalize_process_env(port, env)
+    process_env, _needs_key_generate = prepare_laravel_env_for_sync(str(cwd), port, env)
     write_env_file(runtime_env, process_env)
     write_supervisor_wrapper(wrapper, runtime_env, str(cwd), start_command)
     laravel_env_path = None
     if is_laravel_artisan_command(start_command):
-        laravel_env_path = sync_laravel_env_file(str(cwd), port, env)
+        laravel_env_path, _, _ = sync_laravel_env_file(str(cwd), port, env)
     return wrapper, runtime_env, laravel_env_path

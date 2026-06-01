@@ -101,7 +101,7 @@ export const sysagent = {
   deploymentHealth: (body: unknown) =>
     request("/deployments/health", { method: "POST", body: JSON.stringify(body) }),
   deploymentGuardianRepair: (body: { rootPath: string; framework?: string; env?: Record<string, string> }) =>
-    request<{ returncode: number; steps: Record<string, unknown>; failed?: string[] }>("/deployments/guardian-repair", {
+    request<{ returncode: number; steps: Record<string, unknown>; failed?: string[]; appKey?: string }>("/deployments/guardian-repair", {
       method: "POST",
       body: JSON.stringify(body)
     }),
@@ -118,7 +118,7 @@ export const sysagent = {
   deploymentRepairLaravelWritablePaths: (body: unknown) =>
     request<SysagentCommandResult>("/deployments/laravel/repair-writable-paths", { method: "POST", body: JSON.stringify(body) }),
   deploymentSyncLaravelEnv: (body: { rootPath: string; port?: number; env?: Record<string, string> }) =>
-    request<SysagentCommandResult & { envPath?: string }>("/deployments/laravel/sync-env-file", { method: "POST", body: JSON.stringify(body) }),
+    request<SysagentCommandResult & { envPath?: string; appKey?: string; keyGenerated?: boolean }>("/deployments/laravel/sync-env-file", { method: "POST", body: JSON.stringify(body) }),
   deploymentRepairSupervisor: (body: unknown) =>
     request<SysagentCommandResult>("/deployments/supervisor/repair", { method: "POST", body: JSON.stringify(body) }),
   deploymentNginxInspect: (body: unknown) =>

@@ -11,7 +11,13 @@ from pydantic import BaseModel, Field
 
 from app.command import run_command, run_install_plan
 from app.config import DEPLOYMENT_COMMANDS_LIVE, settings
-from app.deployment_env import prepare_supervisor_runtime, sync_laravel_env_file
+from app.deployment_env import (
+    is_laravel_artisan_command,
+    is_valid_laravel_app_key,
+    prepare_supervisor_runtime,
+    read_existing_env_values,
+    sync_laravel_env_file,
+)
 from app.deployment_commands import normalize_laravel_start_command, parse_deployment_command
 from app.deployment_health import curl_health_probe
 from app.platform import runtime_tool_install_plan
@@ -401,6 +407,11 @@ def supervisor_start(body: ProcessRequest, start_command: list[str]) -> dict:
     if not info["allowed"]:
         return blocked_command("Path escapes configured file manager root", ["supervisorctl", "start", body.name], info)
 
+    if is_laravel_artisan_command(start_command):
+        ensure = _ensure_laravel_env(body.rootPath, body.port, body.env)
+        if ensure.get("returncode") != 0:
+            return ensure
+
     reset_runtime_logs(log_dir)
     config_dir.mkdir(parents=True, exist_ok=True)
     service = ensure_supervisord_running()
@@ -469,6 +480,12 @@ def pm2_start(body: ProcessRequest, start_command: list[str]) -> dict:
         log_dir = safe_log_dir(body.name, body.logDir)
     except ValueError as error:
         return blocked_command(str(error), ["pm2", "start", body.name], path_info(body.rootPath))
+
+    if is_laravel_artisan_command(start_command):
+        ensure = _ensure_laravel_env(body.rootPath, body.port, body.env)
+        if ensure.get("returncode") != 0:
+            return ensure
+
     reset_runtime_logs(log_dir)
     delete = guarded_command(body.rootPath, ["pm2", "delete", body.name], cwd=cwd)
     if "not found" in (delete.get("stderr") or "").lower() or "not found" in (delete.get("stdout") or "").lower():
@@ -1014,33 +1031,76 @@ def repair_permissions(body: PermissionRepairRequest) -> dict:
     return {"dryRun": any(result.get("dryRun") for result in steps.values()), "returncode": 1 if failed else 0, "steps": steps}
 
 
-@router.post("/laravel/sync-env-file")
-def sync_laravel_env(body: SyncEnvFileRequest) -> dict:
-    info = path_info(body.rootPath)
+def _ensure_laravel_env(root_path: str, port: int | None, env: dict[str, str] | None) -> dict:
+    info = path_info(root_path)
     if not info["allowed"]:
-        return blocked_command("Path escapes configured file manager root", ["sync-env-file", body.rootPath], info)
+        return blocked_command("Path escapes configured file manager root", ["ensure-laravel-env", root_path], info)
+
     try:
-        env_path = sync_laravel_env_file(body.rootPath, body.port, body.env)
+        env_path, app_key, needs_key_generate = sync_laravel_env_file(root_path, port, env)
     except (OSError, ValueError) as error:
         return {
             "dryRun": False,
-            "command": ["write-file", str(Path(body.rootPath) / ".env")],
-            "cwd": deployment_cwd(body.rootPath),
+            "command": ["write-file", str(Path(root_path) / ".env")],
+            "cwd": deployment_cwd(root_path),
             "stdout": "",
             "stderr": str(error),
             "returncode": 1,
             "path": info,
         }
+
+    key_generate: dict | None = None
+    if needs_key_generate:
+        runtime_env = read_existing_env_values(env_path)
+        key_generate = guarded_deployment_command(
+            root_path,
+            "php artisan key:generate --force",
+            env=runtime_env or None,
+        )
+        if key_generate.get("returncode") != 0:
+            return {
+                "dryRun": False,
+                "command": ["php", "artisan", "key:generate", "--force"],
+                "cwd": deployment_cwd(root_path),
+                "stdout": key_generate.get("stdout") or "",
+                "stderr": key_generate.get("stderr") or "Failed to generate Laravel APP_KEY",
+                "returncode": 1,
+                "path": info,
+                "envPath": str(env_path),
+                "keyGenerate": key_generate,
+            }
+        env_path, app_key, _ = sync_laravel_env_file(root_path, port, env)
+        if not is_valid_laravel_app_key(app_key):
+            return {
+                "dryRun": False,
+                "command": ["php", "artisan", "key:generate", "--force"],
+                "cwd": deployment_cwd(root_path),
+                "stdout": key_generate.get("stdout") or "",
+                "stderr": "APP_KEY was not written to .env after key:generate",
+                "returncode": 1,
+                "path": info,
+                "envPath": str(env_path),
+                "keyGenerate": key_generate,
+            }
+
     return {
         "dryRun": False,
         "command": ["write-file", str(env_path)],
-        "cwd": deployment_cwd(body.rootPath),
+        "cwd": deployment_cwd(root_path),
         "stdout": f"Synced {env_path}",
         "stderr": "",
         "returncode": 0,
         "path": info,
         "envPath": str(env_path),
+        "appKey": app_key,
+        "keyGenerated": bool(needs_key_generate and key_generate and key_generate.get("returncode") == 0),
+        "keyGenerate": key_generate,
     }
+
+
+@router.post("/laravel/sync-env-file")
+def sync_laravel_env(body: SyncEnvFileRequest) -> dict:
+    return _ensure_laravel_env(body.rootPath, body.port, body.env)
 
 
 @router.post("/laravel/repair-writable-paths")
@@ -1084,10 +1144,15 @@ def guardian_repair(body: GuardianRepairRequest) -> dict:
     steps: dict[str, dict] = {}
 
     if framework == "LARAVEL":
-        steps["writablePaths"] = repair_laravel_writable_paths(LaravelWritablePathsRequest(rootPath=body.rootPath))
+        port = None
         env = dict(body.env or {})
-        if not env.get("APP_KEY", "").strip():
-            steps["appKey"] = guarded_deployment_command(body.rootPath, "php artisan key:generate --force", env=env or None)
+        port_raw = env.get("PORT")
+        if port_raw and str(port_raw).isdigit():
+            port = int(port_raw)
+        steps["env"] = _ensure_laravel_env(body.rootPath, port, env)
+        if steps["env"].get("appKey"):
+            env["APP_KEY"] = steps["env"]["appKey"]
+        steps["writablePaths"] = repair_laravel_writable_paths(LaravelWritablePathsRequest(rootPath=body.rootPath))
         steps["optimizeClear"] = guarded_deployment_command(body.rootPath, "php artisan optimize:clear", env=env or None)
         steps["configClear"] = guarded_deployment_command(body.rootPath, "php artisan config:clear", env=env or None)
         steps["cacheClear"] = guarded_deployment_command(body.rootPath, "php artisan cache:clear", env=env or None)
@@ -1095,12 +1160,14 @@ def guardian_repair(body: GuardianRepairRequest) -> dict:
         steps["viewClear"] = guarded_deployment_command(body.rootPath, "php artisan view:clear", env=env or None)
 
     failed = [name for name, step in steps.items() if step.get("returncode", 0) != 0]
+    app_key = steps.get("env", {}).get("appKey") if framework == "LARAVEL" else None
     return {
         "framework": framework or None,
         "dryRun": any(step.get("dryRun") for step in steps.values()),
         "returncode": 1 if failed else 0,
         "steps": steps,
         "failed": failed,
+        "appKey": app_key,
     }
 
 
@@ -1189,7 +1256,7 @@ def port_status(body: PortStatusRequest) -> dict:
 @router.post("/health")
 def health(body: HealthRequest) -> dict:
     url = body.healthUrl or f"http://127.0.0.1:{body.port}/"
-    accept_http_errors = False
+    accept_http_errors = (body.framework or "").upper() == "LARAVEL"
 
     mismatch = _pm2_process_mismatch(body)
     if mismatch:
