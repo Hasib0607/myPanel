@@ -10,7 +10,14 @@ import { laravelPublicCwdMissing } from "../lib/deploymentFailureRuntimeRepairs.
 import { detectComposerPlatformIssue, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import { audit } from "../lib/audit.js";
 import { detectDeploymentFiles, detectDeploymentSource } from "../lib/deploymentDetection.js";
-import { buildDeploymentNginxRequest, deploymentFallbackRootPath } from "../lib/deploymentDomainSsl.js";
+import {
+  boundDomainFromBinding,
+  buildDeploymentNginxRequest,
+  deploymentFallbackRootPath,
+  deploymentIsRoutable,
+  publishDeploymentProxyNginx,
+  publishPublicHtmlNginxVhost
+} from "../lib/deploymentDomainSsl.js";
 import { prisma } from "../lib/prisma.js";
 import { deleteSecret, getSecret, putSecret } from "../lib/secrets.js";
 import { sysagent } from "../lib/sysagent.js";
@@ -226,6 +233,51 @@ async function findDeploymentBindingBySelection(deploymentId: string, selectionI
       : { deploymentId_domainId: { deploymentId, domainId: target.domainId ?? "" } },
     include: { domain: true, subdomain: { include: { domain: true } } }
   });
+}
+
+function deploymentRouteRootPath(deployment: { rootPath: string; rootDirectory?: string | null }) {
+  const cleanRootDirectory = (deployment.rootDirectory || ".").replace(/^\/+|\/+$/g, "");
+  return cleanRootDirectory && cleanRootDirectory !== "." ? path.join(deployment.rootPath, cleanRootDirectory) : deployment.rootPath;
+}
+
+async function publishDomainRouteForBinding(
+  deployment: {
+    id: string;
+    status?: string | null;
+    port: number;
+    rootPath: string;
+    rootDirectory?: string | null;
+    framework: DeploymentFramework;
+    startCommand?: string | null;
+    publicDirectory?: string | null;
+    outputDirectory?: string | null;
+  },
+  binding: { domain?: any; subdomain?: any }
+) {
+  const domain = boundDomainFromBinding(binding);
+  if (!domain) return null;
+  if (!deploymentIsRoutable(deployment)) {
+    return publishPublicHtmlNginxVhost(domain);
+  }
+  return publishDeploymentProxyNginx({
+    deploymentId: deployment.id,
+    fqdn: deploymentServerName(domain) ?? domain.name,
+    upstreamPort: deployment.port,
+    rootPath: deploymentRouteRootPath(deployment),
+    framework: deployment.framework,
+    startCommand: deployment.startCommand,
+    publicDirectory: deployment.publicDirectory,
+    outputDirectory: deployment.outputDirectory,
+    fallbackRootPath: deploymentFallbackRootPath(domain),
+    forceHttps: domain.forceSsl
+  });
+}
+
+async function reconcileSelectedDomainRoute(deploymentId: string, selectionId: string | null | undefined) {
+  if (!selectionId) return null;
+  const deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId } });
+  const binding = await findDeploymentBindingBySelection(deploymentId, selectionId);
+  return publishDomainRouteForBinding(deployment, binding);
 }
 
 async function syncPrimaryBindingTarget(deploymentId: string, selectionId: string | null | undefined) {
@@ -1510,6 +1562,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       webhook
     });
     await syncPrimaryBindingTarget(deployment.id, selectedDomainId);
+    await reconcileSelectedDomainRoute(deployment.id, selectedDomainId);
     return reply.code(existingDeployment ? 200 : 201).send(await findDeployment(deployment.id));
   });
 
@@ -1530,6 +1583,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       }
     });
     await syncPrimaryBindingTarget(deployment.id, selectedDomainId);
+    await reconcileSelectedDomainRoute(deployment.id, selectedDomainId);
     if (body.autoDeployEnabled && body.sourceProvider === "GITHUB") {
       const connection = await prisma.gitHubConnection.findUnique({ where: { id: "superadmin" } });
       const token = connection?.tokenSecretRef ? await getSecret(connection.tokenSecretRef) : null;
@@ -1584,6 +1638,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       }
     });
     await syncPrimaryBindingTarget(deployment.id, selectedDomainId);
+    await reconcileSelectedDomainRoute(deployment.id, selectedDomainId);
     await audit(request, { action: "UPDATE", resource: "deployment", resourceId: deployment.id, description: `Updated deployment ${updated.slug}` });
     return findDeployment(deployment.id);
   });
@@ -1635,6 +1690,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     } else if (target.domainId) {
       await prisma.domain.update({ where: { id: target.domainId }, data: { hostingMode: "DEPLOYMENT_PROXY", hostingDeploymentId: deployment.id } });
     }
+    await publishDomainRouteForBinding(deployment, binding);
     await audit(request, { action: "UPDATE", resource: "deployment", resourceId: deployment.id, description: `Bound domain ${target.displayName} to ${deployment.slug}` });
     return reply.code(201).send(serializeDomainBinding(binding));
   });
@@ -1651,6 +1707,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     ];
     if (target.domainId) updates.push(prisma.domain.update({ where: { id: target.domainId }, data: { hostingMode: "DEPLOYMENT_PROXY", hostingDeploymentId: deployment.id } }));
     await prisma.$transaction(updates);
+    await publishDomainRouteForBinding(deployment, binding);
     await audit(request, { action: "UPDATE", resource: "deployment", resourceId: deployment.id, description: `Set primary domain ${target.displayName} for ${deployment.slug}` });
     return { ok: true };
   });
@@ -1660,6 +1717,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     const deployment = await findDeployment(deploymentId);
     const target = await resolveBindingTarget(domainId);
     const binding = await findDeploymentBindingBySelection(deployment.id, domainId);
+    const removedDomain = boundDomainFromBinding(binding);
     await prisma.deploymentDomain.delete({ where: { id: binding.id } });
     if (deployment.domainId === domainId) {
       const next = await prisma.deploymentDomain.findFirst({ where: { deploymentId: deployment.id }, include: { domain: true, subdomain: { include: { domain: true } } }, orderBy: { createdAt: "asc" } });
@@ -1675,12 +1733,14 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
         if (next.domainId) updates.push(prisma.domain.update({ where: { id: next.domainId }, data: { hostingMode: "DEPLOYMENT_PROXY", hostingDeploymentId: deployment.id } }));
       }
       await prisma.$transaction(updates);
+      if (next) await publishDomainRouteForBinding(deployment, next);
     } else if (target.domainId) {
       await prisma.domain.updateMany({
         where: { id: target.domainId, hostingDeploymentId: deployment.id },
         data: { hostingMode: "PUBLIC_HTML", hostingDeploymentId: null }
       });
     }
+    await publishPublicHtmlNginxVhost(removedDomain);
     await audit(request, { action: "UPDATE", resource: "deployment", resourceId: deployment.id, description: `Removed a domain from ${deployment.slug}` });
     return { ok: true };
   });

@@ -6,7 +6,7 @@ import { Prisma } from "@prisma/client";
 import { env } from "../config/env.js";
 import { audit } from "../lib/audit.js";
 import { ensureDomainFileStructure, ensureSubdomainFileStructure } from "../lib/domainFiles.js";
-import { buildDeploymentNginxRequest } from "../lib/deploymentDomainSsl.js";
+import { buildDeploymentNginxRequest, deploymentIsRoutable, publishPublicHtmlNginxVhost } from "../lib/deploymentDomainSsl.js";
 import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
 import { sysagent } from "../lib/sysagent.js";
@@ -347,7 +347,7 @@ async function publishDomainHosting(domainId: string) {
   let nginxResult;
   if (domain.hostingMode === "DEPLOYMENT_PROXY") {
     const deployment = domain.hostingDeploymentId
-      ? await prisma.deployment.findUniqueOrThrow({ where: { id: domain.hostingDeploymentId } })
+      ? await prisma.deployment.findUnique({ where: { id: domain.hostingDeploymentId } })
       : await prisma.deployment.findFirst({
           where: {
             OR: [
@@ -357,21 +357,30 @@ async function publishDomainHosting(domainId: string) {
           },
           orderBy: { createdAt: "desc" }
         });
-    if (!deployment) throw Object.assign(new Error("Select a deployment before publishing deployment proxy hosting."), { statusCode: 400 });
-    nginxResult = await sysagent.deploymentNginx(
-      buildDeploymentNginxRequest({
-        deploymentId: deployment.id,
-        fqdn: `${domain.name} www.${domain.name}`,
-        upstreamPort: deployment.port,
-        rootPath: deployment.rootPath,
-        framework: deployment.framework,
-        startCommand: deployment.startCommand,
-        publicDirectory: deployment.publicDirectory,
-        outputDirectory: deployment.outputDirectory,
-        fallbackRootPath: path.join(env.FILE_MANAGER_ROOT, domain.name, normalizeDocumentRoot(domain.documentRoot)),
-        forceSsl: domain.forceSsl && domain.sslEnabled
-      })
-    );
+    if (deployment && deploymentIsRoutable(deployment)) {
+      nginxResult = await sysagent.deploymentNginx(
+        buildDeploymentNginxRequest({
+          deploymentId: deployment.id,
+          fqdn: `${domain.name} www.${domain.name}`,
+          upstreamPort: deployment.port,
+          rootPath: deployment.rootPath,
+          framework: deployment.framework,
+          startCommand: deployment.startCommand,
+          publicDirectory: deployment.publicDirectory,
+          outputDirectory: deployment.outputDirectory,
+          fallbackRootPath: path.join(env.FILE_MANAGER_ROOT, domain.name, normalizeDocumentRoot(domain.documentRoot)),
+          forceSsl: domain.forceSsl && domain.sslEnabled
+        })
+      );
+    } else {
+      nginxResult = await publishPublicHtmlNginxVhost({
+        id: domain.id,
+        name: domain.name,
+        forceSsl: domain.forceSsl,
+        sslEnabled: domain.sslEnabled,
+        documentRoot: domain.documentRoot
+      });
+    }
   } else if (domain.hostingMode === "REDIRECT") {
     if (!domain.redirectUrl) throw Object.assign(new Error("Set a redirect URL before publishing redirect hosting."), { statusCode: 400 });
     nginxResult = await sysagent.writeRedirectNginxVhost({

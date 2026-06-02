@@ -6,9 +6,11 @@ import { prisma } from "../lib/prisma.js";
 import { sysagent, type SysagentCommandResult } from "../lib/sysagent.js";
 import {
   deploymentFallbackRootPath,
+  deploymentIsRoutable,
   deploymentServerName,
   findDeploymentProxyTarget,
-  publishDeploymentProxyNginx
+  publishDeploymentProxyNginx,
+  publishPublicHtmlNginxVhost
 } from "../lib/deploymentDomainSsl.js";
 
 function assertLiveCommandSucceeded(action: string, result: SysagentCommandResult) {
@@ -51,6 +53,9 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
       forceSsl: forceHttps,
       sslEnabled: true,
       documentRoot: proxyTarget.domain.documentRoot,
+      publicRootPath: proxyTarget.subdomainId
+        ? `${env.FILE_MANAGER_ROOT}/${proxyTarget.domain.name}/subdomains/${domainName.replace(new RegExp(`\\.${proxyTarget.domain.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`), "")}`
+        : undefined,
       includeWww: includeWww && proxyTarget.includeWww !== false
     };
     const result = await publishDeploymentProxyNginx({
@@ -86,20 +91,37 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
     const deployment = domain.hostingDeploymentId
       ? await prisma.deployment.findUnique({ where: { id: domain.hostingDeploymentId } })
       : domain.deploymentBindings[0]?.deployment ?? domain.deployments[0] ?? null;
-    if (!deployment) throw new Error(`No deployment selected for ${domainName} HTTPS proxy`);
-    result = await publishDeploymentProxyNginx({
-      deploymentId: deployment.id,
-      fqdn: sslServerName(domainName, includeWww),
-      upstreamPort: deployment.port,
-      rootPath: deployment.rootPath,
-      framework: deployment.framework,
-      startCommand: deployment.startCommand,
-      publicDirectory: deployment.publicDirectory,
-      outputDirectory: deployment.outputDirectory,
-      fallbackRootPath: `${env.FILE_MANAGER_ROOT}/${domainName}/${domain.documentRoot || "public_html"}`,
-      forceHttps,
-      requireSsl: true
-    }) as NginxPublishResult;
+    if (deployment && deploymentIsRoutable(deployment)) {
+      result = await publishDeploymentProxyNginx({
+        deploymentId: deployment.id,
+        fqdn: sslServerName(domainName, includeWww),
+        upstreamPort: deployment.port,
+        rootPath: deployment.rootPath,
+        framework: deployment.framework,
+        startCommand: deployment.startCommand,
+        publicDirectory: deployment.publicDirectory,
+        outputDirectory: deployment.outputDirectory,
+        fallbackRootPath: deploymentFallbackRootPath({
+          id: domain.id,
+          name: domain.name,
+          forceSsl: forceHttps,
+          sslEnabled: domain.sslEnabled,
+          documentRoot: domain.documentRoot,
+          includeWww
+        }),
+        forceHttps,
+        requireSsl: true
+      }) as NginxPublishResult;
+    } else {
+      result = await publishPublicHtmlNginxVhost({
+        id: domain.id,
+        name: domain.name,
+        forceSsl: forceHttps,
+        sslEnabled: true,
+        documentRoot: domain.documentRoot,
+        includeWww
+      }) as NginxPublishResult;
+    }
   } else if (domain?.hostingMode === "REDIRECT") {
     if (!domain.redirectUrl) throw new Error(`No redirect URL selected for ${domainName}`);
     result = await sysagent.writeRedirectNginxVhost({

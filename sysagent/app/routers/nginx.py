@@ -145,7 +145,7 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
 
     if settings.allow_live_nginx:
         run_live_step("website root create", lambda: root_path.mkdir(parents=True, exist_ok=True))
-    result = publish_nginx_config(body.name, config, sites_available, sites_enabled)
+    result = publish_nginx_config(body.name, config, sites_available, sites_enabled, server_name=body.serverName)
     return {
         **result,
         "rootPath": str(root_path),
@@ -156,6 +156,9 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
 
 @router.post("/redirect-vhost")
 def write_redirect_vhost(body: RedirectVhostRequest) -> dict:
+    sites_available, sites_enabled = _resolve_sites(body)
+    safe_nginx_path(sites_available, body.name)
+    safe_nginx_path(sites_enabled, body.name)
     if not body.redirectUrl.startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="Redirect URL must start with http:// or https://")
     ssl_certificate = safe_letsencrypt_path(body.sslCertificate) if body.sslCertificate else None
@@ -194,7 +197,7 @@ def write_redirect_vhost(body: RedirectVhostRequest) -> dict:
             "    }\n"
             "}\n"
         )
-    result = publish_nginx_config(body.name, config, sites_available, sites_enabled)
+    result = publish_nginx_config(body.name, config, sites_available, sites_enabled, server_name=body.serverName)
     return {
         **result,
         "redirectUrl": body.redirectUrl,

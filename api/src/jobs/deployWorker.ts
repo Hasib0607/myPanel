@@ -46,6 +46,7 @@ import {
   ensureParentDomainDeploymentProxy,
   buildDeploymentNginxRequest,
   publishDeploymentProxyNginx,
+  publishPublicHtmlNginxVhost,
   waitForQueueJob
 } from "../lib/deploymentDomainSsl.js";
 
@@ -2425,6 +2426,11 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
 
     if (processAction === "stop") {
       await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "STOPPED", healthStatus: "DOWN", lastHealthCheckAt: new Date() } });
+      if (domain) {
+        await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Public HTML fallback config", async () =>
+          publishPublicHtmlNginxVhost(domain)
+        );
+      }
       return { result, status: "STOPPED", healthStatus: "DOWN" };
     }
 

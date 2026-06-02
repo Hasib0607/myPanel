@@ -13,8 +13,17 @@ export type BoundDomain = {
   sslEnabled?: boolean;
   parentDomainId?: string;
   documentRoot?: string | null;
+  publicRootPath?: string | null;
   includeWww?: boolean;
 };
+
+function normalizeDocumentRoot(value?: string | null) {
+  return (value || "public_html").replace(/^\/+|\/+$/g, "") || "public_html";
+}
+
+function publicHtmlRootPath(domainName: string, documentRoot?: string | null) {
+  return path.join(env.FILE_MANAGER_ROOT, domainName, normalizeDocumentRoot(documentRoot));
+}
 
 export function boundDomainFromBinding(binding: {
   domain?: BoundDomain | null;
@@ -28,6 +37,7 @@ export function boundDomainFromBinding(binding: {
       forceSsl: binding.subdomain.sslEnabled,
       sslEnabled: binding.subdomain.sslEnabled,
       documentRoot: binding.subdomain.domain.documentRoot,
+      publicRootPath: path.join(env.FILE_MANAGER_ROOT, binding.subdomain.domain.name, "subdomains", binding.subdomain.name),
       includeWww: false
     };
   }
@@ -35,10 +45,15 @@ export function boundDomainFromBinding(binding: {
     return {
       ...binding.domain,
       forceSsl: binding.domain.forceSsl ?? true,
-      sslEnabled: binding.domain.sslEnabled ?? false
+      sslEnabled: binding.domain.sslEnabled ?? false,
+      publicRootPath: binding.domain.publicRootPath ?? publicHtmlRootPath(binding.domain.name, binding.domain.documentRoot)
     };
   }
   return null;
+}
+
+export function deploymentIsRoutable(deployment: { status?: string | null } | null | undefined) {
+  return deployment?.status === "RUNNING";
 }
 
 export function deploymentWantsSsl(domain: BoundDomain | null) {
@@ -76,8 +91,25 @@ export async function deploymentSslCertificatePathsWhenReady(domain: BoundDomain
 
 export function deploymentFallbackRootPath(domain: BoundDomain | null) {
   if (!domain?.name) return null;
-  const documentRoot = (domain.documentRoot || "public_html").replace(/^\/+|\/+$/g, "") || "public_html";
-  return path.join(env.FILE_MANAGER_ROOT, domain.name, documentRoot);
+  return domain.publicRootPath ?? publicHtmlRootPath(domain.name, domain.documentRoot);
+}
+
+function nginxResourceName(prefix: string, name: string) {
+  return `${prefix}-${name.replace(/[^a-zA-Z0-9_.-]/g, "-")}`;
+}
+
+export async function publishPublicHtmlNginxVhost(domain: BoundDomain | null) {
+  const serverName = deploymentServerName(domain);
+  const rootPath = deploymentFallbackRootPath(domain);
+  if (!domain?.name || !serverName || !rootPath) return null;
+  const httpsReady = await deploymentHttpsReady(domain);
+  return sysagent.writeStaticNginxVhost({
+    name: nginxResourceName("domain", domain.name),
+    serverName,
+    rootPath,
+    forceHttps: Boolean(domain.forceSsl && httpsReady),
+    ...(httpsReady ? deploymentSslCertificatePaths(domain) : {})
+  });
 }
 
 export async function ensureParentDomainDeploymentProxy(deploymentId: string, domain: BoundDomain | null) {
@@ -174,6 +206,7 @@ export async function findDeploymentProxyTarget(fqdn: string) {
     (binding) => binding.subdomain && `${binding.subdomain.name}.${binding.subdomain.domain.name}` === fqdn
   );
   if (subdomainHit?.deployment) {
+    if (!deploymentIsRoutable(subdomainHit.deployment)) return null;
     return {
       deployment: subdomainHit.deployment,
       domain: subdomainHit.subdomain!.domain,
@@ -187,6 +220,7 @@ export async function findDeploymentProxyTarget(fqdn: string) {
     include: { deployment: true, domain: true }
   });
   if (apexBinding?.deployment && apexBinding.domain) {
+    if (!deploymentIsRoutable(apexBinding.deployment)) return null;
     return {
       deployment: apexBinding.deployment,
       domain: apexBinding.domain,
@@ -207,6 +241,7 @@ export async function findDeploymentProxyTarget(fqdn: string) {
     ? await prisma.deployment.findUnique({ where: { id: domain.hostingDeploymentId } })
     : domain.deploymentBindings[0]?.deployment ?? domain.deployments[0] ?? null;
   if (!deployment) return null;
+  if (!deploymentIsRoutable(deployment)) return null;
   return { deployment, domain, subdomainId: null as string | null, includeWww: true };
 }
 

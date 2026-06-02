@@ -74,6 +74,7 @@ From Deployment Doctor or runtime-tools install:
 - [ ] Zip uploads with one nested app folder auto-correct `rootDirectory` before runtime detection, Nginx/start/health checks for Laravel, React/Node, Next.js, Python, and Go projects
 - [ ] Laravel zip uploads where the parent has `artisan` but only the nested app has `public/index.php` choose the nested public web root, not backend-only idle mode
 - [ ] Backend-only Laravel deployments without `public/index.php` start as idle Supervisor jobs, report healthy backend-only health instead of `DEGRADED`, skip `php artisan storage:link`, and do not raise public route 502 danger warnings
+- [ ] Linked domains/subdomains serve the deployment while it is `RUNNING`, then restore the file-manager `public_html`/subdomain root after stop, unlink, or missing deployment target without stale Nginx 502 proxy configs
 - [ ] Install Composer (EPEL or fallback)
 - [ ] Install Go if needed
 
