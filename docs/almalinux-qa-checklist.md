@@ -68,6 +68,8 @@ From panel **Firewall** page:
 From Deployment Doctor or runtime-tools install:
 
 - [ ] Install PHP stack (dnf packages)
+- [ ] Upgrade Composer/Laravel PHP runtime to PHP 8.2 when lockfiles require PHP 8.1/8.2+
+- [ ] PHP 8.2 repair removes old PHP 8.0 PECL ABI blockers (`php-pecl-redis*`, `php-pecl-msgpack*`, `php-pecl-igbinary*`) before module switch
 - [ ] Install Composer (EPEL or fallback)
 - [ ] Install Go if needed
 

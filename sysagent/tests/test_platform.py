@@ -13,6 +13,7 @@ from app.platform import (
     RHEL_CERTBOT_PACKAGES,
     RHEL_COMPOSER_PACKAGES,
     RHEL_DOVECOT_PACKAGES,
+    RHEL_PHP82_CONFLICT_CLEANUP_COMMAND,
     OsFamily,
     certbot_install_plan,
     classify_os_release,
@@ -303,10 +304,20 @@ class AlmaPackagePlanTests(unittest.TestCase):
         plan = runtime_tool_install_plan("php82", self.alma)
         self.assertEqual(plan.key, "php82_runtime")
         self.assertEqual(plan.steps[0].command, ("dnf", "module", "reset", "-y", "php"))
-        self.assertEqual(plan.steps[1].command, ("dnf", "module", "enable", "-y", "php:8.2"))
-        self.assertEqual(plan.steps[2].command[0:3], ("dnf", "install", "-y"))
-        self.assertIn("php-fpm", plan.steps[2].command)
-        self.assertTrue(all(step.skip_if for step in plan.steps[:3]))
+        self.assertEqual(plan.steps[1].command, RHEL_PHP82_CONFLICT_CLEANUP_COMMAND)
+        self.assertEqual(plan.steps[2].command, ("dnf", "module", "enable", "-y", "php:8.2"))
+        self.assertEqual(plan.steps[3].command[0:3], ("dnf", "install", "-y"))
+        self.assertIn("php-fpm", plan.steps[3].command)
+        self.assertTrue(all(step.skip_if for step in plan.steps[:4]))
+
+    def test_rhel_php82_install_plan_removes_old_pecl_abi_conflicts(self) -> None:
+        plan = runtime_tool_install_plan("php82", self.alma)
+        cleanup = plan.steps[1]
+        self.assertIn("PECL", cleanup.description)
+        self.assertIn("php-pecl-redis*", cleanup.command[-1])
+        self.assertIn("php-pecl-msgpack*", cleanup.command[-1])
+        self.assertIn("php-pecl-igbinary*", cleanup.command[-1])
+        self.assertIn("dnf remove -y", cleanup.command[-1])
 
     def test_dovecot_install_plan(self) -> None:
         plan = dovecot_install_plan(self.alma)

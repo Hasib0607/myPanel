@@ -600,6 +600,9 @@ function commandTreeFailure(value: unknown): string | null {
 
 function knownErrorHint(text: string): { message: string; repairAction: "set-node-memory" | "sync-public-env" | "sync-runtime" | "redeploy" | "restart" | "request-approval"; category: string } | null {
   const lower = text.toLowerCase();
+  const phpPeclAbiConflict = /php-pecl-[a-z0-9_-]+/i.test(text)
+    && (lower.includes("requires php(api)") || lower.includes("requires php(zend-abi)"))
+    && lower.includes("cannot install both php-common");
   if (lower.includes("eresolve") || lower.includes("unable to resolve dependency tree") || lower.includes("peer dep")) return { message: "NPM dependency resolution failed. Review peer dependencies or use a compatible lockfile before redeploying.", repairAction: "redeploy", category: "npm_peer_dependency" };
   if (lower.includes("package-lock.json") && lower.includes("yarn.lock")) return { message: "Multiple lockfiles detected. Keep one package manager lockfile to avoid inconsistent installs.", repairAction: "redeploy", category: "lockfile_conflict" };
   if (lower.includes("unsupported engine") || lower.includes("node version") || lower.includes("requires node")) return { message: "Node version mismatch. Set a compatible runtime version or update the app engines field.", repairAction: "redeploy", category: "node_version" };
@@ -614,6 +617,7 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
   if (lower.includes("artisan package:discover") || lower.includes("laravel package discovery")) return { message: "Laravel package discovery failed while bootstrapping the app. Check the deployment environment values and the package discovery error output, then redeploy.", repairAction: "request-approval", category: "laravel_package_discovery" };
   if (lower.includes("vendor/autoload.php") && lower.includes("artisan")) return { message: "Laravel vendor dependencies are missing. Guardian now auto-runs composer install before restart; retry deploy/restart.", repairAction: "redeploy", category: "laravel_vendor_missing" };
   if (lower.includes("the home or composer_home environment variable must be set")) return { message: "Composer runtime HOME/COMPOSER_HOME was missing on sysagent. Guardian/sysagent now auto-sets fallback HOME paths; retry deploy.", repairAction: "redeploy", category: "composer_home_missing" };
+  if (phpPeclAbiConflict) return { message: "PHP 8.2 upgrade is blocked by older PHP 8.0 PECL extension RPMs. Guardian will remove incompatible PECL RPMs, switch the PHP 8.2 module stream, reinstall Laravel PHP extensions, then redeploy.", repairAction: "request-approval", category: "php_pecl_abi_conflict" };
   if (isComposerPlatformCheckInconclusive(text)) return { message: "Composer platform preflight could not produce actionable details because vendor is not installed yet. Redeploy will continue to composer install, where exact PHP/extension issues can be repaired.", repairAction: "redeploy", category: "composer_platform_check_inconclusive" };
   const composerPlatform = detectComposerPlatformIssue(text);
   const phpVersionMismatch = Boolean(
@@ -1136,7 +1140,7 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
     });
   }
   const composerRepairTargets = runtimeInstallTargetsForComposerPlatformIssue(recentErrors);
-  if (hint?.category === "php_extension" || hint?.category === "php_extension_gd" || hint?.category === "php_extension_soap" || hint?.category === "php_runtime_version") {
+  if (hint?.category === "php_extension" || hint?.category === "php_extension_gd" || hint?.category === "php_extension_soap" || hint?.category === "php_runtime_version" || hint?.category === "php_pecl_abi_conflict") {
     for (const target of composerRepairTargets) {
       riskyActions.push({
         key: target.actionKey,

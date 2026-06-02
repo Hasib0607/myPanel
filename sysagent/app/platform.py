@@ -47,6 +47,16 @@ RHEL_PHP_RUNTIME_PACKAGES = (
     "unzip",
 )
 RHEL_PHP82_PACKAGES = RHEL_PHP_RUNTIME_PACKAGES
+RHEL_PHP82_CONFLICTING_PECL_PATTERNS = (
+    "php-pecl-redis*",
+    "php-pecl-msgpack*",
+    "php-pecl-igbinary*",
+)
+RHEL_PHP82_CONFLICT_CLEANUP_COMMAND = (
+    "sh",
+    "-lc",
+    "packages=$(rpm -qa 'php-pecl-redis*' 'php-pecl-msgpack*' 'php-pecl-igbinary*' 2>/dev/null); [ -z \"$packages\" ] && exit 0; dnf remove -y $packages",
+)
 DEBIAN_DOVECOT_PACKAGES = ("dovecot-core", "dovecot-imapd", "dovecot-lmtpd")
 RHEL_DOVECOT_PACKAGES = ("dovecot",)
 DEBIAN_PYTHON311_PACKAGES = ("python3", "python3-venv", "python3-pip")
@@ -580,6 +590,11 @@ def php82_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
                     "Reset existing PHP module stream",
                     ("dnf", "module", "reset", "-y", "php"),
                     on_failure="continue",
+                    skip_if=("sh", "-lc", "php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION >= 2 ? 0 : 1);'"),
+                ),
+                InstallStep(
+                    "Remove PHP 8.0 PECL packages that block PHP 8.2 module switch",
+                    RHEL_PHP82_CONFLICT_CLEANUP_COMMAND,
                     skip_if=("sh", "-lc", "php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION >= 2 ? 0 : 1);'"),
                 ),
                 InstallStep(
