@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, MouseEvent, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Archive,
@@ -14,6 +14,7 @@ import {
   Folder,
   FolderPlus,
   Image as ImageIcon,
+  Info,
   RefreshCw,
   Search,
   Settings2,
@@ -151,6 +152,9 @@ export function FileManagerClient() {
   const queryClient = useQueryClient();
   const [currentPath, setCurrentPath] = useState(".");
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+  const [infoTarget, setInfoTarget] = useState<FileEntry | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; item: FileEntry } | null>(null);
   const [search, setSearch] = useState("");
   const [draftSearch, setDraftSearch] = useState("");
   const [sort, setSort] = useState<"name" | "size" | "modifiedAt">("name");
@@ -186,6 +190,7 @@ export function FileManagerClient() {
   const tree = useQuery({ queryKey: ["files-tree", domainRootPath], queryFn: () => apiGet<TreeResponse>(`/files/tree?${queryString({ path: domainRootPath, depth: 4 })}`), enabled: Boolean(selectedRoot) });
 
   const selectedEntry = useMemo(() => list.data?.items.find((item) => item.path === selectedPath) ?? null, [list.data?.items, selectedPath]);
+  const selectedEntries = useMemo(() => (list.data?.items ?? []).filter((item) => selectedPaths.has(item.path)), [list.data?.items, selectedPaths]);
   const canEdit = selectedEntry?.type === "file" && selectedEntry.kind === "text";
 
   useEffect(() => {
@@ -200,6 +205,20 @@ export function FileManagerClient() {
     await queryClient.invalidateQueries({ queryKey: ["files-list"] });
     await queryClient.invalidateQueries({ queryKey: ["files-tree"] });
   };
+
+  useEffect(() => {
+    setContextMenu(null);
+  }, [currentPath, search, sort, direction]);
+
+  useEffect(() => {
+    const close = () => setContextMenu(null);
+    window.addEventListener("click", close);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("resize", close);
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -354,10 +373,62 @@ export function FileManagerClient() {
     setSelectedDomainId(domainId);
     setCurrentPath(root?.path ?? ".");
     setSelectedPath(null);
+    setSelectedPaths(new Set());
     setSearch("");
     setDraftSearch("");
     setLastResult("");
   }
+
+  function setSingleSelection(item: FileEntry) {
+    setSelectedPath(item.path);
+    setSelectedPaths(new Set([item.path]));
+  }
+
+  function toggleSelection(item: FileEntry, checked?: boolean) {
+    setSelectedPath(item.path);
+    setSelectedPaths((current) => {
+      const next = new Set(current);
+      const shouldSelect = checked ?? !next.has(item.path);
+      if (shouldSelect) next.add(item.path);
+      else next.delete(item.path);
+      return next;
+    });
+  }
+
+  function toggleAllVisible(checked: boolean) {
+    const items = list.data?.items ?? [];
+    if (!checked) {
+      setSelectedPaths(new Set());
+      setSelectedPath(null);
+      return;
+    }
+    setSelectedPaths(new Set(items.map((item) => item.path)));
+    setSelectedPath(items[0]?.path ?? null);
+  }
+
+  function openEntry(item: FileEntry) {
+    if (item.type === "directory") {
+      setCurrentPath(item.path);
+      setSelectedPath(null);
+      setSelectedPaths(new Set());
+    } else if (item.kind === "text") {
+      window.location.href = editorHref(item.path);
+    }
+  }
+
+  function openContextMenu(event: MouseEvent, item: FileEntry) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!selectedPaths.has(item.path)) {
+      setSingleSelection(item);
+    } else {
+      setSelectedPath(item.path);
+    }
+    setContextMenu({ x: Math.min(event.clientX, window.innerWidth - 230), y: Math.min(event.clientY, window.innerHeight - 330), item });
+  }
+
+  const contextItem = contextMenu?.item ?? null;
+  const contextCanEdit = contextItem?.type === "file" && contextItem.kind === "text";
 
   return (
     <section className="grid h-[calc(100vh-64px)] grid-cols-[300px_minmax(520px,1fr)_380px] overflow-hidden p-6 lg:h-screen xl:p-8">
@@ -470,10 +541,26 @@ export function FileManagerClient() {
           </div>
         ) : null}
 
-        <div className="h-[calc(100%-122px)] overflow-auto">
-          <table className="w-full text-sm">
+        <div className="h-[calc(100%-122px)] overflow-auto" onContextMenu={(event) => event.preventDefault()}>
+          <table className="w-full table-fixed text-sm">
+            <colgroup>
+              <col className="w-12" />
+              <col className="w-[52%]" />
+              <col className="w-28" />
+              <col className="w-24" />
+              <col className="w-48" />
+            </colgroup>
             <thead className="sticky top-0 bg-slate-50 text-left text-xs uppercase text-panel-muted">
               <tr>
+                <th className="px-4 py-3">
+                  <input
+                    aria-label="Select all files"
+                    checked={Boolean(list.data?.items.length) && selectedPaths.size === list.data?.items.length}
+                    className="h-4 w-4 rounded border-panel-line"
+                    onChange={(event) => toggleAllVisible(event.target.checked)}
+                    type="checkbox"
+                  />
+                </th>
                 <th className="px-4 py-3">Name</th>
                 <th className="px-4 py-3">Size</th>
                 <th className="px-4 py-3">Mode</th>
@@ -483,17 +570,27 @@ export function FileManagerClient() {
             <tbody>
               {(list.data?.items ?? []).map((item) => (
                 <tr
-                  className={`cursor-pointer border-t border-panel-line hover:bg-slate-50 ${selectedPath === item.path ? "bg-slate-50" : ""}`}
+                  className={`cursor-pointer border-t border-panel-line hover:bg-slate-50 ${selectedPaths.has(item.path) ? "bg-emerald-50/60" : selectedPath === item.path ? "bg-slate-50" : ""}`}
                   key={item.path}
                   onClick={() => {
-                    setSelectedPath(item.path);
-                    if (item.type === "directory") setCurrentPath(item.path);
+                    setSingleSelection(item);
                   }}
+                  onContextMenu={(event) => openContextMenu(event, item)}
+                  onDoubleClick={() => openEntry(item)}
                 >
-                  <td className="max-w-0 px-4 py-3">
+                  <td className="px-4 py-3" onClick={(event) => event.stopPropagation()}>
+                    <input
+                      aria-label={`Select ${item.name}`}
+                      checked={selectedPaths.has(item.path)}
+                      className="h-4 w-4 rounded border-panel-line"
+                      onChange={(event) => toggleSelection(item, event.target.checked)}
+                      type="checkbox"
+                    />
+                  </td>
+                  <td className="px-4 py-3">
                     <div className="flex min-w-0 items-center gap-2">
                       {item.type === "directory" ? <Folder size={16} /> : item.kind === "image" ? <ImageIcon size={16} /> : <FileCode2 size={16} />}
-                      <span className="truncate font-medium">{item.name}</span>
+                      <span className="min-w-0 break-all font-medium leading-5">{item.name}</span>
                     </div>
                   </td>
                   <td className="px-4 py-3 text-panel-muted">{item.type === "directory" ? "-" : formatBytes(item.size)}</td>
@@ -503,7 +600,7 @@ export function FileManagerClient() {
               ))}
               {list.data?.items.length === 0 ? (
                 <tr>
-                  <td className="px-4 py-12 text-center text-panel-muted" colSpan={4}>No files found</td>
+                  <td className="px-4 py-12 text-center text-panel-muted" colSpan={5}>No files found</td>
                 </tr>
               ) : null}
             </tbody>
@@ -514,69 +611,19 @@ export function FileManagerClient() {
       <aside className="min-h-0 rounded-r-md border border-panel-line bg-white">
         <div className="flex h-full flex-col">
           <div className="border-b border-panel-line p-4">
-            <div className="truncate text-sm font-semibold">{selectedEntry?.name ?? "No selection"}</div>
+            <div className="truncate text-sm font-semibold">
+              {selectedEntries.length > 1 ? `${selectedEntries.length} selected` : selectedEntry?.name ?? "No selection"}
+            </div>
             <div className="mt-1 truncate text-xs text-panel-muted">{selectedEntry?.path ?? "Select a file or folder"}</div>
           </div>
 
           {selectedEntry ? (
             <div className="space-y-4 overflow-auto p-4">
-              <div className="grid grid-cols-2 gap-2">
-                {canEdit ? (
-                  <Link className="flex h-9 items-center justify-center gap-2 rounded-md bg-panel-accent px-2 text-sm font-semibold text-white hover:bg-panel-accent/90" href={editorHref(selectedEntry.path)}>
-                    <Edit3 size={15} /> Edit
-                  </Link>
-                ) : null}
-                {selectedEntry.type === "file" ? (
-                  <button className="flex h-9 items-center justify-center gap-2 rounded-md border border-panel-line px-2 text-sm hover:bg-slate-50" onClick={() => download(selectedEntry.path).catch((error) => setLastResult(error instanceof Error ? error.message : "Download failed"))} type="button"><Download size={15} /> Download</button>
-                ) : null}
-                <button className="flex h-9 items-center justify-center gap-2 rounded-md border border-panel-line px-2 text-sm hover:bg-slate-50" onClick={() => navigator.clipboard.writeText(selectedEntry.path).then(() => setLastResult("Path copied."))} type="button"><Copy size={15} /> Copy Path</button>
-                <button className="flex h-9 items-center justify-center gap-2 rounded-md border border-panel-line px-2 text-sm hover:bg-slate-50" onClick={() => {
-                  const name = window.prompt("Rename to", selectedEntry.name);
-                  if (name && name !== selectedEntry.name) renameItem.mutate({ path: selectedEntry.path, name });
-                }} type="button"><Settings2 size={15} /> Rename</button>
-                <button className="flex h-9 items-center justify-center gap-2 rounded-md border border-panel-line px-2 text-sm text-panel-danger hover:bg-red-50" onClick={() => setDeleteTarget(selectedEntry)} type="button"><Trash2 size={15} /> Delete</button>
+              <div className="rounded-md border border-panel-line p-4 text-sm text-panel-muted">
+                Right-click a selected item to open actions. Use the checkboxes to select multiple files.
               </div>
 
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                <div className="rounded-md bg-slate-50 p-3"><div className="text-panel-muted">Kind</div><div className="mt-1 font-semibold">{selectedEntry.kind}</div></div>
-                <div className="rounded-md bg-slate-50 p-3"><div className="text-panel-muted">Size</div><div className="mt-1 font-semibold">{formatBytes(selectedEntry.size)}</div></div>
-                <div className="rounded-md bg-slate-50 p-3"><div className="text-panel-muted">Mode</div><div className="mt-1 font-mono font-semibold">{selectedEntry.permissions}</div></div>
-                <div className="rounded-md bg-slate-50 p-3"><div className="text-panel-muted">Modified</div><div className="mt-1 font-semibold">{new Date(selectedEntry.modifiedAt).toLocaleDateString()}</div></div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <button className="h-9 rounded-md border border-panel-line px-2 text-sm hover:bg-slate-50" onClick={() => {
-                  const name = window.prompt("Copy name", `copy-${selectedEntry.name}`);
-                  if (name) copyItem.mutate({ sourcePath: selectedEntry.path, name });
-                }} type="button">Copy Here</button>
-                <button className="h-9 rounded-md border border-panel-line px-2 text-sm hover:bg-slate-50" onClick={() => {
-                  const name = window.prompt("Move/rename to", selectedEntry.name);
-                  if (name) moveItem.mutate({ sourcePath: selectedEntry.path, name });
-                }} type="button">Move Here</button>
-                <button className="h-9 rounded-md border border-panel-line px-2 text-sm hover:bg-slate-50" onClick={() => {
-                  const mode = window.prompt("Mode", selectedEntry.permissions);
-                  if (mode) chmodItem.mutate({ path: selectedEntry.path, mode });
-                }} type="button">Chmod</button>
-                {selectedEntry.type === "file" ? (
-                  <button className="h-9 rounded-md border border-panel-line px-2 text-sm hover:bg-slate-50" onClick={() => checksum(selectedEntry.path).catch((error) => setLastResult(error instanceof Error ? error.message : "Checksum failed"))} type="button">SHA256</button>
-                ) : null}
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <button className="flex h-9 items-center justify-center gap-2 rounded-md border border-panel-line px-2 text-sm hover:bg-slate-50" onClick={() => {
-                  const archivePath = window.prompt("Archive path", joinPath(parentPath(selectedEntry.path), `${selectedEntry.name}.zip`));
-                  if (archivePath) archiveCreate.mutate({ sourcePath: selectedEntry.path, archivePath });
-                }} type="button"><Archive size={15} /> Zip</button>
-                {selectedEntry.extension === ".zip" ? (
-                  <button className="h-9 rounded-md border border-panel-line px-2 text-sm hover:bg-slate-50" onClick={() => archiveExtract.mutate({ archivePath: selectedEntry.path, targetPath: parentPath(selectedEntry.path) })} type="button">Extract</button>
-                ) : null}
-              </div>
-
-              {canEdit ? (
-                <div className="rounded-md border border-panel-line p-4 text-sm text-panel-muted">
-                  Open this text file in the full-page editor for a larger workspace.
-                </div>
-              ) : selectedEntry.kind === "image" && imagePreview ? (
+              {selectedEntry.kind === "image" && imagePreview ? (
                 <div className="rounded-md border border-panel-line p-3">
                   <img alt={selectedEntry.name} className="max-h-96 w-full object-contain" src={imagePreview} />
                 </div>
@@ -593,6 +640,123 @@ export function FileManagerClient() {
 
         </div>
       </aside>
+      {contextItem ? (
+        <div
+          className="fixed z-50 w-56 overflow-hidden rounded-md border border-panel-line bg-white py-1 text-sm shadow-xl"
+          onClick={(event) => event.stopPropagation()}
+          style={{ left: contextMenu?.x ?? 0, top: contextMenu?.y ?? 0 }}
+        >
+          <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={() => { setInfoTarget(contextItem); setContextMenu(null); }} type="button">
+            <Info size={15} /> Info
+          </button>
+          {contextItem.type === "directory" ? (
+            <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={() => { openEntry(contextItem); setContextMenu(null); }} type="button">
+              <Folder size={15} /> Open
+            </button>
+          ) : null}
+          {contextCanEdit ? (
+            <Link className="flex h-9 w-full items-center gap-2 px-3 hover:bg-slate-50" href={editorHref(contextItem.path)} onClick={() => setContextMenu(null)}>
+              <Edit3 size={15} /> Edit
+            </Link>
+          ) : null}
+          {contextItem.type === "file" ? (
+            <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={() => { download(contextItem.path).catch((error) => setLastResult(error instanceof Error ? error.message : "Download failed")); setContextMenu(null); }} type="button">
+              <Download size={15} /> Download
+            </button>
+          ) : null}
+          <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={() => { navigator.clipboard.writeText(contextItem.path).then(() => setLastResult("Path copied.")); setContextMenu(null); }} type="button">
+            <Copy size={15} /> Copy Path
+          </button>
+          <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={() => {
+            const name = window.prompt("Rename to", contextItem.name);
+            if (name && name !== contextItem.name) renameItem.mutate({ path: contextItem.path, name });
+            setContextMenu(null);
+          }} type="button">
+            <Settings2 size={15} /> Rename
+          </button>
+          <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={() => {
+            const name = window.prompt("Copy name", `copy-${contextItem.name}`);
+            if (name) copyItem.mutate({ sourcePath: contextItem.path, name });
+            setContextMenu(null);
+          }} type="button">
+            <Copy size={15} /> Copy Here
+          </button>
+          <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={() => {
+            const name = window.prompt("Move/rename to", contextItem.name);
+            if (name) moveItem.mutate({ sourcePath: contextItem.path, name });
+            setContextMenu(null);
+          }} type="button">
+            <Settings2 size={15} /> Move Here
+          </button>
+          <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={() => {
+            const mode = window.prompt("Mode", contextItem.permissions);
+            if (mode) chmodItem.mutate({ path: contextItem.path, mode });
+            setContextMenu(null);
+          }} type="button">
+            <Settings2 size={15} /> Chmod
+          </button>
+          {contextItem.type === "file" ? (
+            <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={() => { checksum(contextItem.path).catch((error) => setLastResult(error instanceof Error ? error.message : "Checksum failed")); setContextMenu(null); }} type="button">
+              <Settings2 size={15} /> SHA256
+            </button>
+          ) : null}
+          <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={() => {
+            const archivePath = window.prompt("Archive path", joinPath(parentPath(contextItem.path), `${contextItem.name}.zip`));
+            if (archivePath) archiveCreate.mutate({ sourcePath: contextItem.path, archivePath });
+            setContextMenu(null);
+          }} type="button">
+            <Archive size={15} /> Zip
+          </button>
+          {contextItem.extension === ".zip" ? (
+            <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={() => { archiveExtract.mutate({ archivePath: contextItem.path, targetPath: parentPath(contextItem.path) }); setContextMenu(null); }} type="button">
+              <Archive size={15} /> Extract
+            </button>
+          ) : null}
+          <div className="my-1 border-t border-panel-line" />
+          <button className="flex h-9 w-full items-center gap-2 px-3 text-left text-panel-danger hover:bg-red-50" onClick={() => {
+            if (selectedPaths.size > 1) {
+              if (window.confirm(`Delete ${selectedPaths.size} selected items?`)) deleteItems.mutate([...selectedPaths]);
+            } else {
+              setDeleteTarget(contextItem);
+            }
+            setContextMenu(null);
+          }} type="button">
+            <Trash2 size={15} /> Delete{selectedPaths.size > 1 ? ` ${selectedPaths.size} selected` : ""}
+          </button>
+        </div>
+      ) : null}
+      {infoTarget ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" onClick={() => setInfoTarget(null)}>
+          <div className="w-full max-w-2xl rounded-md bg-white shadow-xl" onClick={(event) => event.stopPropagation()}>
+            <div className="border-b border-panel-line p-5">
+              <div className="text-lg font-semibold text-panel-text">{infoTarget.name}</div>
+              <div className="mt-1 break-all text-sm text-panel-muted">{infoTarget.path}</div>
+            </div>
+            <div className="grid gap-3 p-5 text-sm sm:grid-cols-2">
+              {[
+                ["Type", infoTarget.type],
+                ["Kind", infoTarget.kind],
+                ["Extension", infoTarget.extension || "-"],
+                ["Size", infoTarget.type === "directory" ? "-" : formatBytes(infoTarget.size)],
+                ["Mode", infoTarget.permissions],
+                ["MIME", infoTarget.mime ?? "-"],
+                ["Hidden", infoTarget.isHidden ? "Yes" : "No"],
+                ["Readonly", infoTarget.isReadonly ? "Yes" : "No"],
+                ["Created", new Date(infoTarget.createdAt).toLocaleString()],
+                ["Modified", new Date(infoTarget.modifiedAt).toLocaleString()]
+              ].map(([label, value]) => (
+                <div className="rounded-md bg-slate-50 p-3" key={label}>
+                  <div className="text-xs font-medium uppercase text-panel-muted">{label}</div>
+                  <div className="mt-1 break-all font-semibold text-panel-text">{value}</div>
+                </div>
+              ))}
+            </div>
+            <div className="flex justify-end border-t border-panel-line p-4">
+              <button className="h-9 rounded-md border border-panel-line px-4 text-sm font-medium hover:bg-slate-50" onClick={() => setInfoTarget(null)} type="button">Close</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       <ConfirmModal
         confirmLabel="Delete item"
         message={`This will permanently delete ${deleteTarget?.name ?? "the selected item"} from the file manager.`}
