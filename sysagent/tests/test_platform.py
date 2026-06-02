@@ -14,6 +14,9 @@ from app.platform import (
     RHEL_COMPOSER_PACKAGES,
     RHEL_DOVECOT_PACKAGES,
     RHEL_PHP82_CONFLICT_CLEANUP_COMMAND,
+    RHEL_PHP_REDIS_BUILD_PACKAGES,
+    PHP_REDIS_EXTENSION_LOADED_COMMAND,
+    PHP_REDIS_PECL_INSTALL_COMMAND,
     OsFamily,
     certbot_install_plan,
     classify_os_release,
@@ -221,6 +224,17 @@ class PlatformMappingTests(unittest.TestCase):
         self.assertEqual(runtime_tool_install_plan("php-mysql", self.alma).packages, ("php-mysqlnd",))
         self.assertEqual(runtime_tool_install_command("php-curl", self.ubuntu), ["apt-get", "install", "-y", "php-curl"])
         self.assertIsNotNone(runtime_tool_install_plan("php-gd", self.ubuntu).steps[0].skip_if)
+
+    def test_rhel_php_redis_install_plan_builds_against_active_php(self) -> None:
+        plan = runtime_tool_install_plan("php-redis", self.alma)
+        self.assertEqual(plan.key, "php_redis")
+        self.assertEqual(plan.packages, RHEL_PHP_REDIS_BUILD_PACKAGES)
+        self.assertIn("php-pecl-redis*", plan.steps[0].command[-1])
+        self.assertEqual(plan.steps[1].command, ("dnf", "install", "-y", *RHEL_PHP_REDIS_BUILD_PACKAGES))
+        self.assertEqual(plan.steps[2].command, PHP_REDIS_PECL_INSTALL_COMMAND)
+        self.assertEqual(plan.steps[0].skip_if, PHP_REDIS_EXTENSION_LOADED_COMMAND)
+        self.assertEqual(plan.steps[1].skip_if, PHP_REDIS_EXTENSION_LOADED_COMMAND)
+        self.assertEqual(plan.steps[2].skip_if, PHP_REDIS_EXTENSION_LOADED_COMMAND)
 
     def test_platform_summary_has_no_known_alma_code_gaps(self) -> None:
         summary = platform_summary(self.alma)

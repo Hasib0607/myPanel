@@ -57,6 +57,9 @@ RHEL_PHP82_CONFLICT_CLEANUP_COMMAND = (
     "-lc",
     "packages=$(rpm -qa 'php-pecl-redis*' 'php-pecl-msgpack*' 'php-pecl-igbinary*' 2>/dev/null); [ -z \"$packages\" ] && exit 0; dnf remove -y $packages",
 )
+RHEL_PHP_REDIS_BUILD_PACKAGES = ("php-pear", "php-devel", "gcc", "make")
+PHP_REDIS_EXTENSION_LOADED_COMMAND = ("sh", "-lc", "php -m 2>/dev/null | grep -qi '^redis$'")
+PHP_REDIS_PECL_INSTALL_COMMAND = ("sh", "-lc", "printf '\\n' | pecl install -f redis && echo 'extension=redis.so' > /etc/php.d/50-redis.ini")
 DEBIAN_DOVECOT_PACKAGES = ("dovecot-core", "dovecot-imapd", "dovecot-lmtpd")
 RHEL_DOVECOT_PACKAGES = ("dovecot",)
 DEBIAN_PYTHON311_PACKAGES = ("python3", "python3-venv", "python3-pip")
@@ -718,6 +721,40 @@ def php_soap_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPl
     )
 
 
+def php_redis_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
+    family = _resolve_family(info)
+    if family is OsFamily.RHEL:
+        return PackageInstallPlan(
+            key="php_redis",
+            packages=RHEL_PHP_REDIS_BUILD_PACKAGES,
+            steps=(
+                InstallStep(
+                    "Remove old PHP Redis PECL RPMs that require the PHP 8.0 ABI",
+                    ("sh", "-lc", "packages=$(rpm -qa 'php-pecl-redis*' 2>/dev/null); [ -z \"$packages\" ] && exit 0; dnf remove -y $packages"),
+                    skip_if=PHP_REDIS_EXTENSION_LOADED_COMMAND,
+                ),
+                InstallStep(
+                    "Install PHP Redis PECL build dependencies",
+                    tuple(package_install_command(list(RHEL_PHP_REDIS_BUILD_PACKAGES), info)),
+                    env=package_install_env(info),
+                    skip_if=PHP_REDIS_EXTENSION_LOADED_COMMAND,
+                ),
+                InstallStep(
+                    "Install PHP Redis extension with PECL for the active PHP runtime",
+                    PHP_REDIS_PECL_INSTALL_COMMAND,
+                    skip_if=PHP_REDIS_EXTENSION_LOADED_COMMAND,
+                ),
+                InstallStep(
+                    "Restart PHP-FPM after Redis extension install",
+                    ("systemctl", "restart", "php-fpm"),
+                    on_failure="continue",
+                ),
+            ),
+            notes="Builds ext-redis with PECL on AlmaLinux/RHEL so it matches the active PHP module ABI after PHP 8.2 upgrades.",
+        )
+    return install_plan_for("php_redis", info)
+
+
 def mysql_database_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
     packages = tuple(packages_for("mysql_database", info))
     service = service_spec("mysql_database", info)
@@ -843,6 +880,8 @@ def runtime_tool_install_plan(tool: str, info: OsReleaseInfo | None = None) -> P
         return composer_install_plan(info)
     if tool == "php82":
         return php82_install_plan(info)
+    if tool == "php-redis":
+        return php_redis_install_plan(info)
 
     package_key = {
         "php": "php_runtime",

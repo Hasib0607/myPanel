@@ -604,12 +604,16 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
   const phpPeclAbiConflict = /php-pecl-[a-z0-9_-]+/i.test(text)
     && (lower.includes("requires php(api)") || lower.includes("requires php(zend-abi)"))
     && lower.includes("cannot install both php-common");
+  const phpRedisAbiConflict = /php-pecl-redis[0-9-]*/i.test(text)
+    && (lower.includes("requires php(api)") || lower.includes("requires php(zend-abi)"))
+    && lower.includes("filtered out by modular filtering");
   if (lower.includes("eresolve") || lower.includes("unable to resolve dependency tree") || lower.includes("peer dep")) return { message: "NPM dependency resolution failed. Review peer dependencies or use a compatible lockfile before redeploying.", repairAction: "redeploy", category: "npm_peer_dependency" };
   if (lower.includes("package-lock.json") && lower.includes("yarn.lock")) return { message: "Multiple lockfiles detected. Keep one package manager lockfile to avoid inconsistent installs.", repairAction: "redeploy", category: "lockfile_conflict" };
   if (lower.includes("unsupported engine") || lower.includes("node version") || lower.includes("requires node")) return { message: "Node version mismatch. Set a compatible runtime version or update the app engines field.", repairAction: "redeploy", category: "node_version" };
   if (lower.includes("prisma") && (lower.includes("migration") || lower.includes("p100") || lower.includes("database"))) return { message: "Prisma/database migration failed. Check DATABASE_URL, database grants, and migration state.", repairAction: "redeploy", category: "prisma_migration" };
   if (lower.includes("client_encoding") && lower.includes("utf8mb4") && (lower.includes("postgres") || lower.includes("pgsql"))) return { message: "PostgreSQL deployment is using a MySQL charset value. Set DB_CHARSET=utf8 and clear DB_COLLATION, then redeploy.", repairAction: "request-approval", category: "postgres_charset" };
   if (/class\s+["']redis["']\s+not\s+found/i.test(text)) return { message: "Laravel is configured to use Redis but the PHP redis extension is not installed. Install php-redis on the VPS or set CACHE_DRIVER=file and SESSION_DRIVER=file, then redeploy.", repairAction: "request-approval", category: "php_redis_extension" };
+  if (phpRedisAbiConflict) return { message: "PHP Redis extension install is blocked by old EPEL Redis PECL RPMs for the PHP 8.0 ABI. Guardian will rebuild ext-redis with PECL for the active PHP runtime, then redeploy.", repairAction: "request-approval", category: "php_redis_abi_conflict" };
   if (lower.includes("not secure") || (lower.includes("certificate") && lower.includes("invalid"))) return { message: "HTTPS is not active for this domain. Redeploy to issue Let's Encrypt SSL, or use Deployment Doctor to queue an SSL certificate.", repairAction: "redeploy", category: "ssl_missing" };
   if (lower.includes("unsupported operand type") && lower.includes("for |") && lower.includes("nonetype") && lower.includes("python3.9")) return { message: "Python app uses Python 3.10+ type syntax but the VPS started it with Python 3.9. Guardian will install/use Python 3.11, rebuild .venv, and restart.", repairAction: "redeploy", category: "python_runtime_version" };
   if (lower.includes("ssl handshake failed") || lower.includes("invalid ssl response") || lower.includes("err_ssl_protocol")) return { message: "HTTPS works on the VPS locally but fails on the public internet path. Turn off browser VPN, set DNS A record to this VPS, use Cloudflare DNS-only or SSL Full, then redeploy.", repairAction: "redeploy", category: "ssl_protocol_error" };
@@ -1123,7 +1127,7 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
       approvalRequired: true
     });
   }
-  if (hint?.category === "php_redis_extension") {
+  if (hint?.category === "php_redis_extension" || hint?.category === "php_redis_abi_conflict") {
     riskyActions.push({
       key: "install-php-extension-redis",
       label: "Install PHP Redis extension",
