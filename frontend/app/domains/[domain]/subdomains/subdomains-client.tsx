@@ -6,6 +6,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, ShieldCheck, Trash2 } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { apiDeleteBody, apiGet, apiPost } from "@/lib/api";
+import { ConfirmModal } from "@/components/confirm-modal";
 
 type DomainDetail = {
   id: string;
@@ -17,6 +18,7 @@ export function SubdomainsClient({ domainId }: { domainId: string }) {
   const queryClient = useQueryClient();
   const [name, setName] = useState("");
   const [target, setTarget] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; fqdn: string } | null>(null);
   const domain = useQuery({ queryKey: ["domain", domainId], queryFn: () => apiGet<DomainDetail>(`/domains/${domainId}`) });
   const create = useMutation({
     mutationFn: () => apiPost(`/domains/${domainId}/subdomains`, { name, target, sslEnabled: false }),
@@ -71,10 +73,7 @@ export function SubdomainsClient({ domainId }: { domainId: string }) {
                       <button
                         className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line text-panel-danger hover:bg-red-50 disabled:opacity-60"
                         disabled={remove.isPending}
-                        onClick={() => {
-                          if (!window.confirm(`Delete subdomain ${subdomain.name}.${domain.data?.name}?`)) return;
-                          remove.mutate(subdomain.id);
-                        }}
+                        onClick={() => setDeleteTarget({ id: subdomain.id, fqdn: `${subdomain.name}.${domain.data?.name ?? ""}` })}
                         title="Delete subdomain"
                         type="button"
                       >
@@ -88,6 +87,20 @@ export function SubdomainsClient({ domainId }: { domainId: string }) {
           </table>
         </div>
       </section>
+      <ConfirmModal
+        open={Boolean(deleteTarget)}
+        title="Delete subdomain?"
+        message={`Delete subdomain ${deleteTarget?.fqdn ?? ""}?`}
+        confirmLabel="Delete subdomain"
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={() => {
+          if (!deleteTarget) return;
+          remove.mutate(deleteTarget.id, {
+            onSettled: () => setDeleteTarget(null)
+          });
+        }}
+        pending={remove.isPending}
+      />
     </>
   );
 }

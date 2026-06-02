@@ -113,6 +113,7 @@ export function DomainsClient() {
   const [bulkSkipExisting, setBulkSkipExisting] = useState(true);
   const [bulkResults, setBulkResults] = useState<BulkDomainResponse | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Domain | null>(null);
+  const [deleteSubdomainTarget, setDeleteSubdomainTarget] = useState<{ domainId: string; subdomainId: string; fqdn: string } | null>(null);
   const normalizedNewDomain = normalizeDomainInput(newDomain);
   const parsedBulkDomains = useMemo(() => {
     const domains = bulkText
@@ -490,9 +491,11 @@ export function DomainsClient() {
                             className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line bg-white text-panel-danger hover:bg-red-50 disabled:opacity-60"
                             disabled={deleteSubdomain.isPending}
                             onClick={() => {
-                              if (!window.confirm(`Delete subdomain ${subdomain.name}.${domain.name}?`)) return;
-                              setNotice("");
-                              deleteSubdomain.mutate({ domainId: domain.id, subdomainId: subdomain.id });
+                              setDeleteSubdomainTarget({
+                                domainId: domain.id,
+                                subdomainId: subdomain.id,
+                                fqdn: `${subdomain.name}.${domain.name}`
+                              });
                             }}
                             title="Delete subdomain"
                             type="button"
@@ -682,6 +685,22 @@ export function DomainsClient() {
           </div>
         </div>
       ) : null}
+      <ConfirmModal
+        confirmLabel="Delete subdomain"
+        message={`Delete subdomain ${deleteSubdomainTarget?.fqdn ?? ""}?`}
+        onClose={() => setDeleteSubdomainTarget(null)}
+        onConfirm={() => {
+          if (!deleteSubdomainTarget) return;
+          setNotice("");
+          deleteSubdomain.mutate(
+            { domainId: deleteSubdomainTarget.domainId, subdomainId: deleteSubdomainTarget.subdomainId },
+            { onSettled: () => setDeleteSubdomainTarget(null) }
+          );
+        }}
+        open={Boolean(deleteSubdomainTarget)}
+        pending={deleteSubdomain.isPending}
+        title="Delete subdomain?"
+      />
       <ConfirmModal
         confirmLabel="Delete domain"
         message={`This removes ${deleteTarget?.name ?? "this domain"} with its DNS records, mail accounts, subdomains, and deployment metadata.`}

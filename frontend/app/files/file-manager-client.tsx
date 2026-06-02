@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, MouseEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Archive,
@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { apiDeleteBody, apiGet, apiPatch, apiPost, apiUploadWithProgress } from "@/lib/api";
 import { ConfirmModal } from "@/components/confirm-modal";
+import { InputModal } from "@/components/input-modal";
 import Link from "next/link";
 
 type FileEntry = {
@@ -111,6 +112,21 @@ type FileRootOption = {
   hint: string;
 };
 
+type PromptRequest = {
+  title: string;
+  label?: string;
+  placeholder?: string;
+  defaultValue?: string;
+  confirmLabel?: string;
+};
+
+type ConfirmRequest = {
+  title: string;
+  message: string;
+  confirmLabel?: string;
+  tone?: "danger" | "warn";
+};
+
 function formatBytes(value: number) {
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
@@ -187,6 +203,10 @@ export function FileManagerClient() {
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const [uploadDragActive, setUploadDragActive] = useState(false);
   const [extractProgress, setExtractProgress] = useState<ExtractProgress | null>(null);
+  const [promptRequest, setPromptRequest] = useState<PromptRequest | null>(null);
+  const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
+  const promptResolverRef = useRef<((value: string | null) => void) | null>(null);
+  const confirmResolverRef = useRef<((value: boolean) => void) | null>(null);
 
   const domains = useQuery({
     queryKey: ["domains", "file-manager"],
@@ -380,6 +400,34 @@ export function FileManagerClient() {
     setSearch(draftSearch.trim());
   }
 
+  async function requestInput(options: PromptRequest) {
+    return await new Promise<string | null>((resolve) => {
+      promptResolverRef.current = resolve;
+      setPromptRequest(options);
+    });
+  }
+
+  function resolveInput(value: string | null) {
+    const resolver = promptResolverRef.current;
+    promptResolverRef.current = null;
+    setPromptRequest(null);
+    resolver?.(value);
+  }
+
+  async function requestConfirm(options: ConfirmRequest) {
+    return await new Promise<boolean>((resolve) => {
+      confirmResolverRef.current = resolve;
+      setConfirmRequest(options);
+    });
+  }
+
+  function resolveConfirm(value: boolean) {
+    const resolver = confirmResolverRef.current;
+    confirmResolverRef.current = null;
+    setConfirmRequest(null);
+    resolver?.(value);
+  }
+
   async function download(pathValue: string) {
     const response = await apiGet<DownloadResponse>(`/files/download?${queryString({ path: pathValue })}`);
     const binary = atob(response.contentBase64);
@@ -401,7 +449,12 @@ export function FileManagerClient() {
   async function uploadFile(file: File, overwrite = false) {
     try {
       if (!overwrite && list.data?.items.some((item) => item.name === file.name)) {
-        const shouldReplace = window.confirm(`${file.name} already exists in this folder. Replace it?`);
+        const shouldReplace = await requestConfirm({
+          title: "Replace existing file?",
+          message: `${file.name} already exists in this folder. Do you want to replace it?`,
+          confirmLabel: "Replace",
+          tone: "warn"
+        });
         if (!shouldReplace) return;
         return uploadFile(file, true);
       }
@@ -457,7 +510,12 @@ export function FileManagerClient() {
     } catch (error) {
       setUploadProgress(null);
       if (!overwrite && error instanceof Error && /exists|already/i.test(error.message)) {
-        const shouldReplace = window.confirm(`${file.name} already exists in this folder. Replace it?`);
+        const shouldReplace = await requestConfirm({
+          title: "Replace existing file?",
+          message: `${file.name} already exists in this folder. Do you want to replace it?`,
+          confirmLabel: "Replace",
+          tone: "warn"
+        });
         if (shouldReplace) return uploadFile(file, true);
       }
       throw error;
@@ -592,12 +650,12 @@ export function FileManagerClient() {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <button aria-label="Refresh" className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50" onClick={() => list.refetch()} title="Refresh" type="button"><RefreshCw size={16} /></button>
-            <button aria-label="New file" className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50" onClick={() => {
-              const name = window.prompt("New file name");
+            <button aria-label="New file" className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50" onClick={async () => {
+              const name = (await requestInput({ title: "Create New File", label: "File name", placeholder: "index.html", confirmLabel: "Create" }))?.trim();
               if (name) createFile.mutate({ name, value: "" });
             }} title="New file" type="button"><FilePlus size={16} /></button>
-            <button aria-label="New folder" className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50" onClick={() => {
-              const name = window.prompt("New folder name");
+            <button aria-label="New folder" className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50" onClick={async () => {
+              const name = (await requestInput({ title: "Create New Folder", label: "Folder name", placeholder: "assets", confirmLabel: "Create" }))?.trim();
               if (name) createFolder.mutate(name);
             }} title="New folder" type="button"><FolderPlus size={16} /></button>
             <button aria-label="Upload" className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50" onClick={() => setUploadDialogOpen(true)} title="Upload" type="button">
@@ -608,8 +666,13 @@ export function FileManagerClient() {
               aria-label="Zip selected"
               className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
               disabled={selectedCount === 0 || archiveCreate.isPending}
-              onClick={() => {
-                const archivePath = window.prompt("Archive path", joinPath(currentPath, "selected.zip"));
+              onClick={async () => {
+                const archivePath = (await requestInput({
+                  title: "Create Zip Archive",
+                  label: "Archive path",
+                  defaultValue: joinPath(currentPath, "selected.zip"),
+                  confirmLabel: "Create"
+                }))?.trim();
                 if (archivePath) archiveCreate.mutate({ sourcePaths: [...selectedPaths], archivePath });
               }}
               title={selectedCount > 0 ? `Zip ${selectedCount} selected` : "Zip selected"}
@@ -621,8 +684,13 @@ export function FileManagerClient() {
               aria-label="Change selected permissions"
               className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
               disabled={selectedCount === 0 || chmodItem.isPending}
-              onClick={() => {
-                const mode = window.prompt(`Mode for ${selectedCount} selected`, "775");
+              onClick={async () => {
+                const mode = (await requestInput({
+                  title: "Change Permissions",
+                  label: `Mode for ${selectedCount} selected`,
+                  defaultValue: "775",
+                  confirmLabel: "Apply"
+                }))?.trim();
                 if (mode) chmodItem.mutate({ paths: [...selectedPaths], mode });
               }}
               title={selectedCount > 0 ? `Chmod ${selectedCount} selected` : "Chmod selected"}
@@ -634,8 +702,14 @@ export function FileManagerClient() {
               aria-label={currentInTrash ? "Delete selected permanently" : "Move selected to trash"}
               className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-panel-danger hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
               disabled={selectedCount === 0 || deleteItems.isPending}
-              onClick={() => {
-                if (window.confirm(`${currentInTrash ? "Permanently delete" : "Move to trash"} ${selectedCount} selected item${selectedCount === 1 ? "" : "s"}?`)) deleteItems.mutate([...selectedPaths]);
+              onClick={async () => {
+                const ok = await requestConfirm({
+                  title: currentInTrash ? "Delete permanently?" : "Move to trash?",
+                  message: `${currentInTrash ? "Permanently delete" : "Move to trash"} ${selectedCount} selected item${selectedCount === 1 ? "" : "s"}?`,
+                  confirmLabel: currentInTrash ? "Delete permanently" : "Move to trash",
+                  tone: "danger"
+                });
+                if (ok) deleteItems.mutate([...selectedPaths]);
               }}
               title={selectedCount > 0
                 ? `${currentInTrash ? "Permanently delete" : "Move to trash"} ${selectedCount} selected`
@@ -795,7 +869,14 @@ export function FileManagerClient() {
           ) : null}
           <button className="flex h-9 w-full items-center gap-2 px-3 text-left text-panel-danger hover:bg-red-50" onClick={() => {
             if (selectedPaths.size > 1) {
-              if (window.confirm(`${currentInTrash ? "Permanently delete" : "Move to trash"} ${selectedPaths.size} selected items?`)) deleteItems.mutate([...selectedPaths]);
+              requestConfirm({
+                title: currentInTrash ? "Delete permanently?" : "Move to trash?",
+                message: `${currentInTrash ? "Permanently delete" : "Move to trash"} ${selectedPaths.size} selected items?`,
+                confirmLabel: currentInTrash ? "Delete permanently" : "Move to trash",
+                tone: "danger"
+              }).then((ok) => {
+                if (ok) deleteItems.mutate([...selectedPaths]);
+              });
             } else {
               setDeleteTarget(contextItem);
             }
@@ -807,29 +888,29 @@ export function FileManagerClient() {
           <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={() => { navigator.clipboard.writeText(contextItem.path).then(() => setLastResult("Path copied.")); setContextMenu(null); }} type="button">
             <Copy size={15} /> Copy Path
           </button>
-          <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={() => {
-            const name = window.prompt("Rename to", contextItem.name);
+          <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={async () => {
+            const name = (await requestInput({ title: "Rename Item", label: "Rename to", defaultValue: contextItem.name, confirmLabel: "Rename" }))?.trim();
             if (name && name !== contextItem.name) renameItem.mutate({ path: contextItem.path, name });
             setContextMenu(null);
           }} type="button">
             <Settings2 size={15} /> Rename
           </button>
-          <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={() => {
-            const name = window.prompt("Copy name", `copy-${contextItem.name}`);
+          <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={async () => {
+            const name = (await requestInput({ title: "Copy Item Here", label: "Copy name", defaultValue: `copy-${contextItem.name}`, confirmLabel: "Copy" }))?.trim();
             if (name) copyItem.mutate({ sourcePath: contextItem.path, name });
             setContextMenu(null);
           }} type="button">
             <Copy size={15} /> Copy Here
           </button>
-          <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={() => {
-            const name = window.prompt("Move/rename to", contextItem.name);
+          <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={async () => {
+            const name = (await requestInput({ title: "Move Item Here", label: "Move/rename to", defaultValue: contextItem.name, confirmLabel: "Move" }))?.trim();
             if (name) moveItem.mutate({ sourcePath: contextItem.path, name });
             setContextMenu(null);
           }} type="button">
             <Settings2 size={15} /> Move Here
           </button>
-          <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={() => {
-            const mode = window.prompt("Mode", contextItem.permissions);
+          <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={async () => {
+            const mode = (await requestInput({ title: "Change Permissions", label: "Mode", defaultValue: contextItem.permissions, confirmLabel: "Apply" }))?.trim();
             if (mode) chmodItem.mutate({ paths: [contextItem.path], mode });
             setContextMenu(null);
           }} type="button">
@@ -840,8 +921,13 @@ export function FileManagerClient() {
               <Settings2 size={15} /> SHA256
             </button>
           ) : null}
-          <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={() => {
-            const archivePath = window.prompt("Archive path", joinPath(parentPath(contextItem.path), `${contextItem.name}.zip`));
+          <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={async () => {
+            const archivePath = (await requestInput({
+              title: "Create Zip Archive",
+              label: "Archive path",
+              defaultValue: joinPath(parentPath(contextItem.path), `${contextItem.name}.zip`),
+              confirmLabel: "Create"
+            }))?.trim();
             if (archivePath) archiveCreate.mutate({ sourcePaths: [contextItem.path], archivePath });
             setContextMenu(null);
           }} type="button">
@@ -1000,6 +1086,25 @@ export function FileManagerClient() {
           </div>
         </div>
       ) : null}
+      <InputModal
+        open={Boolean(promptRequest)}
+        title={promptRequest?.title ?? "Input"}
+        label={promptRequest?.label}
+        placeholder={promptRequest?.placeholder}
+        defaultValue={promptRequest?.defaultValue}
+        confirmLabel={promptRequest?.confirmLabel ?? "Confirm"}
+        onClose={() => resolveInput(null)}
+        onConfirm={(value) => resolveInput(value)}
+      />
+      <ConfirmModal
+        open={Boolean(confirmRequest)}
+        title={confirmRequest?.title ?? "Confirm action"}
+        message={confirmRequest?.message ?? "Are you sure?"}
+        confirmLabel={confirmRequest?.confirmLabel ?? "Confirm"}
+        tone={confirmRequest?.tone ?? "danger"}
+        onClose={() => resolveConfirm(false)}
+        onConfirm={() => resolveConfirm(true)}
+      />
       <ConfirmModal
         confirmLabel={currentInTrash ? "Delete permanently" : "Move to trash"}
         message={currentInTrash
