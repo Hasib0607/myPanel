@@ -1868,6 +1868,30 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     return { ok: true };
   });
 
+  app.post("/:deploymentId/env/bulk-delete", async (request) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const body = z.object({ keys: z.array(z.string().min(1)).min(1).max(200) }).parse(request.body);
+    const deployment = await findDeployment(deploymentId);
+    const removed: string[] = [];
+    for (const key of [...new Set(body.keys.map((item) => item.trim().toUpperCase()).filter(Boolean))]) {
+      const existing = await prisma.deploymentEnvVar.findUnique({
+        where: { deploymentId_key: { deploymentId: deployment.id, key } }
+      });
+      if (!existing) continue;
+      if (existing.secretRef) await deleteSecret(existing.secretRef);
+      await prisma.deploymentEnvVar.delete({ where: { deploymentId_key: { deploymentId: deployment.id, key } } });
+      removed.push(key);
+    }
+    await audit(request, {
+      action: "DELETE",
+      resource: "deployment_env",
+      resourceId: deployment.id,
+      description: `Bulk deleted ${removed.length} env vars for ${deployment.slug}`,
+      metadata: { removed }
+    });
+    return { ok: true, removed };
+  });
+
   app.post("/:deploymentId/env/clear-database-overrides", async (request) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const deployment = await findDeployment(deploymentId);

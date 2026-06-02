@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Eye, KeyRound, List, Plus, RefreshCw, Save, Trash2, X } from "lucide-react";
 import { apiDelete, apiGet, apiPost, apiPut } from "@/lib/api";
@@ -53,6 +53,7 @@ export function DeploymentEnvClient({ project }: { project: string }) {
   const [addOpen, setAddOpen] = useState(false);
   const [revealedValues, setRevealedValues] = useState<Record<string, string>>({});
   const [draftValues, setDraftValues] = useState<Record<string, string>>({});
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
 
   const detail = useQuery({ queryKey: ["deployment", project], queryFn: () => apiGet<Deployment>(`/deployments/${project}`) });
   const env = useQuery({
@@ -124,6 +125,15 @@ export function DeploymentEnvClient({ project }: { project: string }) {
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not delete variable")
   });
 
+  const removeBulk = useMutation({
+    mutationFn: (keys: string[]) => apiPost<{ ok: true; removed: string[] }>(`/deployments/${project}/env/bulk-delete`, { keys }),
+    onSuccess: async (result) => {
+      setNotice(`${result.removed.length} environment variable(s) deleted.`);
+      await invalidate();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not delete selected variables")
+  });
+
   const clearDatabaseOverrides = useMutation({
     mutationFn: () => apiPost<{ ok: true; removed: string[] }>(`/deployments/${project}/env/clear-database-overrides`, {}),
     onSuccess: async (result) => {
@@ -139,6 +149,35 @@ export function DeploymentEnvClient({ project }: { project: string }) {
 
   const hasDatabaseOverrides = envItems.some((item) => item.key === "DB_PASSWORD" || item.key === "DATABASE_URL");
   const deployment = detail.data;
+  const allSelected = envItems.length > 0 && selectedKeys.size === envItems.length;
+  const someSelected = selectedKeys.size > 0;
+
+  useEffect(() => {
+    setSelectedKeys(new Set());
+  }, [project, envItems.length]);
+
+  const toggleKey = (itemKey: string, checked: boolean) => {
+    setSelectedKeys((current) => {
+      const next = new Set(current);
+      if (checked) next.add(itemKey);
+      else next.delete(itemKey);
+      return next;
+    });
+  };
+
+  const toggleAll = (checked: boolean) => {
+    setSelectedKeys(checked ? new Set(envItems.map((item) => item.key)) : new Set());
+  };
+
+  const deleteSelected = () => {
+    const keys = [...selectedKeys];
+    if (!keys.length) return;
+    const message = keys.length === 1
+      ? `Delete environment variable ${keys[0]}?`
+      : `Delete ${keys.length} environment variables?`;
+    if (!window.confirm(message)) return;
+    removeBulk.mutate(keys);
+  };
 
   let bulkCount = 0;
   try {
@@ -176,9 +215,34 @@ export function DeploymentEnvClient({ project }: { project: string }) {
         {listOpen ? (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-6">
             <div className="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-md border border-panel-line bg-white shadow-xl">
-              <div className="flex items-center justify-between border-b border-panel-line p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-panel-line p-4">
                 <div className="flex items-center gap-2 text-sm font-semibold"><List size={17} />Environment variables</div>
-                <button className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line" onClick={() => setListOpen(false)} type="button"><X size={16} /></button>
+                <div className="flex flex-wrap items-center gap-3">
+                  {envItems.length > 0 ? (
+                    <>
+                      <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-panel-muted">
+                        <input
+                          aria-label="Select all environment variables"
+                          checked={allSelected}
+                          className="h-4 w-4 rounded border-panel-line"
+                          onChange={(event) => toggleAll(event.target.checked)}
+                          type="checkbox"
+                        />
+                        Select all
+                      </label>
+                      <button
+                        className="inline-flex h-8 items-center gap-1 rounded-md border border-panel-line px-3 text-xs font-semibold text-panel-danger hover:bg-red-50 disabled:opacity-50"
+                        disabled={!someSelected || removeBulk.isPending}
+                        onClick={deleteSelected}
+                        type="button"
+                      >
+                        <Trash2 size={13} />
+                        {removeBulk.isPending ? "Deleting..." : `Delete selected (${selectedKeys.size})`}
+                      </button>
+                    </>
+                  ) : null}
+                  <button className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line" onClick={() => setListOpen(false)} type="button"><X size={16} /></button>
+                </div>
               </div>
               <div className="min-h-0 flex-1 overflow-auto p-4">
                 {deployment?.dbType && hasDatabaseOverrides ? (
@@ -195,7 +259,16 @@ export function DeploymentEnvClient({ project }: { project: string }) {
                 ) : null}
                 <div className="overflow-hidden rounded-md border border-panel-line">
                   {envItems.map((item) => (
-                    <div className="flex items-start gap-3 border-b border-panel-line p-3 last:border-b-0" key={item.key}>
+                    <div className={`flex items-start gap-3 border-b border-panel-line p-3 last:border-b-0 ${selectedKeys.has(item.key) ? "bg-emerald-50/50" : ""}`} key={item.key}>
+                      <div className="pt-1">
+                        <input
+                          aria-label={`Select ${item.key}`}
+                          checked={selectedKeys.has(item.key)}
+                          className="h-4 w-4 rounded border-panel-line"
+                          onChange={(event) => toggleKey(item.key, event.target.checked)}
+                          type="checkbox"
+                        />
+                      </div>
                       <div className="min-w-0 flex-1">
                         <div className="font-mono text-sm font-semibold">{item.key}</div>
                         <input

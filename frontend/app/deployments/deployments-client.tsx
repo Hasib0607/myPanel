@@ -526,6 +526,18 @@ export function DeploymentsClient() {
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not remove env")
   });
 
+  const removeBulkEnv = useMutation({
+    mutationFn: async (keys: string[]) => {
+      if (!selected) throw new Error("Select a project first");
+      return apiPost<{ ok: true; removed: string[] }>(`/deployments/${selected.slug}/env/bulk-delete`, { keys });
+    },
+    onSuccess: async (result) => {
+      setNotice(`${result.removed.length} environment variable(s) removed.`);
+      await invalidateDeployments();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not remove selected env vars")
+  });
+
   const clearDatabaseEnvOverrides = useMutation({
     mutationFn: () => apiPost<{ ok: true; removed: string[] }>(`/deployments/${selected!.slug}/env/clear-database-overrides`, {}),
     onSuccess: async (result) => {
@@ -668,7 +680,7 @@ export function DeploymentsClient() {
                 {activeTab === "overview" ? <OverviewPanel deployment={selected} /> : null}
                 {activeTab === "domains" ? <DomainsPanel deployment={selected} domains={domainOptions(domains.data?.items ?? [])} domainToAdd={domainToAdd} setDomainToAdd={setDomainToAdd} addDomain={() => addDomain.mutate()} setPrimary={(binding) => setPrimaryDomain.mutate(binding)} removeDomain={(binding) => removeDomain.mutate(binding)} /> : null}
                 {activeTab === "history" ? <HistoryPanel deployment={selected} releases={releases.data ?? selected.releases ?? []} loading={releases.isLoading} onRefresh={() => releases.refetch()} onJump={(release) => rollbackRelease.mutate({ deployment: selected, releaseId: release.id })} jumping={rollbackRelease.isPending} /> : null}
-                {activeTab === "env" ? <EnvPanel deployment={selected} envKey={envKey} envValue={envValue} envSecret={envSecret} bulkEnvText={bulkEnvText} bulkEnvSecret={bulkEnvSecret} revealedValues={revealedEnvValues} revealingKey={revealEnv.variables} savingLineKey={saveEnvLine.variables?.item.key} setEnvKey={setEnvKey} setEnvValue={setEnvValue} setEnvSecret={setEnvSecret} setBulkEnvText={setBulkEnvText} setBulkEnvSecret={setBulkEnvSecret} saveEnv={(onSuccess) => saveEnv.mutate(undefined, { onSuccess })} saveBulkEnv={(onSuccess) => saveBulkEnv.mutate(undefined, { onSuccess })} savingEnv={saveEnv.isPending} savingBulkEnv={saveBulkEnv.isPending} revealEnv={(key) => revealEnv.mutate(key)} saveEnvLine={(item, value) => saveEnvLine.mutate({ item, value })} removeEnv={(key) => removeEnv.mutate(key)} clearDatabaseEnvOverrides={() => clearDatabaseEnvOverrides.mutate()} clearingDatabaseEnvOverrides={clearDatabaseEnvOverrides.isPending} /> : null}
+                {activeTab === "env" ? <EnvPanel deployment={selected} envKey={envKey} envValue={envValue} envSecret={envSecret} bulkEnvText={bulkEnvText} bulkEnvSecret={bulkEnvSecret} revealedValues={revealedEnvValues} revealingKey={revealEnv.variables} savingLineKey={saveEnvLine.variables?.item.key} setEnvKey={setEnvKey} setEnvValue={setEnvValue} setEnvSecret={setEnvSecret} setBulkEnvText={setBulkEnvText} setBulkEnvSecret={setBulkEnvSecret} saveEnv={(onSuccess) => saveEnv.mutate(undefined, { onSuccess })} saveBulkEnv={(onSuccess) => saveBulkEnv.mutate(undefined, { onSuccess })} savingEnv={saveEnv.isPending} savingBulkEnv={saveBulkEnv.isPending} revealEnv={(key) => revealEnv.mutate(key)} saveEnvLine={(item, value) => saveEnvLine.mutate({ item, value })} removeEnv={(key) => removeEnv.mutate(key)} removeBulkEnv={(keys) => removeBulkEnv.mutate(keys)} removingBulkEnv={removeBulkEnv.isPending} clearDatabaseEnvOverrides={() => clearDatabaseEnvOverrides.mutate()} clearingDatabaseEnvOverrides={clearDatabaseEnvOverrides.isPending} /> : null}
                 {activeTab === "settings" ? <SettingsPanel deployment={selected} deleteText={deleteText} setDeleteText={setDeleteText} onEdit={openEdit} onDelete={() => deleteProject.mutate()} deleting={deleteProject.isPending} /> : null}
               </div>
             </div>
@@ -850,6 +862,8 @@ function EnvPanel({
   savingEnv,
   savingBulkEnv,
   removeEnv,
+  removeBulkEnv,
+  removingBulkEnv,
   clearDatabaseEnvOverrides,
   clearingDatabaseEnvOverrides
 }: {
@@ -874,6 +888,8 @@ function EnvPanel({
   savingEnv?: boolean;
   savingBulkEnv?: boolean;
   removeEnv: (key: string) => void;
+  removeBulkEnv: (keys: string[]) => void;
+  removingBulkEnv?: boolean;
   clearDatabaseEnvOverrides: () => void;
   clearingDatabaseEnvOverrides?: boolean;
 }) {
@@ -912,6 +928,8 @@ function EnvPanel({
           revealedValues={revealedValues}
           revealingKey={revealingKey}
           removeEnv={removeEnv}
+          removeBulkEnv={removeBulkEnv}
+          removingBulkEnv={removingBulkEnv}
           saveEnvLine={saveEnvLine}
           savingLineKey={savingLineKey}
           revealEnv={revealEnv}
@@ -945,6 +963,8 @@ function EnvListModal({
   deployment,
   onClose,
   removeEnv,
+  removeBulkEnv,
+  removingBulkEnv,
   revealEnv,
   saveEnvLine,
   revealedValues,
@@ -956,6 +976,8 @@ function EnvListModal({
   deployment: Deployment;
   onClose: () => void;
   removeEnv: (key: string) => void;
+  removeBulkEnv: (keys: string[]) => void;
+  removingBulkEnv?: boolean;
   revealEnv: (key: string) => void;
   saveEnvLine: (item: DeploymentEnvVar, value: string) => void;
   revealedValues: Record<string, string>;
@@ -965,21 +987,77 @@ function EnvListModal({
   clearingDatabaseEnvOverrides?: boolean;
 }) {
   const [draftValues, setDraftValues] = useState<Record<string, string>>({});
-  const hasDatabaseOverrides = (deployment.env ?? []).some(
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  const envItems = deployment.env ?? [];
+  const hasDatabaseOverrides = envItems.some(
     (item) => item.key === "DB_PASSWORD" || item.key === "DATABASE_URL"
   );
+  const allSelected = envItems.length > 0 && selectedKeys.size === envItems.length;
+  const someSelected = selectedKeys.size > 0;
+
+  useEffect(() => {
+    setSelectedKeys(new Set());
+  }, [deployment.id, envItems.length]);
+
+  const toggleKey = (key: string, checked: boolean) => {
+    setSelectedKeys((current) => {
+      const next = new Set(current);
+      if (checked) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+  };
+
+  const toggleAll = (checked: boolean) => {
+    setSelectedKeys(checked ? new Set(envItems.map((item) => item.key)) : new Set());
+  };
+
+  const deleteSelected = () => {
+    const keys = [...selectedKeys];
+    if (!keys.length) return;
+    const message = keys.length === 1
+      ? `Delete environment variable ${keys[0]}?`
+      : `Delete ${keys.length} environment variables?`;
+    if (!window.confirm(message)) return;
+    removeBulkEnv(keys);
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-6">
       <div className="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-md border border-panel-line bg-white shadow-xl">
-        <div className="flex items-center justify-between border-b border-panel-line p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-panel-line p-4">
           <div className="flex items-center gap-2 text-sm font-semibold text-panel-ink">
             <List size={17} />
             Environment variables
           </div>
-          <button className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line" onClick={onClose} type="button">
-            <X size={16} />
-          </button>
+          <div className="flex flex-wrap items-center gap-3">
+            {envItems.length > 0 ? (
+              <>
+                <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-panel-muted">
+                  <input
+                    aria-label="Select all environment variables"
+                    checked={allSelected}
+                    className="h-4 w-4 rounded border-panel-line"
+                    onChange={(event) => toggleAll(event.target.checked)}
+                    type="checkbox"
+                  />
+                  Select all
+                </label>
+                <button
+                  className="inline-flex h-8 items-center gap-1 rounded-md border border-panel-line px-3 text-xs font-semibold text-panel-danger hover:bg-red-50 disabled:opacity-50"
+                  disabled={!someSelected || removingBulkEnv}
+                  onClick={deleteSelected}
+                  type="button"
+                >
+                  <Trash2 size={13} />
+                  {removingBulkEnv ? "Deleting..." : `Delete selected (${selectedKeys.size})`}
+                </button>
+              </>
+            ) : null}
+            <button className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line" onClick={onClose} type="button">
+              <X size={16} />
+            </button>
+          </div>
         </div>
         <div className="min-h-0 flex-1 overflow-auto p-4">
           {deployment.dbType && hasDatabaseOverrides ? (
@@ -998,8 +1076,17 @@ function EnvListModal({
             </div>
           ) : null}
           <div className="overflow-hidden rounded-md border border-panel-line">
-            {(deployment.env ?? []).map((item) => (
-              <div className="flex items-start gap-3 border-b border-panel-line p-3 last:border-b-0" key={item.key}>
+            {envItems.map((item) => (
+              <div className={`flex items-start gap-3 border-b border-panel-line p-3 last:border-b-0 ${selectedKeys.has(item.key) ? "bg-emerald-50/50" : ""}`} key={item.key}>
+                <div className="pt-1">
+                  <input
+                    aria-label={`Select ${item.key}`}
+                    checked={selectedKeys.has(item.key)}
+                    className="h-4 w-4 rounded border-panel-line"
+                    onChange={(event) => toggleKey(item.key, event.target.checked)}
+                    type="checkbox"
+                  />
+                </div>
                 <div className="min-w-0 flex-1">
                   <div className="font-mono text-sm font-semibold">{item.key}</div>
                   <input
@@ -1038,7 +1125,7 @@ function EnvListModal({
                 </button>
               </div>
             ))}
-            {(deployment.env ?? []).length === 0 ? (
+            {envItems.length === 0 ? (
               <div className="p-8 text-center text-sm text-panel-muted">No environment variables.</div>
             ) : null}
           </div>
