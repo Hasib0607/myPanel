@@ -1,5 +1,8 @@
 from __future__ import annotations
 import secrets
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
@@ -47,6 +50,38 @@ def certificate_exists(domain: str) -> dict:
     }
 
 
+def certificate_expiry(domain: str) -> str | None:
+    cert_path = Path(f"/etc/letsencrypt/live/{domain}/fullchain.pem")
+    if not cert_path.exists():
+        return None
+    result = subprocess.run(
+        ["openssl", "x509", "-in", str(cert_path), "-noout", "-enddate"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    line = result.stdout.strip()
+    if not line.startswith("notAfter="):
+        return None
+    parsed = datetime.strptime(line.removeprefix("notAfter="), "%b %d %H:%M:%S %Y %Z")
+    return parsed.replace(tzinfo=timezone.utc).isoformat()
+
+
+@router.get("/certificate-status/{domain}")
+def certificate_status(domain: str) -> dict:
+    primary = domain.split()[0].strip()
+    expiry = certificate_expiry(primary)
+    return {
+        "domain": primary,
+        "exists": letsencrypt_certificate_exists(primary),
+        "expiry": expiry,
+        "certificate": f"/etc/letsencrypt/live/{primary}/fullchain.pem",
+        "privateKey": f"/etc/letsencrypt/live/{primary}/privkey.pem",
+    }
+
+
 @router.post("/ensure-acme-webroot")
 def ensure_acme_webroot(body: EnsureAcmeWebrootRequest) -> dict:
     primary = body.domain.split()[0].strip()
@@ -89,7 +124,24 @@ def issue_certificate(payload: CertificateRequest) -> dict:
 
 @router.post("/renew/{domain}")
 def renew_certificate(domain: str) -> dict:
-    return run_command(["certbot", "renew", "--cert-name", domain], allow_live=settings.allow_live_ssl)
+    return run_command([
+        "certbot",
+        "renew",
+        "--cert-name",
+        domain,
+        "--deploy-hook",
+        "systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true",
+    ], allow_live=settings.allow_live_ssl)
+
+
+@router.post("/renew-all")
+def renew_all_certificates() -> dict:
+    return run_command([
+        "certbot",
+        "renew",
+        "--deploy-hook",
+        "systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true",
+    ], allow_live=settings.allow_live_ssl)
 
 
 @router.get("/certbot")

@@ -125,7 +125,7 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
   return result;
 }
 
-async function markSslIssued(job: { data: { domainId?: string | null; subdomainId?: string | null; forceSsl?: boolean } }) {
+async function markSslIssued(job: { data: { domain: string; domainId?: string | null; subdomainId?: string | null; forceSsl?: boolean } }) {
   if (job.data.subdomainId) {
     await prisma.subdomain.update({
       where: { id: job.data.subdomainId },
@@ -135,11 +135,12 @@ async function markSslIssued(job: { data: { domainId?: string | null; subdomainI
   }
   if (job.data.domainId) {
     const domain = await prisma.domain.findUnique({ where: { id: job.data.domainId }, select: { forceSsl: true } });
+    const status = await sysagent.certificateStatus(job.data.domain);
     await prisma.domain.update({
       where: { id: job.data.domainId },
       data: {
         sslEnabled: true,
-        sslExpiry: new Date(Date.now() + 90 * 86_400_000),
+        sslExpiry: status.expiry ? new Date(status.expiry) : new Date(Date.now() + 90 * 86_400_000),
         forceSsl: domain?.forceSsl ?? job.data.forceSsl ?? true
       }
     });

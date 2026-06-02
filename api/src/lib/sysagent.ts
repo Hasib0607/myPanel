@@ -131,6 +131,8 @@ export const sysagent = {
     request("/deployments/public-access-repair", { method: "POST", body: JSON.stringify(body) }),
   certificateExists: (domain: string) =>
     request<{ domain: string; exists: boolean; certificate: string; privateKey: string }>(`/ssl/certificate-exists/${encodeURIComponent(domain.split(" ")[0] ?? domain)}`),
+  certificateStatus: (domain: string) =>
+    request<{ domain: string; exists: boolean; expiry: string | null; certificate: string; privateKey: string }>(`/ssl/certificate-status/${encodeURIComponent(domain.split(" ")[0] ?? domain)}`),
   ensureAcmeWebroot: (body: { domain: string; webRoot?: string | null }) =>
     request<SysagentCommandResult & { webRoot?: string; challengeDir?: string }>("/ssl/ensure-acme-webroot", { method: "POST", body: JSON.stringify(body) }),
   applyDnsZone: (body: unknown) =>
@@ -193,6 +195,8 @@ export const sysagent = {
     request<SysagentCommandResult>("/ssl/issue", { method: "POST", body: JSON.stringify(body) }),
   renewCertificate: (domain: string) =>
     request<SysagentCommandResult>(`/ssl/renew/${encodeURIComponent(domain)}`, { method: "POST" }),
+  renewAllCertificates: () =>
+    request<SysagentCommandResult>("/ssl/renew-all", { method: "POST" }),
   setupDkim: (body: unknown) =>
     request("/mail-config/dkim", { method: "POST", body: JSON.stringify(body) }),
   createMailbox: (body: unknown) =>

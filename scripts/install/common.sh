@@ -423,6 +423,8 @@ ALLOW_LIVE_SSL=true
 GUARDIAN_AUTO_HEAL=true
 GUARDIAN_AUTO_DEPLOY_REPAIR=true
 GUARDIAN_DEPLOYMENT_DOCTOR_INTERVAL_MS=300000
+GUARDIAN_SSL_RENEW_ENABLED=true
+GUARDIAN_SSL_RENEW_INTERVAL_MS=43200000
 DEPLOY_GUARDIAN_RECOVERY_ATTEMPTS=3
 EOF
   chown "$APP_USER:$APP_USER" "$APP_DIR/.env"
@@ -684,6 +686,36 @@ issue_panel_ssl_certificate() {
   certbot certonly --standalone --non-interactive --agree-tos "${email_args[@]}" -d "$PANEL_DOMAIN"
   PANEL_PUBLIC_SCHEME=https
   export PANEL_PUBLIC_SCHEME
+}
+
+configure_certbot_auto_renewal() {
+  log "Configuring Certbot auto-renewal"
+  install -d -m 0755 /etc/letsencrypt/renewal-hooks/deploy
+  write_file /etc/letsencrypt/renewal-hooks/deploy/vps-panel-reload-nginx.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true
+fi
+EOF
+  chmod 0755 /etc/letsencrypt/renewal-hooks/deploy/vps-panel-reload-nginx.sh
+
+  local enabled_timer=false
+  for timer in certbot.timer certbot-renew.timer snap.certbot.renew.timer; do
+    if systemctl list-unit-files "$timer" >/dev/null 2>&1; then
+      systemctl enable --now "$timer" >/dev/null 2>&1 && enabled_timer=true && log "Enabled $timer" && break
+    fi
+  done
+
+  if [[ "$enabled_timer" != "true" ]]; then
+    log "Certbot systemd timer not found; installing daily cron fallback"
+    write_file /etc/cron.d/vps-panel-certbot-renew <<EOF
+SHELL=/bin/bash
+PATH=/sbin:/bin:/usr/sbin:/usr/bin
+17 3,15 * * * root certbot renew --quiet --deploy-hook "systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true"
+EOF
+    chmod 0644 /etc/cron.d/vps-panel-certbot-renew
+  fi
 }
 
 write_update_sudoers() {

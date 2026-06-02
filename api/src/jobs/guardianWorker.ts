@@ -283,6 +283,35 @@ async function runDeploymentWatch() {
   return { checked: results.length, results };
 }
 
+async function runSslRenewWatch() {
+  const renew = await sysagent.renewAllCertificates() as { dryRun?: boolean; returncode?: number; stderr?: string; stdout?: string };
+  if (renew.dryRun || renew.returncode !== 0) {
+    throw new Error(`Certbot auto-renew failed${renew.returncode !== undefined ? ` with exit code ${renew.returncode}` : ""}: ${[renew.stderr, renew.stdout].filter(Boolean).join("\n").trim()}`);
+  }
+
+  const domains = await prisma.domain.findMany({
+    where: { sslEnabled: true },
+    select: { id: true, name: true, sslExpiry: true }
+  });
+  const updated = [];
+  for (const domain of domains) {
+    try {
+      const status = await sysagent.certificateStatus(domain.name) as { exists: boolean; expiry: string | null };
+      if (status.exists && status.expiry) {
+        const sslExpiry = new Date(status.expiry);
+        await prisma.domain.update({ where: { id: domain.id }, data: { sslExpiry } });
+        updated.push({ domain: domain.name, sslExpiry });
+      }
+    } catch (error) {
+      logger.warn("ssl renew watch failed to sync certificate status", {
+        domain: domain.name,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+  return { renew, checked: domains.length, updated };
+}
+
 export const guardianWorker = new Worker(
   "guardian",
   async (job) => {
@@ -292,6 +321,9 @@ export const guardianWorker = new Worker(
     }
     if (job.name === "panel-update-watch") {
       return checkPanelRemoteUpdate();
+    }
+    if (job.name === "ssl-renew-watch") {
+      return runSslRenewWatch();
     }
 
     const diagnosis = await sysagent.guardianDiagnosis() as GuardianDiagnosis;
