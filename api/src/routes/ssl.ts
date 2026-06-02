@@ -129,11 +129,32 @@ async function subdomainSslTarget(subdomainId: string) {
   };
 }
 
+async function publishSubdomainHttpVhost(target: Awaited<ReturnType<typeof subdomainSslTarget>>) {
+  const result = await sysagent.writeStaticNginxVhost({
+    name: `domain-${target.fqdn}`,
+    serverName: target.fqdn,
+    rootPath: target.webRoot,
+    forceHttps: false
+  }) as { test?: SysagentCommandResult; reload?: SysagentCommandResult };
+
+  if (result.test && !commandSucceeded(result.test)) {
+    const detail = commandFailureDetail(result.test);
+    throw Object.assign(new Error(`Could not publish HTTP vhost for ${target.fqdn}.${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
+  }
+  if (result.reload && !commandSucceeded(result.reload)) {
+    const detail = commandFailureDetail(result.reload);
+    throw Object.assign(new Error(`Could not reload Nginx for ${target.fqdn}.${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
+  }
+
+  return result;
+}
+
 async function runSubdomainSslPreflight(subdomainId: string) {
   const target = await subdomainSslTarget(subdomainId);
   await publishDomainDnsZone(target.parentDomain.id);
   const records = await assertARecordPointsToVps(target.fqdn, target.parentDomain.id, target.parentDomain.name);
   const dnsChecks = [{ host: target.fqdn, records, ok: true, skipped: false }];
+  const httpVhost = await publishSubdomainHttpVhost(target);
   const preflight = await sysagent.sslPreflight({ domain: target.fqdn, webRoot: target.webRoot, includeWww: false });
 
   if (!commandSucceeded(preflight.certbot)) {
@@ -147,7 +168,7 @@ async function runSubdomainSslPreflight(subdomainId: string) {
     throw Object.assign(new Error(`HTTP ACME challenge failed for ${target.fqdn}. Publish the subdomain first and keep port 80 open.${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
   }
 
-  return { ...target, dnsChecks, preflight, includeWww: false };
+  return { ...target, dnsChecks, httpVhost, preflight, includeWww: false };
 }
 
 export const sslRoutes: FastifyPluginAsync = async (app) => {
