@@ -78,6 +78,7 @@ From Deployment Doctor or runtime-tools install:
 - [ ] Deployment Doctor/Guardian marks public HTTP 502/503/504 as a repairable failure, rewrites the generated Nginx vhost, and queues restart if the deployment upstream is still unreachable
 - [ ] Deployment Doctor/Guardian identifies Laravel MySQL access-denied crashes, including DB/user case mismatch, host-grant mismatch (`localhost` vs `127.0.0.1`), and password/grant repair needs
 - [ ] Wildcard subdomains like `*.example.com` can be added after the parent domain exists, publish a wildcard DNS/vhost, and use the safe file-manager root `example.com/subdomains/_wildcard`
+- [ ] React/Vite build failures like `vite: command not found` are treated as missing project package binaries; Guardian reinstalls Node dependencies with devDependencies and retries the build instead of requesting a global Vite install
 - [ ] Install Composer (EPEL or fallback)
 - [ ] Install Go if needed
 

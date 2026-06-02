@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { detectComposerPlatformIssue, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "./deploymentRuntimeTools.js";
-import { laravelPublicCwdMissing, pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded } from "./deploymentFailureRuntimeRepairs.js";
+import { laravelPublicCwdMissing, nodePackageBinaryMissing, pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded } from "./deploymentFailureRuntimeRepairs.js";
 
 test("composer PHP 8.1 requirement on PHP 8.0 queues PHP 8.2 runtime repair", () => {
   const targets = runtimeInstallTargetsForComposerPlatformIssue(`
@@ -245,4 +245,11 @@ test("failed deploy parser detects Laravel public cwd missing", () => {
   const log = 'The provided cwd "/var/www/deployments/ecommercex-admin/public" does not exist.';
 
   assert.equal(laravelPublicCwdMissing(log), true);
+});
+
+test("failed deploy parser treats missing Vite as project dependency repair", () => {
+  const log = "Build failed with exit code 127: sh: line 1: vite: command not found";
+
+  assert.equal(nodePackageBinaryMissing(log), true);
+  assert.deepEqual(runtimeTargetsForFailedDeploymentLog(log), []);
 });

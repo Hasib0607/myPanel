@@ -6,7 +6,7 @@ import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { env } from "../config/env.js";
 import { deployQueue } from "../jobs/queues.js";
-import { laravelPublicCwdMissing } from "../lib/deploymentFailureRuntimeRepairs.js";
+import { laravelPublicCwdMissing, nodePackageBinaryMissing } from "../lib/deploymentFailureRuntimeRepairs.js";
 import { detectComposerPlatformIssue, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import { audit } from "../lib/audit.js";
 import { detectDeploymentFiles, detectDeploymentSource } from "../lib/deploymentDetection.js";
@@ -734,6 +734,13 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
   if (composerPlatform?.missingExtensions.includes("gd")) return { message: "Composer is missing the PHP GD extension. Install/enable GD on the VPS, then redeploy.", repairAction: "request-approval", category: "php_extension_gd" };
   if (composerPlatform?.missingExtensions.includes("soap")) return { message: "Composer is missing the PHP SOAP extension. Install/enable SOAP on the VPS, then redeploy.", repairAction: "request-approval", category: "php_extension_soap" };
   if (lower.includes("composer") && (lower.includes("ext-") || lower.includes("requires php extension"))) return { message: "Composer is missing a required PHP extension. Install the extension on the VPS, then redeploy.", repairAction: "request-approval", category: "php_extension" };
+  if (nodePackageBinaryMissing(text)) {
+    return {
+      message: "React/Vite build could not find a local package binary such as vite. Guardian will reinstall Node dependencies with devDependencies and retry the build on redeploy.",
+      repairAction: "redeploy",
+      category: "node_package_bin_missing"
+    };
+  }
   if ((lower.includes("no such file or directory") || lower.includes("command not found") || lower.includes("unsupported deployment executable")) && (lower.includes("composer") || lower.includes("php") || lower.includes("python") || lower.includes("pip") || lower.includes("uv") || lower.includes("uvicorn") || lower.includes("gunicorn") || lower.includes("node") || lower.includes("npm") || lower.includes("pnpm") || lower.includes("yarn") || lower.includes("next") || lower.includes("vite") || lower.includes("pm2") || lower.includes("supervisor"))) {
     return { message: "A required runtime tool is missing on the VPS. Use Deployment Doctor to request approval for the missing tool install, then redeploy.", repairAction: "request-approval", category: "missing_runtime_tool" };
   }

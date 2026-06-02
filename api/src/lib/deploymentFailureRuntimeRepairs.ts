@@ -24,6 +24,12 @@ export function laravelPublicCwdMissing(text: string) {
   return /provided cwd\s+["'][^"']+\/public["']\s+does not exist/i.test(text);
 }
 
+export function nodePackageBinaryMissing(text: string) {
+  return /\b(vite|next|react-scripts)\b(?:[^;\n\r]*:)?\s+command not found/i.test(text)
+    || /sh:\s+\d+:\s+(vite|next|react-scripts):\s+not found/i.test(text)
+    || /sh:\s+line\s+\d+:\s+(vite|next|react-scripts):\s+command not found/i.test(text);
+}
+
 export function permissionRepairNeeded(text: string) {
   const lower = text.toLowerCase();
   return lower.includes("permission denied")
@@ -41,6 +47,10 @@ export function runtimeTargetsForFailedDeploymentLog(text: string) {
 
   if (pythonRuntimeRepairNeeded(text)) {
     missingTools.add("python3.10+");
+  }
+
+  if (nodePackageBinaryMissing(text)) {
+    return uniqueRuntimeTargets(targets);
   }
 
   const missingExecutable = lower.includes("command not found")
