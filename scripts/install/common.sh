@@ -449,6 +449,7 @@ prepare_runtime_directories() {
 
 build_application() {
   log "Building application"
+  chmod +x "$APP_DIR/scripts/deploy/start-frontend.sh" 2>/dev/null || true
   repair_app_workspace_permissions
   if [[ "$DB_CREATE" == "true" && ( "$DB_HOST" == "localhost" || "$DB_HOST" == "127.0.0.1" ) ]]; then
     create_postgresql_database
@@ -521,17 +522,20 @@ EOF
   write_file /etc/systemd/system/vps-panel-frontend.service <<EOF
 [Unit]
 Description=VPS Panel Frontend
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=$APP_USER
 WorkingDirectory=$APP_DIR/frontend
 EnvironmentFile=$APP_DIR/.env
+Environment=APP_DIR=$APP_DIR
 Environment=PORT=$FRONTEND_PORT
-ExecStart=/usr/bin/npm run start -- -p $FRONTEND_PORT
+ExecStart=/usr/bin/bash $APP_DIR/scripts/deploy/start-frontend.sh
 Restart=always
-RestartSec=3
+RestartSec=5
+TimeoutStartSec=900
 
 [Install]
 WantedBy=multi-user.target
@@ -728,7 +732,7 @@ write_update_sudoers() {
   SYSTEMCTL_BIN="$(command -v systemctl)"
   write_file /etc/sudoers.d/vps-panel-update <<EOF
 $APP_USER ALL=(root) NOPASSWD: $SYSTEMCTL_BIN --no-block restart vps-panel-sysagent, $SYSTEMCTL_BIN is-active vps-panel-sysagent, $SYSTEMCTL_BIN status vps-panel-sysagent, $SYSTEMCTL_BIN --no-block restart vps-panel-api, $SYSTEMCTL_BIN is-active vps-panel-api, $SYSTEMCTL_BIN status vps-panel-api, $SYSTEMCTL_BIN --no-block restart vps-panel-workers, $SYSTEMCTL_BIN is-active vps-panel-workers, $SYSTEMCTL_BIN status vps-panel-workers, $SYSTEMCTL_BIN --no-block restart vps-panel-guardian, $SYSTEMCTL_BIN is-active vps-panel-guardian, $SYSTEMCTL_BIN status vps-panel-guardian, $SYSTEMCTL_BIN --no-block restart vps-panel-frontend, $SYSTEMCTL_BIN is-active vps-panel-frontend, $SYSTEMCTL_BIN status vps-panel-frontend
-$APP_USER ALL=(root) NOPASSWD: $SYSTEMCTL_BIN start vps-panel-self-update, $SYSTEMCTL_BIN is-active vps-panel-self-update, $SYSTEMCTL_BIN status vps-panel-self-update
+$APP_USER ALL=(root) NOPASSWD: $SYSTEMCTL_BIN start vps-panel-self-update, $SYSTEMCTL_BIN is-active vps-panel-self-update, $SYSTEMCTL_BIN status vps-panel-self-update, $SYSTEMCTL_BIN daemon-reload
 $APP_USER ALL=(root) NOPASSWD: $APP_DIR/scripts/maintenance/repair-panel-permissions.sh
 EOF
   chmod 0440 /etc/sudoers.d/vps-panel-update

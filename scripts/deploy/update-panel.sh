@@ -23,6 +23,8 @@ DIRTY_STRATEGY="${PANEL_UPDATE_DIRTY_STRATEGY:-fail}"
 COMMAND_TIMEOUT="${PANEL_UPDATE_COMMAND_TIMEOUT:-30}"
 SYSTEMCTL_NO_BLOCK="${PANEL_UPDATE_SYSTEMCTL_NO_BLOCK:-true}"
 STALE_AFTER_SECONDS="${PANEL_UPDATE_STALE_AFTER_SECONDS:-1200}"
+APP_USER="${APP_USER:-panel}"
+FRONTEND_PORT="${FRONTEND_PORT:-3000}"
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")"
 SCRIPT_REEXECUTED="${PANEL_UPDATE_SCRIPT_REEXECUTED:-false}"
 FINAL_COMMIT=""
@@ -423,6 +425,51 @@ ensure_live_sysagent_config() {
   fi
 }
 
+repair_frontend_service_unit() {
+  local unit="/etc/systemd/system/vps-panel-frontend.service"
+  local start_script="$APP_DIR/scripts/deploy/start-frontend.sh"
+  if [[ ! -f "$start_script" ]]; then
+    log "frontend start repair script missing at $start_script; skipping service unit repair"
+    return 0
+  fi
+
+  chmod +x "$start_script" 2>/dev/null || true
+
+  if [[ "$(id -u)" != "0" ]]; then
+    log "not root; skipping frontend systemd unit repair"
+    return 0
+  fi
+
+  if [[ -f "$unit" ]] && grep -q "$start_script" "$unit"; then
+    log "frontend systemd unit already uses resilient start script"
+    return 0
+  fi
+
+  log "repairing frontend systemd unit to rebuild missing artifacts before start"
+  cat > "$unit" <<EOF
+[Unit]
+Description=VPS Panel Frontend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$APP_USER
+WorkingDirectory=$APP_DIR/frontend
+EnvironmentFile=$APP_DIR/.env
+Environment=APP_DIR=$APP_DIR
+Environment=PORT=$FRONTEND_PORT
+ExecStart=/usr/bin/bash $start_script
+Restart=always
+RestartSec=5
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  "$SYSTEMCTL_BIN" daemon-reload 2>&1 | tee -a "$LOG_FILE"
+}
+
 sudo_systemctl_output() {
   "$SUDO_BIN" -n "$SYSTEMCTL_BIN" "$@" 2>&1
 }
@@ -628,6 +675,7 @@ write_status "running" "source updated; building panel" "$NEW_COMMIT" "$NEW_COMM
 ensure_systemctl_permission
 ensure_node_runtime
 ensure_live_sysagent_config
+repair_frontend_service_unit
 
 npm_install_with_recovery
 run "$NPM_BIN" --workspace api run prisma:generate
