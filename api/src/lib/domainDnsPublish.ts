@@ -1,6 +1,7 @@
 import { prisma } from "./prisma.js";
 import { sysagent } from "./sysagent.js";
 import { env } from "../config/env.js";
+import { defaultVanityNameServerHostnames } from "./publicDns.js";
 import { renderZone } from "../routes/dns.js";
 
 async function syncVanityNameserverRecords(domainId: string, domainName: string) {
@@ -41,6 +42,26 @@ async function syncVanityNameserverRecords(domainId: string, domainName: string)
   }
 }
 
+async function ensureDefaultVanityNameserverRecords(domainId: string, domainName: string) {
+  for (const hostname of defaultVanityNameServerHostnames(domainName)) {
+    const label = hostname.slice(0, -(domainName.length + 1));
+    const nsValue = `${hostname}.`;
+    const existingNs = await prisma.dnsRecord.findFirst({
+      where: { domainId, type: "NS", name: "@", value: nsValue }
+    });
+    if (!existingNs) {
+      await prisma.dnsRecord.create({ data: { domainId, type: "NS", name: "@", value: nsValue, ttl: 3600 } });
+    }
+
+    const existingA = await prisma.dnsRecord.findFirst({ where: { domainId, type: "A", name: label } });
+    if (existingA) {
+      await prisma.dnsRecord.update({ where: { id: existingA.id }, data: { value: env.VPS_IP, ttl: 3600 } });
+    } else {
+      await prisma.dnsRecord.create({ data: { domainId, type: "A", name: label, value: env.VPS_IP, ttl: 3600 } });
+    }
+  }
+}
+
 async function ensureDefaultApexRecords(domainId: string) {
   const apex = await prisma.dnsRecord.findFirst({ where: { domainId, type: "A", name: "@" } });
   if (!apex) {
@@ -60,6 +81,7 @@ async function ensureDefaultApexRecords(domainId: string) {
 export async function publishDomainDnsZone(domainId: string) {
   const domainMeta = await prisma.domain.findUniqueOrThrow({ where: { id: domainId }, select: { name: true } });
   await syncVanityNameserverRecords(domainId, domainMeta.name);
+  await ensureDefaultVanityNameserverRecords(domainId, domainMeta.name);
   await ensureDefaultApexRecords(domainId);
 
   const domain = await prisma.domain.findUniqueOrThrow({

@@ -3,7 +3,7 @@ import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { env } from "../config/env.js";
 import { publishDomainDnsZone } from "../lib/domainDnsPublish.js";
-import { assertPublicARecordPointsTo, resolvePublicA } from "../lib/publicDns.js";
+import { assertPublicARecordPointsTo, defaultVanityNameServerHostnames, resolvePublicA } from "../lib/publicDns.js";
 import { sslQueue } from "../jobs/queues.js";
 import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
@@ -66,10 +66,13 @@ async function panelVanityNameServers(domainId: string, domainName: string) {
     prisma.nameServer.findMany({ where: { active: true }, select: { hostname: true } })
   ]);
 
-  return [...new Set([
+  const hostnames = [...new Set([
     ...dnsRecords.map((record) => record.value.replace(/\.$/, "").toLowerCase()),
-    ...configuredNameServers.map((record) => record.hostname.toLowerCase())
-  ])].filter((hostname) => hostname.endsWith(`.${domainName}`));
+    ...configuredNameServers.map((record) => record.hostname.toLowerCase()),
+    ...defaultVanityNameServerHostnames(domainName)
+  ])];
+
+  return hostnames.filter((hostname) => hostname.endsWith(`.${domainName}`));
 }
 
 async function assertARecordPointsToVps(hostname: string, domainId: string, domainName: string) {

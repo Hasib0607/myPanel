@@ -27,6 +27,10 @@ function normalizeNameServer(value: string) {
   return value.trim().toLowerCase().replace(/\.$/, "");
 }
 
+export function defaultVanityNameServerHostnames(domain: string) {
+  return [`ns1.${domain}`, `ns2.${domain}`];
+}
+
 async function resolveWithDoh(hostname: string, recordType: "A" | "NS", errors: string[]) {
   const typeCode = recordType === "A" ? DNS_TYPE_A : DNS_TYPE_NS;
 
@@ -39,6 +43,11 @@ async function resolveWithDoh(hostname: string, recordType: "A" | "NS", errors: 
         headers: { accept: "application/dns-json" },
         signal: AbortSignal.timeout(5000)
       });
+      const contentType = response.headers.get("content-type") ?? "";
+      if (!contentType.includes("application/json") && !contentType.includes("application/dns-json")) {
+        errors.push(`${baseUrl}: non-JSON response`);
+        continue;
+      }
       const body = await response.json() as DnsJsonResponse;
       if (body.Status === DNS_RCODE_SERVFAIL) {
         errors.push(`${baseUrl}: SERVFAIL`);
@@ -144,6 +153,38 @@ export async function resolvePublicNameServers(domain: string): Promise<PublicNa
   return { nameServers: [], errors };
 }
 
+async function resolveNameServersFromParentZone(domain: string) {
+  const labels = domain.split(".").filter(Boolean);
+  if (labels.length < 2) return [];
+
+  const parentZone = labels.slice(1).join(".");
+  let parentNameServers: string[] = [];
+  try {
+    parentNameServers = await dns.resolveNs(parentZone);
+  } catch {
+    return [];
+  }
+
+  const parentIps: string[] = [];
+  for (const host of parentNameServers) {
+    try {
+      parentIps.push(...await dns.resolve4(host));
+    } catch {
+      // Try the next parent nameserver host.
+    }
+  }
+  if (parentIps.length === 0) return [];
+
+  const resolver = new dns.Resolver();
+  resolver.setServers([...new Set(parentIps)]);
+  try {
+    const records = await resolver.resolveNs(domain);
+    return records.map((nameServer) => normalizeNameServer(nameServer)).sort();
+  } catch {
+    return [];
+  }
+}
+
 async function resolveAuthoritativeA(hostname: string, nameserverIp: string) {
   const resolver = new dns.Resolver();
   resolver.setServers([nameserverIp]);
@@ -174,16 +215,27 @@ export async function diagnosePublicDnsFailure(
   if (apex !== hostname && !hostname.endsWith(`.${apex}`)) return null;
 
   const domain = apex;
-  const { nameServers, errors: nsErrors } = await resolvePublicNameServers(domain);
+  const [{ nameServers, errors: nsErrors }, parentNameServers] = await Promise.all([
+    resolvePublicNameServers(domain),
+    resolveNameServersFromParentZone(domain)
+  ]);
   const delegationErrors = [...errors, ...nsErrors];
 
   const vanityNameServers = [...new Set([
     ...nameServers.filter((nameServer) => nameServer.endsWith(`.${domain}`)),
-    ...knownVanityNameServers.map((nameServer) => normalizeNameServer(nameServer)).filter((nameServer) => nameServer.endsWith(`.${domain}`))
+    ...parentNameServers.filter((nameServer) => nameServer.endsWith(`.${domain}`)),
+    ...knownVanityNameServers.map((nameServer) => normalizeNameServer(nameServer)).filter((nameServer) => nameServer.endsWith(`.${domain}`)),
+    ...defaultVanityNameServerHostnames(domain)
   ])].sort();
-  if (nameServers.length === 0 || vanityNameServers.length === 0) {
+
+  if (vanityNameServers.length === 0) {
     if (isServfailError(delegationErrors)) {
-      return `Public DNS cannot resolve ${hostname} (SERVFAIL). Check that the domain is registered, nameservers are set at your registrar, and the DNS zone is published from this panel. Resolver checks: ${errors.join("; ")}`;
+      return [
+        `Public DNS cannot resolve ${hostname} (SERVFAIL).`,
+        "If this domain uses child nameservers (for example ns1.example.com on the same VPS), add glue records at your registrar.",
+        "Otherwise confirm the domain is registered, nameservers point to this server, and click Publish on the domain DNS page.",
+        `Resolver checks: ${errors.join("; ")}`
+      ].join(" ");
     }
     return null;
   }
