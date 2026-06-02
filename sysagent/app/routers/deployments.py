@@ -5,6 +5,7 @@ import json
 import base64
 import time
 import shutil
+import os
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -262,20 +263,34 @@ def guarded_command_with_env(root_path: str, command: list[str], cwd: str | None
     return result
 
 
-def git_auth_env(token: str | None) -> dict[str, str] | None:
-    if not token:
-        return None
-    basic = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+def git_base_env() -> dict[str, str]:
+    home = os.environ.get("HOME") or "/tmp/vps-panel-git-home"
     return {
-        "GIT_CONFIG_COUNT": "1",
-        "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
-        "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}",
+        "HOME": home,
+        "XDG_CONFIG_HOME": os.environ.get("XDG_CONFIG_HOME") or f"{home}/.config",
         "GIT_TERMINAL_PROMPT": "0",
     }
 
 
+def git_auth_env(token: str | None) -> dict[str, str]:
+    env = git_base_env()
+    if not token:
+        return env
+    basic = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+    env.update({
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+        "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}",
+    })
+    return env
+
+
 def git_safe_directory(root_path: str, target: Path) -> dict:
-    return guarded_command(root_path, ["git", "config", "--global", "--add", "safe.directory", str(target.resolve())])
+    return guarded_command_with_env(
+        root_path,
+        ["git", "config", "--global", "--add", "safe.directory", str(target.resolve())],
+        env=git_base_env(),
+    )
 
 
 def git_command_with_safe_directory(root_path: str, target: Path, command: list[str], env: dict[str, str] | None = None) -> dict:

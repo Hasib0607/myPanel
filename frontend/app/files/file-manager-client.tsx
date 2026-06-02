@@ -297,13 +297,16 @@ export function FileManagerClient() {
   });
 
   const chmodItem = useMutation({
-    mutationFn: ({ path, mode }: { path: string; mode: string }) => apiPost("/files/chmod", { path, mode }),
-    onSuccess: () => setLastResult("Permissions updated."),
+    mutationFn: ({ paths, mode }: { paths: string[]; mode: string }) => Promise.all(paths.map((path) => apiPost("/files/chmod", { path, mode }))),
+    onSuccess: async () => {
+      setLastResult("Permissions updated.");
+      await invalidateFiles();
+    },
     onError: (err) => setLastResult(err instanceof Error ? err.message : "Could not change permissions")
   });
 
   const archiveCreate = useMutation({
-    mutationFn: ({ sourcePath, archivePath }: { sourcePath: string; archivePath: string }) => apiPost("/files/archive/create", { sourcePaths: [sourcePath], archivePath }),
+    mutationFn: ({ sourcePaths, archivePath }: { sourcePaths: string[]; archivePath: string }) => apiPost("/files/archive/create", { sourcePaths, archivePath }),
     onSuccess: async () => {
       setLastResult("Archive created.");
       await invalidateFiles();
@@ -442,6 +445,7 @@ export function FileManagerClient() {
 
   const contextItem = contextMenu?.item ?? null;
   const contextCanEdit = contextItem?.type === "file" && contextItem.kind === "text";
+  const selectedCount = selectedPaths.size;
 
   return (
     <section className="grid h-[calc(100vh-64px)] grid-cols-[300px_minmax(0,1fr)] overflow-hidden p-6 lg:h-screen xl:p-8">
@@ -494,24 +498,63 @@ export function FileManagerClient() {
             )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50" onClick={() => list.refetch()} type="button"><RefreshCw size={15} /> Refresh</button>
-            <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50" onClick={() => {
+            <button aria-label="Refresh" className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50" onClick={() => list.refetch()} title="Refresh" type="button"><RefreshCw size={16} /></button>
+            <button aria-label="New file" className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50" onClick={() => {
               const name = window.prompt("New file name");
               if (name) createFile.mutate({ name, value: "" });
-            }} type="button"><FilePlus size={15} /> New File</button>
-            <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50" onClick={() => {
+            }} title="New file" type="button"><FilePlus size={16} /></button>
+            <button aria-label="New folder" className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50" onClick={() => {
               const name = window.prompt("New folder name");
               if (name) createFolder.mutate(name);
-            }} type="button"><FolderPlus size={15} /> New Folder</button>
-            <label className="flex h-9 cursor-pointer items-center gap-2 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50">
-              <Upload size={15} />
-              Upload
+            }} title="New folder" type="button"><FolderPlus size={16} /></button>
+            <label aria-label="Upload" className="flex h-9 w-9 cursor-pointer items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50" title="Upload">
+              <Upload size={16} />
               <input className="hidden" onChange={(event) => {
                 const file = event.target.files?.[0];
                 if (file) uploadFile(file).catch((error) => setLastResult(error instanceof Error ? error.message : "Upload failed"));
                 event.target.value = "";
               }} type="file" />
             </label>
+            <div className="mx-1 h-6 border-l border-panel-line" />
+            <button
+              aria-label="Zip selected"
+              className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={selectedCount === 0 || archiveCreate.isPending}
+              onClick={() => {
+                const archivePath = window.prompt("Archive path", joinPath(currentPath, "selected.zip"));
+                if (archivePath) archiveCreate.mutate({ sourcePaths: [...selectedPaths], archivePath });
+              }}
+              title={selectedCount > 0 ? `Zip ${selectedCount} selected` : "Zip selected"}
+              type="button"
+            >
+              <Archive size={16} />
+            </button>
+            <button
+              aria-label="Change selected permissions"
+              className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={selectedCount === 0 || chmodItem.isPending}
+              onClick={() => {
+                const mode = window.prompt(`Mode for ${selectedCount} selected`, "775");
+                if (mode) chmodItem.mutate({ paths: [...selectedPaths], mode });
+              }}
+              title={selectedCount > 0 ? `Chmod ${selectedCount} selected` : "Chmod selected"}
+              type="button"
+            >
+              <Settings2 size={16} />
+            </button>
+            <button
+              aria-label="Delete selected"
+              className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-panel-danger hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={selectedCount === 0 || deleteItems.isPending}
+              onClick={() => {
+                if (window.confirm(`Delete ${selectedCount} selected item${selectedCount === 1 ? "" : "s"}?`)) deleteItems.mutate([...selectedPaths]);
+              }}
+              title={selectedCount > 0 ? `Delete ${selectedCount} selected` : "Delete selected"}
+              type="button"
+            >
+              <Trash2 size={16} />
+            </button>
+            {selectedCount > 0 ? <span className="rounded-md bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">{selectedCount} selected</span> : null}
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <form className="relative" onSubmit={submitSearch}>
@@ -555,13 +598,13 @@ export function FileManagerClient() {
         ) : null}
 
         <div className="h-[calc(100%-122px)] overflow-auto" onContextMenu={(event) => event.preventDefault()}>
-          <table className="w-full min-w-[900px] table-fixed text-sm">
+          <table className="w-full min-w-[980px] table-fixed text-sm">
             <colgroup>
-              <col className="w-14" />
+              <col style={{ width: "56px" }} />
               <col />
-              <col className="w-32" />
-              <col className="w-28" />
-              <col className="w-56" />
+              <col style={{ width: "130px" }} />
+              <col style={{ width: "110px" }} />
+              <col style={{ width: "230px" }} />
             </colgroup>
             <thead className="sticky top-0 bg-slate-50 text-left text-xs uppercase text-panel-muted">
               <tr>
@@ -600,10 +643,10 @@ export function FileManagerClient() {
                       type="checkbox"
                     />
                   </td>
-                  <td className="min-w-0 px-4 py-3">
-                    <div className="flex min-w-0 items-center gap-2">
+                  <td className="min-w-0 overflow-hidden px-4 py-3">
+                    <div className="flex w-full min-w-0 items-center gap-2">
                       {item.type === "directory" ? <Folder className="shrink-0" size={16} /> : item.kind === "image" ? <ImageIcon className="shrink-0" size={16} /> : <FileCode2 className="shrink-0" size={16} />}
-                      <span className="min-w-0 truncate font-medium leading-5" title={item.name}>{item.name}</span>
+                      <span className="block min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap font-medium leading-5" title={item.name}>{item.name}</span>
                     </div>
                   </td>
                   <td className="whitespace-nowrap px-4 py-3 text-panel-muted">{item.type === "directory" ? "-" : formatBytes(item.size)}</td>
@@ -671,7 +714,7 @@ export function FileManagerClient() {
           </button>
           <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={() => {
             const mode = window.prompt("Mode", contextItem.permissions);
-            if (mode) chmodItem.mutate({ path: contextItem.path, mode });
+            if (mode) chmodItem.mutate({ paths: [contextItem.path], mode });
             setContextMenu(null);
           }} type="button">
             <Settings2 size={15} /> Chmod
@@ -683,7 +726,7 @@ export function FileManagerClient() {
           ) : null}
           <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={() => {
             const archivePath = window.prompt("Archive path", joinPath(parentPath(contextItem.path), `${contextItem.name}.zip`));
-            if (archivePath) archiveCreate.mutate({ sourcePath: contextItem.path, archivePath });
+            if (archivePath) archiveCreate.mutate({ sourcePaths: [contextItem.path], archivePath });
             setContextMenu(null);
           }} type="button">
             <Archive size={15} /> Zip
