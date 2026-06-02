@@ -6,6 +6,7 @@ import base64
 import time
 import shutil
 import os
+import subprocess
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -1320,9 +1321,98 @@ def runtime_tools(body: RuntimeToolsRequest) -> dict:
             names.append(cleaned)
     items = []
     for name in names:
-        path = shutil.which(name)
-        items.append({"name": name, "installed": bool(path), "path": path})
+        items.append(inspect_runtime_tool(name))
     return {"items": items}
+
+
+def _run_probe(command: list[str], timeout: int = 15) -> subprocess.CompletedProcess[str] | None:
+    try:
+        return subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _php_modules() -> set[str]:
+    result = _run_probe(["php", "-m"])
+    if not result or result.returncode != 0:
+        return set()
+    return {line.strip().lower() for line in result.stdout.splitlines() if line.strip() and not line.startswith("[")}
+
+
+def _php_extension_installed(extension: str) -> bool:
+    modules = _php_modules()
+    aliases = {
+        "mysql": {"mysqli", "pdo_mysql", "mysqlnd"},
+        "pgsql": {"pgsql", "pdo_pgsql"},
+        "xml": {"xml", "libxml", "simplexml", "xmlreader", "xmlwriter"},
+    }
+    expected = aliases.get(extension, {extension})
+    return any(item.lower() in modules for item in expected)
+
+
+def _python_executable_version(executable: str) -> tuple[int, int] | None:
+    result = _run_probe([
+        executable,
+        "-c",
+        "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+    ])
+    if not result or result.returncode != 0:
+        return None
+    return _version_tuple(result.stdout)
+
+
+def _python_at_least(major: int, minor: int) -> tuple[bool, str | None]:
+    for executable in ("python3.12", "python3.11", "python3.10", "python3"):
+        path = shutil.which(executable)
+        if not path:
+            continue
+        version = _python_executable_version(executable)
+        if version and version >= (major, minor):
+            return True, path
+    return False, None
+
+
+def _python_venv_available() -> tuple[bool, str | None]:
+    for executable in ("python3.12", "python3.11", "python3.10", "python3"):
+        path = shutil.which(executable)
+        if not path:
+            continue
+        result = _run_probe([executable, "-m", "venv", "--help"])
+        if result and result.returncode == 0:
+            return True, path
+    return False, None
+
+
+def _php_fpm_path() -> str | None:
+    path = shutil.which("php-fpm")
+    if path:
+        return path
+    for candidate in sorted([*Path("/usr/sbin").glob("php*-fpm"), *Path("/usr/bin").glob("php*-fpm")]):
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def inspect_runtime_tool(name: str) -> dict:
+    if name.startswith("php-ext-"):
+        extension = name.removeprefix("php-ext-").lower()
+        installed = _php_extension_installed(extension)
+        return {"name": name, "installed": installed, "path": f"php -m:{extension}" if installed else None}
+
+    if name == "php-fpm":
+        path = _php_fpm_path()
+        return {"name": name, "installed": bool(path), "path": path}
+
+    if name == "python3.10+":
+        installed, path = _python_at_least(3, 10)
+        return {"name": name, "installed": installed, "path": path}
+
+    if name == "python-venv":
+        installed, path = _python_venv_available()
+        return {"name": name, "installed": installed, "path": path}
+
+    path = shutil.which(name)
+    return {"name": name, "installed": bool(path), "path": path}
 
 
 def _python_version(root_path: str, executable: str) -> dict:

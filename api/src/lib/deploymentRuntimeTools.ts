@@ -27,6 +27,25 @@ export type ComposerPlatformIssue = {
   composerLockOutdated: boolean;
 };
 
+const phpRuntimeTools = [
+  "php",
+  "php-fpm",
+  "composer",
+  "php-ext-mbstring",
+  "php-ext-xml",
+  "php-ext-curl",
+  "php-ext-zip",
+  "php-ext-gd",
+  "php-ext-redis",
+  "php-ext-soap",
+  "php-ext-mysql",
+  "php-ext-pgsql"
+];
+
+const nodeRuntimeTools = ["node", "npm"];
+const pythonRuntimeTools = ["python3", "python3.10+", "pip3", "python-venv"];
+const goRuntimeTools = ["go"];
+
 function firstExecutable(command: string | null | undefined) {
   const trimmed = command?.trim();
   if (!trimmed) return null;
@@ -54,49 +73,61 @@ function executablesForCommand(command: string | null | undefined) {
 
 export function requiredRuntimeExecutables(input: RuntimeToolInput) {
   const tools = new Set<string>();
+  const addTools = (items: string[]) => {
+    for (const item of items) tools.add(item);
+  };
 
   if (input.packageManager === "NPM") {
-    tools.add("node");
-    tools.add("npm");
+    addTools(nodeRuntimeTools);
   }
   if (input.packageManager === "PNPM") {
-    tools.add("node");
+    addTools(nodeRuntimeTools);
     tools.add("pnpm");
   }
   if (input.packageManager === "YARN") {
-    tools.add("node");
+    addTools(nodeRuntimeTools);
     tools.add("yarn");
   }
   if (input.packageManager === "COMPOSER") {
-    tools.add("php");
-    tools.add("composer");
+    addTools(phpRuntimeTools);
   }
   if (input.packageManager === "PIP") {
-    tools.add("python3");
-    tools.add("pip3");
+    addTools(pythonRuntimeTools);
   }
   if (input.packageManager === "UV") {
-    tools.add("python3");
+    addTools(pythonRuntimeTools);
     tools.add("uv");
   }
-  if (input.packageManager === "GO") tools.add("go");
+  if (input.packageManager === "GO") addTools(goRuntimeTools);
 
-  if (input.runtime === "NODE") tools.add("node");
-  if (input.runtime === "PHP") tools.add("php");
-  if (input.runtime === "PYTHON") tools.add("python3");
-  if (input.runtime === "GO") tools.add("go");
+  if (input.runtime === "NODE") addTools(nodeRuntimeTools);
+  if (input.runtime === "PHP") addTools(phpRuntimeTools);
+  if (input.runtime === "PYTHON") addTools(pythonRuntimeTools);
+  if (input.runtime === "GO") addTools(goRuntimeTools);
 
-  if ((input.processManager ?? (input.framework === "LARAVEL" || input.framework === "PYTHON" || input.framework === "GO" ? "SUPERVISOR" : input.framework === "STATIC" ? "STATIC" : "PM2")) === "PM2") {
+  const processManager = input.processManager ?? (input.framework === "LARAVEL" || input.framework === "PYTHON" || input.framework === "GO" ? "SUPERVISOR" : input.framework === "STATIC" ? "STATIC" : "PM2");
+  if (processManager === "PM2") {
+    addTools(nodeRuntimeTools);
     tools.add("pm2");
   }
-  if ((input.processManager ?? (input.framework === "LARAVEL" || input.framework === "PYTHON" || input.framework === "GO" ? "SUPERVISOR" : input.framework === "STATIC" ? "STATIC" : "PM2")) === "SUPERVISOR") {
+  if (processManager === "SUPERVISOR") {
     tools.add("supervisorctl");
   }
 
   if (input.framework === "LARAVEL") {
-    tools.add("php");
-    tools.add("composer");
-    tools.add("supervisorctl");
+    addTools(phpRuntimeTools);
+    if (processManager !== "PM2") tools.add("supervisorctl");
+  }
+  if (input.framework === "NEXTJS" || input.framework === "NODEJS") {
+    addTools(nodeRuntimeTools);
+  }
+  if (input.framework === "PYTHON") {
+    addTools(pythonRuntimeTools);
+    if (processManager !== "PM2") tools.add("supervisorctl");
+  }
+  if (input.framework === "GO") {
+    addTools(goRuntimeTools);
+    if (processManager !== "PM2") tools.add("supervisorctl");
   }
 
   for (const executable of [
@@ -125,7 +156,19 @@ const installTargetCatalog: RuntimeInstallTarget[] = [
     label: "Install PHP runtime",
     command: "Install PHP, php-fpm, and common Laravel extensions via panel runtime-tools",
     reason: "PHP runtime and php-fpm are required for Laravel apps.",
-    executables: ["php"]
+    executables: [
+      "php",
+      "php-fpm",
+      "php-ext-mbstring",
+      "php-ext-xml",
+      "php-ext-curl",
+      "php-ext-zip",
+      "php-ext-gd",
+      "php-ext-redis",
+      "php-ext-soap",
+      "php-ext-mysql",
+      "php-ext-pgsql"
+    ]
   },
   {
     actionKey: "install-php82",
@@ -157,15 +200,15 @@ const installTargetCatalog: RuntimeInstallTarget[] = [
     label: "Install Python runtime",
     command: "Install Python 3 and pip via panel runtime-tools",
     reason: "Python 3 and pip are required for this deployment.",
-    executables: ["python3", "pip3"]
+    executables: ["python3", "pip3", "python-venv"]
   },
   {
     actionKey: "install-python311",
     tool: "python311",
-    label: "Install Python 3.11 runtime",
-    command: "Install Python 3.11 and pip via panel runtime-tools",
+    label: "Install Python 3.10+ runtime",
+    command: "Install Python 3.10+/3.11 and pip via panel runtime-tools",
     reason: "This Python app uses syntax that requires Python 3.10 or newer, but the VPS started it with Python 3.9.",
-    executables: ["python3.11"]
+    executables: ["python3.10+", "python3.11"]
   },
   {
     actionKey: "install-nodejs",

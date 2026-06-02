@@ -199,6 +199,13 @@ class PlatformMappingTests(unittest.TestCase):
         )
         self.assertIn("php", runtime_tool_install_command("php", self.alma))
 
+    def test_python_modern_runtime_mapping(self) -> None:
+        ubuntu_plan = runtime_tool_install_plan("python311", self.ubuntu)
+        self.assertEqual(ubuntu_plan.packages, ("python3", "python3-venv", "python3-pip"))
+
+        alma_plan = runtime_tool_install_plan("python311", self.alma)
+        self.assertEqual(alma_plan.packages, ("python3.11", "python3.11-pip"))
+
     def test_platform_summary_has_no_known_alma_code_gaps(self) -> None:
         summary = platform_summary(self.alma)
         self.assertEqual(summary["family"], "rhel")

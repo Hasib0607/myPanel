@@ -48,7 +48,7 @@ RHEL_PHP_RUNTIME_PACKAGES = (
 )
 DEBIAN_DOVECOT_PACKAGES = ("dovecot-core", "dovecot-imapd", "dovecot-lmtpd")
 RHEL_DOVECOT_PACKAGES = ("dovecot",)
-DEBIAN_PYTHON311_PACKAGES = ("python3.11", "python3.11-venv", "python3.11-pip")
+DEBIAN_PYTHON311_PACKAGES = ("python3", "python3-venv", "python3-pip")
 RHEL_PYTHON311_PACKAGES = ("python3.11", "python3.11-pip")
 DOVECOT_RHEL_NOTES = (
     "AlmaLinux/RHEL 9 ships a single dovecot package that includes IMAP, POP3, and LMTP. "

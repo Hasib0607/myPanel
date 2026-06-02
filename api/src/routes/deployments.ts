@@ -1109,8 +1109,8 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
   if (hint?.category === "python_runtime_version") {
     riskyActions.push({
       key: "install-python311",
-      label: "Install Python 3.11 runtime",
-      command: "Install Python 3.11 via panel runtime-tools, rebuild .venv, and redeploy",
+      label: "Install Python 3.10+ runtime",
+      command: "Install Python 3.10+/3.11 via panel runtime-tools, rebuild .venv, and redeploy",
       reason: "The app uses Python 3.10+ syntax but the VPS started it with Python 3.9.",
       approvalRequired: true
     });
