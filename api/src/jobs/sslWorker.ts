@@ -5,6 +5,7 @@ import { env } from "../config/env.js";
 import { prisma } from "../lib/prisma.js";
 import { sysagent, type SysagentCommandResult } from "../lib/sysagent.js";
 import { subdomainFolderName } from "../lib/domainFiles.js";
+import { isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
 import {
   deploymentFallbackRootPath,
   deploymentIsRoutable,
@@ -126,7 +127,7 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
   } else if (domain?.hostingMode === "REDIRECT") {
     if (!domain.redirectUrl) throw new Error(`No redirect URL selected for ${domainName}`);
     result = await sysagent.writeRedirectNginxVhost({
-      name: `domain-${domainName}`,
+      name: `domain-${nginxResourceName(domainName)}`,
       serverName: sslServerName(domainName, includeWww),
       redirectUrl: domain.redirectUrl,
       requireSsl: true,
@@ -134,7 +135,7 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
     });
   } else {
     result = await sysagent.writeStaticNginxVhost({
-      name: `domain-${domainName}`,
+      name: `domain-${nginxResourceName(domainName)}`,
       serverName: sslServerName(domainName, includeWww),
       rootPath: webRoot ?? `${env.FILE_MANAGER_ROOT}/${domainName}/${domain?.documentRoot || "public_html"}`,
       forceHttps,
@@ -176,6 +177,9 @@ export const sslWorker = new Worker(
     logger.info("ssl job received", { id: job.id, name: job.name, data: job.data });
 
     if (job.name === "issue") {
+      if (isWildcardHostname(job.data.domain)) {
+        throw new Error(`Wildcard SSL for ${job.data.domain} requires DNS-01 validation. HTTP webroot validation cannot issue wildcard certificates yet.`);
+      }
       const includeWww = job.data.includeWww ?? true;
       const result = await sysagent.issueCertificate({
         domain: job.data.domain,
@@ -196,6 +200,9 @@ export const sslWorker = new Worker(
     }
 
     if (job.name === "renew") {
+      if (isWildcardHostname(job.data.domain)) {
+        throw new Error(`Wildcard SSL for ${job.data.domain} requires DNS-01 validation. HTTP webroot validation cannot renew wildcard certificates yet.`);
+      }
       const result = await sysagent.renewCertificate(job.data.domain);
       assertLiveCommandSucceeded("Certbot renew", result);
 

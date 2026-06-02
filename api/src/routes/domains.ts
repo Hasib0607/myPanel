@@ -10,6 +10,7 @@ import { buildDeploymentNginxRequest, deploymentIsRoutable, publishPublicHtmlNgi
 import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
 import { sysagent } from "../lib/sysagent.js";
+import { nginxResourceName } from "../lib/nginxNames.js";
 import { renderZone } from "./dns.js";
 
 export function normalizeDomainName(value: string) {
@@ -484,10 +485,6 @@ function dnsRecordTypeForTarget(target: string) {
   if (/^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/.test(target)) return "A" as const;
   if (target.includes(":")) return "AAAA" as const;
   return "CNAME" as const;
-}
-
-function nginxResourceName(value: string) {
-  return value.replace(/^\*\./, "wildcard.").replace(/[^a-zA-Z0-9_.-]/g, "-");
 }
 
 async function createSubdomainForDomain(input: {

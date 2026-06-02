@@ -9,6 +9,7 @@ import { sslQueue } from "../jobs/queues.js";
 import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
 import { sysagent, type SysagentCommandResult } from "../lib/sysagent.js";
+import { isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
 
 const sslActionSchema = z.object({
   email: z.string().email().optional(),
@@ -131,7 +132,7 @@ async function subdomainSslTarget(subdomainId: string) {
 
 async function publishSubdomainHttpVhost(target: Awaited<ReturnType<typeof subdomainSslTarget>>) {
   const result = await sysagent.writeStaticNginxVhost({
-    name: `domain-${target.fqdn}`,
+    name: `domain-${nginxResourceName(target.fqdn)}`,
     serverName: target.fqdn,
     rootPath: target.webRoot,
     forceHttps: false
@@ -151,6 +152,9 @@ async function publishSubdomainHttpVhost(target: Awaited<ReturnType<typeof subdo
 
 async function runSubdomainSslPreflight(subdomainId: string) {
   const target = await subdomainSslTarget(subdomainId);
+  if (isWildcardHostname(target.fqdn)) {
+    throw Object.assign(new Error(`Wildcard SSL for ${target.fqdn} requires DNS-01 validation. HTTP webroot validation cannot issue wildcard certificates yet; issue a normal subdomain certificate such as app.${target.parentDomain.name}, or add DNS-01 provider support before enabling wildcard SSL.`), { statusCode: 400 });
+  }
   await publishDomainDnsZone(target.parentDomain.id);
   const records = await assertARecordPointsToVps(target.fqdn, target.parentDomain.id, target.parentDomain.name);
   const dnsChecks = [{ host: target.fqdn, records, ok: true, skipped: false }];
