@@ -9,7 +9,7 @@ import { sysagent } from "../lib/sysagent.js";
 import { checkPanelRemoteUpdate } from "../lib/panelUpdateMonitor.js";
 import { deployQueue } from "./queues.js";
 import { requiredRuntimeExecutables, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
-import { permissionRepairNeeded, pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded } from "../lib/deploymentFailureRuntimeRepairs.js";
+import { laravelPublicCwdMissing, permissionRepairNeeded, pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded } from "../lib/deploymentFailureRuntimeRepairs.js";
 
 const staleDeploymentMs = Number(process.env.GUARDIAN_STALE_DEPLOYMENT_MS ?? 15 * 60_000);
 const autoDeployRepairEnabled = process.env.GUARDIAN_AUTO_DEPLOY_REPAIR !== "false";
@@ -19,6 +19,10 @@ const autoDeployMaxAttempts = Number(process.env.GUARDIAN_AUTO_DEPLOY_MAX_ATTEMP
 function deploymentAppPath(rootPath: string, rootDirectory: string | null | undefined) {
   const cleanRootDirectory = (rootDirectory || ".").replace(/^\/+|\/+$/g, "");
   return cleanRootDirectory && cleanRootDirectory !== "." ? `${rootPath.replace(/\/+$/, "")}/${cleanRootDirectory}` : rootPath;
+}
+
+function deploymentRootWithoutPublicSuffix(rootPath: string) {
+  return rootPath.replace(/\/+$/, "").replace(/\/public$/i, "");
 }
 
 function defaultProcessManager(framework: string) {
@@ -103,15 +107,17 @@ async function guardianApplyFailureRepairs(
   const applied: string[] = [];
   let approvalsCreated = 0;
   const runtimeTargets = runtimeTargetsForFailedDeploymentLog(failureText);
+  const publicCwdMissing = laravelPublicCwdMissing(failureText);
 
   await prisma.deploymentLog.create({
     data: {
       deploymentId: deployment.id,
       step: "PREFLIGHT",
-      level: runtimeTargets.length || supervisorRepairNeeded(failureText) || permissionRepairNeeded(failureText) || pythonRuntimeRepairNeeded(failureText) ? "warn" : "info",
+      level: runtimeTargets.length || publicCwdMissing || supervisorRepairNeeded(failureText) || permissionRepairNeeded(failureText) || pythonRuntimeRepairNeeded(failureText) ? "warn" : "info",
       message: "Guardian parsed failed deployment logs",
       metadata: {
         runtimeTargets: runtimeTargets.map((target) => target.actionKey),
+        laravelPublicCwdMissing: publicCwdMissing,
         supervisorRepair: supervisorRepairNeeded(failureText),
         permissionRepair: permissionRepairNeeded(failureText),
         pythonRuntimeRepair: pythonRuntimeRepairNeeded(failureText),
@@ -119,6 +125,35 @@ async function guardianApplyFailureRepairs(
       } as any
     }
   });
+
+  if (publicCwdMissing && deployment.framework === "LARAVEL") {
+    const correctedRootPath = deploymentRootWithoutPublicSuffix(deployment.rootPath);
+    if (correctedRootPath !== deployment.rootPath || deployment.rootDirectory !== ".") {
+      await prisma.deployment.update({
+        where: { id: deployment.id },
+        data: {
+          rootPath: correctedRootPath,
+          rootDirectory: ".",
+          publicDirectory: deployment.publicDirectory || "public"
+        }
+      });
+      applied.push("correct-laravel-root-cwd");
+      await prisma.deploymentLog.create({
+        data: {
+          deploymentId: deployment.id,
+          step: "PREFLIGHT",
+          level: "warn",
+          message: "Guardian corrected Laravel deployment root after missing public cwd",
+          metadata: {
+            previousRootPath: deployment.rootPath,
+            previousRootDirectory: deployment.rootDirectory,
+            rootPath: correctedRootPath,
+            publicDirectory: deployment.publicDirectory || "public"
+          } as any
+        }
+      });
+    }
+  }
 
   for (const target of runtimeTargets) {
     try {
@@ -167,7 +202,7 @@ async function guardianApplyFailureRepairs(
     }
   }
 
-  if (permissionRepairNeeded(failureText) || supervisorRepairNeeded(failureText)) {
+  if (!publicCwdMissing && (permissionRepairNeeded(failureText) || supervisorRepairNeeded(failureText))) {
     try {
       const repair = await sysagent.deploymentRepairPermissions({ rootPath: appPath, logDir: deploymentLogDir(deployment.slug) });
       const failed = repair.dryRun || (typeof repair.returncode === "number" && repair.returncode !== 0);
@@ -193,7 +228,7 @@ async function guardianApplyFailureRepairs(
     }
   }
 
-  if (supervisorRepairNeeded(failureText)) {
+  if (!publicCwdMissing && supervisorRepairNeeded(failureText)) {
     try {
       const repair = await sysagent.deploymentRepairSupervisor({ name: deployment.slug });
       const failed = repair.dryRun || (typeof repair.returncode === "number" && repair.returncode !== 0);
@@ -219,7 +254,7 @@ async function guardianApplyFailureRepairs(
     }
   }
 
-  return { identified: runtimeTargets.length > 0 || supervisorRepairNeeded(failureText) || permissionRepairNeeded(failureText) || pythonRuntimeRepairNeeded(failureText), applied, approvalsCreated };
+  return { identified: runtimeTargets.length > 0 || publicCwdMissing || supervisorRepairNeeded(failureText) || permissionRepairNeeded(failureText) || pythonRuntimeRepairNeeded(failureText), applied, approvalsCreated };
 }
 
 async function queueGuardianDeployRepair(deployment: Awaited<ReturnType<typeof prisma.deployment.findMany>>[number], action: "restart" | "deploy", reason: string) {

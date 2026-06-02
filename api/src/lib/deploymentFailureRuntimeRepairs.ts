@@ -20,6 +20,10 @@ export function supervisorRepairNeeded(text: string) {
     && (lower.includes("spawn error") || lower.includes("can't spawn") || lower.includes("cannot spawn") || lower.includes("backoff") || lower.includes("exited too quickly"));
 }
 
+export function laravelPublicCwdMissing(text: string) {
+  return /provided cwd\s+["'][^"']+\/public["']\s+does not exist/i.test(text);
+}
+
 export function permissionRepairNeeded(text: string) {
   const lower = text.toLowerCase();
   return lower.includes("permission denied")

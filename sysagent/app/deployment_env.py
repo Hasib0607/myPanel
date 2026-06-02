@@ -264,6 +264,8 @@ def prepare_supervisor_runtime(
     env: dict[str, str] | None,
 ) -> tuple[Path, Path, Path | None]:
     cwd = Path(root_path).resolve()
+    if is_laravel_artisan_command(start_command) and cwd.name == "public" and (cwd.parent / "artisan").is_file():
+        cwd = cwd.parent
     panel_dir = cwd / ".panel"
     runtime_env = panel_dir / "runtime.env"
     wrapper = panel_dir / "run.sh"

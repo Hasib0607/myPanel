@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { detectComposerPlatformIssue, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "./deploymentRuntimeTools.js";
-import { pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded } from "./deploymentFailureRuntimeRepairs.js";
+import { laravelPublicCwdMissing, pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded } from "./deploymentFailureRuntimeRepairs.js";
 
 test("composer PHP 8.1 requirement on PHP 8.0 queues PHP 8.2 runtime repair", () => {
   const targets = runtimeInstallTargetsForComposerPlatformIssue(`
@@ -239,4 +239,10 @@ test("failed deploy parser detects Supervisor spawn repair separately from tool 
 
   assert.equal(supervisorRepairNeeded(log), true);
   assert.deepEqual(runtimeTargetsForFailedDeploymentLog(log).map((target) => target.actionKey), ["install-supervisor"]);
+});
+
+test("failed deploy parser detects Laravel public cwd missing", () => {
+  const log = 'The provided cwd "/var/www/deployments/ecommercex-admin/public" does not exist.';
+
+  assert.equal(laravelPublicCwdMissing(log), true);
 });

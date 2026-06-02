@@ -164,6 +164,23 @@ class DeploymentEnvTests(unittest.TestCase):
             self.assertEqual(laravel_env.resolve(), (root / ".env").resolve())
             self.assertIn(f"APP_KEY={VALID_APP_KEY}", runtime_env.read_text(encoding="utf-8"))
 
+    def test_prepare_supervisor_runtime_uses_laravel_root_when_public_cwd_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "artisan").write_text("#!/usr/bin/env php\n", encoding="utf-8")
+            from app.deployment_env import prepare_supervisor_runtime
+
+            wrapper, runtime_env, laravel_env = prepare_supervisor_runtime(
+                str(root / "public"),
+                ["php", "artisan", "serve", "--host=127.0.0.1", "--port", "10002"],
+                10002,
+                {"APP_KEY": VALID_APP_KEY},
+            )
+            self.assertEqual(wrapper.resolve(), (root / ".panel" / "run.sh").resolve())
+            self.assertEqual(runtime_env.resolve(), (root / ".panel" / "runtime.env").resolve())
+            self.assertEqual(laravel_env.resolve(), (root / ".env").resolve())
+            self.assertIn(f"cd {root.resolve()}", wrapper.read_text(encoding="utf-8"))
+
     def test_is_laravel_artisan_command(self) -> None:
         self.assertTrue(is_laravel_artisan_command(["php", "artisan", "serve"]))
         self.assertFalse(is_laravel_artisan_command(["node", "server.js"]))

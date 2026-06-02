@@ -1910,6 +1910,24 @@ async function reconcileLaravelRootDirectory(
   if (await deploymentHasLaravelArtisan(appPath)) {
     return { deployment, appPath };
   }
+  const rootPath = path.resolve(deployment.rootPath);
+  const parentPath = path.dirname(rootPath);
+  if (path.basename(rootPath).toLowerCase() === "public" && await deploymentHasLaravelArtisan(parentPath)) {
+    const updated = await prisma.deployment.update({
+      where: { id: deployment.id },
+      data: { rootPath: parentPath, rootDirectory: ".", publicDirectory: deployment.publicDirectory || "public" },
+      include: deploymentWorkerInclude
+    });
+
+    await writeLog(deployment.id, releaseId, "PREFLIGHT", "Corrected Laravel deployment root from public directory", {
+      previousRootPath: deployment.rootPath,
+      appPath,
+      rootPath: parentPath,
+      publicDirectory: updated.publicDirectory
+    }, "warn");
+
+    return { deployment: updated, appPath: parentPath };
+  }
   if (!(await deploymentHasLaravelArtisan(deployment.rootPath))) {
     return { deployment, appPath };
   }

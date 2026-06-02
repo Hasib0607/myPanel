@@ -6,6 +6,7 @@ import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { env } from "../config/env.js";
 import { deployQueue } from "../jobs/queues.js";
+import { laravelPublicCwdMissing } from "../lib/deploymentFailureRuntimeRepairs.js";
 import { detectComposerPlatformIssue, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import { audit } from "../lib/audit.js";
 import { detectDeploymentFiles, detectDeploymentSource } from "../lib/deploymentDetection.js";
@@ -614,6 +615,7 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
   if (lower.includes("ssl handshake failed") || lower.includes("invalid ssl response") || lower.includes("err_ssl_protocol")) return { message: "HTTPS works on the VPS locally but fails on the public internet path. Turn off browser VPN, set DNS A record to this VPS, use Cloudflare DNS-only or SSL Full, then redeploy.", repairAction: "redeploy", category: "ssl_protocol_error" };
   if (lower.includes("public internet path") || lower.includes("local nginx https")) return { message: "DNS or CDN does not reach this server's nginx HTTPS. Fix DNS A record, disable orange-cloud proxy, turn off browser VPN, then redeploy.", repairAction: "redeploy", category: "ssl_public_path" };
   if (lower.includes("please provide a valid cache path") || lower.includes("bootstrap/cache") || lower.includes("storage/framework")) return { message: "Laravel writable/cache directories are missing or not writable. Repair the Laravel storage/bootstrap cache paths, then redeploy.", repairAction: "request-approval", category: "laravel_writable_paths" };
+  if (laravelPublicCwdMissing(text)) return { message: "Laravel process was started from a missing public directory. Guardian will correct the deployment root to the Laravel app root and start artisan from there.", repairAction: "redeploy", category: "laravel_public_cwd_missing" };
   if (lower.includes("artisan package:discover") || lower.includes("laravel package discovery")) return { message: "Laravel package discovery failed while bootstrapping the app. Check the deployment environment values and the package discovery error output, then redeploy.", repairAction: "request-approval", category: "laravel_package_discovery" };
   if (lower.includes("vendor/autoload.php") && lower.includes("artisan")) return { message: "Laravel vendor dependencies are missing. Guardian now auto-runs composer install before restart; retry deploy/restart.", repairAction: "redeploy", category: "laravel_vendor_missing" };
   if (lower.includes("the home or composer_home environment variable must be set")) return { message: "Composer runtime HOME/COMPOSER_HOME was missing on sysagent. Guardian/sysagent now auto-sets fallback HOME paths; retry deploy.", repairAction: "redeploy", category: "composer_home_missing" };
