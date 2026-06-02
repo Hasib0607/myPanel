@@ -91,10 +91,26 @@ type DomainScaffoldResponse = {
   };
 };
 
+type GitStatusResponse = {
+  ok: true;
+  path: string;
+  isRepo: boolean;
+};
+
+type GitPullResponse = {
+  ok: true;
+  path: string;
+  stdout?: string;
+  stderr?: string;
+  returncode: number;
+};
+
 type UploadProgress = {
   fileName: string;
   percent: number;
   phase: "uploading" | "processing" | "done";
+  uploadedBytes: number;
+  totalBytes: number;
 };
 
 type ExtractProgress = {
@@ -205,8 +221,12 @@ export function FileManagerClient() {
   const [extractProgress, setExtractProgress] = useState<ExtractProgress | null>(null);
   const [promptRequest, setPromptRequest] = useState<PromptRequest | null>(null);
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
+  const [autoPullEnabled, setAutoPullEnabled] = useState(false);
+  const [autoPullBusy, setAutoPullBusy] = useState(false);
   const promptResolverRef = useRef<((value: string | null) => void) | null>(null);
   const confirmResolverRef = useRef<((value: boolean) => void) | null>(null);
+  const autoPullTimerRef = useRef<number | null>(null);
+  const currentInTrash = currentPath === ".trash" || currentPath.startsWith(".trash/");
 
   const domains = useQuery({
     queryKey: ["domains", "file-manager"],
@@ -234,6 +254,12 @@ export function FileManagerClient() {
   const overview = useQuery({ queryKey: ["files-overview"], queryFn: () => apiGet<Overview>("/files/overview") });
   const list = useQuery({ queryKey: ["files-list", currentPath, search, sort, direction], queryFn: () => apiGet<ListResponse>(listPath), enabled: Boolean(selectedRoot) });
   const tree = useQuery({ queryKey: ["files-tree", domainRootPath], queryFn: () => apiGet<TreeResponse>(`/files/tree?${queryString({ path: domainRootPath, depth: 4 })}`), enabled: Boolean(selectedRoot) });
+  const gitStatus = useQuery({
+    queryKey: ["files-git-status", currentPath],
+    queryFn: () => apiPost<GitStatusResponse>("/files/git/status", { path: currentPath }),
+    enabled: Boolean(selectedRoot && !currentInTrash),
+    retry: false
+  });
 
   useEffect(() => {
     if (selectedDomainId || rootOptions.length === 0) return;
@@ -242,6 +268,16 @@ export function FileManagerClient() {
     setCurrentPath(firstRoot.path);
     setSelectedPath(null);
   }, [rootOptions, selectedDomainId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const stored = window.localStorage.getItem("file-manager:auto-pull");
+      setAutoPullEnabled(stored === "on");
+    } catch {
+      setAutoPullEnabled(false);
+    }
+  }, []);
 
   const invalidateFiles = async () => {
     await queryClient.invalidateQueries({ queryKey: ["files-list"] });
@@ -261,6 +297,15 @@ export function FileManagerClient() {
       window.removeEventListener("resize", close);
     };
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem("file-manager:auto-pull", autoPullEnabled ? "on" : "off");
+    } catch {
+      // ignore storage failures
+    }
+  }, [autoPullEnabled]);
 
   const createFile = useMutation({
     mutationFn: ({ name, value }: { name: string; value: string }) => apiPost<FileEntry>("/files/files", { parentPath: currentPath, name, content: value }),
@@ -395,6 +440,41 @@ export function FileManagerClient() {
     }
   });
 
+  const gitPull = useMutation({
+    mutationFn: () => apiPost<GitPullResponse>("/files/git/pull", { path: currentPath }),
+    onSuccess: async (response) => {
+      const gitOutput = response.stdout?.trim() || response.stderr?.trim() || "Already up to date.";
+      setLastResult(`Git pull done: ${gitOutput.slice(0, 200)}`);
+      await invalidateFiles();
+    },
+    onError: (err) => setLastResult(err instanceof Error ? err.message : "Git pull failed")
+  });
+
+  useEffect(() => {
+    if (autoPullTimerRef.current) {
+      window.clearInterval(autoPullTimerRef.current);
+      autoPullTimerRef.current = null;
+    }
+    if (!autoPullEnabled || !gitStatus.data?.isRepo || gitPull.isPending) return;
+    autoPullTimerRef.current = window.setInterval(async () => {
+      if (autoPullBusy) return;
+      setAutoPullBusy(true);
+      try {
+        await gitPull.mutateAsync();
+      } catch {
+        // handled by mutation
+      } finally {
+        setAutoPullBusy(false);
+      }
+    }, 60000);
+    return () => {
+      if (autoPullTimerRef.current) {
+        window.clearInterval(autoPullTimerRef.current);
+        autoPullTimerRef.current = null;
+      }
+    };
+  }, [autoPullEnabled, gitStatus.data?.isRepo, gitPull.isPending, gitPull.mutateAsync, autoPullBusy]);
+
   function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSearch(draftSearch.trim());
@@ -470,7 +550,7 @@ export function FileManagerClient() {
         ? crypto.randomUUID()
         : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-      setUploadProgress({ fileName: file.name, percent: 0, phase: "uploading" });
+      setUploadProgress({ fileName: file.name, percent: 0, phase: "uploading", uploadedBytes: 0, totalBytes: file.size });
 
       for (let index = 0; index < totalChunks; index += 1) {
         const offset = index * chunkSize;
@@ -494,13 +574,15 @@ export function FileManagerClient() {
             setUploadProgress({
               fileName: file.name,
               percent,
-              phase: index === totalChunks - 1 && percent >= 99 ? "processing" : "uploading"
+              phase: index === totalChunks - 1 && percent >= 99 ? "processing" : "uploading",
+              uploadedBytes: uploaded,
+              totalBytes: file.size
             });
           }
         );
       }
 
-      setUploadProgress({ fileName: file.name, percent: 100, phase: "done" });
+      setUploadProgress({ fileName: file.name, percent: 100, phase: "done", uploadedBytes: file.size, totalBytes: file.size });
       setLastResult("Uploaded.");
       await invalidateFiles();
       window.setTimeout(() => {
@@ -594,7 +676,6 @@ export function FileManagerClient() {
   const contextItem = contextMenu?.item ?? null;
   const contextCanEdit = contextItem?.type === "file" && contextItem.kind === "text";
   const contextIsZip = contextItem ? isZipEntry(contextItem) : false;
-  const currentInTrash = currentPath === ".trash" || currentPath.startsWith(".trash/");
   const selectedCount = selectedPaths.size;
   const selectedZipPaths = useMemo(() => (list.data?.items ?? []).filter((item) => selectedPaths.has(item.path) && isZipEntry(item)).map((item) => item.path), [list.data?.items, selectedPaths]);
 
@@ -650,6 +731,28 @@ export function FileManagerClient() {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <button aria-label="Refresh" className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50" onClick={() => list.refetch()} title="Refresh" type="button"><RefreshCw size={16} /></button>
+            <button
+              aria-label="Git pull"
+              className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={!gitStatus.data?.isRepo || gitPull.isPending}
+              onClick={() => gitPull.mutate()}
+              title={gitStatus.data?.isRepo ? "Pull latest changes from git remote" : "Current folder is not a git repository"}
+              type="button"
+            >
+              <RefreshCw size={15} />
+              <span>Git Pull</span>
+            </button>
+            <button
+              aria-label="Toggle auto pull"
+              className={`flex h-9 items-center gap-2 rounded-md border px-3 text-sm ${autoPullEnabled ? "border-emerald-300 bg-emerald-50 text-emerald-700" : "border-panel-line hover:bg-slate-50"} disabled:cursor-not-allowed disabled:opacity-40`}
+              disabled={!gitStatus.data?.isRepo}
+              onClick={() => setAutoPullEnabled((current) => !current)}
+              title={gitStatus.data?.isRepo ? "Auto pull every 1 minute for this view" : "Current folder is not a git repository"}
+              type="button"
+            >
+              <RefreshCw size={15} />
+              <span>Auto Pull: {autoPullEnabled ? "On" : "Off"}</span>
+            </button>
             <button aria-label="New file" className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50" onClick={async () => {
               const name = (await requestInput({ title: "Create New File", label: "File name", placeholder: "index.html", confirmLabel: "Create" }))?.trim();
               if (name) createFile.mutate({ name, value: "" });
@@ -753,6 +856,15 @@ export function FileManagerClient() {
         </div>
 
         {lastResult ? <div className="border-b border-panel-line bg-slate-50 px-4 py-2 text-sm text-slate-700">{lastResult}</div> : null}
+        {!currentInTrash ? (
+          <div className="border-b border-panel-line bg-slate-50 px-4 py-2 text-xs text-slate-600">
+            {gitStatus.isLoading
+              ? "Checking git repository..."
+              : gitStatus.data?.isRepo
+                ? `Git repository detected. Auto pull is ${autoPullEnabled ? "enabled" : "disabled"}.`
+                : "Current folder is not a git repository."}
+          </div>
+        ) : null}
         {list.isError && selectedRoot ? (
           <div className="border-b border-panel-line bg-amber-50 px-4 py-3 text-sm text-amber-800">
             <div className="font-medium">No default folders exist for {selectedRoot.label} yet.</div>
@@ -1035,6 +1147,9 @@ export function FileManagerClient() {
                       <div className="mt-1 truncate text-sm text-panel-muted">{uploadProgress.fileName}</div>
                     </div>
                     <div className="text-sm font-semibold text-panel-text">{uploadProgress.percent}%</div>
+                  </div>
+                  <div className="mt-2 text-xs text-panel-muted">
+                    {formatBytes(uploadProgress.uploadedBytes)} / {formatBytes(uploadProgress.totalBytes)}
                   </div>
                   <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100">
                     <div className="h-full rounded-full bg-panel-accent transition-all" style={{ width: `${uploadProgress.percent}%` }} />

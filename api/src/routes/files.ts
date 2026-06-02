@@ -282,6 +282,23 @@ const chunkUploadQuery = z.object({
 const chmodSchema = z.object({ path: z.string(), mode: z.string().regex(/^[0-7]{3,4}$/) });
 const archiveSchema = z.object({ sourcePaths: z.array(z.string()).min(1).max(100), archivePath: z.string() });
 const extractSchema = z.object({ archivePath: z.string(), targetPath: z.string().default("."), overwrite: z.boolean().default(false) });
+const gitPathSchema = z.object({ path: z.string().default(".") });
+
+type GitProbeResult = {
+  isRepo: boolean;
+  stdout?: string;
+  stderr?: string;
+};
+
+async function probeGitRepository(target: string): Promise<GitProbeResult> {
+  try {
+    const result = await execFileAsync("git", ["-C", target, "rev-parse", "--is-inside-work-tree"]);
+    return { isRepo: result.stdout.trim() === "true", stdout: result.stdout, stderr: result.stderr };
+  } catch (error) {
+    const failed = error as Error & { stdout?: string; stderr?: string };
+    return { isRepo: false, stdout: failed.stdout, stderr: failed.stderr };
+  }
+}
 
 export const fileRoutes: FastifyPluginAsync = async (app) => {
   app.addContentTypeParser(rawUploadContentType, (_request, payload, done) => {
@@ -657,6 +674,56 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
       assertLiveSysagentResult(await sysagent.chmodFile({ path: body.path, mode: body.mode }));
     }
     return { ok: true, file: await statEntry(target) };
+  });
+
+  app.post("/git/status", async (request) => {
+    const body = gitPathSchema.parse(request.body);
+    const target = safePath(body.path);
+    const stats = await fs.stat(target).catch(() => null);
+    if (!stats?.isDirectory()) throw app.httpErrors.badRequest("Git path must be an existing directory");
+    try {
+      const result = await probeGitRepository(target);
+      return { ok: true, path: toRelative(target), isRepo: result.isRepo };
+    } catch (error) {
+      if (!isPermissionError(error)) throw error;
+      const result = await sysagent.gitStatus({ path: body.path });
+      assertLiveSysagentResult(result);
+      return { ok: true, path: result.path, isRepo: result.isRepo };
+    }
+  });
+
+  app.post("/git/pull", async (request) => {
+    const body = gitPathSchema.parse(request.body);
+    const target = safePath(body.path);
+    const stats = await fs.stat(target).catch(() => null);
+    if (!stats?.isDirectory()) throw app.httpErrors.badRequest("Git path must be an existing directory");
+
+    const repo = await probeGitRepository(target);
+    if (!repo.isRepo) throw app.httpErrors.badRequest("Selected folder is not a git repository");
+    try {
+      const result = await execFileAsync("git", ["-C", target, "pull", "--ff-only"], { maxBuffer: archiveCommandMaxBuffer });
+      return {
+        ok: true,
+        path: toRelative(target),
+        stdout: result.stdout?.trim() ?? "",
+        stderr: result.stderr?.trim() ?? "",
+        returncode: 0
+      };
+    } catch (error) {
+      if (isPermissionError(error)) {
+        const result = await sysagent.gitPull({ path: body.path });
+        assertLiveSysagentResult(result);
+        return {
+          ok: true,
+          path: result.path,
+          stdout: result.stdout?.trim() ?? "",
+          stderr: result.stderr?.trim() ?? "",
+          returncode: result.returncode ?? 0
+        };
+      }
+      const failed = error as Error & { stderr?: string };
+      throw app.httpErrors.badRequest(failed.stderr?.trim() || failed.message || "git pull failed");
+    }
   });
 
   app.post("/archive/create", async (request) => {

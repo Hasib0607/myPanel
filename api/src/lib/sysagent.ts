@@ -171,6 +171,10 @@ export const sysagent = {
     request<{ ok: true; removed: string[]; dryRun?: boolean }>("/files/delete", { method: "DELETE", body: JSON.stringify(body) }),
   trashFiles: (body: unknown) =>
     request<{ ok: true; movedToTrash: string[]; permanentlyRemoved: string[]; dryRun?: boolean }>("/files/trash", { method: "POST", body: JSON.stringify(body) }),
+  gitStatus: (body: unknown) =>
+    request<{ ok: true; path: string; isRepo: boolean; dryRun?: boolean }>("/files/git/status", { method: "POST", body: JSON.stringify(body) }),
+  gitPull: (body: unknown) =>
+    request<{ ok: true; path: string; stdout: string; stderr: string; returncode: number; dryRun?: boolean }>("/files/git/pull", { method: "POST", body: JSON.stringify(body) }),
   createFile: (body: unknown) =>
     request<{ ok: true; path: string; dryRun?: boolean }>("/files/files", { method: "POST", body: JSON.stringify(body) }),
   createFolder: (body: unknown) =>

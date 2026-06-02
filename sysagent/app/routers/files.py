@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.command import run_command
 
 router = APIRouter()
 
@@ -53,6 +54,10 @@ class SubdomainScaffoldRequest(BaseModel):
 
 class AccountScaffoldRequest(BaseModel):
     username: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{2,31}$")
+
+
+class GitPathRequest(BaseModel):
+    path: str = "."
 
 
 DEFAULT_DOMAIN_FOLDERS = [
@@ -119,6 +124,14 @@ def to_relative(target: Path) -> str:
 
 def in_trash(relative_path: str) -> bool:
     return relative_path == ".trash" or relative_path.startswith(".trash/")
+
+
+def ensure_git_repository(target: Path) -> None:
+    if not target.exists() or not target.is_dir():
+        raise HTTPException(status_code=400, detail="Git path must be an existing directory")
+    result = run_command(["git", "-C", str(target), "rev-parse", "--is-inside-work-tree"])
+    if result.get("returncode") != 0 or result.get("stdout", "").strip() != "true":
+        raise HTTPException(status_code=400, detail="Selected folder is not a git repository")
 
 
 @router.post("/domain-scaffold")
@@ -270,6 +283,30 @@ def move_files_to_trash(body: DeleteRequest) -> dict:
         moved_to_trash.append(item_path)
 
     return {"ok": True, "movedToTrash": moved_to_trash, "permanentlyRemoved": permanently_removed}
+
+
+@router.post("/git/status")
+def git_status(body: GitPathRequest) -> dict:
+    target = safe_path(body.path)
+    ensure_git_repository(target)
+    return {"ok": True, "path": to_relative(target), "isRepo": True}
+
+
+@router.post("/git/pull")
+def git_pull(body: GitPathRequest) -> dict:
+    target = safe_path(body.path)
+    ensure_git_repository(target)
+    result = run_command(["git", "-C", str(target), "pull", "--ff-only"])
+    if result.get("returncode") != 0:
+        stderr = result.get("stderr", "").strip() or "git pull failed"
+        raise HTTPException(status_code=400, detail=stderr)
+    return {
+        "ok": True,
+        "path": to_relative(target),
+        "stdout": result.get("stdout", ""),
+        "stderr": result.get("stderr", ""),
+        "returncode": result.get("returncode", 0),
+    }
 
 
 @router.post("/chmod")
