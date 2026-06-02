@@ -5,6 +5,9 @@ import { sysagent } from "./sysagent.js";
 
 export const domainDefaultFolders = [
   "public_html",
+  "subdomains"
+];
+const legacyDomainFolders = [
   "public_ftp",
   "etc",
   "logs",
@@ -57,6 +60,14 @@ async function createDomainFileStructureLocally(normalizedDomain: string, domain
   await fs.mkdir(domainRoot, { recursive: true });
   await Promise.all(domainDefaultFolders.map((folder) => fs.mkdir(path.join(domainRoot, folder), { recursive: true })));
   await fs.mkdir(path.join(domainRoot, "public_html", ".well-known", "acme-challenge"), { recursive: true });
+  await Promise.all(legacyDomainFolders.map(async (folder) => {
+    try {
+      await fs.rmdir(path.join(domainRoot, folder));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTEMPTY") throw error;
+    }
+  }));
 
   return {
     domain: normalizedDomain,

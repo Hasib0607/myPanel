@@ -57,6 +57,9 @@ class AccountScaffoldRequest(BaseModel):
 
 DEFAULT_DOMAIN_FOLDERS = [
     "public_html",
+    "subdomains",
+]
+LEGACY_DOMAIN_FOLDERS = [
     "public_ftp",
     "etc",
     "logs",
@@ -129,6 +132,11 @@ def create_domain_scaffold(body: DomainScaffoldRequest) -> dict:
     for folder in DEFAULT_DOMAIN_FOLDERS:
         (domain_root / folder).mkdir(parents=True, exist_ok=True)
     (domain_root / "public_html" / ".well-known" / "acme-challenge").mkdir(parents=True, exist_ok=True)
+    for folder in LEGACY_DOMAIN_FOLDERS:
+        try:
+            (domain_root / folder).rmdir()
+        except OSError:
+            pass
 
     return {
         "ok": True,

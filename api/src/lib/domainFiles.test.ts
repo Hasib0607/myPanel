@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-test("ensureDomainFileStructure creates cPanel-style default domain folders", async () => {
+test("ensureDomainFileStructure creates minimal domain folders", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "vps-panel-domain-files-"));
   process.env.FILE_MANAGER_ROOT = root;
 
@@ -19,6 +19,9 @@ test("ensureDomainFileStructure creates cPanel-style default domain folders", as
     const stats = await fs.stat(path.join(domainRoot, folder));
     assert.equal(stats.isDirectory(), true);
   }
+  await assert.rejects(() => fs.stat(path.join(domainRoot, "logs")), /ENOENT/);
+  await assert.rejects(() => fs.stat(path.join(domainRoot, "mail")), /ENOENT/);
+  await assert.rejects(() => fs.stat(path.join(domainRoot, "backups")), /ENOENT/);
 
   const wellKnown = await fs.stat(path.join(domainRoot, "public_html", ".well-known"));
   assert.equal(wellKnown.isDirectory(), true);
