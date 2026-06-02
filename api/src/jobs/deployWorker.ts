@@ -1599,8 +1599,17 @@ async function ensureComposerPlatformCompatible(
     return;
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    const repaired = await autoRepairComposerPlatformIssue(deploymentId, releaseId, detail).catch(() => false);
-    if (!repaired) throw error;
+    let repairFailure: string | null = null;
+    const repaired = await autoRepairComposerPlatformIssue(deploymentId, releaseId, detail).catch((repairError) => {
+      repairFailure = repairError instanceof Error ? repairError.message : String(repairError);
+      return false;
+    });
+    if (!repaired) {
+      if (repairFailure) {
+        throw new Error(`${detail}\n\nComposer platform auto-repair failed: ${repairFailure}`);
+      }
+      throw error;
+    }
 
     result = await verify();
     assertCommandTree(result, "Composer platform requirements check retry");
@@ -2425,8 +2434,17 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         assertCommandTree(installResult, "Dependency install");
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
-        const repaired = await autoRepairComposerPlatformIssue(deployment.id, releaseId, detail).catch(() => false);
-        if (!repaired) throw error;
+        let repairFailure: string | null = null;
+        const repaired = await autoRepairComposerPlatformIssue(deployment.id, releaseId, detail).catch((repairError) => {
+          repairFailure = repairError instanceof Error ? repairError.message : String(repairError);
+          return false;
+        });
+        if (!repaired) {
+          if (repairFailure) {
+            throw new Error(`${detail}\n\nComposer platform auto-repair failed: ${repairFailure}`);
+          }
+          throw error;
+        }
         installResult = await runDependencyInstall();
         assertCommandTree(installResult, "Dependency install");
       }
