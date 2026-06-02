@@ -353,6 +353,15 @@ export async function deploymentHasLaravelArtisan(appPath: string) {
   }
 }
 
+export async function deploymentHasLaravelPublicIndex(appPath: string) {
+  try {
+    await fs.access(path.join(appPath, "public", "index.php"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function deploymentRunsLaravel(framework: DeploymentFramework, appPath: string) {
   return framework === "LARAVEL" && await deploymentHasLaravelArtisan(appPath);
 }

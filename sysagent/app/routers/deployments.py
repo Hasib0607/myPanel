@@ -1774,11 +1774,22 @@ def guardian_repair(body: GuardianRepairRequest) -> dict:
         steps["cacheClear"] = guarded_deployment_command(body.rootPath, "php artisan cache:clear", env=env or None)
         steps["routeClear"] = guarded_deployment_command(body.rootPath, "php artisan route:clear", env=env or None)
         steps["viewClear"] = guarded_deployment_command(body.rootPath, "php artisan view:clear", env=env or None)
-        steps["storageLink"] = guarded_deployment_command(body.rootPath, "php artisan storage:link", env=env or None)
-        if steps["storageLink"].get("returncode") != 0:
-            stderr = (steps["storageLink"].get("stderr") or "").lower()
-            if "already exists" in stderr or "exists" in stderr:
-                steps["storageLink"]["returncode"] = 0
+        if laravel_has_public_web_root(body.rootPath):
+            steps["storageLink"] = guarded_deployment_command(body.rootPath, "php artisan storage:link", env=env or None)
+            if steps["storageLink"].get("returncode") != 0:
+                stderr = (steps["storageLink"].get("stderr") or "").lower()
+                if "already exists" in stderr or "exists" in stderr:
+                    steps["storageLink"]["returncode"] = 0
+        else:
+            steps["storageLink"] = {
+                "dryRun": False,
+                "command": ["skipped", "php", "artisan", "storage:link"],
+                "cwd": deployment_cwd(body.rootPath),
+                "stdout": "Skipped storage:link: backend-only Laravel deployment has no public/index.php",
+                "stderr": "",
+                "returncode": 0,
+                "skipped": True,
+            }
 
     failed = [name for name, step in steps.items() if step.get("returncode", 0) != 0]
     app_key = steps.get("env", {}).get("appKey") if framework == "LARAVEL" else None

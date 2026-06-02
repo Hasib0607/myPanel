@@ -9,6 +9,7 @@ import { redis } from "../lib/redis.js";
 import { logger } from "../lib/logger.js";
 import {
   deploymentHasLaravelArtisan,
+  deploymentHasLaravelPublicIndex,
   deploymentRunsLaravel,
   detectDeploymentFiles,
   detectDeploymentSource,
@@ -1114,6 +1115,14 @@ async function optionalPublicRouteWarning(
   if (!domain) return null;
 
   if (await deploymentRunsLaravel(deployment.framework, appPath)) {
+    if (!(await deploymentHasLaravelPublicIndex(appPath))) {
+      await writeLog(deploymentId, releaseId, "HEALTH_CHECK", "Skipped public website check for backend-only Laravel deployment", {
+        domain: domain.name,
+        appPath,
+        reason: "No public/index.php exists, so this deployment is database/controller/storage only and should not be probed through Nginx."
+      }, "warn");
+      return null;
+    }
     await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Prepare Laravel public route check", () =>
       sysagent.deploymentRepairLaravelWritablePaths({ rootPath: appPath })
     );

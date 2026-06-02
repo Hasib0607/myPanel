@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { detectDeploymentFiles } from "./deploymentDetection.js";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { detectDeploymentFiles, deploymentHasLaravelPublicIndex } from "./deploymentDetection.js";
 
 test("detectDeploymentFiles prefers React package.json over composer.json", () => {
   const detection = detectDeploymentFiles(
@@ -83,4 +86,18 @@ test("detectDeploymentFiles keeps Python projects out of Laravel APP_KEY flow", 
   assert.equal(pythonWithComposer.detected, "PYTHON");
   assert.equal(pythonWithComposer.suggestions.runtime, "PYTHON");
   assert.equal(pythonWithComposer.suggestions.processManager, "SUPERVISOR");
+});
+
+test("deploymentHasLaravelPublicIndex distinguishes backend-only Laravel projects", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "deployment-detection-"));
+  try {
+    assert.equal(await deploymentHasLaravelPublicIndex(root), false);
+
+    await fs.mkdir(path.join(root, "public"));
+    await fs.writeFile(path.join(root, "public", "index.php"), "<?php\n");
+
+    assert.equal(await deploymentHasLaravelPublicIndex(root), true);
+  } finally {
+    await fs.rm(root, { force: true, recursive: true });
+  }
 });
