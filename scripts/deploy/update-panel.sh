@@ -18,13 +18,13 @@ SUDO_BIN="${SUDO_BIN:-sudo}"
 SERVICES="${PANEL_UPDATE_SERVICES:-vps-panel-sysagent vps-panel-workers vps-panel-frontend vps-panel-api}"
 API_SERVICE="${PANEL_UPDATE_API_SERVICE:-vps-panel-api}"
 HEALTH_URL="${PANEL_UPDATE_HEALTH_URL:-http://127.0.0.1:4000/health}"
+FRONTEND_HEALTH_URL="${PANEL_UPDATE_FRONTEND_HEALTH_URL:-http://127.0.0.1:3000/login}"
 DIRTY_STRATEGY="${PANEL_UPDATE_DIRTY_STRATEGY:-fail}"
 COMMAND_TIMEOUT="${PANEL_UPDATE_COMMAND_TIMEOUT:-30}"
 SYSTEMCTL_NO_BLOCK="${PANEL_UPDATE_SYSTEMCTL_NO_BLOCK:-true}"
 STALE_AFTER_SECONDS="${PANEL_UPDATE_STALE_AFTER_SECONDS:-1200}"
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")"
 SCRIPT_REEXECUTED="${PANEL_UPDATE_SCRIPT_REEXECUTED:-false}"
-FINAL_API_RESTART_REQUESTED="false"
 FINAL_COMMIT=""
 FINAL_COMMIT_SUBJECT=""
 GIT_ASKPASS_FILE=""
@@ -76,12 +76,6 @@ current_commit_subject() {
 
 on_error() {
   local exit_code=$?
-  if [[ "$FINAL_API_RESTART_REQUESTED" == "true" && "$exit_code" == "143" ]]; then
-    write_status "succeeded" "panel self-update completed; $API_SERVICE restart was requested" "$FINAL_COMMIT" "$FINAL_COMMIT_SUBJECT"
-    log "panel self-update handoff exited with 143 after requesting $API_SERVICE restart; treating as success"
-    rm -f "$PID_FILE"
-    exit 0
-  fi
   write_status "failed" "panel self-update failed with exit code $exit_code" "$(current_commit)" "$(current_commit_subject)"
   log "panel self-update failed with exit code $exit_code"
   rm -f "$PID_FILE"
@@ -89,12 +83,6 @@ on_error() {
 }
 
 on_term() {
-  if [[ "$FINAL_API_RESTART_REQUESTED" == "true" ]]; then
-    write_status "succeeded" "panel self-update completed; $API_SERVICE restart was requested" "$FINAL_COMMIT" "$FINAL_COMMIT_SUBJECT"
-    log "panel self-update received TERM after requesting $API_SERVICE restart; treating as success"
-    rm -f "$PID_FILE"
-    exit 0
-  fi
   write_status "failed" "panel self-update interrupted by TERM" "$(current_commit)" "$(current_commit_subject)"
   log "panel self-update interrupted by TERM"
   rm -f "$PID_FILE"
@@ -465,6 +453,30 @@ wait_service_active() {
   return 1
 }
 
+wait_http_ready() {
+  local label="$1"
+  local url="$2"
+  local attempts="${3:-30}"
+
+  if ! command -v curl >/dev/null 2>&1; then
+    log "curl not installed; skipping $label readiness check"
+    return 0
+  fi
+
+  log "Waiting for $label at $url"
+  for i in $(seq 1 "$attempts"); do
+    if curl --fail --silent --show-error "$url" 2>&1 | tee -a "$LOG_FILE" >/dev/null; then
+      log "$label readiness check passed"
+      return 0
+    fi
+    log "$label not ready yet, retry $i/$attempts..."
+    sleep 2
+  done
+
+  log "$label readiness check failed after retries"
+  return 1
+}
+
 pid_is_running() {
   local pid="$1"
   [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" >/dev/null 2>&1
@@ -598,47 +610,15 @@ run "$NPM_BIN" --workspace frontend run build
 
 patch_nginx_websocket
 
-API_RESTART_NEEDED="false"
 for service in $SERVICES; do
-  if [[ "$service" == "$API_SERVICE" ]]; then
-    API_RESTART_NEEDED="true"
-    continue
-  fi
   write_status "running" "restarting $service" "$NEW_COMMIT" "$NEW_COMMIT_SUBJECT"
   run_systemctl restart "$service"
   wait_service_active "$service"
 done
 
-if command -v curl >/dev/null 2>&1; then
-  log "Waiting for API health at $HEALTH_URL"
+wait_http_ready "API health" "$HEALTH_URL" 30
+wait_http_ready "frontend" "$FRONTEND_HEALTH_URL" 30
 
-  for i in {1..20}; do
-    if curl --fail --silent --show-error "$HEALTH_URL" 2>&1 | tee -a "$LOG_FILE"; then
-      log "API health check passed"
-      break
-    fi
-
-    log "API not ready yet, retry $i/20..."
-    sleep 2
-
-    if [ "$i" -eq 20 ]; then
-      log "API health check failed after retries"
-      exit 7
-    fi
-  done
-else
-  log "curl not installed; skipping API health check"
-fi
-
-if [[ "$API_RESTART_NEEDED" == "true" ]]; then
-  FINAL_API_RESTART_REQUESTED="true"
-  FINAL_COMMIT="$NEW_COMMIT"
-  FINAL_COMMIT_SUBJECT="$NEW_COMMIT_SUBJECT"
-  write_status "succeeded" "panel self-update completed; restarting $API_SERVICE" "$NEW_COMMIT" "$NEW_COMMIT_SUBJECT"
-  log "panel self-update completed; restarting $API_SERVICE"
-  run_systemctl restart "$API_SERVICE"
-else
-  write_status "succeeded" "panel self-update completed" "$NEW_COMMIT" "$NEW_COMMIT_SUBJECT"
-  log "panel self-update completed"
-fi
+write_status "succeeded" "panel self-update completed" "$NEW_COMMIT" "$NEW_COMMIT_SUBJECT"
+log "panel self-update completed"
 rm -f "$PID_FILE"
