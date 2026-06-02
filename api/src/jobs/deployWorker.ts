@@ -13,6 +13,7 @@ import {
   deploymentRunsLaravel,
   detectDeploymentFiles,
   detectDeploymentSource,
+  findDeploymentAppRoot,
   findLaravelAppRoot,
   nodeStartUsesVitePreview
 } from "../lib/deploymentDetection.js";
@@ -1909,6 +1910,49 @@ async function reconcileMisdetectedLaravelFramework(
   return updated;
 }
 
+async function reconcileDeploymentRootDirectory(
+  deployment: DeploymentWithWorkerRelations,
+  releaseId: string | undefined,
+  appPath: string
+) {
+  const detected = await findDeploymentAppRoot(deployment.rootPath, deployment.rootDirectory, deployment.framework);
+  if (!detected) {
+    return { deployment, appPath };
+  }
+
+  const rootPath = path.resolve(deployment.rootPath);
+  const detectedAppPath = path.resolve(detected.appPath);
+  const currentAppPath = path.resolve(appPath);
+  if (detectedAppPath === currentAppPath) {
+    return { deployment, appPath };
+  }
+
+  const relativeRootDirectory = path.relative(rootPath, detectedAppPath);
+  if (!relativeRootDirectory || relativeRootDirectory.startsWith("..") || path.isAbsolute(relativeRootDirectory)) {
+    return { deployment, appPath };
+  }
+
+  const updated = await prisma.deployment.update({
+    where: { id: deployment.id },
+    data: {
+      rootDirectory: relativeRootDirectory,
+      publicDirectory: detected.detection.detected === "LARAVEL" ? deployment.publicDirectory || "public" : deployment.publicDirectory
+    },
+    include: deploymentWorkerInclude
+  });
+
+  await writeLog(deployment.id, releaseId, "PREFLIGHT", "Corrected nested deployment app root directory", {
+    framework: detected.detection.detected,
+    previousRootDirectory: deployment.rootDirectory,
+    previousAppPath: appPath,
+    appPath: detectedAppPath,
+    rootDirectory: updated.rootDirectory,
+    reason: detected.detection.reason
+  }, "warn");
+
+  return { deployment: updated, appPath: detectedAppPath };
+}
+
 async function reconcileLaravelRootDirectory(
   deployment: DeploymentWithWorkerRelations,
   releaseId: string | undefined,
@@ -2319,6 +2363,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
 
     const envVars = await resolveEnvVars(deployment.env);
     let appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
+    ({ deployment, appPath } = await reconcileDeploymentRootDirectory(deployment, releaseId, appPath));
     ({ deployment, appPath } = await reconcileLaravelRootDirectory(deployment, releaseId, appPath));
     const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
     const domain = deploymentDomain(deployment);
@@ -2435,6 +2480,9 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       await writeLog(deployment.id, releaseId, "CLONING", "Source sync skipped for non-Git source", { sourceProvider: deployment.sourceProvider });
     }
 
+    let appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
+    ({ deployment, appPath } = await reconcileDeploymentRootDirectory(deployment, releaseId, appPath));
+
     const detection = await runStep(deployment.id, releaseId, "PREFLIGHT", "Runtime detection", () =>
       detectDeploymentSource(deployment.rootPath, deployment.rootDirectory)
     );
@@ -2454,7 +2502,6 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     });
     await assertRuntimeToolsInstalled(deployment.id, releaseId, deployment);
 
-    let appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
     ({ deployment, appPath } = await reconcileLaravelRootDirectory(deployment, releaseId, appPath));
     deployment = await reconcileMisdetectedLaravelFramework(deployment, releaseId, appPath);
     deployment = await reconcileMissingStartCommand(deployment, releaseId);

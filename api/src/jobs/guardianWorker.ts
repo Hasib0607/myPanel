@@ -3,7 +3,7 @@ import { redis } from "../lib/redis.js";
 import { logger } from "../lib/logger.js";
 import { expireGuardianIpBlocks, runGuardianAutoHeal, syncGuardianIncidentsOnly, type GuardianDiagnosis } from "../lib/guardianAutoHeal.js";
 import { restartDeploymentProcess, runGuardianDeploymentRepair } from "../lib/deploymentGuardianRepair.js";
-import { detectDeploymentSource, findLaravelAppRoot } from "../lib/deploymentDetection.js";
+import { detectDeploymentSource, findDeploymentAppRoot, findLaravelAppRoot } from "../lib/deploymentDetection.js";
 import { prisma } from "../lib/prisma.js";
 import { sysagent } from "../lib/sysagent.js";
 import { checkPanelRemoteUpdate } from "../lib/panelUpdateMonitor.js";
@@ -358,6 +358,7 @@ async function guardianSyncRuntimeIfMissingStart(
     return deployment;
   }
 
+  deployment = await guardianCorrectNestedDeploymentRoot(deployment);
   const detection = await detectDeploymentSource(deployment.rootPath, deployment.rootDirectory);
   const startCommand = detection.suggestions.startCommand;
   if (!startCommand) {
@@ -377,6 +378,48 @@ async function guardianSyncRuntimeIfMissingStart(
       processManager: detection.suggestions.processManager ?? "PM2"
     }
   });
+}
+
+async function guardianCorrectNestedDeploymentRoot(
+  deployment: Awaited<ReturnType<typeof prisma.deployment.findMany>>[number]
+) {
+  const currentAppPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
+  const detected = await findDeploymentAppRoot(deployment.rootPath, deployment.rootDirectory, deployment.framework);
+  if (!detected || detected.appPath === currentAppPath) {
+    return deployment;
+  }
+
+  const relativeRootDirectory = path.relative(deployment.rootPath, detected.appPath);
+  if (!relativeRootDirectory || relativeRootDirectory.startsWith("..") || path.isAbsolute(relativeRootDirectory)) {
+    return deployment;
+  }
+
+  const updated = await prisma.deployment.update({
+    where: { id: deployment.id },
+    data: {
+      rootDirectory: relativeRootDirectory,
+      publicDirectory: detected.detection.detected === "LARAVEL" ? deployment.publicDirectory || "public" : deployment.publicDirectory
+    }
+  });
+
+  await prisma.deploymentLog.create({
+    data: {
+      deploymentId: deployment.id,
+      step: "PREFLIGHT",
+      level: "warn",
+      message: "Guardian corrected nested deployment app root directory",
+      metadata: {
+        framework: detected.detection.detected,
+        previousRootDirectory: deployment.rootDirectory,
+        previousAppPath: currentAppPath,
+        appPath: detected.appPath,
+        rootDirectory: relativeRootDirectory,
+        reason: detected.detection.reason
+      } as any
+    }
+  });
+
+  return { ...deployment, ...updated };
 }
 
 async function guardianInlineDeploymentRepair(
@@ -574,8 +617,9 @@ async function runDeploymentGuardWatch() {
 
   const guarded: Array<{ deploymentId: string; missingBefore: number; missingAfter: number; approvalsCreated: number }> = [];
 
-  for (const deployment of deployments) {
+  for (let deployment of deployments) {
     try {
+      deployment = await guardianCorrectNestedDeploymentRoot(deployment);
       const detection = await detectDeploymentSource(deployment.rootPath, deployment.rootDirectory);
       const effectiveFramework = detection.detected;
 

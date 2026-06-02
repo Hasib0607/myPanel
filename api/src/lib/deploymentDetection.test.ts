@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { detectDeploymentFiles, deploymentHasLaravelPublicIndex, findLaravelAppRoot } from "./deploymentDetection.js";
+import { detectDeploymentFiles, deploymentHasLaravelPublicIndex, findDeploymentAppRoot, findLaravelAppRoot } from "./deploymentDetection.js";
 
 test("detectDeploymentFiles prefers React package.json over composer.json", () => {
   const detection = detectDeploymentFiles(
@@ -111,6 +111,52 @@ test("findLaravelAppRoot detects nested Laravel app folders from zip uploads", a
     await fs.writeFile(path.join(app, "public", "index.php"), "<?php\n");
 
     assert.equal(await findLaravelAppRoot(root, "."), app);
+  } finally {
+    await fs.rm(root, { force: true, recursive: true });
+  }
+});
+
+test("findDeploymentAppRoot detects nested React and Node app folders", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "deployment-detection-"));
+  try {
+    const app = path.join(root, "react-admin");
+    await fs.mkdir(app, { recursive: true });
+    await fs.writeFile(path.join(app, "package.json"), JSON.stringify({
+      scripts: { build: "vite build" },
+      dependencies: { react: "^18.0.0", vite: "^5.0.0" }
+    }));
+    await fs.writeFile(path.join(app, "vite.config.ts"), "export default {}\n");
+
+    const detected = await findDeploymentAppRoot(root, ".", "NODEJS");
+    assert.equal(detected?.appPath, app);
+    assert.equal(detected?.detection.detected, "NODEJS");
+  } finally {
+    await fs.rm(root, { force: true, recursive: true });
+  }
+});
+
+test("findDeploymentAppRoot detects nested Next, Python, and Go app folders", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "deployment-detection-"));
+  try {
+    const nextApp = path.join(root, "next-storefront");
+    await fs.mkdir(nextApp, { recursive: true });
+    await fs.writeFile(path.join(nextApp, "package.json"), JSON.stringify({
+      scripts: { build: "next build" },
+      dependencies: { next: "^14.0.0", react: "^18.0.0" }
+    }));
+    assert.equal((await findDeploymentAppRoot(root, ".", "NEXTJS"))?.appPath, nextApp);
+
+    await fs.rm(nextApp, { force: true, recursive: true });
+    const pythonApp = path.join(root, "python-api");
+    await fs.mkdir(pythonApp, { recursive: true });
+    await fs.writeFile(path.join(pythonApp, "requirements.txt"), "fastapi\nuvicorn\n");
+    assert.equal((await findDeploymentAppRoot(root, ".", "PYTHON"))?.appPath, pythonApp);
+
+    await fs.rm(pythonApp, { force: true, recursive: true });
+    const goApp = path.join(root, "go-api");
+    await fs.mkdir(goApp, { recursive: true });
+    await fs.writeFile(path.join(goApp, "go.mod"), "module example.com/app\n");
+    assert.equal((await findDeploymentAppRoot(root, ".", "GO"))?.appPath, goApp);
   } finally {
     await fs.rm(root, { force: true, recursive: true });
   }
