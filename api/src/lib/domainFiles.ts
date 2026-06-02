@@ -15,6 +15,10 @@ export const domainDefaultFolders = [
   "private"
 ];
 
+export const subdomainDefaultFolders = [
+  "public_html"
+];
+
 function fileManagerRoot() {
   return path.resolve(env.FILE_MANAGER_ROOT);
 }
@@ -54,7 +58,7 @@ async function createDomainFileStructureLocally(normalizedDomain: string, domain
 
 async function createSubdomainFileStructureLocally(parentDomain: string, subdomain: string, subdomainRoot: string) {
   await fs.mkdir(subdomainRoot, { recursive: true });
-  await Promise.all(domainDefaultFolders.map((folder) => fs.mkdir(path.join(subdomainRoot, folder), { recursive: true })));
+  await Promise.all(subdomainDefaultFolders.map((folder) => fs.mkdir(path.join(subdomainRoot, folder), { recursive: true })));
   await fs.mkdir(path.join(subdomainRoot, "public_html", ".well-known", "acme-challenge"), { recursive: true });
 
   const fqdn = `${subdomain}.${parentDomain}`;
@@ -64,7 +68,7 @@ async function createSubdomainFileStructureLocally(parentDomain: string, subdoma
     fqdn,
     root: subdomainRoot,
     relativeRoot: path.posix.join(parentDomain, "subdomains", subdomain),
-    folders: domainDefaultFolders
+    folders: subdomainDefaultFolders
   };
 }
 

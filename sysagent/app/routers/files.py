@@ -64,6 +64,9 @@ DEFAULT_DOMAIN_FOLDERS = [
     "backups",
     "private",
 ]
+DEFAULT_SUBDOMAIN_FOLDERS = [
+    "public_html",
+]
 
 
 def assert_safe_name(name: str) -> None:
@@ -124,7 +127,7 @@ def create_subdomain_scaffold(body: SubdomainScaffoldRequest) -> dict:
         return dry_run(["subdomain-scaffold", str(subdomain_root)], subdomain_root)
 
     subdomain_root.mkdir(parents=True, exist_ok=True)
-    for folder in DEFAULT_DOMAIN_FOLDERS:
+    for folder in DEFAULT_SUBDOMAIN_FOLDERS:
         (subdomain_root / folder).mkdir(parents=True, exist_ok=True)
     (subdomain_root / "public_html" / ".well-known" / "acme-challenge").mkdir(parents=True, exist_ok=True)
 
@@ -135,7 +138,7 @@ def create_subdomain_scaffold(body: SubdomainScaffoldRequest) -> dict:
         "fqdn": fqdn,
         "root": str(subdomain_root),
         "relativeRoot": f"{domain}/subdomains/{subdomain}",
-        "folders": DEFAULT_DOMAIN_FOLDERS,
+        "folders": DEFAULT_SUBDOMAIN_FOLDERS,
     }
 
 
