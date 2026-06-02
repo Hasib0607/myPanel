@@ -46,6 +46,7 @@ RHEL_PHP_RUNTIME_PACKAGES = (
     "php-soap",
     "unzip",
 )
+RHEL_PHP82_PACKAGES = RHEL_PHP_RUNTIME_PACKAGES
 DEBIAN_DOVECOT_PACKAGES = ("dovecot-core", "dovecot-imapd", "dovecot-lmtpd")
 RHEL_DOVECOT_PACKAGES = ("dovecot",)
 DEBIAN_PYTHON311_PACKAGES = ("python3", "python3-venv", "python3-pip")
@@ -571,7 +572,35 @@ def composer_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPl
 def php82_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
     family = _resolve_family(info)
     if family is OsFamily.RHEL:
-        return php_runtime_install_plan(info)
+        return PackageInstallPlan(
+            key="php82_runtime",
+            packages=RHEL_PHP82_PACKAGES,
+            steps=(
+                InstallStep(
+                    "Reset existing PHP module stream",
+                    ("dnf", "module", "reset", "-y", "php"),
+                    on_failure="continue",
+                    skip_if=("sh", "-lc", "php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION >= 2 ? 0 : 1);'"),
+                ),
+                InstallStep(
+                    "Enable PHP 8.2 module stream",
+                    ("dnf", "module", "enable", "-y", "php:8.2"),
+                    skip_if=("sh", "-lc", "php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION >= 2 ? 0 : 1);'"),
+                ),
+                InstallStep(
+                    "Install PHP 8.2 runtime, FPM, and common Laravel extensions",
+                    tuple(package_install_command(list(RHEL_PHP82_PACKAGES), info)),
+                    env=package_install_env(info),
+                    skip_if=("sh", "-lc", "php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION >= 2 ? 0 : 1);'"),
+                ),
+                InstallStep(
+                    "Enable and restart PHP-FPM after PHP 8.2 install",
+                    ("systemctl", "enable", "--now", "php-fpm"),
+                    on_failure="continue",
+                ),
+            ),
+            notes="AlmaLinux/RHEL PHP 8.2 runtime for Composer lockfiles that require PHP 8.1/8.2+.",
+        )
     if family is not OsFamily.DEBIAN:
         raise KeyError("PHP 8.2 auto-upgrade is currently supported on Debian/Ubuntu hosts only")
 

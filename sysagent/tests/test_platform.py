@@ -299,6 +299,15 @@ class AlmaPackagePlanTests(unittest.TestCase):
             ["dnf", "install", "-y", *RHEL_COMPOSER_PACKAGES],
         )
 
+    def test_rhel_php82_install_plan_enables_php82_module(self) -> None:
+        plan = runtime_tool_install_plan("php82", self.alma)
+        self.assertEqual(plan.key, "php82_runtime")
+        self.assertEqual(plan.steps[0].command, ("dnf", "module", "reset", "-y", "php"))
+        self.assertEqual(plan.steps[1].command, ("dnf", "module", "enable", "-y", "php:8.2"))
+        self.assertEqual(plan.steps[2].command[0:3], ("dnf", "install", "-y"))
+        self.assertIn("php-fpm", plan.steps[2].command)
+        self.assertTrue(all(step.skip_if for step in plan.steps[:3]))
+
     def test_dovecot_install_plan(self) -> None:
         plan = dovecot_install_plan(self.alma)
         self.assertEqual(plan.packages, ("dovecot",))

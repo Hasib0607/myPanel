@@ -12,6 +12,22 @@ test("composer PHP 8.1 requirement on PHP 8.0 queues PHP 8.2 runtime repair", ()
   assert.deepEqual(targets.map((target) => target.actionKey), ["install-php82"]);
 });
 
+test("composer lock warning with PHP mismatch still queues PHP runtime repair", () => {
+  const text = `
+    Warning: The lock file is not up to date with the latest changes in composer.json.
+    Your lock file does not contain a compatible set of packages. Please run composer update.
+    carbonphp/carbon-doctrine-types 3.2.0 requires php ^8.1 -> your php version (8.0.30) does not satisfy that requirement.
+    maennchen/zipstream-php 3.1.2 requires php-64bit ^8.2 -> your php-64bit version (8.0.30) does not satisfy that requirement.
+    symfony/http-client v7.3.4 requires php >=8.2 -> your php version (8.0.30) does not satisfy that requirement.
+  `;
+
+  const issue = detectComposerPlatformIssue(text);
+  assert.equal(issue?.composerLockOutdated, true);
+  assert.equal(issue?.requiredPhpVersion, "8.2");
+  assert.equal(issue?.currentPhpVersion, "8.0.30");
+  assert.deepEqual(runtimeInstallTargetsForComposerPlatformIssue(text).map((target) => target.actionKey), ["install-php82"]);
+});
+
 test("composer platform parser keeps highest required PHP and lockfile-outdated signal", () => {
   const issue = detectComposerPlatformIssue(`
     Warning: The lock file is not up to date with the latest changes in composer.json.

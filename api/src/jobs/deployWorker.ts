@@ -2462,7 +2462,12 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           throw error;
         }
         installResult = await runDependencyInstall();
-        assertCommandTree(installResult, "Dependency install");
+        try {
+          assertCommandTree(installResult, "Dependency install retry after Composer platform repair");
+        } catch (retryError) {
+          const retryDetail = retryError instanceof Error ? retryError.message : String(retryError);
+          throw new Error(`${retryDetail}\n\nComposer platform auto-repair was attempted but the dependency install still failed. Deployment Doctor has a pending repair target for the detected PHP platform issue.`);
+        }
       }
     }
 

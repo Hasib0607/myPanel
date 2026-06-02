@@ -616,13 +616,6 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
   if (lower.includes("the home or composer_home environment variable must be set")) return { message: "Composer runtime HOME/COMPOSER_HOME was missing on sysagent. Guardian/sysagent now auto-sets fallback HOME paths; retry deploy.", repairAction: "redeploy", category: "composer_home_missing" };
   if (isComposerPlatformCheckInconclusive(text)) return { message: "Composer platform preflight could not produce actionable details because vendor is not installed yet. Redeploy will continue to composer install, where exact PHP/extension issues can be repaired.", repairAction: "redeploy", category: "composer_platform_check_inconclusive" };
   const composerPlatform = detectComposerPlatformIssue(text);
-  if (composerPlatform?.composerLockOutdated) {
-    return {
-      message: "Composer lockfile is out of date with composer.json or incompatible with this PHP runtime. Regenerate composer.lock on a compatible PHP version, commit it, then redeploy.",
-      repairAction: "redeploy",
-      category: "composer_lock_outdated"
-    };
-  }
   const phpVersionMismatch = Boolean(
     composerPlatform?.requiredPhpVersion
     && (!composerPlatform.currentPhpVersion || Number((composerPlatform.currentPhpVersion.split(".")[0] ?? "0")) < Number((composerPlatform.requiredPhpVersion.split(".")[0] ?? "0"))
@@ -635,6 +628,13 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
     const requiredPhpVersion = composerPlatform?.requiredPhpVersion ?? "unknown";
     const currentPhpVersion = composerPlatform?.currentPhpVersion ?? "unknown";
     return { message: `Composer lockfile requires PHP ${requiredPhpVersion}+ but the VPS CLI runtime is ${currentPhpVersion}. Upgrade PHP on the VPS, then redeploy.`, repairAction: "request-approval", category: "php_runtime_version" };
+  }
+  if (composerPlatform?.composerLockOutdated) {
+    return {
+      message: "Composer lockfile is out of date with composer.json or incompatible with this PHP runtime. Regenerate composer.lock on a compatible PHP version, commit it, then redeploy.",
+      repairAction: "redeploy",
+      category: "composer_lock_outdated"
+    };
   }
   if (composerPlatform?.missingExtensions.includes("gd")) return { message: "Composer is missing the PHP GD extension. Install/enable GD on the VPS, then redeploy.", repairAction: "request-approval", category: "php_extension_gd" };
   if (composerPlatform?.missingExtensions.includes("soap")) return { message: "Composer is missing the PHP SOAP extension. Install/enable SOAP on the VPS, then redeploy.", repairAction: "request-approval", category: "php_extension_soap" };
