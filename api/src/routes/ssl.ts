@@ -1,8 +1,9 @@
 import path from "node:path";
-import dns from "node:dns/promises";
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { env } from "../config/env.js";
+import { publishDomainDnsZone } from "../lib/domainDnsPublish.js";
+import { assertPublicARecordPointsTo, resolvePublicA } from "../lib/publicDns.js";
 import { sslQueue } from "../jobs/queues.js";
 import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
@@ -59,36 +60,24 @@ function commandFailureDetail(result: SysagentCommandResult) {
   return [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
 }
 
-async function resolvePublicA(hostname: string) {
-  const resolvers = env.DOMAIN_NAMESERVER_RESOLVERS.split(",").map((resolver) => resolver.trim()).filter(Boolean);
-  const errors: string[] = [];
-  for (const resolverAddress of resolvers) {
-    const resolver = new dns.Resolver();
-    resolver.setServers([resolverAddress]);
-    try {
-      const records = await resolver.resolve4(hostname);
-      if (records.length > 0) return records;
-    } catch (error) {
-      errors.push(`${resolverAddress}: ${error instanceof Error ? error.message : "lookup failed"}`);
-    }
-  }
-  try {
-    return await dns.resolve4(hostname);
-  } catch (error) {
-    errors.push(`system: ${error instanceof Error ? error.message : "lookup failed"}`);
-  }
-  throw Object.assign(new Error(`No public A record found for ${hostname}. Resolver checks: ${errors.join("; ")}`), { statusCode: 400 });
+async function panelVanityNameServers(domainId: string, domainName: string) {
+  const [dnsRecords, configuredNameServers] = await Promise.all([
+    prisma.dnsRecord.findMany({ where: { domainId, type: "NS", name: "@" }, select: { value: true } }),
+    prisma.nameServer.findMany({ where: { active: true }, select: { hostname: true } })
+  ]);
+
+  return [...new Set([
+    ...dnsRecords.map((record) => record.value.replace(/\.$/, "").toLowerCase()),
+    ...configuredNameServers.map((record) => record.hostname.toLowerCase())
+  ])].filter((hostname) => hostname.endsWith(`.${domainName}`));
 }
 
-async function assertARecordPointsToVps(hostname: string) {
-  const records = await resolvePublicA(hostname);
-  if (!records.includes(env.VPS_IP)) {
-    throw Object.assign(new Error(`${hostname} A record must point to this VPS (${env.VPS_IP}). Current A records: ${records.join(", ") || "none"}`), { statusCode: 400 });
-  }
-  return records;
+async function assertARecordPointsToVps(hostname: string, domainId: string, domainName: string) {
+  const knownVanityNameServers = await panelVanityNameServers(domainId, domainName);
+  return assertPublicARecordPointsTo(hostname, env.VPS_IP, { knownVanityNameServers });
 }
 
-async function optionalARecordPointsToVps(hostname: string) {
+async function optionalARecordPointsToVps(hostname: string, domainId: string, domainName: string) {
   try {
     const records = await resolvePublicA(hostname);
     const ok = records.includes(env.VPS_IP);
@@ -98,9 +87,10 @@ async function optionalARecordPointsToVps(hostname: string) {
   }
 }
 
-async function runSslPreflight(domain: { name: string }, includeWww: boolean) {
-  const apexCheck = { host: domain.name, records: await assertARecordPointsToVps(domain.name), ok: true, skipped: false };
-  const wwwCheck = includeWww ? await optionalARecordPointsToVps(`www.${domain.name}`) : null;
+async function runSslPreflight(domain: { id: string; name: string }, includeWww: boolean) {
+  await publishDomainDnsZone(domain.id);
+  const apexCheck = { host: domain.name, records: await assertARecordPointsToVps(domain.name, domain.id, domain.name), ok: true, skipped: false };
+  const wwwCheck = includeWww ? await optionalARecordPointsToVps(`www.${domain.name}`, domain.id, domain.name) : null;
   const effectiveIncludeWww = Boolean(wwwCheck?.ok);
   const dnsChecks = [apexCheck, ...(wwwCheck ? [wwwCheck] : [])];
   const webRoot = path.join(env.FILE_MANAGER_ROOT, domain.name, "public_html");
@@ -145,14 +135,14 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
   app.post("/domains/:domainId/preflight", async (request) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const body = sslActionSchema.parse(request.body ?? {});
-    const domain = await prisma.domain.findUniqueOrThrow({ where: { id: domainId }, select: { name: true } });
+    const domain = await prisma.domain.findUniqueOrThrow({ where: { id: domainId }, select: { id: true, name: true } });
     return runSslPreflight(domain, body.includeWww);
   });
 
   app.post("/domains/:domainId/issue", async (request, reply) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const body = sslActionSchema.parse(request.body ?? {});
-    const domain = await prisma.domain.findUniqueOrThrow({ where: { id: domainId } });
+    const domain = await prisma.domain.findUniqueOrThrow({ where: { id: domainId }, select: { id: true, name: true, forceSsl: true } });
     const preflight = await runSslPreflight(domain, body.includeWww);
     const job = await sslQueue.add("issue", {
       domainId,
@@ -178,7 +168,7 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
   app.post("/domains/:domainId/renew", async (request, reply) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const body = sslActionSchema.parse(request.body ?? {});
-    const domain = await prisma.domain.findUniqueOrThrow({ where: { id: domainId } });
+    const domain = await prisma.domain.findUniqueOrThrow({ where: { id: domainId }, select: { id: true, name: true, forceSsl: true } });
     const preflight = await runSslPreflight(domain, body.includeWww);
     const job = await sslQueue.add("renew", {
       domainId,
