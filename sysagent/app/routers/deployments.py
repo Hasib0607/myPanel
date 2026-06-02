@@ -158,7 +158,7 @@ class NginxInspectRequest(BaseModel):
 
 
 class RuntimeInstallRequest(BaseModel):
-    tool: str = Field(pattern="^(pnpm|yarn|composer|uv|go|php|php82|php-gd|php-soap|python|python311|nodejs|supervisor|pm2)$")
+    tool: str = Field(pattern="^(pnpm|yarn|composer|uv|go|php|php82|php-mbstring|php-xml|php-curl|php-zip|php-gd|php-redis|php-soap|php-mysql|php-pgsql|python|python311|nodejs|supervisor|pm2)$")
 
 
 class PermissionRepairRequest(BaseModel):

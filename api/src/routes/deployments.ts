@@ -739,15 +739,34 @@ async function createDoctorApprovals(deploymentId: string, actions: Array<{ key:
   return created;
 }
 
+function uniqueRiskyActions(actions: Array<{ key: string; label: string; command: string; reason: string; approvalRequired: true }>) {
+  const seen = new Set<string>();
+  return actions.filter((action) => {
+    if (seen.has(action.key)) return false;
+    seen.add(action.key);
+    return true;
+  });
+}
+
 async function executeDoctorApproval(deployment: Awaited<ReturnType<typeof findDeployment>>, approval: { actionKey: string }) {
   if (approval.actionKey.startsWith("install-")) {
     const toolMap: Record<string, string> = {
       "install-composer": "composer",
+      "install-php-runtime": "php",
       "install-php": "php",
       "install-php82": "php82",
+      "install-php-extension-gd": "php-gd",
       "install-php-gd": "php-gd",
+      "install-php-extension-soap": "php-soap",
       "install-php-soap": "php-soap",
+      "install-php-extension-redis": "php-redis",
       "install-php-redis": "php-redis",
+      "install-php-extension-mbstring": "php-mbstring",
+      "install-php-extension-xml": "php-xml",
+      "install-php-extension-curl": "php-curl",
+      "install-php-extension-zip": "php-zip",
+      "install-php-extension-mysql": "php-mysql",
+      "install-php-extension-pgsql": "php-pgsql",
       "install-python": "python",
       "install-python311": "python311",
       "install-nodejs": "nodejs",
@@ -1099,7 +1118,7 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
   }
   if (hint?.category === "php_redis_extension") {
     riskyActions.push({
-      key: "install-php-redis",
+      key: "install-php-extension-redis",
       label: "Install PHP Redis extension",
       command: "Install php-redis via panel runtime-tools",
       reason: "Laravel is configured for Redis but PHP cannot load the Redis class.",
@@ -1215,7 +1234,7 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
     checks,
     evidence: evidenceLines(recentErrors),
     envSuggestions,
-    riskyActions,
+    riskyActions: uniqueRiskyActions(riskyActions),
     generatedAt: new Date().toISOString()
   };
 }

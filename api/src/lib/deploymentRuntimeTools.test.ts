@@ -102,8 +102,11 @@ test("runtime matrix includes Python and Go supervisor requirements", () => {
 
 test("missing runtime matrix entries map to small install targets", () => {
   const targets = runtimeInstallTargetsForMissingExecutables([
+    "php",
     "php-ext-gd",
     "php-ext-pgsql",
+    "composer",
+    "node",
     "python3.10+",
     "python-venv",
     "pm2",
@@ -112,11 +115,27 @@ test("missing runtime matrix entries map to small install targets", () => {
   ]);
 
   assert.deepEqual(targets.map((target) => target.actionKey), [
-    "install-php",
+    "install-composer",
+    "install-php-runtime",
+    "install-php-extension-gd",
+    "install-php-extension-pgsql",
     "install-python",
     "install-python311",
+    "install-nodejs",
     "install-go",
     "install-supervisor",
     "install-pm2"
+  ]);
+});
+
+test("composer missing extensions queue extension-specific repairs", () => {
+  const targets = runtimeInstallTargetsForComposerPlatformIssue(`
+    intervention/image requires ext-gd * -> it is missing from your system.
+    some/soap-client requires ext-soap * -> it is missing from your system.
+  `);
+
+  assert.deepEqual(targets.map((target) => target.actionKey), [
+    "install-php-extension-gd",
+    "install-php-extension-soap"
   ]);
 });

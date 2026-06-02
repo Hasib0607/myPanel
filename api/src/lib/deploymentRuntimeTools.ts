@@ -12,7 +12,28 @@ type RuntimeToolInput = {
 
 export type RuntimeInstallTarget = {
   actionKey: string;
-  tool: "composer" | "php" | "php82" | "php-gd" | "php-soap" | "python" | "python311" | "nodejs" | "pnpm" | "yarn" | "uv" | "go" | "supervisor" | "pm2";
+  tool:
+    | "composer"
+    | "php"
+    | "php82"
+    | "php-gd"
+    | "php-soap"
+    | "php-redis"
+    | "php-mbstring"
+    | "php-xml"
+    | "php-curl"
+    | "php-zip"
+    | "php-mysql"
+    | "php-pgsql"
+    | "python"
+    | "python311"
+    | "nodejs"
+    | "pnpm"
+    | "yarn"
+    | "uv"
+    | "go"
+    | "supervisor"
+    | "pm2";
   label: string;
   command: string;
   reason: string;
@@ -45,6 +66,20 @@ const phpRuntimeTools = [
 const nodeRuntimeTools = ["node", "npm"];
 const pythonRuntimeTools = ["python3", "python3.10+", "pip3", "python-venv"];
 const goRuntimeTools = ["go"];
+const phpExtensionRepairActions: Record<string, string> = {
+  mbstring: "install-php-extension-mbstring",
+  xml: "install-php-extension-xml",
+  curl: "install-php-extension-curl",
+  zip: "install-php-extension-zip",
+  gd: "install-php-extension-gd",
+  redis: "install-php-extension-redis",
+  soap: "install-php-extension-soap",
+  mysql: "install-php-extension-mysql",
+  mysqli: "install-php-extension-mysql",
+  pdo_mysql: "install-php-extension-mysql",
+  pgsql: "install-php-extension-pgsql",
+  pdo_pgsql: "install-php-extension-pgsql"
+};
 
 function firstExecutable(command: string | null | undefined) {
   const trimmed = command?.trim();
@@ -151,24 +186,12 @@ const installTargetCatalog: RuntimeInstallTarget[] = [
     executables: ["composer"]
   },
   {
-    actionKey: "install-php",
+    actionKey: "install-php-runtime",
     tool: "php",
     label: "Install PHP runtime",
-    command: "Install PHP, php-fpm, and common Laravel extensions via panel runtime-tools",
+    command: "Install PHP CLI and php-fpm via panel runtime-tools",
     reason: "PHP runtime and php-fpm are required for Laravel apps.",
-    executables: [
-      "php",
-      "php-fpm",
-      "php-ext-mbstring",
-      "php-ext-xml",
-      "php-ext-curl",
-      "php-ext-zip",
-      "php-ext-gd",
-      "php-ext-redis",
-      "php-ext-soap",
-      "php-ext-mysql",
-      "php-ext-pgsql"
-    ]
+    executables: ["php", "php-fpm"]
   },
   {
     actionKey: "install-php82",
@@ -176,23 +199,79 @@ const installTargetCatalog: RuntimeInstallTarget[] = [
     label: "Upgrade PHP runtime to 8.2",
     command: "Install PHP 8.2 runtime, common Laravel extensions, and switch the CLI default to php8.2",
     reason: "Composer reported that the project lockfile requires PHP 8.2 or newer.",
-    executables: ["php"]
+    executables: []
   },
   {
-    actionKey: "install-php-gd",
+    actionKey: "install-php-extension-gd",
     tool: "php-gd",
     label: "Install PHP GD extension",
     command: "Install the PHP GD extension via panel runtime-tools",
     reason: "Composer reported that the GD extension is required by this deployment.",
-    executables: ["php"]
+    executables: ["php-ext-gd"]
   },
   {
-    actionKey: "install-php-soap",
+    actionKey: "install-php-extension-soap",
     tool: "php-soap",
     label: "Install PHP SOAP extension",
     command: "Install the PHP SOAP extension via panel runtime-tools",
     reason: "Composer reported that the SOAP extension is required by this deployment.",
-    executables: ["php"]
+    executables: ["php-ext-soap"]
+  },
+  {
+    actionKey: "install-php-extension-redis",
+    tool: "php-redis",
+    label: "Install PHP Redis extension",
+    command: "Install the PHP Redis extension via panel runtime-tools",
+    reason: "Laravel is configured for Redis but PHP cannot load the Redis extension.",
+    executables: ["php-ext-redis"]
+  },
+  {
+    actionKey: "install-php-extension-mbstring",
+    tool: "php-mbstring",
+    label: "Install PHP mbstring extension",
+    command: "Install the PHP mbstring extension via panel runtime-tools",
+    reason: "Laravel and Composer commonly require the PHP mbstring extension.",
+    executables: ["php-ext-mbstring"]
+  },
+  {
+    actionKey: "install-php-extension-xml",
+    tool: "php-xml",
+    label: "Install PHP XML extension",
+    command: "Install the PHP XML extension via panel runtime-tools",
+    reason: "Laravel and Composer commonly require PHP XML support.",
+    executables: ["php-ext-xml"]
+  },
+  {
+    actionKey: "install-php-extension-curl",
+    tool: "php-curl",
+    label: "Install PHP cURL extension",
+    command: "Install the PHP cURL extension via panel runtime-tools",
+    reason: "Composer and HTTP clients commonly require the PHP cURL extension.",
+    executables: ["php-ext-curl"]
+  },
+  {
+    actionKey: "install-php-extension-zip",
+    tool: "php-zip",
+    label: "Install PHP ZIP extension",
+    command: "Install the PHP ZIP extension via panel runtime-tools",
+    reason: "Composer and archive handling commonly require the PHP ZIP extension.",
+    executables: ["php-ext-zip"]
+  },
+  {
+    actionKey: "install-php-extension-mysql",
+    tool: "php-mysql",
+    label: "Install PHP MySQL extension",
+    command: "Install the PHP MySQL/PDO extension via panel runtime-tools",
+    reason: "Laravel MySQL database connections require PHP MySQL/PDO support.",
+    executables: ["php-ext-mysql"]
+  },
+  {
+    actionKey: "install-php-extension-pgsql",
+    tool: "php-pgsql",
+    label: "Install PHP PostgreSQL extension",
+    command: "Install the PHP PostgreSQL/PDO extension via panel runtime-tools",
+    reason: "Laravel PostgreSQL database connections require PHP PostgreSQL/PDO support.",
+    executables: ["php-ext-pgsql"]
   },
   {
     actionKey: "install-python",
@@ -320,11 +399,11 @@ export function runtimeInstallTargetsForComposerPlatformIssue(text: string) {
     }
   }
 
-  if (issue.missingExtensions.includes("gd")) {
-    addTarget(targets.some((item) => item.actionKey === "install-php82") ? "install-php82" : "install-php-gd");
-  }
-  if (issue.missingExtensions.includes("soap")) {
-    addTarget(targets.some((item) => item.actionKey === "install-php82") ? "install-php82" : "install-php-soap");
+  if (!targets.some((item) => item.actionKey === "install-php82")) {
+    for (const extension of issue.missingExtensions) {
+      const actionKey = phpExtensionRepairActions[extension];
+      if (actionKey) addTarget(actionKey);
+    }
   }
 
   return targets;

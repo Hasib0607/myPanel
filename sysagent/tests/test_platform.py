@@ -206,6 +206,12 @@ class PlatformMappingTests(unittest.TestCase):
         alma_plan = runtime_tool_install_plan("python311", self.alma)
         self.assertEqual(alma_plan.packages, ("python3.11", "python3.11-pip"))
 
+    def test_php_extension_runtime_tool_mapping(self) -> None:
+        self.assertEqual(runtime_tool_install_plan("php-gd", self.ubuntu).packages, ("php-gd",))
+        self.assertEqual(runtime_tool_install_plan("php-pgsql", self.ubuntu).packages, ("php-pgsql",))
+        self.assertEqual(runtime_tool_install_plan("php-mysql", self.alma).packages, ("php-mysqlnd",))
+        self.assertEqual(runtime_tool_install_command("php-curl", self.ubuntu), ["apt-get", "install", "-y", "php-curl"])
+
     def test_platform_summary_has_no_known_alma_code_gaps(self) -> None:
         summary = platform_summary(self.alma)
         self.assertEqual(summary["family"], "rhel")
