@@ -4,6 +4,7 @@ import { logger } from "../lib/logger.js";
 import { env } from "../config/env.js";
 import { prisma } from "../lib/prisma.js";
 import { sysagent, type SysagentCommandResult } from "../lib/sysagent.js";
+import { subdomainFolderName } from "../lib/domainFiles.js";
 import {
   deploymentFallbackRootPath,
   deploymentIsRoutable,
@@ -54,7 +55,7 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
       sslEnabled: true,
       documentRoot: proxyTarget.domain.documentRoot,
       publicRootPath: proxyTarget.subdomainId
-        ? `${env.FILE_MANAGER_ROOT}/${proxyTarget.domain.name}/subdomains/${domainName.replace(new RegExp(`\\.${proxyTarget.domain.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`), "")}`
+        ? `${env.FILE_MANAGER_ROOT}/${proxyTarget.domain.name}/subdomains/${subdomainFolderName(domainName.replace(new RegExp(`\\.${proxyTarget.domain.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`), ""))}`
         : undefined,
       includeWww: includeWww && proxyTarget.includeWww !== false
     };

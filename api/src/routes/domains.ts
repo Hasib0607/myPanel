@@ -5,7 +5,7 @@ import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { env } from "../config/env.js";
 import { audit } from "../lib/audit.js";
-import { ensureDomainFileStructure, ensureSubdomainFileStructure } from "../lib/domainFiles.js";
+import { ensureDomainFileStructure, ensureSubdomainFileStructure, subdomainFolderName } from "../lib/domainFiles.js";
 import { buildDeploymentNginxRequest, deploymentIsRoutable, publishPublicHtmlNginxVhost } from "../lib/deploymentDomainSsl.js";
 import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
@@ -24,10 +24,14 @@ export function normalizeDomainName(value: string) {
 
 const domainNameSchema = z.string().transform((value) => normalizeDomainName(value)).superRefine((value, ctx) => {
   const labels = value.split(".");
-  const validLabels = labels.every((label) => /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(label));
+  const validLabels = labels.every((label, index) =>
+    label === "*" && index === 0
+      ? true
+      : /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(label)
+  );
 
   if (labels.length < 2 || value.length > 253 || !validLabels || !/^[a-z]{2,63}$/.test(labels[labels.length - 1] ?? "")) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Enter a valid root domain, like example.com" });
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Enter a valid root domain, like example.com, or a wildcard subdomain like *.example.com" });
   }
 });
 
@@ -49,7 +53,7 @@ const bulkCreateDomainSchema = createDomainSchema.omit({ name: true }).extend({
 });
 
 const subdomainSchema = z.object({
-  name: z.string().trim().toLowerCase(),
+  name: z.string().trim().toLowerCase().regex(/^(\*|[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*)$/, "Enter a valid subdomain name, or * for a wildcard"),
   target: z.string().min(1),
   sslEnabled: z.boolean().default(false)
 });
@@ -411,7 +415,7 @@ async function publishDomainHosting(domainId: string) {
     const scaffold = await ensureSubdomainFileStructure(domain.name, subdomain.name);
     try {
       const result = await sysagent.writeStaticNginxVhost({
-        name: `domain-${fqdn}`,
+        name: `domain-${nginxResourceName(fqdn)}`,
         serverName: fqdn,
         rootPath: path.join(env.FILE_MANAGER_ROOT, scaffold.relativeRoot),
         forceHttps: false
@@ -482,6 +486,10 @@ function dnsRecordTypeForTarget(target: string) {
   return "CNAME" as const;
 }
 
+function nginxResourceName(value: string) {
+  return value.replace(/^\*\./, "wildcard.").replace(/[^a-zA-Z0-9_.-]/g, "-");
+}
+
 async function createSubdomainForDomain(input: {
   domainId: string;
   name: string;
@@ -523,9 +531,10 @@ async function createSubdomainForDomain(input: {
   let nginxWarning: string | undefined;
   try {
     if (input.target === env.VPS_IP || input.target === parentDomain.name || input.target === `${input.name}.${parentDomain.name}`) {
+      const fqdn = `${input.name}.${parentDomain.name}`;
       nginxResult = await sysagent.writeStaticNginxVhost({
-        name: `domain-${input.name}.${parentDomain.name}`,
-        serverName: `${input.name}.${parentDomain.name}`,
+        name: `domain-${nginxResourceName(fqdn)}`,
+        serverName: fqdn,
         rootPath: path.join(env.FILE_MANAGER_ROOT, fileScaffold.relativeRoot),
         forceHttps: false
       });
@@ -624,6 +633,9 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
       }
       throw error;
     });
+    if (!subdomainShortcut && body.name.startsWith("*.")) {
+      throw Object.assign(new Error(`Add the parent domain ${body.name.slice(2)} before creating wildcard subdomain ${body.name}.`), { statusCode: 400 });
+    }
     if (subdomainShortcut) {
       await audit(request, {
         action: "CREATE",
@@ -699,6 +711,10 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
             })) as Prisma.InputJsonValue
           });
           results.push({ input: name, name: subdomainShortcut.name, status: "created", kind: "subdomain", subdomain: subdomainShortcut });
+          continue;
+        }
+        if (name.startsWith("*.")) {
+          results.push({ input: name, name, status: "failed", error: `Add the parent domain ${name.slice(2)} before creating this wildcard subdomain.` });
           continue;
         }
 

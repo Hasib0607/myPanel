@@ -49,7 +49,7 @@ class DomainScaffoldRequest(BaseModel):
 
 class SubdomainScaffoldRequest(BaseModel):
     domain: str = Field(pattern=r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
-    subdomain: str = Field(pattern=r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$")
+    subdomain: str = Field(pattern=r"^(\*|[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*)$")
 
 
 class AccountScaffoldRequest(BaseModel):
@@ -164,8 +164,9 @@ def create_domain_scaffold(body: DomainScaffoldRequest) -> dict:
 def create_subdomain_scaffold(body: SubdomainScaffoldRequest) -> dict:
     domain = body.domain.strip().lower()
     subdomain = body.subdomain.strip().lower()
+    folder_name = "_wildcard" if subdomain == "*" else subdomain
     fqdn = f"{subdomain}.{domain}"
-    subdomain_root = safe_path(f"{domain}/subdomains/{subdomain}")
+    subdomain_root = safe_path(f"{domain}/subdomains/{folder_name}")
     if not settings.allow_live_file_manager:
         return dry_run(["subdomain-scaffold", str(subdomain_root)], subdomain_root)
 
@@ -182,7 +183,7 @@ def create_subdomain_scaffold(body: SubdomainScaffoldRequest) -> dict:
         "subdomain": subdomain,
         "fqdn": fqdn,
         "root": str(subdomain_root),
-        "relativeRoot": f"{domain}/subdomains/{subdomain}",
+        "relativeRoot": f"{domain}/subdomains/{folder_name}",
         "folders": DEFAULT_SUBDOMAIN_FOLDERS,
     }
 

@@ -34,7 +34,7 @@ def _resolve_sites(body: VhostRequest | StaticVhostRequest | RedirectVhostReques
 
 class StaticVhostRequest(BaseModel):
     name: str = Field(pattern=r"^[a-zA-Z0-9_.-]+$")
-    serverName: str = Field(pattern=r"^[a-zA-Z0-9_. -]+$")
+    serverName: str = Field(pattern=r"^[a-zA-Z0-9_*.-]+( [a-zA-Z0-9_*.-]+)*$")
     rootPath: str
     forceHttps: bool = False
     sslCertificate: str | None = None
@@ -46,7 +46,7 @@ class StaticVhostRequest(BaseModel):
 
 class RedirectVhostRequest(BaseModel):
     name: str = Field(pattern=r"^[a-zA-Z0-9_.-]+$")
-    serverName: str = Field(pattern=r"^[a-zA-Z0-9_. -]+$")
+    serverName: str = Field(pattern=r"^[a-zA-Z0-9_*.-]+( [a-zA-Z0-9_*.-]+)*$")
     redirectUrl: str
     sslCertificate: str | None = None
     sslCertificateKey: str | None = None

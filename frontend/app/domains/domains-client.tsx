@@ -94,7 +94,11 @@ function validDomainInput(value: string) {
   const labels = value.split(".");
   if (labels.length < 2 || value.length > 253) return false;
   if (!/^[a-z]{2,63}$/.test(labels[labels.length - 1] ?? "")) return false;
-  return labels.every((label) => /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(label));
+  return labels.every((label, index) =>
+    label === "*" && index === 0
+      ? true
+      : /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(label)
+  );
 }
 
 export function DomainsClient() {
@@ -270,7 +274,7 @@ export function DomainsClient() {
       return;
     }
     if (!validDomainInput(normalizedNewDomain)) {
-      setError("Enter a valid root domain, like example.com.");
+      setError("Enter a valid root domain like example.com, or a wildcard subdomain like *.example.com.");
       return;
     }
     createDomain.mutate();
@@ -287,7 +291,7 @@ export function DomainsClient() {
     }
     const invalid = parsedBulkDomains.find((domain) => !validDomainInput(domain));
     if (invalid) {
-      setError(`${invalid} is not a valid root domain.`);
+      setError(`${invalid} is not a valid root domain or wildcard subdomain.`);
       return;
     }
     createBulkDomains.mutate();

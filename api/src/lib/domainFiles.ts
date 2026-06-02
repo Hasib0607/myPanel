@@ -45,11 +45,16 @@ function assertSafeDomainName(domain: string) {
 }
 
 function assertSafeSubdomainName(subdomain: string) {
+  if (subdomain === "*") return;
   if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/.test(subdomain)) {
     const error = new Error("Invalid subdomain folder name");
     (error as Error & { statusCode?: number }).statusCode = 400;
     throw error;
   }
+}
+
+export function subdomainFolderName(subdomain: string) {
+  return subdomain.trim().toLowerCase() === "*" ? "_wildcard" : subdomain.trim().toLowerCase();
 }
 
 function isPermissionError(error: unknown) {
@@ -77,7 +82,7 @@ async function createDomainFileStructureLocally(normalizedDomain: string, domain
   };
 }
 
-async function createSubdomainFileStructureLocally(parentDomain: string, subdomain: string, subdomainRoot: string) {
+async function createSubdomainFileStructureLocally(parentDomain: string, subdomain: string, subdomainRoot: string, folderName = subdomain) {
   await fs.mkdir(subdomainRoot, { recursive: true });
   await Promise.all(subdomainDefaultFolders.map((folder) => fs.mkdir(path.join(subdomainRoot, folder), { recursive: true })));
   await fs.mkdir(path.join(subdomainRoot, ".well-known", "acme-challenge"), { recursive: true });
@@ -89,7 +94,7 @@ async function createSubdomainFileStructureLocally(parentDomain: string, subdoma
     subdomain,
     fqdn,
     root: subdomainRoot,
-    relativeRoot: path.posix.join(parentDomain, "subdomains", subdomain),
+    relativeRoot: path.posix.join(parentDomain, "subdomains", folderName),
     folders: subdomainDefaultFolders
   };
 }
@@ -129,12 +134,13 @@ export async function ensureDomainFileStructure(domain: string) {
 export async function ensureSubdomainFileStructure(parentDomain: string, subdomain: string) {
   const normalizedDomain = parentDomain.trim().toLowerCase();
   const normalizedSubdomain = subdomain.trim().toLowerCase();
+  const folderName = subdomainFolderName(normalizedSubdomain);
   assertSafeDomainName(normalizedDomain);
   assertSafeSubdomainName(normalizedSubdomain);
 
   await ensureDomainFileStructure(normalizedDomain);
   const root = fileManagerRoot();
-  const relativeRoot = path.posix.join(normalizedDomain, "subdomains", normalizedSubdomain);
+  const relativeRoot = path.posix.join(normalizedDomain, "subdomains", folderName);
   const subdomainRoot = path.resolve(root, relativeRoot);
   const insideRoot = subdomainRoot === root || subdomainRoot.startsWith(`${root}${path.sep}`);
   if (!insideRoot) {
@@ -144,7 +150,7 @@ export async function ensureSubdomainFileStructure(parentDomain: string, subdoma
   }
 
   try {
-    return await createSubdomainFileStructureLocally(normalizedDomain, normalizedSubdomain, subdomainRoot);
+    return await createSubdomainFileStructureLocally(normalizedDomain, normalizedSubdomain, subdomainRoot, folderName);
   } catch (error) {
     if (!isPermissionError(error)) throw error;
     const result = await sysagent.createSubdomainScaffold({ domain: normalizedDomain, subdomain: normalizedSubdomain });

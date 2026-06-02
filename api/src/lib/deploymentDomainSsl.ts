@@ -5,6 +5,7 @@ import { prisma } from "./prisma.js";
 import { env } from "../config/env.js";
 import path from "node:path";
 import { sysagent } from "./sysagent.js";
+import { subdomainFolderName } from "./domainFiles.js";
 
 export type BoundDomain = {
   id: string;
@@ -37,7 +38,7 @@ export function boundDomainFromBinding(binding: {
       forceSsl: binding.subdomain.sslEnabled,
       sslEnabled: binding.subdomain.sslEnabled,
       documentRoot: binding.subdomain.domain.documentRoot,
-      publicRootPath: path.join(env.FILE_MANAGER_ROOT, binding.subdomain.domain.name, "subdomains", binding.subdomain.name),
+      publicRootPath: path.join(env.FILE_MANAGER_ROOT, binding.subdomain.domain.name, "subdomains", subdomainFolderName(binding.subdomain.name)),
       includeWww: false
     };
   }

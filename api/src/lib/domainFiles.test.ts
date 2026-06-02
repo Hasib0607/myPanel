@@ -62,3 +62,17 @@ test("ensureSubdomainFileStructure creates minimal subdomain folders", async () 
   await assert.rejects(() => fs.stat(path.join(subdomainRoot, "mail")), /ENOENT/);
 });
 
+test("ensureSubdomainFileStructure maps wildcard subdomains to a safe folder", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "vps-panel-wildcard-subdomain-files-"));
+  process.env.FILE_MANAGER_ROOT = root;
+
+  const { ensureSubdomainFileStructure } = await import("./domainFiles.js");
+  const result = await ensureSubdomainFileStructure("Example.COM", "*");
+
+  assert.equal(result.fqdn, "*.example.com");
+  assert.equal(result.subdomain, "*");
+  assert.equal(result.relativeRoot, "example.com/subdomains/_wildcard");
+
+  const wellKnown = await fs.stat(path.join(result.root, ".well-known", "acme-challenge"));
+  assert.equal(wellKnown.isDirectory(), true);
+});

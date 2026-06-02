@@ -77,6 +77,7 @@ From Deployment Doctor or runtime-tools install:
 - [ ] Linked domains/subdomains serve the deployment while it is `RUNNING`, then restore the file-manager `public_html`/subdomain root after stop, unlink, or missing deployment target without stale Nginx 502 proxy configs
 - [ ] Deployment Doctor/Guardian marks public HTTP 502/503/504 as a repairable failure, rewrites the generated Nginx vhost, and queues restart if the deployment upstream is still unreachable
 - [ ] Deployment Doctor/Guardian identifies Laravel MySQL access-denied crashes, including DB/user case mismatch, host-grant mismatch (`localhost` vs `127.0.0.1`), and password/grant repair needs
+- [ ] Wildcard subdomains like `*.example.com` can be added after the parent domain exists, publish a wildcard DNS/vhost, and use the safe file-manager root `example.com/subdomains/_wildcard`
 - [ ] Install Composer (EPEL or fallback)
 - [ ] Install Go if needed
 
