@@ -612,6 +612,7 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
   if (lower.includes("please provide a valid cache path") || lower.includes("bootstrap/cache") || lower.includes("storage/framework")) return { message: "Laravel writable/cache directories are missing or not writable. Repair the Laravel storage/bootstrap cache paths, then redeploy.", repairAction: "request-approval", category: "laravel_writable_paths" };
   if (lower.includes("artisan package:discover") || lower.includes("laravel package discovery")) return { message: "Laravel package discovery failed while bootstrapping the app. Check the deployment environment values and the package discovery error output, then redeploy.", repairAction: "request-approval", category: "laravel_package_discovery" };
   if (lower.includes("vendor/autoload.php") && lower.includes("artisan")) return { message: "Laravel vendor dependencies are missing. Guardian now auto-runs composer install before restart; retry deploy/restart.", repairAction: "redeploy", category: "laravel_vendor_missing" };
+  if (lower.includes("the home or composer_home environment variable must be set")) return { message: "Composer runtime HOME/COMPOSER_HOME was missing on sysagent. Guardian/sysagent now auto-sets fallback HOME paths; retry deploy.", repairAction: "redeploy", category: "composer_home_missing" };
   const composerPlatform = detectComposerPlatformIssue(text);
   const phpVersionMismatch = Boolean(
     composerPlatform?.requiredPhpVersion

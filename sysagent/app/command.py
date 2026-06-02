@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import os
 import signal
+from pathlib import Path
 from typing import Sequence
 
 from app.config import settings
@@ -33,10 +34,19 @@ def run_command(command: Sequence[str], cwd: str | None = None, env: dict[str, s
 
     effective_timeout = timeout or settings.deployment_command_timeout_seconds
     try:
+        home = os.environ.get("HOME") or "/tmp/vps-panel-home"
+        composer_home = os.environ.get("COMPOSER_HOME") or f"{home}/.composer"
+        xdg_config_home = os.environ.get("XDG_CONFIG_HOME") or f"{home}/.config"
+        Path(home).mkdir(parents=True, exist_ok=True)
+        Path(composer_home).mkdir(parents=True, exist_ok=True)
+        Path(xdg_config_home).mkdir(parents=True, exist_ok=True)
         command_env = {
             **os.environ,
             "CI": os.environ.get("CI", "false"),
             "NEXT_TELEMETRY_DISABLED": os.environ.get("NEXT_TELEMETRY_DISABLED", "1"),
+            "HOME": home,
+            "COMPOSER_HOME": composer_home,
+            "XDG_CONFIG_HOME": xdg_config_home,
             **(env or {}),
         }
         # start_new_session=True isolates the child process in its own process group
