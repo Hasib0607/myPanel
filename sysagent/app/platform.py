@@ -48,6 +48,8 @@ RHEL_PHP_RUNTIME_PACKAGES = (
 )
 DEBIAN_DOVECOT_PACKAGES = ("dovecot-core", "dovecot-imapd", "dovecot-lmtpd")
 RHEL_DOVECOT_PACKAGES = ("dovecot",)
+DEBIAN_PYTHON311_PACKAGES = ("python3.11", "python3.11-venv", "python3.11-pip")
+RHEL_PYTHON311_PACKAGES = ("python3.11", "python3.11-pip")
 DOVECOT_RHEL_NOTES = (
     "AlmaLinux/RHEL 9 ships a single dovecot package that includes IMAP, POP3, and LMTP. "
     "Debian/Ubuntu split these into dovecot-core, dovecot-imapd, and dovecot-lmtpd."
@@ -306,6 +308,7 @@ PACKAGE_SETS: dict[OsFamily, dict[str, tuple[str, ...]]] = {
         "php_redis": ("php-redis",),
         "php_soap": ("php-soap",),
         "python_runtime": ("python3", "python3-venv", "python3-pip"),
+        "python311_runtime": DEBIAN_PYTHON311_PACKAGES,
         "nodejs_runtime": ("nodejs", "npm"),
         "supervisor": ("supervisor",),
         "golang": ("golang-go",),
@@ -353,6 +356,7 @@ PACKAGE_SETS: dict[OsFamily, dict[str, tuple[str, ...]]] = {
         "php_redis": ("php-redis",),
         "php_soap": ("php-soap",),
         "python_runtime": ("python3", "python3-pip"),
+        "python311_runtime": RHEL_PYTHON311_PACKAGES,
         "nodejs_runtime": ("nodejs", "npm"),
         "supervisor": ("supervisor",),
         "golang": ("golang",),
@@ -417,7 +421,7 @@ PLATFORM_PATHS: dict[OsFamily, PlatformPaths] = {
     ),
 }
 
-RUNTIME_TOOL_KEYS = frozenset({"composer", "golang", "php_runtime", "php82_runtime", "php_gd", "php_redis", "php_soap", "python_runtime", "nodejs_runtime", "supervisor", "pnpm", "yarn", "uv", "pm2"})
+RUNTIME_TOOL_KEYS = frozenset({"composer", "golang", "php_runtime", "php82_runtime", "php_gd", "php_redis", "php_soap", "python_runtime", "python311_runtime", "nodejs_runtime", "supervisor", "pnpm", "yarn", "uv", "pm2"})
 
 
 def _resolve_family(info: OsReleaseInfo | None = None) -> OsFamily:
@@ -749,6 +753,7 @@ def runtime_tool_install_plan(tool: str, info: OsReleaseInfo | None = None) -> P
         "php-redis": "php_redis",
         "php-soap": "php_soap",
         "python": "python_runtime",
+        "python311": "python311_runtime",
         "go": "golang",
         "nodejs": "nodejs_runtime",
     }.get(tool, tool)

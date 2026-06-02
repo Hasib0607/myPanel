@@ -12,7 +12,7 @@ type RuntimeToolInput = {
 
 export type RuntimeInstallTarget = {
   actionKey: string;
-  tool: "composer" | "php" | "php82" | "php-gd" | "php-soap" | "python" | "nodejs" | "pnpm" | "yarn" | "uv" | "go" | "supervisor" | "pm2";
+  tool: "composer" | "php" | "php82" | "php-gd" | "php-soap" | "python" | "python311" | "nodejs" | "pnpm" | "yarn" | "uv" | "go" | "supervisor" | "pm2";
   label: string;
   command: string;
   reason: string;
@@ -157,6 +157,14 @@ const installTargetCatalog: RuntimeInstallTarget[] = [
     command: "Install Python 3 and pip via panel runtime-tools",
     reason: "Python 3 and pip are required for this deployment.",
     executables: ["python3", "pip3"]
+  },
+  {
+    actionKey: "install-python311",
+    tool: "python311",
+    label: "Install Python 3.11 runtime",
+    command: "Install Python 3.11 and pip via panel runtime-tools",
+    reason: "This Python app uses syntax that requires Python 3.10 or newer, but the VPS started it with Python 3.9.",
+    executables: ["python3.11"]
   },
   {
     actionKey: "install-nodejs",

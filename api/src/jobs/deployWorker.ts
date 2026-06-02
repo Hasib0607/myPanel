@@ -281,6 +281,15 @@ function isLaravelVendorAutoloadMissing(result: unknown) {
   return text.includes("vendor/autoload.php") && (text.includes("artisan") || text.includes("autoload"));
 }
 
+function isPythonPep604RuntimeIssue(result: unknown) {
+  if (!result || typeof result !== "object") return false;
+  const text = JSON.stringify(result).toLowerCase();
+  return text.includes("unsupported operand type")
+    && text.includes("for |")
+    && text.includes("nonetype")
+    && text.includes("python3.9");
+}
+
 const liveSystemCommandsFix = "Set ALLOW_LIVE_SYSTEM_COMMANDS=true on vps-panel-sysagent, restart vps-panel-sysagent and vps-panel-workers, then retry.";
 
 type SysagentLiveDiagnosis = {
@@ -484,6 +493,34 @@ async function runLiveDeploymentProcess(
       );
     } catch (error) {
       await writeLog(deploymentId, releaseId, "STARTING", "Guardian Laravel dependency repair failed", {
+        error: error instanceof Error ? error.message : String(error)
+      }, "error");
+    }
+  }
+
+  if (isPythonPep604RuntimeIssue(result)) {
+    await writeLog(deploymentId, releaseId, "STARTING", `${label} hit Python 3.9 syntax/runtime mismatch; running Guardian Python runtime repair`, {
+      result: result as Prisma.InputJsonValue
+    }, "warn");
+    try {
+      let repair = await runStep(deploymentId, releaseId, "PREFLIGHT", "Guardian Python runtime repair", () =>
+        sysagent.deploymentRepairPythonRuntime({ rootPath: body.rootPath })
+      );
+      if (liveResultFailureMessage(repair, "Guardian Python runtime repair")?.includes("Python 3.10+")) {
+        const install = await runStep(deploymentId, releaseId, "PREFLIGHT", "Auto-repair Python 3.11 runtime", () =>
+          sysagent.deploymentInstallRuntimeTool({ tool: "python311" })
+        );
+        assertLiveResult(install, "Auto-repair Python 3.11 runtime");
+        repair = await runStep(deploymentId, releaseId, "PREFLIGHT", "Guardian Python runtime repair retry", () =>
+          sysagent.deploymentRepairPythonRuntime({ rootPath: body.rootPath })
+        );
+      }
+      assertLiveResult(repair, "Guardian Python runtime repair");
+      result = await runStep(deploymentId, releaseId, "STARTING", `${label} retry after Python runtime repair`, () =>
+        sysagent.deploymentProcess(body)
+      );
+    } catch (error) {
+      await writeLog(deploymentId, releaseId, "STARTING", "Guardian Python runtime repair failed", {
         error: error instanceof Error ? error.message : String(error)
       }, "error");
     }

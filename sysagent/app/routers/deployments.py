@@ -157,7 +157,7 @@ class NginxInspectRequest(BaseModel):
 
 
 class RuntimeInstallRequest(BaseModel):
-    tool: str = Field(pattern="^(pnpm|yarn|composer|uv|go|php|php82|php-gd|php-soap|python|nodejs|supervisor|pm2)$")
+    tool: str = Field(pattern="^(pnpm|yarn|composer|uv|go|php|php82|php-gd|php-soap|python|python311|nodejs|supervisor|pm2)$")
 
 
 class PermissionRepairRequest(BaseModel):
@@ -170,6 +170,10 @@ class SupervisorRepairRequest(BaseModel):
 
 
 class LaravelWritablePathsRequest(BaseModel):
+    rootPath: str
+
+
+class PythonRuntimeRepairRequest(BaseModel):
     rootPath: str
 
 
@@ -1319,6 +1323,104 @@ def runtime_tools(body: RuntimeToolsRequest) -> dict:
         path = shutil.which(name)
         items.append({"name": name, "installed": bool(path), "path": path})
     return {"items": items}
+
+
+def _python_version(root_path: str, executable: str) -> dict:
+    return guarded_command(
+        root_path,
+        [
+            executable,
+            "-c",
+            "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+        ],
+        cwd=deployment_cwd(root_path),
+    )
+
+
+def _version_tuple(raw: str) -> tuple[int, int] | None:
+    match = re.search(r"(\d+)\.(\d+)", raw or "")
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _modern_python(root_path: str) -> tuple[str | None, dict[str, dict]]:
+    checks: dict[str, dict] = {}
+    for executable in ("python3.12", "python3.11", "python3.10", "python3"):
+        path = shutil.which(executable)
+        if not path:
+            checks[executable] = {"returncode": 127, "stderr": "not found"}
+            continue
+        result = _python_version(root_path, executable)
+        checks[executable] = result
+        if result.get("returncode") == 0:
+            version = _version_tuple(result.get("stdout") or "")
+            if version and version >= (3, 10):
+                return executable, checks
+    return None, checks
+
+
+@router.post("/python/repair-runtime")
+def repair_python_runtime(body: PythonRuntimeRepairRequest) -> dict:
+    root = Path(body.rootPath).resolve()
+    info = path_info(str(root))
+    if not info["allowed"]:
+        return blocked_command("Path escapes configured file manager root", ["python-runtime-repair", str(root)], info)
+
+    executable, checks = _modern_python(str(root))
+    if not executable:
+        return {
+            "dryRun": False,
+            "command": ["python-runtime-repair", str(root)],
+            "cwd": str(root),
+            "stdout": "",
+            "stderr": "Python 3.10+ is required but no python3.10/python3.11/python3.12 executable is installed",
+            "returncode": 1,
+            "path": info,
+            "checks": checks,
+        }
+
+    venv = guarded_command(str(root), [executable, "-m", "venv", ".venv"], cwd=str(root))
+    if venv.get("returncode") != 0:
+        return {
+            "dryRun": venv.get("dryRun", False),
+            "command": ["python-runtime-repair", str(root)],
+            "cwd": str(root),
+            "stdout": "",
+            "stderr": venv.get("stderr") or f"Could not create .venv with {executable}",
+            "returncode": 1,
+            "path": info,
+            "checks": checks,
+            "venv": venv,
+        }
+
+    venv_python = str(root / ".venv" / "bin" / "python")
+    install_steps: dict[str, dict] = {}
+    if (root / "requirements.txt").is_file():
+        install_steps["requirements"] = guarded_command(str(root), [venv_python, "-m", "pip", "install", "-r", "requirements.txt"], cwd=str(root))
+    elif (root / "pyproject.toml").is_file():
+        install_steps["project"] = guarded_command(str(root), [venv_python, "-m", "pip", "install", "."], cwd=str(root))
+    else:
+        install_steps["dependencies"] = {
+            "returncode": 0,
+            "stdout": "No requirements.txt or pyproject.toml found; created .venv only",
+            "stderr": "",
+        }
+
+    failed = [name for name, step in install_steps.items() if step.get("returncode", 0) != 0]
+    return {
+        "dryRun": venv.get("dryRun", False) or any(step.get("dryRun") for step in install_steps.values()),
+        "command": ["python-runtime-repair", str(root)],
+        "cwd": str(root),
+        "stdout": f"Prepared .venv with {executable}",
+        "stderr": "; ".join(f"{name}: {install_steps[name].get('stderr')}" for name in failed),
+        "returncode": 1 if failed else 0,
+        "path": info,
+        "python": executable,
+        "checks": checks,
+        "venv": venv,
+        "install": install_steps,
+    }
 
 
 @router.post("/runtime-tools/install")

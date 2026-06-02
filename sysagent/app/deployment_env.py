@@ -275,6 +275,11 @@ def prepare_supervisor_runtime(
         laravel_env_path = write_laravel_env_bundle(str(cwd), process_env)
     else:
         process_env = normalize_process_env(port, env)
+        venv_bin = cwd / ".venv" / "bin"
+        if venv_bin.is_dir():
+            process_env["VIRTUAL_ENV"] = str(cwd / ".venv")
+            existing_path = process_env.get("PATH") or os.environ.get("PATH") or "/usr/local/bin:/usr/bin:/bin"
+            process_env["PATH"] = f"{venv_bin}:{existing_path}"
         write_env_file(runtime_env, process_env)
     write_supervisor_wrapper(wrapper, runtime_env, str(cwd), start_command)
     return wrapper, runtime_env, laravel_env_path
