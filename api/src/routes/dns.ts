@@ -231,13 +231,21 @@ export const dnsRoutes: FastifyPluginAsync = async (app) => {
     });
 
     await Promise.all(domains.map((domain) => redis.del(`dns_records:${domain.id}`)));
+    const domainsWithRecords = await prisma.domain.findMany({
+      include: { dnsRecords: { orderBy: [{ type: "asc" }, { name: "asc" }] } }
+    });
+    const appliedZones = await Promise.all(domainsWithRecords.map(async (domain) => {
+      const zone = renderZone(domain.name, domain.dnsRecords);
+      const result = await sysagent.applyDnsZone({ domain: domain.name, zone });
+      return { domain: domain.name, result };
+    }));
     await audit(request, {
       action: "APPLY",
       resource: "nameserver",
       description: "Synced nameservers into domain DNS records",
-      metadata: { domains: domains.length, nameServers: nameServers.length, created, updated }
+      metadata: { domains: domains.length, nameServers: nameServers.length, created, updated, applied: appliedZones.length }
     });
-    return reply.code(202).send({ domains: domains.length, nameServers: nameServers.length, created, updated });
+    return reply.code(202).send({ domains: domains.length, nameServers: nameServers.length, created, updated, applied: appliedZones.length });
   });
 
   app.get("/:domainId/records", async (request) => {

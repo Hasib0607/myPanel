@@ -203,7 +203,7 @@ export function DashboardClient() {
   });
 
   const syncRecords = useMutation({
-    mutationFn: () => apiPost<{ domains: number; nameServers: number; created: number; updated: number }>("/dns/nameservers/sync-records"),
+    mutationFn: () => apiPost<{ domains: number; nameServers: number; created: number; updated: number; applied: number }>("/dns/nameservers/sync-records"),
     onSuccess: async () => {
       setNameServerError(null);
       await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
@@ -521,7 +521,7 @@ export function DashboardClient() {
               </button>
               {syncRecords.data ? (
                 <div className="mt-3 text-xs text-panel-muted">
-                  Synced {syncRecords.data.nameServers} nameservers across {syncRecords.data.domains} domains. Created {syncRecords.data.created}, updated {syncRecords.data.updated}.
+                  Synced {syncRecords.data.nameServers} nameservers across {syncRecords.data.domains} domains. Created {syncRecords.data.created}, updated {syncRecords.data.updated}, applied {syncRecords.data.applied} zones.
                 </div>
               ) : null}
             </div>

@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 from app.command import run_command
 from app.config import settings
+from app.platform import is_rhel
 
 router = APIRouter()
 
@@ -17,6 +18,16 @@ class ZoneApplyRequest(BaseModel):
     namedConfOptions: str = "/etc/bind/named.conf.options"
 
 
+def effective_dns_paths(body: ZoneApplyRequest) -> tuple[str, str, str]:
+    if not is_rhel():
+        return body.zoneDir, body.namedConfLocal, body.namedConfOptions
+
+    zone_dir = "/var/named" if body.zoneDir == "/etc/bind/zones" else body.zoneDir
+    named_conf_local = "/etc/named.vps-panel.zones" if body.namedConfLocal == "/etc/bind/named.conf.local" else body.namedConfLocal
+    named_conf_options = "/etc/named.conf" if body.namedConfOptions == "/etc/bind/named.conf.options" else body.namedConfOptions
+    return zone_dir, named_conf_local, named_conf_options
+
+
 def safe_zone_path(zone_dir: str, domain: str) -> Path:
     root = Path(zone_dir).resolve()
     target = (root / f"db.{domain}").resolve()
@@ -27,7 +38,7 @@ def safe_zone_path(zone_dir: str, domain: str) -> Path:
 
 def ensure_zone_declared(named_conf_local: str, domain: str, zone_path: Path) -> dict:
     conf_path = Path(named_conf_local).resolve()
-    if conf_path.name != "named.conf.local":
+    if conf_path.name not in {"named.conf.local", "named.vps-panel.zones"}:
         raise HTTPException(status_code=400, detail="Unsupported named.conf.local path")
 
     block = (
@@ -50,10 +61,34 @@ def ensure_zone_declared(named_conf_local: str, domain: str, zone_path: Path) ->
 
 def ensure_public_authoritative_options(named_conf_options: str) -> dict:
     conf_path = Path(named_conf_options).resolve()
-    if conf_path.name != "named.conf.options":
+    if conf_path.name not in {"named.conf.options", "named.conf"}:
         raise HTTPException(status_code=400, detail="Unsupported named.conf.options path")
 
-    config = """options {
+    if conf_path.name == "named.conf":
+        config = """options {
+    listen-on port 53 { any; };
+    listen-on-v6 port 53 { any; };
+    directory "/var/named";
+    dump-file "/var/named/data/cache_dump.db";
+    statistics-file "/var/named/data/named_stats.txt";
+    memstatistics-file "/var/named/data/named_mem_stats.txt";
+    secroots-file "/var/named/data/named.secroots";
+    recursing-file "/var/named/data/named.recursing";
+    allow-query { any; };
+    recursion no;
+    dnssec-validation auto;
+    managed-keys-directory "/var/named/dynamic";
+    geoip-directory "/usr/share/GeoIP";
+    pid-file "/run/named/named.pid";
+    session-keyfile "/run/named/session.key";
+};
+
+include "/etc/named.rfc1912.zones";
+include "/etc/named.root.key";
+include "/etc/named.vps-panel.zones";
+"""
+    else:
+        config = """options {
     directory "/var/cache/bind";
 
     listen-on { any; };
@@ -81,12 +116,13 @@ def ensure_public_authoritative_options(named_conf_options: str) -> dict:
 
 @router.post("/zone/apply")
 def apply_zone(body: ZoneApplyRequest) -> dict:
-    zone_path = safe_zone_path(body.zoneDir, body.domain)
-    options = ensure_public_authoritative_options(body.namedConfOptions)
+    zone_dir, named_conf_local, named_conf_options = effective_dns_paths(body)
+    zone_path = safe_zone_path(zone_dir, body.domain)
+    options = ensure_public_authoritative_options(named_conf_options)
     if settings.allow_live_dns:
         zone_path.parent.mkdir(parents=True, exist_ok=True)
         zone_path.write_text(body.zone, encoding="utf-8")
-    declare = ensure_zone_declared(body.namedConfLocal, body.domain, zone_path)
+    declare = ensure_zone_declared(named_conf_local, body.domain, zone_path)
     return {
         "write": {
             "dryRun": not settings.allow_live_dns,
