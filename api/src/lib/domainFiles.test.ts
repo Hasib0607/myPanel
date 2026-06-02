@@ -60,3 +60,4 @@ test("ensureSubdomainFileStructure creates minimal subdomain folders", async () 
   await assert.rejects(() => fs.stat(path.join(subdomainRoot, "logs")), /ENOENT/);
   await assert.rejects(() => fs.stat(path.join(subdomainRoot, "mail")), /ENOENT/);
 });
+

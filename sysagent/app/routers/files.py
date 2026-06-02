@@ -67,6 +67,16 @@ DEFAULT_DOMAIN_FOLDERS = [
 DEFAULT_SUBDOMAIN_FOLDERS = [
     "public_html",
 ]
+LEGACY_SUBDOMAIN_FOLDERS = [
+    "public_ftp",
+    "etc",
+    "logs",
+    "mail",
+    "tmp",
+    "ssl",
+    "backups",
+    "private",
+]
 
 
 def assert_safe_name(name: str) -> None:
@@ -130,6 +140,8 @@ def create_subdomain_scaffold(body: SubdomainScaffoldRequest) -> dict:
     for folder in DEFAULT_SUBDOMAIN_FOLDERS:
         (subdomain_root / folder).mkdir(parents=True, exist_ok=True)
     (subdomain_root / "public_html" / ".well-known" / "acme-challenge").mkdir(parents=True, exist_ok=True)
+    for folder in LEGACY_SUBDOMAIN_FOLDERS:
+        shutil.rmtree(subdomain_root / folder, ignore_errors=True)
 
     return {
         "ok": True,
