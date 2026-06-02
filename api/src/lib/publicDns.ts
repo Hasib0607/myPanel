@@ -224,8 +224,7 @@ export async function diagnosePublicDnsFailure(
   const vanityNameServers = [...new Set([
     ...nameServers.filter((nameServer) => nameServer.endsWith(`.${domain}`)),
     ...parentNameServers.filter((nameServer) => nameServer.endsWith(`.${domain}`)),
-    ...knownVanityNameServers.map((nameServer) => normalizeNameServer(nameServer)).filter((nameServer) => nameServer.endsWith(`.${domain}`)),
-    ...defaultVanityNameServerHostnames(domain)
+    ...knownVanityNameServers.map((nameServer) => normalizeNameServer(nameServer)).filter((nameServer) => nameServer.endsWith(`.${domain}`))
   ])].sort();
 
   if (vanityNameServers.length === 0) {

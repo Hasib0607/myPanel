@@ -4,16 +4,13 @@ import { env } from "../config/env.js";
 import { defaultVanityNameServerHostnames } from "./publicDns.js";
 import { renderZone } from "../routes/dns.js";
 
-async function syncVanityNameserverRecords(domainId: string, domainName: string) {
+async function syncActiveNameserverRecords(domainId: string, domainName: string) {
   const nameServers = await prisma.nameServer.findMany({
     where: { active: true },
     orderBy: [{ sortOrder: "asc" }, { hostname: "asc" }]
   });
 
   for (const nameServer of nameServers) {
-    if (!nameServer.hostname.endsWith(`.${domainName}`)) continue;
-
-    const label = nameServer.hostname.slice(0, -(domainName.length + 1));
     const nsValue = `${nameServer.hostname}.`;
     const existingNs = await prisma.dnsRecord.findFirst({
       where: { domainId, type: "NS", name: "@", value: nsValue }
@@ -21,6 +18,9 @@ async function syncVanityNameserverRecords(domainId: string, domainName: string)
     if (!existingNs) {
       await prisma.dnsRecord.create({ data: { domainId, type: "NS", name: "@", value: nsValue, ttl: 3600 } });
     }
+
+    if (!nameServer.hostname.endsWith(`.${domainName}`)) continue;
+    const label = nameServer.hostname.slice(0, -(domainName.length + 1));
 
     if (nameServer.ipv4) {
       const existingA = await prisma.dnsRecord.findFirst({ where: { domainId, type: "A", name: label } });
@@ -40,6 +40,8 @@ async function syncVanityNameserverRecords(domainId: string, domainName: string)
       }
     }
   }
+
+  return nameServers.length;
 }
 
 async function ensureDefaultVanityNameserverRecords(domainId: string, domainName: string) {
@@ -62,6 +64,28 @@ async function ensureDefaultVanityNameserverRecords(domainId: string, domainName
   }
 }
 
+async function removeUnconfiguredDefaultVanityNameserverRecords(domainId: string, domainName: string) {
+  const activeNameservers = await prisma.nameServer.findMany({
+    where: { active: true },
+    select: { hostname: true }
+  });
+  const activeHostnames = new Set(activeNameservers.map((item) => item.hostname.toLowerCase()));
+
+  for (const hostname of defaultVanityNameServerHostnames(domainName)) {
+    if (activeHostnames.has(hostname)) continue;
+    const label = hostname.slice(0, -(domainName.length + 1));
+    await prisma.dnsRecord.deleteMany({
+      where: {
+        domainId,
+        OR: [
+          { type: "NS", name: "@", value: `${hostname}.` },
+          { type: { in: ["A", "AAAA"] }, name: label }
+        ]
+      }
+    });
+  }
+}
+
 async function ensureDefaultApexRecords(domainId: string) {
   const apex = await prisma.dnsRecord.findFirst({ where: { domainId, type: "A", name: "@" } });
   if (!apex) {
@@ -80,8 +104,12 @@ async function ensureDefaultApexRecords(domainId: string) {
 
 export async function publishDomainDnsZone(domainId: string) {
   const domainMeta = await prisma.domain.findUniqueOrThrow({ where: { id: domainId }, select: { name: true } });
-  await syncVanityNameserverRecords(domainId, domainMeta.name);
-  await ensureDefaultVanityNameserverRecords(domainId, domainMeta.name);
+  const activeNameserverCount = await syncActiveNameserverRecords(domainId, domainMeta.name);
+  if (activeNameserverCount === 0) {
+    await ensureDefaultVanityNameserverRecords(domainId, domainMeta.name);
+  } else {
+    await removeUnconfiguredDefaultVanityNameserverRecords(domainId, domainMeta.name);
+  }
   await ensureDefaultApexRecords(domainId);
 
   const domain = await prisma.domain.findUniqueOrThrow({
