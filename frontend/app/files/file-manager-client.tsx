@@ -126,6 +126,10 @@ function editorHref(filePath: string) {
   return `/files/editor?${queryString({ path: filePath })}`;
 }
 
+function isZipEntry(item: Pick<FileEntry, "extension" | "name" | "type">) {
+  return item.type === "file" && (item.extension.toLowerCase() === ".zip" || item.name.toLowerCase().endsWith(".zip"));
+}
+
 function TreeNode({ node, currentPath, onOpen }: { node: TreeEntry; currentPath: string; onOpen: (path: string) => void }) {
   const [open, setOpen] = useState(currentPath.startsWith(node.path));
   return (
@@ -315,7 +319,7 @@ export function FileManagerClient() {
   });
 
   const archiveExtract = useMutation({
-    mutationFn: ({ archivePath, targetPath }: { archivePath: string; targetPath: string }) => apiPost("/files/archive/extract", { archivePath, targetPath, overwrite: false }),
+    mutationFn: ({ archivePaths, targetPath }: { archivePaths: string[]; targetPath: string }) => Promise.all(archivePaths.map((archivePath) => apiPost("/files/archive/extract", { archivePath, targetPath, overwrite: false }))),
     onSuccess: async () => {
       setLastResult("Archive extracted.");
       await invalidateFiles();
@@ -449,8 +453,9 @@ export function FileManagerClient() {
 
   const contextItem = contextMenu?.item ?? null;
   const contextCanEdit = contextItem?.type === "file" && contextItem.kind === "text";
-  const contextIsZip = contextItem?.type === "file" && (contextItem.extension.toLowerCase() === ".zip" || contextItem.name.toLowerCase().endsWith(".zip"));
+  const contextIsZip = contextItem ? isZipEntry(contextItem) : false;
   const selectedCount = selectedPaths.size;
+  const selectedZipPaths = useMemo(() => (list.data?.items ?? []).filter((item) => selectedPaths.has(item.path) && isZipEntry(item)).map((item) => item.path), [list.data?.items, selectedPaths]);
 
   return (
     <section className="grid h-[calc(100vh-64px)] grid-cols-[300px_minmax(0,1fr)] overflow-hidden p-6 lg:h-screen xl:p-8">
@@ -558,6 +563,16 @@ export function FileManagerClient() {
               type="button"
             >
               <Trash2 size={16} />
+            </button>
+            <button
+              aria-label="Extract selected zip files"
+              className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={selectedZipPaths.length === 0 || archiveExtract.isPending}
+              onClick={() => archiveExtract.mutate({ archivePaths: selectedZipPaths, targetPath: currentPath })}
+              title={selectedZipPaths.length > 0 ? `Extract ${selectedZipPaths.length} selected zip file${selectedZipPaths.length === 1 ? "" : "s"}` : "Extract selected zip files"}
+              type="button"
+            >
+              <Archive size={16} />
             </button>
             {selectedCount > 0 ? <span className="rounded-md bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">{selectedCount} selected</span> : null}
           </div>
@@ -693,6 +708,22 @@ export function FileManagerClient() {
               <Download size={15} /> Download
             </button>
           ) : null}
+          {contextIsZip ? (
+            <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={() => { archiveExtract.mutate({ archivePaths: [contextItem.path], targetPath: parentPath(contextItem.path) }); setContextMenu(null); }} type="button">
+              <Archive size={15} /> Extract
+            </button>
+          ) : null}
+          <button className="flex h-9 w-full items-center gap-2 px-3 text-left text-panel-danger hover:bg-red-50" onClick={() => {
+            if (selectedPaths.size > 1) {
+              if (window.confirm(`Delete ${selectedPaths.size} selected items?`)) deleteItems.mutate([...selectedPaths]);
+            } else {
+              setDeleteTarget(contextItem);
+            }
+            setContextMenu(null);
+          }} type="button">
+            <Trash2 size={15} /> Delete{selectedPaths.size > 1 ? ` ${selectedPaths.size} selected` : ""}
+          </button>
+          <div className="my-1 border-t border-panel-line" />
           <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={() => { navigator.clipboard.writeText(contextItem.path).then(() => setLastResult("Path copied.")); setContextMenu(null); }} type="button">
             <Copy size={15} /> Copy Path
           </button>
@@ -735,22 +766,6 @@ export function FileManagerClient() {
             setContextMenu(null);
           }} type="button">
             <Archive size={15} /> Zip
-          </button>
-          {contextIsZip ? (
-            <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={() => { archiveExtract.mutate({ archivePath: contextItem.path, targetPath: parentPath(contextItem.path) }); setContextMenu(null); }} type="button">
-              <Archive size={15} /> Extract
-            </button>
-          ) : null}
-          <div className="my-1 border-t border-panel-line" />
-          <button className="flex h-9 w-full items-center gap-2 px-3 text-left text-panel-danger hover:bg-red-50" onClick={() => {
-            if (selectedPaths.size > 1) {
-              if (window.confirm(`Delete ${selectedPaths.size} selected items?`)) deleteItems.mutate([...selectedPaths]);
-            } else {
-              setDeleteTarget(contextItem);
-            }
-            setContextMenu(null);
-          }} type="button">
-            <Trash2 size={15} /> Delete{selectedPaths.size > 1 ? ` ${selectedPaths.size} selected` : ""}
           </button>
         </div>
       ) : null}
