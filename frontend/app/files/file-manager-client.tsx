@@ -318,14 +318,14 @@ export function FileManagerClient() {
 
   const chmodItem = useMutation({
     mutationFn: ({ path, mode }: { path: string; mode: string }) => apiPost("/files/chmod", { path, mode }),
-    onSuccess: (result) => setLastResult(JSON.stringify(result)),
+    onSuccess: () => setLastResult("Permissions updated."),
     onError: (err) => setLastResult(err instanceof Error ? err.message : "Could not change permissions")
   });
 
   const archiveCreate = useMutation({
     mutationFn: ({ sourcePath, archivePath }: { sourcePath: string; archivePath: string }) => apiPost("/files/archive/create", { sourcePaths: [sourcePath], archivePath }),
-    onSuccess: async (result) => {
-      setLastResult(JSON.stringify(result));
+    onSuccess: async () => {
+      setLastResult("Archive created.");
       await invalidateFiles();
     },
     onError: (err) => setLastResult(err instanceof Error ? err.message : "Could not create archive")
@@ -333,8 +333,8 @@ export function FileManagerClient() {
 
   const archiveExtract = useMutation({
     mutationFn: ({ archivePath, targetPath }: { archivePath: string; targetPath: string }) => apiPost("/files/archive/extract", { archivePath, targetPath, overwrite: false }),
-    onSuccess: async (result) => {
-      setLastResult(JSON.stringify(result));
+    onSuccess: async () => {
+      setLastResult("Archive extracted.");
       await invalidateFiles();
     },
     onError: (err) => setLastResult(err instanceof Error ? err.message : "Could not extract archive")
@@ -363,8 +363,14 @@ export function FileManagerClient() {
     setLastResult(`SHA256 copied: ${response.hash}`);
   }
 
-  async function uploadFile(file: File) {
+  async function uploadFile(file: File, overwrite = false) {
     try {
+      if (!overwrite && list.data?.items.some((item) => item.name === file.name)) {
+        const shouldReplace = window.confirm(`${file.name} already exists in this folder. Replace it?`);
+        if (!shouldReplace) return;
+        return uploadFile(file, true);
+      }
+
       setUploadProgress({ fileName: file.name, percent: 0, phase: "preparing" });
       const buffer = await file.arrayBuffer();
       const bytes = new Uint8Array(buffer);
@@ -373,7 +379,7 @@ export function FileManagerClient() {
         binary += String.fromCharCode(byte);
       });
       setUploadProgress({ fileName: file.name, percent: 0, phase: "uploading" });
-      const payload = JSON.stringify({ parentPath: currentPath, name: file.name, contentBase64: btoa(binary), overwrite: false });
+      const payload = JSON.stringify({ parentPath: currentPath, name: file.name, contentBase64: btoa(binary), overwrite });
       await apiUploadWithProgress("/files/upload", payload, "application/json", (percent) => {
         setUploadProgress({
           fileName: file.name,
@@ -387,6 +393,10 @@ export function FileManagerClient() {
       window.setTimeout(() => setUploadProgress(null), 700);
     } catch (error) {
       setUploadProgress(null);
+      if (!overwrite && error instanceof Error && /exists|already/i.test(error.message)) {
+        const shouldReplace = window.confirm(`${file.name} already exists in this folder. Replace it?`);
+        if (shouldReplace) return uploadFile(file, true);
+      }
       throw error;
     }
   }
