@@ -209,18 +209,25 @@ normalize_known_self_update_dirty_files() {
   fi
 
   local path=""
+  local known_paths=()
   while IFS= read -r path; do
     case "$path" in
+      scripts/deploy/start-frontend.sh|\
+      scripts/deploy/update-panel.sh|\
       scripts/maintenance/repair-panel-permissions.sh)
+        known_paths+=("$path")
         ;;
       *)
-        return 0
         ;;
     esac
   done <<< "$dirty_paths"
 
-  log "normalizing known self-update permission changes before dirty worktree check"
-  run git checkout "origin/$BRANCH" -- scripts/maintenance/repair-panel-permissions.sh
+  if [[ "${#known_paths[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  log "normalizing known self-update managed file changes before dirty worktree check"
+  run git checkout "origin/$BRANCH" -- "${known_paths[@]}"
 }
 
 file_checksum() {
