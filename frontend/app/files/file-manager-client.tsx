@@ -21,7 +21,7 @@ import {
   Trash2,
   Upload
 } from "lucide-react";
-import { apiDeleteBody, apiGet, apiPatch, apiPost } from "@/lib/api";
+import { apiDeleteBody, apiGet, apiPatch, apiPost, apiUploadWithProgress } from "@/lib/api";
 import { ConfirmModal } from "@/components/confirm-modal";
 import Link from "next/link";
 
@@ -87,6 +87,12 @@ type DomainScaffoldResponse = {
     relativeRoot: string;
     folders: string[];
   };
+};
+
+type UploadProgress = {
+  fileName: string;
+  percent: number;
+  phase: "preparing" | "uploading" | "processing" | "done";
 };
 
 type FileRootOption = {
@@ -163,6 +169,7 @@ export function FileManagerClient() {
   const [imagePreview, setImagePreview] = useState("");
   const [selectedDomainId, setSelectedDomainId] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
 
   const domains = useQuery({
     queryKey: ["domains", "file-manager"],
@@ -357,15 +364,31 @@ export function FileManagerClient() {
   }
 
   async function uploadFile(file: File) {
-    const buffer = await file.arrayBuffer();
-    const bytes = new Uint8Array(buffer);
-    let binary = "";
-    bytes.forEach((byte) => {
-      binary += String.fromCharCode(byte);
-    });
-    await apiPost("/files/upload", { parentPath: currentPath, name: file.name, contentBase64: btoa(binary), overwrite: false });
-    setLastResult("Uploaded.");
-    await invalidateFiles();
+    try {
+      setUploadProgress({ fileName: file.name, percent: 0, phase: "preparing" });
+      const buffer = await file.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      let binary = "";
+      bytes.forEach((byte) => {
+        binary += String.fromCharCode(byte);
+      });
+      setUploadProgress({ fileName: file.name, percent: 0, phase: "uploading" });
+      const payload = JSON.stringify({ parentPath: currentPath, name: file.name, contentBase64: btoa(binary), overwrite: false });
+      await apiUploadWithProgress("/files/upload", payload, "application/json", (percent) => {
+        setUploadProgress({
+          fileName: file.name,
+          percent,
+          phase: percent >= 100 ? "processing" : "uploading"
+        });
+      });
+      setUploadProgress({ fileName: file.name, percent: 100, phase: "done" });
+      setLastResult("Uploaded.");
+      await invalidateFiles();
+      window.setTimeout(() => setUploadProgress(null), 700);
+    } catch (error) {
+      setUploadProgress(null);
+      throw error;
+    }
   }
 
   function selectDomain(domainId: string) {
@@ -753,6 +776,28 @@ export function FileManagerClient() {
             </div>
             <div className="flex justify-end border-t border-panel-line p-4">
               <button className="h-9 rounded-md border border-panel-line px-4 text-sm font-medium hover:bg-slate-50" onClick={() => setInfoTarget(null)} type="button">Close</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {uploadProgress ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4">
+          <div className="w-full max-w-md rounded-md bg-white p-6 shadow-xl">
+            <div className="flex items-center gap-3">
+              <div className="h-9 w-9 animate-spin rounded-full border-2 border-panel-line border-t-panel-accent" />
+              <div className="min-w-0">
+                <div className="font-semibold text-panel-text">
+                  {uploadProgress.phase === "done" ? "Upload complete" : uploadProgress.phase === "processing" ? "Finishing upload" : uploadProgress.phase === "preparing" ? "Preparing upload" : "Uploading file"}
+                </div>
+                <div className="mt-1 truncate text-sm text-panel-muted">{uploadProgress.fileName}</div>
+              </div>
+            </div>
+            <div className="mt-5 flex items-center justify-between text-sm">
+              <span className="capitalize text-panel-muted">{uploadProgress.phase}</span>
+              <span className="font-semibold text-panel-text">{uploadProgress.percent}%</span>
+            </div>
+            <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
+              <div className="h-full rounded-full bg-panel-accent transition-all" style={{ width: `${uploadProgress.percent}%` }} />
             </div>
           </div>
         </div>

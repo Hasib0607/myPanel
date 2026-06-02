@@ -44,25 +44,6 @@ async function createDomainFileStructureLocally(normalizedDomain: string, domain
   await Promise.all(domainDefaultFolders.map((folder) => fs.mkdir(path.join(domainRoot, folder), { recursive: true })));
   await fs.mkdir(path.join(domainRoot, "public_html", ".well-known", "acme-challenge"), { recursive: true });
 
-  const indexPath = path.join(domainRoot, "public_html", "index.html");
-  await fs.writeFile(
-    indexPath,
-    `<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8">
-    <title>${normalizedDomain}</title>
-  </head>
-  <body>
-    <h1>${normalizedDomain}</h1>
-  </body>
-</html>
-`,
-    { flag: "wx" }
-  ).catch((error: NodeJS.ErrnoException) => {
-    if (error.code !== "EEXIST") throw error;
-  });
-
   return {
     domain: normalizedDomain,
     root: domainRoot,
@@ -77,25 +58,6 @@ async function createSubdomainFileStructureLocally(parentDomain: string, subdoma
   await fs.mkdir(path.join(subdomainRoot, "public_html", ".well-known", "acme-challenge"), { recursive: true });
 
   const fqdn = `${subdomain}.${parentDomain}`;
-  const indexPath = path.join(subdomainRoot, "public_html", "index.html");
-  await fs.writeFile(
-    indexPath,
-    `<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8">
-    <title>${fqdn}</title>
-  </head>
-  <body>
-    <h1>${fqdn}</h1>
-  </body>
-</html>
-`,
-    { flag: "wx" }
-  ).catch((error: NodeJS.ErrnoException) => {
-    if (error.code !== "EEXIST") throw error;
-  });
-
   return {
     domain: parentDomain,
     subdomain,

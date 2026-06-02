@@ -105,23 +105,6 @@ def create_domain_scaffold(body: DomainScaffoldRequest) -> dict:
         (domain_root / folder).mkdir(parents=True, exist_ok=True)
     (domain_root / "public_html" / ".well-known" / "acme-challenge").mkdir(parents=True, exist_ok=True)
 
-    index_path = domain_root / "public_html" / "index.html"
-    if not index_path.exists():
-        index_path.write_text(
-            f"""<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8">
-    <title>{domain}</title>
-  </head>
-  <body>
-    <h1>{domain}</h1>
-  </body>
-</html>
-""",
-            encoding="utf-8",
-        )
-
     return {
         "ok": True,
         "domain": domain,
@@ -144,23 +127,6 @@ def create_subdomain_scaffold(body: SubdomainScaffoldRequest) -> dict:
     for folder in DEFAULT_DOMAIN_FOLDERS:
         (subdomain_root / folder).mkdir(parents=True, exist_ok=True)
     (subdomain_root / "public_html" / ".well-known" / "acme-challenge").mkdir(parents=True, exist_ok=True)
-
-    index_path = subdomain_root / "public_html" / "index.html"
-    if not index_path.exists():
-        index_path.write_text(
-            f"""<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8">
-    <title>{fqdn}</title>
-  </head>
-  <body>
-    <h1>{fqdn}</h1>
-  </body>
-</html>
-""",
-            encoding="utf-8",
-        )
 
     return {
         "ok": True,
@@ -185,9 +151,6 @@ def create_account_scaffold(body: AccountScaffoldRequest) -> dict:
     for folder in folders:
         (account_root / folder).mkdir(parents=True, exist_ok=True)
     (account_root / "public_html" / ".well-known" / "acme-challenge").mkdir(parents=True, exist_ok=True)
-    index_path = account_root / "public_html" / "index.html"
-    if not index_path.exists():
-        index_path.write_text("<!doctype html><title>Account ready</title><h1>Account ready</h1>\n", encoding="utf-8")
     return {"ok": True, "username": username, "root": str(account_root), "relativeRoot": f"accounts/{username}", "folders": folders}
 
 

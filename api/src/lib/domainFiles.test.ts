@@ -25,8 +25,7 @@ test("ensureDomainFileStructure creates cPanel-style default domain folders", as
   const acmeChallenge = await fs.stat(path.join(domainRoot, "public_html", ".well-known", "acme-challenge"));
   assert.equal(acmeChallenge.isDirectory(), true);
 
-  const index = await fs.readFile(path.join(domainRoot, "public_html", "index.html"), "utf8");
-  assert.match(index, /<h1>example\.com<\/h1>/);
+  await assert.rejects(() => fs.stat(path.join(domainRoot, "public_html", "index.html")), /ENOENT/);
 });
 
 test("ensureDomainFileStructure rejects unsafe domain folder names", async () => {
