@@ -52,6 +52,7 @@ def nginx_spa_static_locations(public_root: str, upstream_port: int) -> str:
         "    }\n"
         "\n"
         "    location @deployment_upstream {\n"
+        f"{fallback_error_page}"
         f"{nginx_proxy_headers(upstream_port)}"
         "    }\n"
     )

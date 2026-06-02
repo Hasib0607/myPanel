@@ -89,7 +89,7 @@ const detectSchema = z.object({
   files: z.array(z.string()).optional()
 });
 const doctorRepairSchema = z.object({
-  action: z.enum(["auto", "sync-runtime", "health", "restart", "redeploy", "rollback", "set-node-memory", "sync-public-env", "request-approval"])
+  action: z.enum(["auto", "sync-runtime", "health", "restart", "redeploy", "rollback", "set-node-memory", "sync-public-env", "rewrite-nginx", "request-approval"])
 });
 const approvalActionSchema = z.object({ approvalId: z.string().min(1) });
 
@@ -278,6 +278,27 @@ async function reconcileSelectedDomainRoute(deploymentId: string, selectionId: s
   const deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId } });
   const binding = await findDeploymentBindingBySelection(deploymentId, selectionId);
   return publishDomainRouteForBinding(deployment, binding);
+}
+
+async function rewriteDeploymentDomainRoute(deployment: Awaited<ReturnType<typeof findDeployment>>) {
+  const binding = deployment.domainBindings?.find((item) => item.role === "primary") ?? deployment.domainBindings?.[0] ?? null;
+  if (binding) return publishDomainRouteForBinding(deployment, binding);
+  if (deployment.domain) {
+    return publishDomainRouteForBinding(deployment, { domain: deployment.domain });
+  }
+  return { skipped: true, reason: "No domain is linked to this deployment" };
+}
+
+function publicRouteNeedsProcessRestart(value: unknown) {
+  const detail = commandDetail(value).toLowerCase();
+  const httpCode = (value as { httpCode?: number })?.httpCode;
+  return [502, 503, 504].includes(httpCode ?? 0)
+    || detail.includes("http 502")
+    || detail.includes("http 503")
+    || detail.includes("http 504")
+    || detail.includes("bad gateway")
+    || detail.includes("connect() failed")
+    || detail.includes("upstream");
 }
 
 async function syncPrimaryBindingTarget(deploymentId: string, selectionId: string | null | undefined) {
@@ -631,8 +652,8 @@ function deploymentServerName(domain: { name: string; includeWww?: boolean } | n
 }
 
 function commandFailed(value: unknown) {
-  const result = value as { dryRun?: boolean; returncode?: number };
-  return Boolean(result?.dryRun || (typeof result?.returncode === "number" && result.returncode !== 0));
+  const result = value as { degraded?: boolean; dryRun?: boolean; returncode?: number };
+  return Boolean(result?.degraded || result?.dryRun || (typeof result?.returncode === "number" && result.returncode !== 0));
 }
 
 function commandDetail(value: unknown) {
@@ -651,7 +672,7 @@ function commandTreeFailure(value: unknown): string | null {
   return null;
 }
 
-function knownErrorHint(text: string): { message: string; repairAction: "set-node-memory" | "sync-public-env" | "sync-runtime" | "redeploy" | "restart" | "request-approval"; category: string } | null {
+function knownErrorHint(text: string): { message: string; repairAction: "set-node-memory" | "sync-public-env" | "sync-runtime" | "redeploy" | "restart" | "rewrite-nginx" | "request-approval"; category: string } | null {
   const lower = text.toLowerCase();
   const phpPeclAbiConflict = /php-pecl-[a-z0-9_-]+/i.test(text)
     && (lower.includes("requires php(api)") || lower.includes("requires php(zend-abi)"))
@@ -663,6 +684,7 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
   if (lower.includes("package-lock.json") && lower.includes("yarn.lock")) return { message: "Multiple lockfiles detected. Keep one package manager lockfile to avoid inconsistent installs.", repairAction: "redeploy", category: "lockfile_conflict" };
   if (lower.includes("unsupported engine") || lower.includes("node version") || lower.includes("requires node")) return { message: "Node version mismatch. Set a compatible runtime version or update the app engines field.", repairAction: "redeploy", category: "node_version" };
   if (lower.includes("prisma") && (lower.includes("migration") || lower.includes("p100") || lower.includes("database"))) return { message: "Prisma/database migration failed. Check DATABASE_URL, database grants, and migration state.", repairAction: "redeploy", category: "prisma_migration" };
+  if (lower.includes("502 bad gateway") || lower.includes("http 502") || lower.includes("connect() failed") || lower.includes("upstream")) return { message: "Nginx cannot reach the deployment upstream. Guardian will rewrite the deployment vhost, scrub stale server_name configs, and restart the process if the route still returns 502.", repairAction: "rewrite-nginx", category: "nginx_upstream_502" };
   if (lower.includes("client_encoding") && lower.includes("utf8mb4") && (lower.includes("postgres") || lower.includes("pgsql"))) return { message: "PostgreSQL deployment is using a MySQL charset value. Set DB_CHARSET=utf8 and clear DB_COLLATION, then redeploy.", repairAction: "request-approval", category: "postgres_charset" };
   if (/class\s+["']redis["']\s+not\s+found/i.test(text)) return { message: "Laravel is configured to use Redis but the PHP redis extension is not installed. Install php-redis on the VPS or set CACHE_DRIVER=file and SESSION_DRIVER=file, then redeploy.", repairAction: "request-approval", category: "php_redis_extension" };
   if (phpRedisAbiConflict) return { message: "PHP Redis extension install is blocked by old EPEL Redis PECL RPMs for the PHP 8.0 ABI. Guardian will rebuild ext-redis with PECL for the active PHP runtime, then redeploy.", repairAction: "request-approval", category: "php_redis_abi_conflict" };
@@ -1240,8 +1262,8 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
       label: "Public website",
       status: publicFailed ? "warn" : "pass",
       detail: commandDetail(publicRoute) || "Public route resolved through Nginx",
-      fix: publicFailed ? "Redeploy/restart to rewrite Nginx proxy and verify app public URL env values." : undefined,
-      repairAction: publicFailed ? "redeploy" : undefined
+      fix: publicFailed ? "Rewrite the generated Nginx vhost, scrub stale server_name configs, then restart the process if the route still returns 502/503/504." : undefined,
+      repairAction: publicFailed ? "rewrite-nginx" : undefined
     });
     let nginxInspect: unknown = null;
     try {
@@ -2024,6 +2046,34 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       await addLog(deployment.id, "PREFLIGHT", "Deployment doctor synced public URL env", undefined, result as unknown as Prisma.InputJsonObject);
       await audit(request, { action: "UPDATE", resource: "deployment_env", resourceId: deployment.id, description: `Deployment doctor synced public URL env for ${deployment.slug}`, metadata: result as unknown as Prisma.InputJsonObject });
       return reply.code(202).send({ action, result, next: "redeploy" });
+    }
+
+    if (action === "rewrite-nginx") {
+      const result = await rewriteDeploymentDomainRoute(deployment);
+      await addLog(deployment.id, "HEALTH_CHECK", "Deployment doctor rewrote Nginx public route", undefined, { result } as unknown as Prisma.InputJsonObject);
+      const domain = deployment.domainBindings?.find((binding) => binding.role === "primary")?.domain ?? deployment.domainBindings?.[0]?.domain ?? deployment.domain;
+      const serverName = deploymentServerName(domain);
+      let publicRoute: unknown = null;
+      if (serverName) {
+        try {
+          publicRoute = await sysagent.deploymentPublicRoute({
+            serverName,
+            rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
+            framework: deployment.framework
+          });
+        } catch (error) {
+          publicRoute = { returncode: 1, stderr: error instanceof Error ? error.message : "Public route check failed" };
+        }
+      }
+      if (publicRouteNeedsProcessRestart(publicRoute)) {
+        await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "DEPLOYING", healthStatus: "UNKNOWN" } });
+        const queue = await enqueueDeployAction(deployment.id, "restart");
+        await addLog(deployment.id, "STARTING", "Deployment doctor queued restart after Nginx rewrite still returned upstream 502", undefined, { result, publicRoute, queue } as unknown as Prisma.InputJsonObject);
+        await audit(request, { action: "APPLY", resource: "deployment", resourceId: deployment.id, description: `Deployment doctor rewrote Nginx and queued restart for ${deployment.slug}`, metadata: { result, publicRoute, queue } as unknown as Prisma.InputJsonObject });
+        return reply.code(202).send({ action, result, publicRoute, queue, next: "restart" });
+      }
+      await audit(request, { action: "APPLY", resource: "deployment", resourceId: deployment.id, description: `Deployment doctor rewrote Nginx for ${deployment.slug}`, metadata: { result, publicRoute } as unknown as Prisma.InputJsonObject });
+      return reply.code(202).send({ action, result, publicRoute });
     }
 
     if (action === "request-approval") {
