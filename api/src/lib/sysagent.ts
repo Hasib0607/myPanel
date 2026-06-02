@@ -169,6 +169,8 @@ export const sysagent = {
     request("/database/table/import", { method: "POST", body: JSON.stringify(body) }),
   deleteFiles: (body: unknown) =>
     request<{ ok: true; removed: string[]; dryRun?: boolean }>("/files/delete", { method: "DELETE", body: JSON.stringify(body) }),
+  trashFiles: (body: unknown) =>
+    request<{ ok: true; movedToTrash: string[]; permanentlyRemoved: string[]; dryRun?: boolean }>("/files/trash", { method: "POST", body: JSON.stringify(body) }),
   createFile: (body: unknown) =>
     request<{ ok: true; path: string; dryRun?: boolean }>("/files/files", { method: "POST", body: JSON.stringify(body) }),
   createFolder: (body: unknown) =>

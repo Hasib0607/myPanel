@@ -245,6 +245,10 @@ function assertLiveSysagentResult(result: { dryRun?: boolean }) {
   }
 }
 
+function isTrashPath(relativePath: string) {
+  return relativePath === ".trash" || relativePath.startsWith(".trash/");
+}
+
 const listQuery = z.object({
   path: z.string().default("."),
   search: z.string().default(""),
@@ -457,19 +461,49 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
 
   app.delete("/delete", async (request) => {
     const body = deleteSchema.parse(request.body);
-    const removed = [];
+    const movedToTrash: string[] = [];
+    const permanentlyRemoved: string[] = [];
+    const trashRoot = safePath(".trash");
     for (const itemPath of body.paths) {
       const resolved = safePath(itemPath);
+      const relative = toRelative(resolved);
+      if (relative === ".") throw app.httpErrors.badRequest("File manager root cannot be deleted");
+      if (relative === ".trash") throw app.httpErrors.badRequest("Trash root cannot be deleted directly");
       try {
-        await fs.rm(resolved, { recursive: true, force: true });
+        if (isTrashPath(relative)) {
+          await fs.rm(resolved, { recursive: true, force: true });
+          permanentlyRemoved.push(itemPath);
+          continue;
+        }
+        await fs.mkdir(trashRoot, { recursive: true });
+        const trashName = `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${randomUUID().slice(0, 8)}-${path.basename(resolved)}`;
+        const trashTarget = safePath(path.posix.join(".trash", trashName));
+        try {
+          await fs.rename(resolved, trashTarget);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "EXDEV") {
+            await fs.cp(resolved, trashTarget, { recursive: true, force: true });
+            await fs.rm(resolved, { recursive: true, force: true });
+          } else {
+            throw error;
+          }
+        }
+        movedToTrash.push(itemPath);
       } catch (error) {
         if (!isPermissionError(error)) throw error;
-        assertLiveSysagentResult(await sysagent.deleteFiles({ paths: [itemPath] }));
+        const result = await sysagent.trashFiles({ paths: [itemPath] });
+        assertLiveSysagentResult(result);
+        movedToTrash.push(...(result.movedToTrash ?? []));
+        permanentlyRemoved.push(...(result.permanentlyRemoved ?? []));
       }
-      removed.push(itemPath);
     }
-    await audit(request, { action: "DELETE", resource: "file", description: `Deleted ${removed.length} file manager item(s)`, metadata: { paths: removed } });
-    return { ok: true, removed };
+    await audit(request, {
+      action: "DELETE",
+      resource: "file",
+      description: `Processed ${body.paths.length} delete request(s) in file manager`,
+      metadata: { movedToTrash, permanentlyRemoved }
+    });
+    return { ok: true, movedToTrash, permanentlyRemoved };
   });
 
   app.post("/upload", { bodyLimit: Math.ceil(uploadLimit * 1.02) }, async (request, reply) => {

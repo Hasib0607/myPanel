@@ -194,7 +194,7 @@ export function FileManagerClient() {
   });
   const rootOptions = useMemo<FileRootOption[]>(() => {
     const items = domains.data?.items ?? [];
-    return items.flatMap((domain) => [
+    const roots = items.flatMap((domain) => [
       { id: `domain:${domain.id}`, label: domain.name, path: domain.name, hint: `/var/www/${domain.name}` },
       ...(domain.subdomains ?? []).map((subdomain) => ({
         id: `subdomain:${subdomain.id}`,
@@ -203,6 +203,8 @@ export function FileManagerClient() {
         hint: `/var/www/${domain.name}/subdomains/${subdomain.name}`
       }))
     ]);
+    roots.push({ id: "trash:global", label: "Trash", path: ".trash", hint: "/var/www/.trash" });
+    return roots;
   }, [domains.data?.items]);
   const selectedRoot = rootOptions.find((item) => item.id === selectedDomainId) ?? null;
   const domainRootPath = selectedRoot?.path ?? ".";
@@ -287,11 +289,13 @@ export function FileManagerClient() {
   });
 
   const deleteItems = useMutation({
-    mutationFn: (paths: string[]) => apiDeleteBody<{ ok: true; removed: string[] }>("/files/delete", { paths }),
-    onSuccess: async () => {
+    mutationFn: (paths: string[]) => apiDeleteBody<{ ok: true; movedToTrash: string[]; permanentlyRemoved: string[] }>("/files/delete", { paths }),
+    onSuccess: async (result) => {
       setSelectedPath(null);
       setDeleteTarget(null);
-      setLastResult("Deleted.");
+      if (result.permanentlyRemoved.length > 0 && result.movedToTrash.length === 0) setLastResult("Permanently deleted.");
+      else if (result.movedToTrash.length > 0 && result.permanentlyRemoved.length === 0) setLastResult("Moved to trash.");
+      else setLastResult("Moved to trash and permanently deleted selected trash items.");
       await invalidateFiles();
     },
     onError: (err) => setLastResult(err instanceof Error ? err.message : "Could not delete")
@@ -532,6 +536,7 @@ export function FileManagerClient() {
   const contextItem = contextMenu?.item ?? null;
   const contextCanEdit = contextItem?.type === "file" && contextItem.kind === "text";
   const contextIsZip = contextItem ? isZipEntry(contextItem) : false;
+  const currentInTrash = currentPath === ".trash" || currentPath.startsWith(".trash/");
   const selectedCount = selectedPaths.size;
   const selectedZipPaths = useMemo(() => (list.data?.items ?? []).filter((item) => selectedPaths.has(item.path) && isZipEntry(item)).map((item) => item.path), [list.data?.items, selectedPaths]);
 
@@ -626,13 +631,15 @@ export function FileManagerClient() {
               <Settings2 size={16} />
             </button>
             <button
-              aria-label="Delete selected"
+              aria-label={currentInTrash ? "Delete selected permanently" : "Move selected to trash"}
               className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-panel-danger hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
               disabled={selectedCount === 0 || deleteItems.isPending}
               onClick={() => {
-                if (window.confirm(`Delete ${selectedCount} selected item${selectedCount === 1 ? "" : "s"}?`)) deleteItems.mutate([...selectedPaths]);
+                if (window.confirm(`${currentInTrash ? "Permanently delete" : "Move to trash"} ${selectedCount} selected item${selectedCount === 1 ? "" : "s"}?`)) deleteItems.mutate([...selectedPaths]);
               }}
-              title={selectedCount > 0 ? `Delete ${selectedCount} selected` : "Delete selected"}
+              title={selectedCount > 0
+                ? `${currentInTrash ? "Permanently delete" : "Move to trash"} ${selectedCount} selected`
+                : currentInTrash ? "Delete selected permanently" : "Move selected to trash"}
               type="button"
             >
               <Trash2 size={16} />
@@ -788,13 +795,13 @@ export function FileManagerClient() {
           ) : null}
           <button className="flex h-9 w-full items-center gap-2 px-3 text-left text-panel-danger hover:bg-red-50" onClick={() => {
             if (selectedPaths.size > 1) {
-              if (window.confirm(`Delete ${selectedPaths.size} selected items?`)) deleteItems.mutate([...selectedPaths]);
+              if (window.confirm(`${currentInTrash ? "Permanently delete" : "Move to trash"} ${selectedPaths.size} selected items?`)) deleteItems.mutate([...selectedPaths]);
             } else {
               setDeleteTarget(contextItem);
             }
             setContextMenu(null);
           }} type="button">
-            <Trash2 size={15} /> Delete{selectedPaths.size > 1 ? ` ${selectedPaths.size} selected` : ""}
+            <Trash2 size={15} /> {currentInTrash ? "Delete Permanently" : "Move to Trash"}{selectedPaths.size > 1 ? ` ${selectedPaths.size} selected` : ""}
           </button>
           <div className="my-1 border-t border-panel-line" />
           <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={() => { navigator.clipboard.writeText(contextItem.path).then(() => setLastResult("Path copied.")); setContextMenu(null); }} type="button">
@@ -994,13 +1001,15 @@ export function FileManagerClient() {
         </div>
       ) : null}
       <ConfirmModal
-        confirmLabel="Delete item"
-        message={`This will permanently delete ${deleteTarget?.name ?? "the selected item"} from the file manager.`}
+        confirmLabel={currentInTrash ? "Delete permanently" : "Move to trash"}
+        message={currentInTrash
+          ? `This will permanently delete ${deleteTarget?.name ?? "the selected item"} from trash.`
+          : `This will move ${deleteTarget?.name ?? "the selected item"} to trash.`}
         onClose={() => setDeleteTarget(null)}
         onConfirm={() => deleteTarget ? deleteItems.mutate([deleteTarget.path]) : undefined}
         open={Boolean(deleteTarget)}
         pending={deleteItems.isPending}
-        title="Delete file item?"
+        title={currentInTrash ? "Delete permanently?" : "Move item to trash?"}
       />
     </section>
   );

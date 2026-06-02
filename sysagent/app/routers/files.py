@@ -3,6 +3,8 @@ import os
 import re
 import shutil
 import base64
+from datetime import datetime, timezone
+from uuid import uuid4
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -104,6 +106,16 @@ def dry_run(command: list[str], path: Path) -> dict:
         "path": str(path),
         "ok": True,
     }
+
+
+def to_relative(target: Path) -> str:
+    root = root_path()
+    relative = target.relative_to(root).as_posix()
+    return relative if relative else "."
+
+
+def in_trash(relative_path: str) -> bool:
+    return relative_path == ".trash" or relative_path.startswith(".trash/")
 
 
 @router.post("/domain-scaffold")
@@ -218,6 +230,38 @@ def delete_files(body: DeleteRequest) -> dict:
         removed.append(item_path)
 
     return {"ok": True, "removed": removed}
+
+
+@router.post("/trash")
+def move_files_to_trash(body: DeleteRequest) -> dict:
+    moved_to_trash: list[str] = []
+    permanently_removed: list[str] = []
+    trash_root = safe_path(".trash")
+    for item_path in body.paths:
+        target = safe_path(item_path)
+        relative = to_relative(target)
+        if relative == ".":
+            raise HTTPException(status_code=400, detail="File manager root cannot be deleted")
+        if relative == ".trash":
+            raise HTTPException(status_code=400, detail="Trash root cannot be deleted directly")
+        if not settings.allow_live_file_manager:
+            return dry_run(["trash", str(target)], target)
+        if in_trash(relative):
+            if target.is_dir() and not target.is_symlink():
+                shutil.rmtree(target)
+            else:
+                target.unlink(missing_ok=True)
+            permanently_removed.append(item_path)
+            continue
+
+        trash_root.mkdir(parents=True, exist_ok=True)
+        suffix = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+        unique_name = f"{suffix}-{uuid4().hex[:8]}-{target.name}"
+        trash_target = safe_path(f".trash/{unique_name}")
+        shutil.move(str(target), str(trash_target))
+        moved_to_trash.append(item_path)
+
+    return {"ok": True, "movedToTrash": moved_to_trash, "permanentlyRemoved": permanently_removed}
 
 
 @router.post("/chmod")
