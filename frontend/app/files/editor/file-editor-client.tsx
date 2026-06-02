@@ -171,11 +171,8 @@ export function FileEditorClient({ initialPath }: { initialPath: string }) {
   }
 
   function goBack() {
-    if (typeof window !== "undefined" && window.history.length > 1) {
-      router.back();
-      return;
-    }
-    router.push(`/files?${queryString({ path: parentPath(filePath) })}`);
+    if (typeof window === "undefined") return;
+    window.history.back();
   }
 
   return (
