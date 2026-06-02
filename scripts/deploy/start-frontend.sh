@@ -4,6 +4,7 @@ set -Eeuo pipefail
 APP_DIR="${APP_DIR:-/opt/vps-panel}"
 FRONTEND_PORT="${FRONTEND_PORT:-3000}"
 NPM_BIN="${NPM_BIN:-npm}"
+HOST="${FRONTEND_HOST:-127.0.0.1}"
 LOG_FILE="${FRONTEND_START_LOG_FILE:-/var/log/vps-panel/frontend-start.log}"
 FRONTEND_DIR="$APP_DIR/frontend"
 
@@ -42,5 +43,15 @@ if [[ ! -s .next/BUILD_ID || ! -s .next/routes-manifest.json || ! -d .next/serve
   build_frontend
 fi
 
-log "starting frontend on port $FRONTEND_PORT"
-exec "$NPM_BIN" run start -- -p "$FRONTEND_PORT"
+if command -v ss >/dev/null 2>&1 && ss -ltn | awk '{print $4}' | grep -Eq "(:|\\])${FRONTEND_PORT}$"; then
+  log "port $FRONTEND_PORT is already listening before frontend start"
+fi
+
+NEXT_BIN="$FRONTEND_DIR/node_modules/.bin/next"
+if [[ ! -x "$NEXT_BIN" ]]; then
+  log "next binary is still missing after install; cannot start frontend"
+  exit 1
+fi
+
+log "starting frontend on $HOST:$FRONTEND_PORT"
+exec "$NEXT_BIN" start -H "$HOST" -p "$FRONTEND_PORT"
