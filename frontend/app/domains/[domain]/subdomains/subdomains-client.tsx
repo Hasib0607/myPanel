@@ -1,8 +1,9 @@
 "use client";
 
+import Link from "next/link";
 import { FormEvent, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus } from "lucide-react";
+import { Plus, ShieldCheck } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { apiGet, apiPost } from "@/lib/api";
 
@@ -48,7 +49,7 @@ export function SubdomainsClient({ domainId }: { domainId: string }) {
         <div className="rounded-md border border-panel-line bg-white">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs uppercase text-panel-muted">
-              <tr><th className="px-4 py-3">Name</th><th className="px-4 py-3">Target</th><th className="px-4 py-3">SSL</th></tr>
+              <tr><th className="px-4 py-3">Name</th><th className="px-4 py-3">Target</th><th className="px-4 py-3">SSL</th><th className="px-4 py-3">Actions</th></tr>
             </thead>
             <tbody>
               {(domain.data?.subdomains ?? []).map((subdomain) => (
@@ -56,6 +57,11 @@ export function SubdomainsClient({ domainId }: { domainId: string }) {
                   <td className="px-4 py-3 font-medium">{subdomain.name}.{domain.data?.name}</td>
                   <td className="px-4 py-3">{subdomain.target}</td>
                   <td className="px-4 py-3">{subdomain.sslEnabled ? "enabled" : "pending"}</td>
+                  <td className="px-4 py-3">
+                    <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`/domains/${domainId}/subdomains/${subdomain.id}/ssl`} title="SSL">
+                      <ShieldCheck size={15} />
+                    </Link>
+                  </td>
                 </tr>
               ))}
             </tbody>

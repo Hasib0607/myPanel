@@ -47,11 +47,13 @@ type SslPreflight = {
   dnsChecks: Array<{ host: string; records: string[]; ok?: boolean; skipped?: boolean }>;
 };
 
-export function SslClient({ domainId }: { domainId: string }) {
+export function SslClient({ domainId, subdomainId }: { domainId: string; subdomainId?: string }) {
   const queryClient = useQueryClient();
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const sslBase = subdomainId ? `/ssl/subdomains/${subdomainId}` : `/ssl/domains/${domainId}`;
+  const resourceKey = subdomainId ?? domainId;
   const domain = useQuery({ queryKey: ["domain", domainId], queryFn: () => apiGet<DomainDetail>(`/domains/${domainId}`) });
-  const ssl = useQuery({ queryKey: ["ssl-status", domainId], queryFn: () => apiGet<SslStatus>(`/ssl/domains/${domainId}/status`) });
+  const ssl = useQuery({ queryKey: ["ssl-status", resourceKey], queryFn: () => apiGet<SslStatus>(`${sslBase}/status`) });
   const jobStatus = useQuery({
     queryKey: ["ssl-job", activeJobId],
     queryFn: () => apiGet<SslJobStatus>(`/ssl/jobs/${activeJobId}`),
@@ -65,37 +67,37 @@ export function SslClient({ domainId }: { domainId: string }) {
     mutationFn: (forceSsl: boolean) => apiPatch(`/domains/${domainId}`, { forceSsl }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["domain", domainId] });
-      await queryClient.invalidateQueries({ queryKey: ["ssl-status", domainId] });
+      await queryClient.invalidateQueries({ queryKey: ["ssl-status", resourceKey] });
     }
   });
   const issue = useMutation({
-    mutationFn: () => apiPost<SslQueueResponse>(`/ssl/domains/${domainId}/issue`, {}),
+    mutationFn: () => apiPost<SslQueueResponse>(`${sslBase}/issue`, {}),
     onSuccess: async (data) => {
       setActiveJobId(data.jobId);
-      await queryClient.invalidateQueries({ queryKey: ["ssl-status", domainId] });
+      await queryClient.invalidateQueries({ queryKey: ["ssl-status", resourceKey] });
     }
   });
   const renew = useMutation({
-    mutationFn: () => apiPost<SslQueueResponse>(`/ssl/domains/${domainId}/renew`, {}),
+    mutationFn: () => apiPost<SslQueueResponse>(`${sslBase}/renew`, {}),
     onSuccess: async (data) => {
       setActiveJobId(data.jobId);
-      await queryClient.invalidateQueries({ queryKey: ["ssl-status", domainId] });
+      await queryClient.invalidateQueries({ queryKey: ["ssl-status", resourceKey] });
     }
   });
   const preflight = useMutation({
-    mutationFn: () => apiPost<SslPreflight>(`/ssl/domains/${domainId}/preflight`, {}),
+    mutationFn: () => apiPost<SslPreflight>(`${sslBase}/preflight`, {}),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["ssl-status", domainId] });
+      await queryClient.invalidateQueries({ queryKey: ["ssl-status", resourceKey] });
     }
   });
 
   useEffect(() => {
     if (jobStatus.data?.state === "completed") {
       void queryClient.invalidateQueries({ queryKey: ["domain", domainId] });
-      void queryClient.invalidateQueries({ queryKey: ["ssl-status", domainId] });
+      void queryClient.invalidateQueries({ queryKey: ["ssl-status", resourceKey] });
       void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     }
-  }, [domainId, jobStatus.data?.state, queryClient]);
+  }, [domainId, jobStatus.data?.state, queryClient, resourceKey]);
 
   const status = ssl.data;
   const statusText = status?.state ?? "missing";
@@ -109,7 +111,7 @@ export function SslClient({ domainId }: { domainId: string }) {
 
   return (
     <>
-      <PageHeader title={`${domain.data?.name ?? "Domain"} SSL`} description="Certificate status, expiry, force HTTPS, and one-click renewal." />
+      <PageHeader title={`${status?.domain ?? domain.data?.name ?? "Domain"} SSL`} description="Certificate status, expiry, force HTTPS, and one-click renewal." />
       <section className="p-8">
         <div className="space-y-5 rounded-md border border-panel-line bg-white p-5">
           {actionErrorText ? (
@@ -167,15 +169,17 @@ export function SslClient({ domainId }: { domainId: string }) {
             </div>
             <div className="rounded-md border border-panel-line p-4">
               <div className="flex items-center gap-2 text-panel-muted"><ShieldCheck size={16} /> Force HTTPS</div>
-              <div className="mt-2 text-lg font-semibold">{domain.data?.forceSsl ? "On" : "Off"}</div>
+              <div className="mt-2 text-lg font-semibold">{status?.forceSsl ? "On" : "Off"}</div>
               <div className="mt-1 text-xs text-panel-muted">{status?.sslEnabled ? "Applied through Nginx vhost" : "Applies after certificate issue"}</div>
             </div>
           </div>
 
           <div className="flex flex-wrap gap-2">
-            <button className="rounded-md border border-panel-line px-3 py-2 text-sm font-semibold hover:bg-slate-50 disabled:opacity-60" disabled={isBusy} onClick={() => update.mutate(!domain.data?.forceSsl)} type="button">
-              Toggle Force HTTPS
-            </button>
+            {!subdomainId ? (
+              <button className="rounded-md border border-panel-line px-3 py-2 text-sm font-semibold hover:bg-slate-50 disabled:opacity-60" disabled={isBusy} onClick={() => update.mutate(!domain.data?.forceSsl)} type="button">
+                Toggle Force HTTPS
+              </button>
+            ) : null}
             <button className="rounded-md border border-panel-line px-3 py-2 text-sm font-semibold hover:bg-slate-50 disabled:opacity-60" disabled={isBusy} onClick={() => preflight.mutate()} type="button">
               Check Readiness
             </button>
@@ -189,7 +193,7 @@ export function SslClient({ domainId }: { domainId: string }) {
           </div>
 
           <div className="rounded-md border border-dashed border-panel-line p-4 text-sm text-panel-muted">
-            Live SSL uses Certbot webroot validation, then writes a 443 Nginx vhost after the certificate succeeds. The root domain A record must point to this VPS. The www host is included only when its A record also points here.
+            Live SSL uses Certbot webroot validation, then writes a 443 Nginx vhost after the certificate succeeds. Subdomains get their own certificate and do not use the root domain certificate.
           </div>
         </div>
       </section>

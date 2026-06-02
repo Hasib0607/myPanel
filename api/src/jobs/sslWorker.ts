@@ -38,7 +38,7 @@ function sslServerName(domainName: string, includeWww: boolean) {
   return includeWww ? `${domainName} www.${domainName}` : domainName;
 }
 
-async function writeHttpsVhost(domainName: string, domainId: string | null | undefined, forceHttps: boolean, includeWww: boolean) {
+async function writeHttpsVhost(domainName: string, domainId: string | null | undefined, forceHttps: boolean, includeWww: boolean, webRoot?: string | null) {
   const proxyTarget = await findDeploymentProxyTarget(domainName);
   if (proxyTarget) {
     const serverName = deploymentServerName({
@@ -113,7 +113,7 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
     result = await sysagent.writeStaticNginxVhost({
       name: `domain-${domainName}`,
       serverName: sslServerName(domainName, includeWww),
-      rootPath: `${env.FILE_MANAGER_ROOT}/${domainName}/${domain?.documentRoot || "public_html"}`,
+      rootPath: webRoot ?? `${env.FILE_MANAGER_ROOT}/${domainName}/${domain?.documentRoot || "public_html"}`,
       forceHttps,
       requireSsl: true,
       ...certificatePaths(domainName)
@@ -165,7 +165,7 @@ export const sslWorker = new Worker(
       const domain = job.data.domainId
         ? await prisma.domain.findUnique({ where: { id: job.data.domainId }, select: { forceSsl: true } })
         : null;
-      const vhost = await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true, includeWww);
+      const vhost = await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true, includeWww, job.data.webRoot);
       await markSslIssued(job);
 
       await redis.del("domain_list", `ssl_expiry:${job.data.domain}`);
@@ -179,7 +179,7 @@ export const sslWorker = new Worker(
       const domain = job.data.domainId
         ? await prisma.domain.findUnique({ where: { id: job.data.domainId }, select: { forceSsl: true } })
         : null;
-      const vhost = await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true, job.data.includeWww ?? true);
+      const vhost = await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true, job.data.includeWww ?? true, job.data.webRoot);
       await markSslIssued(job);
 
       await redis.del("domain_list", `ssl_expiry:${job.data.domain}`);

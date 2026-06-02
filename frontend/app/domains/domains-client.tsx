@@ -471,6 +471,9 @@ export function DomainsClient() {
                           <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line bg-white hover:bg-slate-100" href={`/domains/${domain.id}/dns`} title="DNS records">
                             <Network size={15} />
                           </Link>
+                          <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line bg-white hover:bg-slate-100" href={`/domains/${domain.id}/subdomains/${subdomain.id}/ssl`} title="SSL">
+                            <ShieldCheck size={15} />
+                          </Link>
                         </div>
                       </td>
                     </tr>
