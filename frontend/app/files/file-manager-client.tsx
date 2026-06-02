@@ -8,7 +8,6 @@ import {
   Copy,
   Download,
   Edit3,
-  Eye,
   FileCode2,
   FilePlus,
   Folder,
@@ -166,7 +165,6 @@ export function FileManagerClient() {
   const [sort, setSort] = useState<"name" | "size" | "modifiedAt">("name");
   const [direction, setDirection] = useState<"asc" | "desc">("asc");
   const [lastResult, setLastResult] = useState("");
-  const [imagePreview, setImagePreview] = useState("");
   const [selectedDomainId, setSelectedDomainId] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null);
   const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
@@ -196,10 +194,6 @@ export function FileManagerClient() {
   const list = useQuery({ queryKey: ["files-list", currentPath, search, sort, direction], queryFn: () => apiGet<ListResponse>(listPath), enabled: Boolean(selectedRoot) });
   const tree = useQuery({ queryKey: ["files-tree", domainRootPath], queryFn: () => apiGet<TreeResponse>(`/files/tree?${queryString({ path: domainRootPath, depth: 4 })}`), enabled: Boolean(selectedRoot) });
 
-  const selectedEntry = useMemo(() => list.data?.items.find((item) => item.path === selectedPath) ?? null, [list.data?.items, selectedPath]);
-  const selectedEntries = useMemo(() => (list.data?.items ?? []).filter((item) => selectedPaths.has(item.path)), [list.data?.items, selectedPaths]);
-  const canEdit = selectedEntry?.type === "file" && selectedEntry.kind === "text";
-
   useEffect(() => {
     if (selectedDomainId || rootOptions.length === 0) return;
     const firstRoot = rootOptions[0];
@@ -226,20 +220,6 @@ export function FileManagerClient() {
       window.removeEventListener("resize", close);
     };
   }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    setImagePreview("");
-    if (selectedEntry?.kind !== "image") return;
-    apiGet<DownloadResponse>(`/files/download?${queryString({ path: selectedEntry.path })}`)
-      .then((response) => {
-        if (!cancelled) setImagePreview(`data:${response.file.mime ?? "image/png"};base64,${response.contentBase64}`);
-      })
-      .catch((error) => setLastResult(error instanceof Error ? error.message : "Could not load preview"));
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedEntry?.path, selectedEntry?.kind]);
 
   const createFile = useMutation({
     mutationFn: ({ name, value }: { name: string; value: string }) => apiPost<FileEntry>("/files/files", { parentPath: currentPath, name, content: value }),
@@ -464,7 +444,7 @@ export function FileManagerClient() {
   const contextCanEdit = contextItem?.type === "file" && contextItem.kind === "text";
 
   return (
-    <section className="grid h-[calc(100vh-64px)] grid-cols-[300px_minmax(520px,1fr)_380px] overflow-hidden p-6 lg:h-screen xl:p-8">
+    <section className="grid h-[calc(100vh-64px)] grid-cols-[300px_minmax(0,1fr)] overflow-hidden p-6 lg:h-screen xl:p-8">
       <aside className="min-h-0 rounded-l-md border border-panel-line bg-white">
         <div className="border-b border-panel-line p-4">
           <div className="truncate text-sm font-semibold">{selectedRoot ? selectedRoot.label : "Web roots"}</div>
@@ -494,7 +474,7 @@ export function FileManagerClient() {
         </div>
       </aside>
 
-      <main className="min-h-0 border-y border-panel-line bg-white">
+      <main className="min-w-0 min-h-0 rounded-r-md border-y border-r border-panel-line bg-white">
         <div className="space-y-3 border-b border-panel-line p-4">
           <div className="flex flex-wrap items-center gap-2">
             <select
@@ -575,13 +555,13 @@ export function FileManagerClient() {
         ) : null}
 
         <div className="h-[calc(100%-122px)] overflow-auto" onContextMenu={(event) => event.preventDefault()}>
-          <table className="w-full table-fixed text-sm">
+          <table className="w-full min-w-[900px] table-fixed text-sm">
             <colgroup>
-              <col className="w-12" />
-              <col className="w-[52%]" />
+              <col className="w-14" />
+              <col />
+              <col className="w-32" />
               <col className="w-28" />
-              <col className="w-24" />
-              <col className="w-48" />
+              <col className="w-56" />
             </colgroup>
             <thead className="sticky top-0 bg-slate-50 text-left text-xs uppercase text-panel-muted">
               <tr>
@@ -620,15 +600,15 @@ export function FileManagerClient() {
                       type="checkbox"
                     />
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="min-w-0 px-4 py-3">
                     <div className="flex min-w-0 items-center gap-2">
-                      {item.type === "directory" ? <Folder size={16} /> : item.kind === "image" ? <ImageIcon size={16} /> : <FileCode2 size={16} />}
-                      <span className="min-w-0 break-all font-medium leading-5">{item.name}</span>
+                      {item.type === "directory" ? <Folder className="shrink-0" size={16} /> : item.kind === "image" ? <ImageIcon className="shrink-0" size={16} /> : <FileCode2 className="shrink-0" size={16} />}
+                      <span className="min-w-0 truncate font-medium leading-5" title={item.name}>{item.name}</span>
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-panel-muted">{item.type === "directory" ? "-" : formatBytes(item.size)}</td>
+                  <td className="whitespace-nowrap px-4 py-3 text-panel-muted">{item.type === "directory" ? "-" : formatBytes(item.size)}</td>
                   <td className="px-4 py-3 font-mono text-xs">{item.permissions}</td>
-                  <td className="px-4 py-3 text-panel-muted">{new Date(item.modifiedAt).toLocaleString()}</td>
+                  <td className="whitespace-nowrap px-4 py-3 text-panel-muted">{new Date(item.modifiedAt).toLocaleString()}</td>
                 </tr>
               ))}
               {list.data?.items.length === 0 ? (
@@ -641,38 +621,6 @@ export function FileManagerClient() {
         </div>
       </main>
 
-      <aside className="min-h-0 rounded-r-md border border-panel-line bg-white">
-        <div className="flex h-full flex-col">
-          <div className="border-b border-panel-line p-4">
-            <div className="truncate text-sm font-semibold">
-              {selectedEntries.length > 1 ? `${selectedEntries.length} selected` : selectedEntry?.name ?? "No selection"}
-            </div>
-            <div className="mt-1 truncate text-xs text-panel-muted">{selectedEntry?.path ?? "Select a file or folder"}</div>
-          </div>
-
-          {selectedEntry ? (
-            <div className="space-y-4 overflow-auto p-4">
-              <div className="rounded-md border border-panel-line p-4 text-sm text-panel-muted">
-                Right-click a selected item to open actions. Use the checkboxes to select multiple files.
-              </div>
-
-              {selectedEntry.kind === "image" && imagePreview ? (
-                <div className="rounded-md border border-panel-line p-3">
-                  <img alt={selectedEntry.name} className="max-h-96 w-full object-contain" src={imagePreview} />
-                </div>
-              ) : (
-                <div className="rounded-md border border-dashed border-panel-line p-6 text-center text-sm text-panel-muted">
-                  <Eye className="mx-auto mb-2" size={18} />
-                  {selectedEntry.type === "directory" ? "Folder selected" : "Preview unavailable for this file type"}
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="p-8 text-center text-sm text-panel-muted">Select an item to inspect, preview, edit, or operate on it.</div>
-          )}
-
-        </div>
-      </aside>
       {contextItem ? (
         <div
           className="fixed z-50 w-56 overflow-hidden rounded-md border border-panel-line bg-white py-1 text-sm shadow-xl"
