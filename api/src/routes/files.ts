@@ -29,6 +29,23 @@ const textExtensions = new Set([
   ".nginx", ".php", ".prisma", ".py", ".rb", ".rs", ".sh", ".sql", ".svg", ".toml", ".tsx", ".ts", ".txt", ".xml",
   ".yaml", ".yml"
 ]);
+const textFileNames = new Set([
+  ".env",
+  ".env.example",
+  ".gitignore",
+  ".gitattributes",
+  ".htaccess",
+  ".editorconfig",
+  ".npmrc",
+  ".yarnrc",
+  ".prettierrc",
+  ".eslintrc",
+  "dockerfile",
+  "makefile",
+  "procfile",
+  "readme",
+  "license"
+]);
 
 const imageExtensions = new Set([".avif", ".gif", ".jpeg", ".jpg", ".png", ".webp"]);
 
@@ -108,6 +125,8 @@ async function ensureParentFolderReady(parentPath: string) {
 
 function fileKind(name: string, isDirectory: boolean) {
   if (isDirectory) return "directory";
+  const normalizedName = name.toLowerCase();
+  if (textFileNames.has(normalizedName)) return "text";
   const extension = path.extname(name).toLowerCase();
   if (imageExtensions.has(extension)) return "image";
   if (extension === ".pdf") return "pdf";
