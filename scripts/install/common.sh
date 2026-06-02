@@ -648,6 +648,14 @@ $(if [[ "$PANEL_PUBLIC_SCHEME" == "https" && -n "$PANEL_DOMAIN" ]]; then cat <<S
 SSL
 fi)
 
+    location = /health {
+        proxy_pass http://127.0.0.1:$PANEL_PORT/health;
+        proxy_set_header Host \$http_host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-Port $CPANEL_LOGIN_PORT;
+        proxy_set_header X-Panel-Mode account;
+    }
+
     location /api/v1/ {
         proxy_pass http://127.0.0.1:$PANEL_PORT/api/v1/;
         proxy_http_version 1.1;
@@ -795,7 +803,7 @@ wait_for_http() {
   local delay="${4:-1}"
   local attempt=1
   while (( attempt <= attempts )); do
-    if curl --fail --silent --show-error "$url" >/dev/null; then
+    if curl --fail --silent "$url" >/dev/null 2>&1; then
       return 0
     fi
     if (( attempt == 1 || attempt % 5 == 0 )); then
@@ -815,7 +823,7 @@ wait_for_head() {
   local delay="${4:-1}"
   local attempt=1
   while (( attempt <= attempts )); do
-    if curl --fail --silent --show-error --insecure --head "$url" >/dev/null; then
+    if curl --fail --silent --insecure --head "$url" >/dev/null 2>&1; then
       return 0
     fi
     if (( attempt == 1 || attempt % 5 == 0 )); then
@@ -841,8 +849,8 @@ run_smoke_tests() {
   wait_for_http "http://127.0.0.1:$SYSAGENT_PORT/health" "sysagent" || { diagnose_service_failure vps-panel-sysagent; return 1; }
   wait_for_http "http://127.0.0.1:$PANEL_PORT/health" "api" || { diagnose_service_failure vps-panel-api; return 1; }
   wait_for_http "http://127.0.0.1:$FRONTEND_PORT/health" "frontend" || { diagnose_service_failure vps-panel-frontend; return 1; }
-  wait_for_http "$PANEL_PUBLIC_SCHEME://127.0.0.1:$PANEL_LOGIN_PORT/login" "admin panel listener" || { diagnose_service_failure nginx; return 1; }
-  wait_for_http "$PANEL_PUBLIC_SCHEME://127.0.0.1:$CPANEL_LOGIN_PORT/login" "account panel listener" || { diagnose_service_failure nginx; return 1; }
+  wait_for_http "$PANEL_PUBLIC_SCHEME://127.0.0.1:$PANEL_LOGIN_PORT/health" "admin panel listener" || { diagnose_service_failure nginx; return 1; }
+  wait_for_http "$PANEL_PUBLIC_SCHEME://127.0.0.1:$CPANEL_LOGIN_PORT/health" "account panel listener" || { diagnose_service_failure nginx; return 1; }
   redis-cli ping >/dev/null
   if [[ "$DB_CREATE" == "true" && ( "$DB_HOST" == "localhost" || "$DB_HOST" == "127.0.0.1" ) ]]; then
     runuser -u postgres -- psql -d "$DB_NAME" -c "select 1" >/dev/null
