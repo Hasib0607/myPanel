@@ -1507,15 +1507,31 @@ def guardian_repair(body: GuardianRepairRequest) -> dict:
     steps: dict[str, dict] = {}
 
     if framework == "LARAVEL":
+        root = Path(body.rootPath).resolve()
         port = None
         env = dict(body.env or {})
         port_raw = env.get("PORT")
         if port_raw and str(port_raw).isdigit():
             port = int(port_raw)
+        vendor_autoload = root / "vendor" / "autoload.php"
+        if not vendor_autoload.is_file():
+            steps["vendorInstall"] = guarded_deployment_command(
+                body.rootPath,
+                "composer install --no-dev --optimize-autoloader --no-interaction",
+                env=env or None,
+            )
+            if steps["vendorInstall"].get("returncode") != 0:
+                failed = [name for name, step in steps.items() if step.get("returncode", 0) != 0]
+                return {
+                    "framework": framework,
+                    "dryRun": any(step.get("dryRun") for step in steps.values()),
+                    "returncode": 1 if failed else 0,
+                    "steps": steps,
+                    "failed": failed,
+                    "appKey": None,
+                }
         steps["env"] = _ensure_laravel_env(body.rootPath, port, env)
-        if steps["env"].get("returncode") != 0:
-            failed = ["env"]
-        elif steps["env"].get("appKey"):
+        if steps["env"].get("appKey"):
             env["APP_KEY"] = steps["env"]["appKey"]
         steps["writablePaths"] = repair_laravel_writable_paths(LaravelWritablePathsRequest(rootPath=body.rootPath))
         steps["optimizeClear"] = guarded_deployment_command(body.rootPath, "php artisan optimize:clear", env=env or None)

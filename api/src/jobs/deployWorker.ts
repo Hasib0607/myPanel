@@ -275,6 +275,12 @@ function isSupervisorSpawnError(result: unknown) {
   return text.includes("spawn error") || text.includes("can't spawn") || text.includes("cannot spawn");
 }
 
+function isLaravelVendorAutoloadMissing(result: unknown) {
+  if (!result || typeof result !== "object") return false;
+  const text = JSON.stringify(result).toLowerCase();
+  return text.includes("vendor/autoload.php") && (text.includes("artisan") || text.includes("autoload"));
+}
+
 const liveSystemCommandsFix = "Set ALLOW_LIVE_SYSTEM_COMMANDS=true on vps-panel-sysagent, restart vps-panel-sysagent and vps-panel-workers, then retry.";
 
 type SysagentLiveDiagnosis = {
@@ -451,6 +457,33 @@ async function runLiveDeploymentProcess(
       );
     } catch (error) {
       await writeLog(deploymentId, releaseId, "STARTING", "Supervisor spawn permission repair failed", {
+        error: error instanceof Error ? error.message : String(error)
+      }, "error");
+    }
+  }
+
+  if (isLaravelVendorAutoloadMissing(result)) {
+    await writeLog(deploymentId, releaseId, "STARTING", `${label} missing Laravel vendor/autoload; running Guardian dependency repair and retrying`, {
+      result: result as Prisma.InputJsonValue
+    }, "warn");
+    try {
+      const install = await runStep(deploymentId, releaseId, "INSTALLING", "Guardian Laravel dependency install", () =>
+        sysagent.deploymentInstall({
+          rootPath: body.rootPath,
+          packageManager: "COMPOSER",
+          command: "composer install --no-dev --optimize-autoloader --no-interaction",
+          env: body.env
+        })
+      );
+      assertLiveResult(install, "Guardian Laravel dependency install");
+      await runStep(deploymentId, releaseId, "STARTING", "Guardian deployment repair", async () =>
+        runGuardianDeploymentRepair({ rootPath: body.rootPath, framework: "LARAVEL", envVars: body.env })
+      );
+      result = await runStep(deploymentId, releaseId, "STARTING", `${label} retry after Laravel dependency repair`, () =>
+        sysagent.deploymentProcess(body)
+      );
+    } catch (error) {
+      await writeLog(deploymentId, releaseId, "STARTING", "Guardian Laravel dependency repair failed", {
         error: error instanceof Error ? error.message : String(error)
       }, "error");
     }
