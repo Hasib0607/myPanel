@@ -46,17 +46,15 @@ test("ensureSubdomainFileStructure creates minimal subdomain folders", async () 
   assert.equal(result.domain, "example.com");
   assert.equal(result.subdomain, "admin");
   assert.equal(result.relativeRoot, "example.com/subdomains/admin");
-  assert.deepEqual(result.folders, ["public_html"]);
+  assert.deepEqual(result.folders, []);
 
   const subdomainRoot = result.root;
-  const publicHtml = await fs.stat(path.join(subdomainRoot, "public_html"));
-  assert.equal(publicHtml.isDirectory(), true);
-
-  const wellKnown = await fs.stat(path.join(subdomainRoot, "public_html", ".well-known"));
+  const wellKnown = await fs.stat(path.join(subdomainRoot, ".well-known"));
   assert.equal(wellKnown.isDirectory(), true);
-  const acmeChallenge = await fs.stat(path.join(subdomainRoot, "public_html", ".well-known", "acme-challenge"));
+  const acmeChallenge = await fs.stat(path.join(subdomainRoot, ".well-known", "acme-challenge"));
   assert.equal(acmeChallenge.isDirectory(), true);
 
+  await assert.rejects(() => fs.stat(path.join(subdomainRoot, "public_html")), /ENOENT/);
   await assert.rejects(() => fs.stat(path.join(subdomainRoot, "logs")), /ENOENT/);
   await assert.rejects(() => fs.stat(path.join(subdomainRoot, "mail")), /ENOENT/);
 });

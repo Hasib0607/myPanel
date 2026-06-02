@@ -65,9 +65,9 @@ DEFAULT_DOMAIN_FOLDERS = [
     "private",
 ]
 DEFAULT_SUBDOMAIN_FOLDERS = [
-    "public_html",
 ]
 LEGACY_SUBDOMAIN_FOLDERS = [
+    "public_html",
     "public_ftp",
     "etc",
     "logs",
@@ -139,7 +139,7 @@ def create_subdomain_scaffold(body: SubdomainScaffoldRequest) -> dict:
     subdomain_root.mkdir(parents=True, exist_ok=True)
     for folder in DEFAULT_SUBDOMAIN_FOLDERS:
         (subdomain_root / folder).mkdir(parents=True, exist_ok=True)
-    (subdomain_root / "public_html" / ".well-known" / "acme-challenge").mkdir(parents=True, exist_ok=True)
+    (subdomain_root / ".well-known" / "acme-challenge").mkdir(parents=True, exist_ok=True)
     for folder in LEGACY_SUBDOMAIN_FOLDERS:
         shutil.rmtree(subdomain_root / folder, ignore_errors=True)
 

@@ -16,9 +16,9 @@ export const domainDefaultFolders = [
 ];
 
 export const subdomainDefaultFolders = [
-  "public_html"
 ];
 const legacySubdomainFolders = [
+  "public_html",
   "public_ftp",
   "etc",
   "logs",
@@ -69,7 +69,7 @@ async function createDomainFileStructureLocally(normalizedDomain: string, domain
 async function createSubdomainFileStructureLocally(parentDomain: string, subdomain: string, subdomainRoot: string) {
   await fs.mkdir(subdomainRoot, { recursive: true });
   await Promise.all(subdomainDefaultFolders.map((folder) => fs.mkdir(path.join(subdomainRoot, folder), { recursive: true })));
-  await fs.mkdir(path.join(subdomainRoot, "public_html", ".well-known", "acme-challenge"), { recursive: true });
+  await fs.mkdir(path.join(subdomainRoot, ".well-known", "acme-challenge"), { recursive: true });
   await Promise.all(legacySubdomainFolders.map((folder) => fs.rm(path.join(subdomainRoot, folder), { recursive: true, force: true })));
 
   const fqdn = `${subdomain}.${parentDomain}`;
