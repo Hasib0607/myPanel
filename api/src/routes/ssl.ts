@@ -125,7 +125,7 @@ async function subdomainSslTarget(subdomainId: string) {
     subdomain,
     parentDomain: subdomain.domain,
     fqdn,
-    webRoot: path.join(env.FILE_MANAGER_ROOT, scaffold.relativeRoot, "public_html")
+    webRoot: path.join(env.FILE_MANAGER_ROOT, scaffold.relativeRoot)
   };
 }
 

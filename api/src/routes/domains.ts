@@ -495,7 +495,7 @@ async function createSubdomainForDomain(input: {
       nginxResult = await sysagent.writeStaticNginxVhost({
         name: `domain-${input.name}.${parentDomain.name}`,
         serverName: `${input.name}.${parentDomain.name}`,
-        rootPath: path.join(env.FILE_MANAGER_ROOT, fileScaffold.relativeRoot, "public_html"),
+        rootPath: path.join(env.FILE_MANAGER_ROOT, fileScaffold.relativeRoot),
         forceHttps: false
       });
     }
