@@ -14,7 +14,7 @@ import {
   detectDeploymentSource,
   nodeStartUsesVitePreview
 } from "../lib/deploymentDetection.js";
-import { requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
+import { isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import {
   deploymentRecoveryAttempts,
   isRecoverableHealthFailure,
@@ -1615,6 +1615,12 @@ async function ensureComposerPlatformCompatible(
       return false;
     });
     if (!repaired) {
+      if (isComposerPlatformCheckInconclusive(detail)) {
+        await writeLog(deploymentId, releaseId, "PREFLIGHT", "Composer platform check was inconclusive before vendor install; continuing to dependency install", {
+          evidence: detail.slice(0, 4000)
+        }, "warn");
+        return;
+      }
       if (repairFailure) {
         throw new Error(`${detail}\n\nComposer platform auto-repair failed: ${repairFailure}`);
       }

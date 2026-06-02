@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { detectComposerPlatformIssue, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "./deploymentRuntimeTools.js";
+import { detectComposerPlatformIssue, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "./deploymentRuntimeTools.js";
 import { pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded } from "./deploymentFailureRuntimeRepairs.js";
 
 test("composer PHP 8.1 requirement on PHP 8.0 queues PHP 8.2 runtime repair", () => {
@@ -23,6 +23,13 @@ test("composer platform parser keeps highest required PHP and lockfile-outdated 
   assert.equal(issue?.requiredPhpVersion, "8.2");
   assert.equal(issue?.currentPhpVersion, "8.0.30");
   assert.equal(issue?.composerLockOutdated, true);
+});
+
+test("composer platform check without vendor and without actionable details is inconclusive", () => {
+  const text = "Composer platform requirements check failed with exit code 1: No vendor dir present, checking platform requirements from the lock file";
+
+  assert.equal(isComposerPlatformCheckInconclusive(text), true);
+  assert.deepEqual(runtimeInstallTargetsForComposerPlatformIssue(text), []);
 });
 
 test("runtime matrix includes Laravel/PHP server requirements", () => {

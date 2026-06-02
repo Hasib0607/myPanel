@@ -382,6 +382,12 @@ export function detectComposerPlatformIssue(text: string): ComposerPlatformIssue
   };
 }
 
+export function isComposerPlatformCheckInconclusive(text: string) {
+  const lower = text.toLowerCase();
+  if (!lower.includes("no vendor dir present") || !lower.includes("checking platform requirements from the lock file")) return false;
+  return runtimeInstallTargetsForComposerPlatformIssue(text).length === 0;
+}
+
 export function runtimeInstallTargetsForComposerPlatformIssue(text: string) {
   const issue = detectComposerPlatformIssue(text);
   if (!issue) return [];

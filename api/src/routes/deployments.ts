@@ -6,7 +6,7 @@ import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { env } from "../config/env.js";
 import { deployQueue } from "../jobs/queues.js";
-import { detectComposerPlatformIssue, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
+import { detectComposerPlatformIssue, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import { audit } from "../lib/audit.js";
 import { detectDeploymentFiles, detectDeploymentSource } from "../lib/deploymentDetection.js";
 import { buildDeploymentNginxRequest, deploymentFallbackRootPath } from "../lib/deploymentDomainSsl.js";
@@ -614,6 +614,7 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
   if (lower.includes("artisan package:discover") || lower.includes("laravel package discovery")) return { message: "Laravel package discovery failed while bootstrapping the app. Check the deployment environment values and the package discovery error output, then redeploy.", repairAction: "request-approval", category: "laravel_package_discovery" };
   if (lower.includes("vendor/autoload.php") && lower.includes("artisan")) return { message: "Laravel vendor dependencies are missing. Guardian now auto-runs composer install before restart; retry deploy/restart.", repairAction: "redeploy", category: "laravel_vendor_missing" };
   if (lower.includes("the home or composer_home environment variable must be set")) return { message: "Composer runtime HOME/COMPOSER_HOME was missing on sysagent. Guardian/sysagent now auto-sets fallback HOME paths; retry deploy.", repairAction: "redeploy", category: "composer_home_missing" };
+  if (isComposerPlatformCheckInconclusive(text)) return { message: "Composer platform preflight could not produce actionable details because vendor is not installed yet. Redeploy will continue to composer install, where exact PHP/extension issues can be repaired.", repairAction: "redeploy", category: "composer_platform_check_inconclusive" };
   const composerPlatform = detectComposerPlatformIssue(text);
   if (composerPlatform?.composerLockOutdated) {
     return {
