@@ -429,22 +429,23 @@ export function DeploymentsClient() {
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not connect GitHub token")
   });
 
-  const importAndDeployGithub = useMutation({
+  const selectGithubRepo = useMutation({
     mutationFn: async (repo: GithubRepo) => {
       const detection = await apiGet<GithubDetectResponse>(`/deployments/github/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/detect?${queryString({ branch: repo.defaultBranch, rootDirectory: draft.rootDirectory || "." })}`);
       const repoDraft = { ...draft, name: repo.name, slug: slugify(repo.name), githubOwner: repo.owner, githubRepo: repo.name, gitUrl: `https://github.com/${repo.fullName}.git`, branch: repo.defaultBranch, rootPath: deploymentRootForRepo(repo.name), sourceProvider: "GITHUB" as const, framework: detection.detected, installCommand: detection.suggestions.installCommand ?? "", buildCommand: detection.suggestions.buildCommand ?? "", startCommand: detection.suggestions.startCommand ?? "", outputDirectory: detection.suggestions.outputDirectory ?? "", autoDeployEnabled: true };
-      const deployment = await apiPost<Deployment>("/deployments/github/import", { ...formPayload(repoDraft), githubOwner: repo.owner, githubRepo: repo.name });
-      await apiPost<QueueResponse>(`/deployments/${deployment.slug}/deploy`);
-      return { deployment, detection };
+      return { repoDraft, detection };
     },
-    onSuccess: async ({ deployment, detection }) => {
-      setNotice(`${deployment.name} imported, ${detection.detected} detected, and deploy queued.`);
-      setCreateOpen(false);
+    onSuccess: ({ repoDraft, detection }) => {
+      if (editingOpen) {
+        setEditDraft((current) => ({ ...current, ...repoDraft }));
+      } else {
+        setDraft((current) => ({ ...current, ...repoDraft }));
+      }
+      setSelectedRepo({ owner: repoDraft.githubOwner, name: repoDraft.githubRepo, fullName: `${repoDraft.githubOwner}/${repoDraft.githubRepo}`, private: false, defaultBranch: repoDraft.branch });
+      setNotice(`Selected ${repoDraft.githubOwner}/${repoDraft.githubRepo}. ${detection.detected} detected. Review options and click ${editingOpen ? "Save changes" : "Create"}.`);
       setRepoPickerOpen(false);
-      setSelectedId(deployment.id);
-      await invalidateDeployments();
     },
-    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not import repository")
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not select repository")
   });
 
   const addDomain = useMutation({
@@ -677,7 +678,7 @@ export function DeploymentsClient() {
 
       {createOpen ? <ProjectModal title="Create Project" draft={draft} setDraft={setDraft} domains={domainOptions(domains.data?.items ?? [])} databaseOverview={databaseOverview.data} onClose={() => setCreateOpen(false)} onDetect={() => detect.mutate("create")} onSubmit={() => createDeployment.mutate()} submitLabel="Create" busy={createDeployment.isPending} openGithub={() => setRepoPickerOpen(true)} /> : null}
       {editingOpen ? <ProjectModal title="Edit Project" draft={editDraft} setDraft={setEditDraft} domains={domainOptions(domains.data?.items ?? [])} databaseOverview={databaseOverview.data} onClose={() => setEditingOpen(false)} onDetect={() => detect.mutate("edit")} onSubmit={() => updateDeployment.mutate()} submitLabel="Save changes" busy={updateDeployment.isPending} openGithub={() => setRepoPickerOpen(true)} /> : null}
-      {repoPickerOpen ? <GithubModal repos={repos.data} loading={repos.isLoading} repoSearch={repoSearch} setRepoSearch={setRepoSearch} connection={githubConnection.data} githubToken={githubToken} setGithubToken={setGithubToken} githubUsername={githubUsername} setGithubUsername={setGithubUsername} saveToken={() => saveGithubToken.mutate()} savingToken={saveGithubToken.isPending} onClose={() => setRepoPickerOpen(false)} onDeploy={(repo) => importAndDeployGithub.mutate(repo)} deploying={importAndDeployGithub.isPending} /> : null}
+      {repoPickerOpen ? <GithubModal repos={repos.data} loading={repos.isLoading} repoSearch={repoSearch} setRepoSearch={setRepoSearch} connection={githubConnection.data} githubToken={githubToken} setGithubToken={setGithubToken} githubUsername={githubUsername} setGithubUsername={setGithubUsername} saveToken={() => saveGithubToken.mutate()} savingToken={saveGithubToken.isPending} onClose={() => setRepoPickerOpen(false)} onDeploy={(repo) => selectGithubRepo.mutate(repo)} deploying={selectGithubRepo.isPending} /> : null}
       {logModalOpen ? <LogsModal title={logTitle} text={logText} onCopy={copyLogText} onClose={() => setLogModalOpen(false)} /> : null}
     </section>
   );
