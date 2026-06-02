@@ -272,6 +272,31 @@ def git_base_env() -> dict[str, str]:
     }
 
 
+def composer_git_env(root_path: str, env: dict[str, str] | None = None) -> dict[str, str]:
+    effective = {**git_base_env(), **(env or {})}
+    effective.setdefault("COMPOSER_ALLOW_SUPERUSER", "1")
+
+    extra_count = 0
+    try:
+        extra_count = int(effective.get("GIT_CONFIG_COUNT", "0"))
+    except ValueError:
+        extra_count = 0
+
+    target = str(Path(root_path).resolve())
+    for index in range(extra_count):
+        key = effective.get(f"GIT_CONFIG_KEY_{index}")
+        value = effective.get(f"GIT_CONFIG_VALUE_{index}")
+        if key == "safe.directory" and value == target:
+            ensure_git_runtime_paths(effective)
+            return effective
+
+    effective["GIT_CONFIG_COUNT"] = str(extra_count + 1)
+    effective[f"GIT_CONFIG_KEY_{extra_count}"] = "safe.directory"
+    effective[f"GIT_CONFIG_VALUE_{extra_count}"] = target
+    ensure_git_runtime_paths(effective)
+    return effective
+
+
 def ensure_git_runtime_paths(env: dict[str, str]) -> None:
     home = env.get("HOME")
     xdg_config_home = env.get("XDG_CONFIG_HOME")
@@ -338,7 +363,7 @@ def guarded_deployment_command(root_path: str, command: str, env: dict[str, str]
         return blocked_command(str(error), [command], info)
     effective_env = dict(env or {})
     if parsed and parsed[0] == "composer":
-        effective_env.setdefault("COMPOSER_ALLOW_SUPERUSER", "1")
+        effective_env = composer_git_env(root_path, effective_env)
     return guarded_command_with_env(root_path, parsed, cwd=deployment_cwd(root_path), env=effective_env or None)
 
 
@@ -1471,7 +1496,6 @@ def repair_laravel_writable_paths(body: LaravelWritablePathsRequest) -> dict:
         return blocked_command("Path escapes configured file manager root", ["laravel-repair", root], info)
 
     paths = [
-        f"{root}/public",
         f"{root}/bootstrap/cache",
         f"{root}/storage",
         f"{root}/storage/app",
@@ -1486,14 +1510,33 @@ def repair_laravel_writable_paths(body: LaravelWritablePathsRequest) -> dict:
     ]
 
     mkdir = run_command(["mkdir", "-p", *paths], timeout=120, allow_live=DEPLOYMENT_COMMANDS_LIVE)
-    public_index = ensure_laravel_public_index(root) if mkdir.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because directory creation failed"}
-    chown = run_command(["chown", "-R", "panel:panel", f"{root}/public", f"{root}/storage", f"{root}/bootstrap/cache"], timeout=120, allow_live=DEPLOYMENT_COMMANDS_LIVE) if mkdir.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because directory creation failed"}
-    chmod = run_command(["chmod", "-R", "ug+rwX", f"{root}/public", f"{root}/storage", f"{root}/bootstrap/cache"], timeout=120, allow_live=DEPLOYMENT_COMMANDS_LIVE) if mkdir.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because directory creation failed"}
+    public_root = Path(root) / "public"
+    should_repair_public = public_root.is_dir() or (public_root / "index.php").is_file()
+    public_index = (
+        ensure_laravel_public_index(root)
+        if mkdir.get("returncode") == 0 and should_repair_public
+        else {
+            "dryRun": False,
+            "command": ["skipped", "laravel-public-index"],
+            "stdout": "Skipped public/index.php repair: deployment has no public web root",
+            "stderr": "",
+            "returncode": 0,
+            "skipped": True,
+        }
+    )
+    chown_paths = [f"{root}/storage", f"{root}/bootstrap/cache"]
+    chmod_paths = [f"{root}/storage", f"{root}/bootstrap/cache"]
+    if should_repair_public:
+        chown_paths.append(f"{root}/public")
+        chmod_paths.append(f"{root}/public")
+    chown = run_command(["chown", "-R", "panel:panel", *chown_paths], timeout=120, allow_live=DEPLOYMENT_COMMANDS_LIVE) if mkdir.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because directory creation failed"}
+    chmod = run_command(["chmod", "-R", "ug+rwX", *chmod_paths], timeout=120, allow_live=DEPLOYMENT_COMMANDS_LIVE) if mkdir.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because directory creation failed"}
     failed = any(step.get("returncode") != 0 for step in [mkdir, public_index, chown, chmod])
     return {
         "dryRun": any(step.get("dryRun") for step in [mkdir, public_index, chown, chmod]),
         "returncode": 1 if failed else 0,
         "paths": paths,
+        "publicRootRepair": should_repair_public,
         "mkdir": mkdir,
         "publicIndex": public_index,
         "chown": chown,

@@ -256,7 +256,7 @@ export function runtimeInstallTargetsForComposerPlatformIssue(text: string) {
 
   if (issue.requiredPhpVersion) {
     const needsUpgrade = !issue.currentPhpVersion || compareMajorMinorVersions(issue.currentPhpVersion, issue.requiredPhpVersion) < 0;
-    if (needsUpgrade && compareMajorMinorVersions(issue.requiredPhpVersion, "8.2") >= 0) {
+    if (needsUpgrade && compareMajorMinorVersions(issue.requiredPhpVersion, "8.1") >= 0) {
       addTarget("install-php82");
     }
   }

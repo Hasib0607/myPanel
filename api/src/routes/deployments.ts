@@ -637,8 +637,8 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
   if (lower.includes("cannot find module") || lower.includes("module_not_found")) return { message: "Missing package or wrong build output. Run dependency install, verify package.json, then redeploy.", repairAction: "redeploy", category: "missing_module" };
   if (lower.includes("eaddrinuse") || lower.includes("address already in use")) return { message: "Port conflict. Let the doctor redeploy so the worker can move the app to a free managed port.", repairAction: "redeploy", category: "port_conflict" };
   if (lower.includes("heap out of memory") || lower.includes("javascript heap out of memory") || lower.includes("sigkill") || lower.includes("killed")) return { message: "Server memory pressure. Add a Node memory cap and redeploy; if it repeats, add swap on the VPS.", repairAction: "set-node-memory", category: "memory" };
-  if (lower.includes("source sync safe.directory") || (lower.includes("safe.directory") && lower.includes("$home not set"))) {
-    return { message: "Git safe.directory failed because HOME was missing in the deploy runtime. Guardian/sysagent now auto-injects a safe git HOME; retry deploy.", repairAction: "redeploy", category: "git_safe_directory_home" };
+  if (lower.includes("dubious ownership") || lower.includes("source sync safe.directory") || lower.includes("safe.directory")) {
+    return { message: "Git safe.directory failed inside the deployment runtime. Guardian/sysagent now injects a safe Git config for deployment and Composer commands; retry deploy.", repairAction: "redeploy", category: "git_safe_directory" };
   }
   if (lower.includes("permission denied") || lower.includes("eacces")) return { message: "File permission issue. Ensure the panel user owns the deployment directory and runtime log directory.", repairAction: "redeploy", category: "permission" };
   if (lower.includes("env") && (lower.includes("missing") || lower.includes("required"))) return { message: "Missing environment variable. Add required env keys in the deployment Env tab, then redeploy.", repairAction: "redeploy", category: "missing_env" };
