@@ -3,9 +3,9 @@
 import Link from "next/link";
 import { FormEvent, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, ShieldCheck } from "lucide-react";
+import { Plus, ShieldCheck, Trash2 } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
-import { apiGet, apiPost } from "@/lib/api";
+import { apiDeleteBody, apiGet, apiPost } from "@/lib/api";
 
 type DomainDetail = {
   id: string;
@@ -23,6 +23,12 @@ export function SubdomainsClient({ domainId }: { domainId: string }) {
     onSuccess: async () => {
       setName("");
       setTarget("");
+      await queryClient.invalidateQueries({ queryKey: ["domain", domainId] });
+    }
+  });
+  const remove = useMutation({
+    mutationFn: (subdomainId: string) => apiDeleteBody(`/domains/${domainId}/subdomains/${subdomainId}`, {}),
+    onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["domain", domainId] });
     }
   });
@@ -58,9 +64,23 @@ export function SubdomainsClient({ domainId }: { domainId: string }) {
                   <td className="px-4 py-3">{subdomain.target}</td>
                   <td className="px-4 py-3">{subdomain.sslEnabled ? "enabled" : "pending"}</td>
                   <td className="px-4 py-3">
-                    <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`/domains/${domainId}/subdomains/${subdomain.id}/ssl`} title="SSL">
-                      <ShieldCheck size={15} />
-                    </Link>
+                    <div className="flex items-center gap-2">
+                      <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`/domains/${domainId}/subdomains/${subdomain.id}/ssl`} title="SSL">
+                        <ShieldCheck size={15} />
+                      </Link>
+                      <button
+                        className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line text-panel-danger hover:bg-red-50 disabled:opacity-60"
+                        disabled={remove.isPending}
+                        onClick={() => {
+                          if (!window.confirm(`Delete subdomain ${subdomain.name}.${domain.data?.name}?`)) return;
+                          remove.mutate(subdomain.id);
+                        }}
+                        title="Delete subdomain"
+                        type="button"
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}

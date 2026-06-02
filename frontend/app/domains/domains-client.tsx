@@ -194,6 +194,18 @@ export function DomainsClient() {
     onError: (err) => setError(err instanceof Error ? err.message : "Could not delete domain")
   });
 
+  const deleteSubdomain = useMutation({
+    mutationFn: ({ domainId, subdomainId }: { domainId: string; subdomainId: string }) =>
+      apiDeleteBody<{ ok: true; publishWarning?: string }>(`/domains/${domainId}/subdomains/${subdomainId}`, {}),
+    onSuccess: async (result) => {
+      setError("");
+      setNotice(result.publishWarning ? `Subdomain deleted. ${result.publishWarning}` : "Subdomain deleted.");
+      await queryClient.invalidateQueries({ queryKey: ["domains"] });
+      await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : "Could not delete subdomain")
+  });
+
   const publishDomain = useMutation({
     mutationFn: (domain: Domain) => apiPost(`/domains/${domain.id}/publish`, {}),
     onSuccess: async () => {
@@ -474,6 +486,19 @@ export function DomainsClient() {
                           <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line bg-white hover:bg-slate-100" href={`/domains/${domain.id}/subdomains/${subdomain.id}/ssl`} title="SSL">
                             <ShieldCheck size={15} />
                           </Link>
+                          <button
+                            className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line bg-white text-panel-danger hover:bg-red-50 disabled:opacity-60"
+                            disabled={deleteSubdomain.isPending}
+                            onClick={() => {
+                              if (!window.confirm(`Delete subdomain ${subdomain.name}.${domain.name}?`)) return;
+                              setNotice("");
+                              deleteSubdomain.mutate({ domainId: domain.id, subdomainId: subdomain.id });
+                            }}
+                            title="Delete subdomain"
+                            type="button"
+                          >
+                            <Trash2 size={15} />
+                          </button>
                         </div>
                       </td>
                     </tr>

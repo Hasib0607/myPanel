@@ -857,4 +857,39 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
     });
     return reply.code(201).send(created);
   });
+
+  app.delete("/:domainId/subdomains/:subdomainId", async (request) => {
+    const { domainId, subdomainId } = z.object({ domainId: z.string(), subdomainId: z.string() }).parse(request.params);
+    const subdomain = await prisma.subdomain.findFirstOrThrow({ where: { id: subdomainId, domainId } });
+
+    await prisma.$transaction(async (tx) => {
+      await tx.subdomain.delete({ where: { id: subdomain.id } });
+      const recordType = dnsRecordTypeForTarget(subdomain.target);
+      await tx.dnsRecord.deleteMany({
+        where: {
+          domainId,
+          type: recordType,
+          name: subdomain.name,
+          value: subdomain.target
+        }
+      });
+    });
+
+    let publishWarning: string | undefined;
+    try {
+      await publishDomainHosting(domainId);
+    } catch (error) {
+      publishWarning = error instanceof Error ? error.message : "Subdomain DNS publish failed";
+    }
+
+    await clearDomainCaches(domainId);
+    await audit(request, {
+      action: "DELETE",
+      resource: "subdomain",
+      resourceId: subdomain.id,
+      description: `Deleted subdomain ${subdomain.name}`,
+      metadata: publishWarning ? ({ publishWarning } as Prisma.InputJsonValue) : undefined
+    });
+    return { ok: true, publishWarning };
+  });
 };
