@@ -28,7 +28,7 @@ from app.deployment_env import (
 )
 from app.deployment_commands import laravel_has_public_web_root, normalize_laravel_start_command, parse_deployment_command, resolve_laravel_public_root
 from app.laravel_nginx import nginx_app_locations
-from app.deployment_health import curl_health_probe
+from app.deployment_health import backend_only_laravel_health, curl_health_probe
 from app.platform import runtime_tool_install_plan
 from app.nginx_paths import nginx_sites_available, nginx_sites_enabled
 from app.nginx_manager import (
@@ -1909,14 +1909,7 @@ def health(body: HealthRequest) -> dict:
             "stderr": supervisor_mismatch,
         }
     if (body.framework or "").upper() == "LARAVEL" and not laravel_has_public_web_root(body.rootPath):
-        return {
-            "dryRun": False,
-            "command": ["backend-only-laravel-health", body.processName or ""],
-            "returncode": 0,
-            "stdout": "Laravel deployment has no public/index.php; Supervisor process is running as backend-only/worker-safe idle process.",
-            "stderr": "",
-            "degraded": True,
-        }
+        return backend_only_laravel_health(body.processName)
 
     # Phase 1: wait for the process to bind (with retries for connection refused).
     first = _curl_once(url, accept_http_errors=accept_http_errors)

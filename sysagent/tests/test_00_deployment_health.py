@@ -1,6 +1,6 @@
 import unittest
 
-from app.deployment_health import _parse_http_probe
+from app.deployment_health import _parse_http_probe, backend_only_laravel_health
 
 
 class DeploymentHealthTests(unittest.TestCase):
@@ -20,6 +20,13 @@ class DeploymentHealthTests(unittest.TestCase):
             accept_http_errors=False,
         )
         self.assertEqual(result["returncode"], 22)
+
+    def test_backend_only_laravel_health_is_healthy_idle(self) -> None:
+        result = backend_only_laravel_health("backend-only")
+
+        self.assertEqual(result["returncode"], 0)
+        self.assertTrue(result["backendOnly"])
+        self.assertNotIn("degraded", result)
 
 
 if __name__ == "__main__":

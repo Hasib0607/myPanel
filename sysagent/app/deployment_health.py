@@ -10,6 +10,17 @@ _CURL_RETRY = [
 _HTTP_CODE_MARKER = "\n__http_code="
 
 
+def backend_only_laravel_health(process_name: str | None = None) -> dict:
+    return {
+        "dryRun": False,
+        "command": ["backend-only-laravel-health", process_name or ""],
+        "returncode": 0,
+        "stdout": "Laravel deployment has no public/index.php; Supervisor process is running as backend-only/worker-safe idle process.",
+        "stderr": "",
+        "backendOnly": True,
+    }
+
+
 def _parse_http_probe(result: dict, url: str, *, accept_http_errors: bool) -> dict:
     stdout = result.get("stdout") or ""
     if _HTTP_CODE_MARKER in stdout:
