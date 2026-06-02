@@ -272,8 +272,18 @@ def git_base_env() -> dict[str, str]:
     }
 
 
+def ensure_git_runtime_paths(env: dict[str, str]) -> None:
+    home = env.get("HOME")
+    xdg_config_home = env.get("XDG_CONFIG_HOME")
+    if home:
+        Path(home).mkdir(parents=True, exist_ok=True)
+    if xdg_config_home:
+        Path(xdg_config_home).mkdir(parents=True, exist_ok=True)
+
+
 def git_auth_env(token: str | None) -> dict[str, str]:
     env = git_base_env()
+    ensure_git_runtime_paths(env)
     if not token:
         return env
     basic = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
@@ -286,10 +296,12 @@ def git_auth_env(token: str | None) -> dict[str, str]:
 
 
 def git_safe_directory(root_path: str, target: Path) -> dict:
+    env = git_base_env()
+    ensure_git_runtime_paths(env)
     return guarded_command_with_env(
         root_path,
         ["git", "config", "--global", "--add", "safe.directory", str(target.resolve())],
-        env=git_base_env(),
+        env=env,
     )
 
 
