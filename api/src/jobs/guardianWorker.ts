@@ -8,7 +8,8 @@ import { prisma } from "../lib/prisma.js";
 import { sysagent } from "../lib/sysagent.js";
 import { checkPanelRemoteUpdate } from "../lib/panelUpdateMonitor.js";
 import { deployQueue } from "./queues.js";
-import { requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables, type RuntimeInstallTarget } from "../lib/deploymentRuntimeTools.js";
+import { requiredRuntimeExecutables, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
+import { permissionRepairNeeded, pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded } from "../lib/deploymentFailureRuntimeRepairs.js";
 
 const staleDeploymentMs = Number(process.env.GUARDIAN_STALE_DEPLOYMENT_MS ?? 15 * 60_000);
 const autoDeployRepairEnabled = process.env.GUARDIAN_AUTO_DEPLOY_REPAIR !== "false";
@@ -92,73 +93,6 @@ async function ensureDoctorApprovalExists(deploymentId: string, target: { action
   });
 }
 
-function uniqueRuntimeTargets(targets: RuntimeInstallTarget[]) {
-  const seen = new Set<string>();
-  return targets.filter((target) => {
-    if (seen.has(target.actionKey)) return false;
-    seen.add(target.actionKey);
-    return true;
-  });
-}
-
-function runtimeTargetsForFailedLog(text: string) {
-  const lower = text.toLowerCase();
-  const missingTools = new Set<string>();
-  const targets: RuntimeInstallTarget[] = [];
-
-  targets.push(...runtimeInstallTargetsForComposerPlatformIssue(text));
-
-  if (lower.includes("unsupported operand type") && lower.includes("for |") && lower.includes("nonetype") && lower.includes("python3.9")) {
-    missingTools.add("python3.10+");
-  }
-
-  const missingExecutable = lower.includes("command not found")
-    || lower.includes("no such file or directory")
-    || lower.includes("unsupported deployment executable")
-    || lower.includes("spawn error")
-    || lower.includes("can't spawn")
-    || lower.includes("cannot spawn");
-
-  if (missingExecutable) {
-    if (/\bcomposer\b/.test(lower)) missingTools.add("composer");
-    if (/\bphp(?:-fpm)?\b/.test(lower)) missingTools.add("php");
-    if (/\bnode\b|\bnpm\b|\bnpx\b|\bnext\b|\bvite\b/.test(lower)) {
-      missingTools.add("node");
-      missingTools.add("npm");
-    }
-    if (/\bpm2\b/.test(lower)) missingTools.add("pm2");
-    if (/\bpnpm\b/.test(lower)) missingTools.add("pnpm");
-    if (/\byarn\b/.test(lower)) missingTools.add("yarn");
-    if (/\bpython3?\b|\bpip3?\b|\buvicorn\b|\bgunicorn\b|\bflask\b/.test(lower)) {
-      missingTools.add("python3");
-      missingTools.add("pip3");
-    }
-    if (/\bgo\b|\bgolang\b/.test(lower)) missingTools.add("go");
-    if (/\bsupervisorctl\b|\bsupervisord\b|\bsupervisor\b/.test(lower)) missingTools.add("supervisorctl");
-  }
-
-  return uniqueRuntimeTargets([...targets, ...runtimeInstallTargetsForMissingExecutables([...missingTools])]);
-}
-
-function supervisorRepairNeeded(text: string) {
-  const lower = text.toLowerCase();
-  return (lower.includes("supervisor") || lower.includes("supervisorctl"))
-    && (lower.includes("spawn error") || lower.includes("can't spawn") || lower.includes("cannot spawn") || lower.includes("backoff") || lower.includes("exited too quickly"));
-}
-
-function permissionRepairNeeded(text: string) {
-  const lower = text.toLowerCase();
-  return lower.includes("permission denied")
-    || lower.includes("eacces")
-    || lower.includes("failed to open log")
-    || ((lower.includes("log") || lower.includes("supervisor")) && lower.includes("no such file or directory"));
-}
-
-function pythonRuntimeRepairNeeded(text: string) {
-  const lower = text.toLowerCase();
-  return lower.includes("unsupported operand type") && lower.includes("for |") && lower.includes("nonetype") && lower.includes("python3.9");
-}
-
 async function guardianApplyFailureRepairs(
   deployment: Awaited<ReturnType<typeof prisma.deployment.findMany>>[number],
   failureText: string,
@@ -168,7 +102,7 @@ async function guardianApplyFailureRepairs(
 
   const applied: string[] = [];
   let approvalsCreated = 0;
-  const runtimeTargets = runtimeTargetsForFailedLog(failureText);
+  const runtimeTargets = runtimeTargetsForFailedDeploymentLog(failureText);
 
   await prisma.deploymentLog.create({
     data: {

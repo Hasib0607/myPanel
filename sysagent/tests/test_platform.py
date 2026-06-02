@@ -206,9 +206,13 @@ class PlatformMappingTests(unittest.TestCase):
     def test_python_modern_runtime_mapping(self) -> None:
         ubuntu_plan = runtime_tool_install_plan("python311", self.ubuntu)
         self.assertEqual(ubuntu_plan.packages, ("python3", "python3-venv", "python3-pip"))
+        self.assertEqual(ubuntu_plan.steps[0].command, ("apt-get", "install", "-y", "python3", "python3-venv", "python3-pip"))
+        self.assertIsNotNone(ubuntu_plan.steps[0].skip_if)
 
         alma_plan = runtime_tool_install_plan("python311", self.alma)
         self.assertEqual(alma_plan.packages, ("python3.11", "python3.11-pip"))
+        self.assertEqual(alma_plan.steps[0].command, ("dnf", "install", "-y", "python3.11", "python3.11-pip"))
+        self.assertIsNotNone(alma_plan.steps[0].skip_if)
 
     def test_php_extension_runtime_tool_mapping(self) -> None:
         self.assertEqual(runtime_tool_install_plan("php-gd", self.ubuntu).packages, ("php-gd",))
@@ -267,18 +271,26 @@ class AlmaPackagePlanTests(unittest.TestCase):
         plan = certbot_install_plan(self.alma)
         self.assertEqual(plan.packages, RHEL_CERTBOT_PACKAGES)
         self.assertEqual(len(plan.steps), 3)
+        self.assertEqual(plan.steps[0].command, CRB_ENABLE_COMMAND)
+        self.assertEqual(plan.steps[1].command, EPEL_INSTALL_COMMAND)
         self.assertEqual(plan.steps[-1].command, ("dnf", "install", "-y", *RHEL_CERTBOT_PACKAGES))
+        self.assertTrue(all(step.skip_if for step in plan.steps))
         ubuntu_plan = certbot_install_plan(self.ubuntu)
         self.assertEqual(len(ubuntu_plan.steps), 1)
         self.assertEqual(ubuntu_plan.steps[0].command[0], "apt-get")
+        self.assertIsNotNone(ubuntu_plan.steps[0].skip_if)
 
     def test_composer_install_plan(self) -> None:
         plan = composer_install_plan(self.alma)
         self.assertEqual(plan.packages, RHEL_COMPOSER_PACKAGES)
         self.assertEqual(len(plan.steps), 3)
+        self.assertEqual(plan.steps[0].command, CRB_ENABLE_COMMAND)
+        self.assertEqual(plan.steps[1].command, EPEL_INSTALL_COMMAND)
         self.assertEqual(plan.steps[-1].command, ("dnf", "install", "-y", *RHEL_COMPOSER_PACKAGES))
+        self.assertTrue(all(step.skip_if for step in plan.steps))
         self.assertEqual(len(plan.fallback_steps), 1)
         self.assertEqual(plan.fallback_steps[0].command, COMPOSER_MANUAL_INSTALL_COMMAND)
+        self.assertIsNotNone(plan.fallback_steps[0].skip_if)
 
         runtime_plan = runtime_tool_install_plan("composer", self.alma)
         self.assertEqual(runtime_plan.fallback_steps, plan.fallback_steps)

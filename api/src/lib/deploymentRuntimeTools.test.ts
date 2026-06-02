@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { detectComposerPlatformIssue, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "./deploymentRuntimeTools.js";
+import { pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded } from "./deploymentFailureRuntimeRepairs.js";
 
 test("composer PHP 8.1 requirement on PHP 8.0 queues PHP 8.2 runtime repair", () => {
   const targets = runtimeInstallTargetsForComposerPlatformIssue(`
@@ -100,6 +101,48 @@ test("runtime matrix includes Python and Go supervisor requirements", () => {
   }
 });
 
+test("required runtime tools are selected per framework", () => {
+  const cases = [
+    {
+      name: "Laravel/PHP",
+      input: { framework: "LARAVEL", packageManager: "COMPOSER", runtime: "PHP", processManager: "SUPERVISOR" },
+      expected: ["php", "php-fpm", "composer", "php-ext-gd", "supervisorctl"]
+    },
+    {
+      name: "React/Node",
+      input: { framework: "NODEJS", packageManager: "NPM", runtime: "NODE", processManager: "PM2" },
+      expected: ["node", "npm", "pm2"]
+    },
+    {
+      name: "Next.js/pnpm",
+      input: { framework: "NEXTJS", packageManager: "PNPM", runtime: "NODE", processManager: "PM2" },
+      expected: ["node", "npm", "pnpm", "pm2"]
+    },
+    {
+      name: "Python/Supervisor",
+      input: { framework: "PYTHON", packageManager: "PIP", runtime: "PYTHON", processManager: "SUPERVISOR" },
+      expected: ["python3", "python3.10+", "pip3", "python-venv", "supervisorctl"]
+    },
+    {
+      name: "Go/Supervisor",
+      input: { framework: "GO", packageManager: "GO", runtime: "GO", processManager: "SUPERVISOR" },
+      expected: ["go", "supervisorctl"]
+    }
+  ] as const;
+
+  for (const item of cases) {
+    const tools = requiredRuntimeExecutables({
+      ...item.input,
+      installCommand: null,
+      buildCommand: null,
+      startCommand: null
+    });
+    for (const tool of item.expected) {
+      assert.ok(tools.includes(tool), `${item.name} missing ${tool}`);
+    }
+  }
+});
+
 test("missing runtime matrix entries map to small install targets", () => {
   const targets = runtimeInstallTargetsForMissingExecutables([
     "php",
@@ -138,4 +181,39 @@ test("composer missing extensions queue extension-specific repairs", () => {
     "install-php-extension-gd",
     "install-php-extension-soap"
   ]);
+});
+
+test("failed deploy parser maps Python 3.9 type-union crash to Python 3.10+ repair", () => {
+  const log = `
+    File "/var/www/deployments/ecommercex-store-bot/app/config.py", line 10, in <module>
+      def _safe_int(raw: str | None, default: int) -> int:
+    TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'
+    Runtime executable: /usr/bin/python3.9
+  `;
+
+  assert.equal(pythonRuntimeRepairNeeded(log), true);
+  assert.deepEqual(runtimeTargetsForFailedDeploymentLog(log).map((target) => target.actionKey), ["install-python311"]);
+});
+
+test("failed deploy parser maps missing process/runtime commands to exact repairs", () => {
+  const log = `
+    npm: command not found
+    pm2: command not found
+    supervisorctl: command not found
+    go: command not found
+  `;
+
+  assert.deepEqual(runtimeTargetsForFailedDeploymentLog(log).map((target) => target.actionKey), [
+    "install-nodejs",
+    "install-go",
+    "install-supervisor",
+    "install-pm2"
+  ]);
+});
+
+test("failed deploy parser detects Supervisor spawn repair separately from tool install", () => {
+  const log = "start: my-app: ERROR (spawn error); Supervisor status: BACKOFF Exited too quickly";
+
+  assert.equal(supervisorRepairNeeded(log), true);
+  assert.deepEqual(runtimeTargetsForFailedDeploymentLog(log).map((target) => target.actionKey), ["install-supervisor"]);
 });
