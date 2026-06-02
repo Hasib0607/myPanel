@@ -149,11 +149,18 @@ export async function apiUpload<T>(path: string, body: BodyInit, contentType: st
   return fetchJson<T>(path, await uploadRequestInit(body, contentType, headers));
 }
 
-export async function apiUploadWithProgress<T>(path: string, body: XMLHttpRequestBodyInit | Document, contentType: string, onProgress: (percent: number) => void, headers?: Record<string, string>): Promise<T> {
+export async function apiUploadWithProgress<T>(
+  path: string,
+  body: XMLHttpRequestBodyInit | Document,
+  contentType: string,
+  onProgress: (percent: number, loaded: number, total: number) => void,
+  headers?: Record<string, string>
+): Promise<T> {
   const url = apiUrl(path);
   const csrf = await csrfHeader();
   return new Promise<T>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
+    const bodySize = body instanceof Blob ? body.size : 1;
     xhr.open("POST", url);
     xhr.withCredentials = true;
     xhr.setRequestHeader("content-type", contentType);
@@ -162,13 +169,13 @@ export async function apiUploadWithProgress<T>(path: string, body: XMLHttpReques
     }
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable && event.total > 0) {
-        onProgress(Math.min(99, Math.round((event.loaded / event.total) * 100)));
+        onProgress(Math.min(99, Math.round((event.loaded / event.total) * 100)), event.loaded, event.total);
       }
     };
     xhr.onload = () => {
       const data = xhr.responseText ? JSON.parse(xhr.responseText) : null;
       if (xhr.status >= 200 && xhr.status < 300) {
-        onProgress(100);
+        onProgress(100, bodySize, bodySize);
         resolve(data as T);
       } else {
         reject(new Error(data?.error ?? `API request failed: ${xhr.status}`));

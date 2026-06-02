@@ -175,7 +175,7 @@ server {
     listen $PANEL_LOGIN_PORT$ssl_listen;
     server_name $PANEL_PUBLIC_HOST $VPS_IP _;
 
-    client_max_body_size 1024M;
+    client_max_body_size 0;
 $ssl_block
 
     location = /health {
@@ -197,6 +197,10 @@ $ssl_block
         proxy_set_header X-Panel-Login-Port $PANEL_LOGIN_PORT;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_send_timeout 3600s;
+        proxy_read_timeout 3600s;
     }
 
     location / {
@@ -217,7 +221,7 @@ server {
     listen $CPANEL_LOGIN_PORT$ssl_listen;
     server_name $PANEL_PUBLIC_HOST $VPS_IP _;
 
-    client_max_body_size 1024M;
+    client_max_body_size 0;
 $ssl_block
 
     location /api/v1/ {
@@ -231,6 +235,10 @@ $ssl_block
         proxy_set_header X-Panel-Mode account;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_send_timeout 3600s;
+        proxy_read_timeout 3600s;
     }
 
     location / {

@@ -17,6 +17,7 @@ import { sysagent } from "../lib/sysagent.js";
 const execFileAsync = promisify(execFile);
 const textReadLimit = 1024 * 1024;
 const uploadLimit = env.FILE_MANAGER_UPLOAD_LIMIT_BYTES;
+const uploadChunkLimit = env.FILE_MANAGER_UPLOAD_CHUNK_BYTES;
 const treeEntryLimit = 1500;
 const rawUploadContentType = "application/vnd.vps-panel.file-upload";
 
@@ -244,6 +245,16 @@ const copyMoveSchema = z.object({ sourcePath: z.string(), targetParentPath: z.st
 const deleteSchema = z.object({ paths: z.array(z.string()).min(1).max(100) });
 const uploadSchema = z.object({ parentPath: z.string().default("."), name: z.string(), contentBase64: z.string(), overwrite: z.boolean().default(false) });
 const rawUploadQuery = z.object({ parentPath: z.string().default("."), name: z.string(), overwrite: z.coerce.boolean().default(false) });
+const chunkUploadQuery = z.object({
+  parentPath: z.string().default("."),
+  name: z.string(),
+  uploadId: z.string().regex(/^[a-zA-Z0-9_.-]{8,120}$/),
+  index: z.coerce.number().int().min(0),
+  totalChunks: z.coerce.number().int().min(1).max(100000),
+  offset: z.coerce.number().int().min(0),
+  totalSize: z.coerce.number().int().min(1),
+  overwrite: z.coerce.boolean().default(false)
+});
 const chmodSchema = z.object({ path: z.string(), mode: z.string().regex(/^[0-7]{3,4}$/) });
 const archiveSchema = z.object({ sourcePaths: z.array(z.string()).min(1).max(100), archivePath: z.string() });
 const extractSchema = z.object({ archivePath: z.string(), targetPath: z.string().default("."), overwrite: z.boolean().default(false) });
@@ -264,6 +275,7 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
       pathSeparator: path.sep,
       textReadLimit,
       uploadLimit,
+      uploadChunkLimit,
       writable: true
     };
   });
@@ -496,6 +508,69 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
       assertLiveSysagentResult(await sysagent.createFile({ parentPath: body.parentPath, name: body.name, contentBase64: body.contentBase64, overwrite: body.overwrite }));
     }
     return reply.code(201).send(await statEntry(file));
+  });
+
+  app.post("/upload/chunk", { bodyLimit: uploadChunkLimit + 4096 }, async (request, reply) => {
+    const query = chunkUploadQuery.parse(request.query);
+    if (query.totalSize > uploadLimit) throw app.httpErrors.payloadTooLarge("Upload is too large");
+
+    const parent = await ensureParentFolderReady(query.parentPath);
+    const file = safeChild(parent, query.name);
+    const chunkLength = Number(request.headers["content-length"] ?? 0);
+    if (chunkLength > uploadChunkLimit) throw app.httpErrors.payloadTooLarge("Upload chunk is too large");
+    if (query.offset + chunkLength > query.totalSize) throw app.httpErrors.badRequest("Upload chunk exceeds declared file size");
+
+    if (query.index === 0 && !query.overwrite) {
+      await fs.access(file).then(() => {
+        throw app.httpErrors.conflict("Target already exists");
+      }).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+    }
+
+    const tempFile = path.join(parent, `.upload-${query.uploadId}.part`);
+    const expectedTempSize = query.index === 0 ? 0 : query.offset;
+    const currentSize = await fs.stat(tempFile).then((stat) => stat.size).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT" && query.index === 0) return 0;
+      throw error;
+    });
+    if (currentSize !== expectedTempSize) {
+      throw app.httpErrors.conflict(`Upload offset mismatch. Expected ${currentSize}, received ${query.offset}.`);
+    }
+
+    let bytes = 0;
+    const limiter = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        bytes += chunk.byteLength;
+        if (bytes > uploadChunkLimit || query.offset + bytes > query.totalSize) {
+          callback(app.httpErrors.payloadTooLarge("Upload chunk is too large"));
+          return;
+        }
+        callback(null, chunk);
+      }
+    });
+
+    try {
+      await pipeline(request.body as Readable, limiter, createWriteStream(tempFile, { flags: query.index === 0 ? "w" : "a" }));
+      const nextOffset = query.offset + bytes;
+      const complete = query.index === query.totalChunks - 1;
+      if (!complete) {
+        return reply.code(202).send({ ok: true, uploadId: query.uploadId, receivedBytes: nextOffset, complete: false });
+      }
+      if (nextOffset !== query.totalSize) {
+        throw app.httpErrors.badRequest(`Final upload size mismatch. Expected ${query.totalSize}, received ${nextOffset}.`);
+      }
+      if (query.overwrite) {
+        await fs.rename(tempFile, file);
+      } else {
+        await fs.link(tempFile, file);
+        await fs.rm(tempFile, { force: true });
+      }
+      return reply.code(201).send({ ok: true, uploadId: query.uploadId, receivedBytes: nextOffset, complete: true, file: await statEntry(file) });
+    } catch (error) {
+      await fs.rm(tempFile, { force: true }).catch(() => undefined);
+      throw error;
+    }
   });
 
   app.get("/download", async (request) => {

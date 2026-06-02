@@ -39,7 +39,7 @@ server {
     listen $PANEL_LOGIN_PORT;
     server_name $VPS_IP _;
 
-    client_max_body_size 1024M;
+    client_max_body_size 0;
 
     location = /health {
         proxy_pass http://127.0.0.1:$PANEL_API_PORT/health;
@@ -58,6 +58,10 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_set_header X-Forwarded-Port $PANEL_LOGIN_PORT;
         proxy_set_header X-Panel-Login-Port $PANEL_LOGIN_PORT;
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_send_timeout 3600s;
+        proxy_read_timeout 3600s;
     }
 
     location / {

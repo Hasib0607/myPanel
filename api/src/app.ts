@@ -32,7 +32,7 @@ import { twoFactorRoutes } from "./routes/twoFactor.js";
 import { whmMigrationRoutes } from "./routes/whmMigration.js";
 
 export function buildApp() {
-  const app = Fastify({ logger: true });
+  const app = Fastify({ logger: true, requestTimeout: 0 });
 
   app.register(cors, {
     origin: env.FRONTEND_URL,

@@ -73,6 +73,7 @@ type Overview = {
   platform: string;
   textReadLimit: number;
   uploadLimit: number;
+  uploadChunkLimit: number;
 };
 
 type DownloadResponse = {
@@ -105,7 +106,9 @@ type FileRootOption = {
 function formatBytes(value: number) {
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  if (value < 1024 * 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  if (value < 1024 * 1024 * 1024 * 1024) return `${(value / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  return `${(value / 1024 / 1024 / 1024 / 1024).toFixed(1)} TB`;
 }
 
 function parentPath(filePath: string) {
@@ -361,19 +364,47 @@ export function FileManagerClient() {
         return uploadFile(file, true);
       }
 
+      const uploadLimit = overview.data?.uploadLimit;
+      if (uploadLimit && file.size > uploadLimit) {
+        throw new Error(`Upload is too large. Limit: ${formatBytes(uploadLimit)}.`);
+      }
+
+      const chunkSize = Math.max(1024 * 1024, overview.data?.uploadChunkLimit ?? 64 * 1024 * 1024);
+      const totalChunks = Math.max(1, Math.ceil(file.size / chunkSize));
+      const uploadId = typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
       setUploadProgress({ fileName: file.name, percent: 0, phase: "uploading" });
-      await apiUploadWithProgress(
-        `/files/upload?${queryString({ parentPath: currentPath, name: file.name, overwrite: overwrite ? "true" : "false" })}`,
-        file,
-        "application/vnd.vps-panel.file-upload",
-        (percent) => {
-          setUploadProgress({
-            fileName: file.name,
-            percent,
-            phase: percent >= 100 ? "processing" : "uploading"
-          });
-        }
-      );
+
+      for (let index = 0; index < totalChunks; index += 1) {
+        const offset = index * chunkSize;
+        const chunk = file.slice(offset, Math.min(file.size, offset + chunkSize));
+        await apiUploadWithProgress(
+          `/files/upload/chunk?${queryString({
+            parentPath: currentPath,
+            name: file.name,
+            uploadId,
+            index,
+            totalChunks,
+            offset,
+            totalSize: file.size,
+            overwrite: overwrite ? "true" : "false"
+          })}`,
+          chunk,
+          "application/vnd.vps-panel.file-upload",
+          (_percent, loaded) => {
+            const uploaded = Math.min(file.size, offset + loaded);
+            const percent = file.size > 0 ? Math.min(99, Math.floor((uploaded / file.size) * 100)) : 99;
+            setUploadProgress({
+              fileName: file.name,
+              percent,
+              phase: index === totalChunks - 1 && percent >= 99 ? "processing" : "uploading"
+            });
+          }
+        );
+      }
+
       setUploadProgress({ fileName: file.name, percent: 100, phase: "done" });
       setLastResult("Uploaded.");
       await invalidateFiles();

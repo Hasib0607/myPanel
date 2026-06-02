@@ -432,6 +432,34 @@ ensure_live_sysagent_config() {
   fi
 }
 
+ensure_large_upload_config() {
+  local file="$APP_DIR/.env"
+  local changed="false"
+  local current=""
+  if [[ ! -f "$file" ]]; then
+    log "panel env file not found at $file; skipping file upload limit normalization"
+    return 0
+  fi
+
+  current="$(grep -E '^FILE_MANAGER_UPLOAD_LIMIT_BYTES=' "$file" | tail -n 1 | cut -d= -f2- || true)"
+  if ! [[ "$current" =~ ^[0-9]+$ ]] || (( current < 1099511627776 )); then
+    log "setting FILE_MANAGER_UPLOAD_LIMIT_BYTES=1099511627776 for large file-manager uploads"
+    set_env_value "FILE_MANAGER_UPLOAD_LIMIT_BYTES" "1099511627776"
+    changed="true"
+  fi
+
+  current="$(grep -E '^FILE_MANAGER_UPLOAD_CHUNK_BYTES=' "$file" | tail -n 1 | cut -d= -f2- || true)"
+  if ! [[ "$current" =~ ^[0-9]+$ ]] || (( current < 1048576 )); then
+    log "setting FILE_MANAGER_UPLOAD_CHUNK_BYTES=67108864 for chunked file-manager uploads"
+    set_env_value "FILE_MANAGER_UPLOAD_CHUNK_BYTES" "67108864"
+    changed="true"
+  fi
+
+  if [[ "$changed" == "true" ]]; then
+    write_status "running" "normalized file-manager large upload settings" "$(current_commit)" "$(current_commit_subject)"
+  fi
+}
+
 repair_frontend_service_unit() {
   local unit="/etc/systemd/system/vps-panel-frontend.service"
   local start_script="$APP_DIR/scripts/deploy/start-frontend.sh"
@@ -682,6 +710,7 @@ write_status "running" "source updated; building panel" "$NEW_COMMIT" "$NEW_COMM
 ensure_systemctl_permission
 ensure_node_runtime
 ensure_live_sysagent_config
+ensure_large_upload_config
 repair_frontend_service_unit
 
 npm_install_with_recovery

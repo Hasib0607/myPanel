@@ -41,7 +41,8 @@ const envSchema = z.object({
   DOMAIN_NAMESERVER_RESOLVERS: z.string().default("1.1.1.1,8.8.8.8,9.9.9.9"),
   DOMAIN_NAMESERVER_DOH_URLS: z.string().default("https://cloudflare-dns.com/dns-query,https://dns.google/resolve,https://dns.quad9.net/dns-query"),
   FILE_MANAGER_ROOT: z.string().default("/var/www"),
-  FILE_MANAGER_UPLOAD_LIMIT_BYTES: z.coerce.number().int().positive().default(1024 * 1024 * 1024),
+  FILE_MANAGER_UPLOAD_LIMIT_BYTES: z.coerce.number().int().positive().default(1024 * 1024 * 1024 * 1024),
+  FILE_MANAGER_UPLOAD_CHUNK_BYTES: z.coerce.number().int().positive().default(64 * 1024 * 1024),
   GUARDIAN_TRUSTED_CIDRS: z.string().default(""),
   ALLOW_LIVE_WHM_MIGRATION: z.coerce.boolean().default(false)
 });
