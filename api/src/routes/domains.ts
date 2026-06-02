@@ -335,7 +335,10 @@ function parseBulkCreateDomains(body: unknown) {
 async function publishDomainHosting(domainId: string) {
   const domain = await prisma.domain.findUniqueOrThrow({
     where: { id: domainId },
-    include: { dnsRecords: { orderBy: [{ type: "asc" }, { name: "asc" }] } }
+    include: {
+      dnsRecords: { orderBy: [{ type: "asc" }, { name: "asc" }] },
+      subdomains: { orderBy: { name: "asc" } }
+    }
   });
   const fileScaffold = await ensureDomainFileStructure(domain.name);
   const zone = renderZone(domain.name, domain.dnsRecords);
@@ -391,7 +394,26 @@ async function publishDomainHosting(domainId: string) {
         : {})
     });
   }
-  return { domain, fileScaffold, zone, dnsResult, nginxResult };
+  const subdomainVhosts: Array<{ fqdn: string; result: unknown } | { fqdn: string; error: string }> = [];
+  for (const subdomain of domain.subdomains) {
+    const fqdn = `${subdomain.name}.${domain.name}`;
+    const targetIsLocal = subdomain.target === env.VPS_IP || subdomain.target === domain.name || subdomain.target === fqdn;
+    if (!targetIsLocal) continue;
+    const scaffold = await ensureSubdomainFileStructure(domain.name, subdomain.name);
+    try {
+      const result = await sysagent.writeStaticNginxVhost({
+        name: `domain-${fqdn}`,
+        serverName: fqdn,
+        rootPath: path.join(env.FILE_MANAGER_ROOT, scaffold.relativeRoot),
+        forceHttps: false
+      });
+      subdomainVhosts.push({ fqdn, result });
+    } catch (error) {
+      subdomainVhosts.push({ fqdn, error: error instanceof Error ? error.message : "Subdomain web root publish failed" });
+    }
+  }
+
+  return { domain, fileScaffold, zone, dnsResult, nginxResult, subdomainVhosts };
 }
 
 type CreateDomainInput = z.infer<typeof createDomainSchema>;
