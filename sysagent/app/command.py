@@ -104,6 +104,22 @@ def run_install_plan(plan: PackageInstallPlan, *, timeout: int | None = None, al
     success = True
 
     for step in plan.steps:
+        if step.skip_if:
+            check = run_command(list(step.skip_if), timeout=timeout, allow_live=allow_live)
+            if check.get("returncode") == 0:
+                step_results.append({
+                    "description": step.description,
+                    "onFailure": step.on_failure,
+                    "skipped": True,
+                    "skipReason": "already installed",
+                    "check": check,
+                    "dryRun": check.get("dryRun", False),
+                    "command": list(step.command),
+                    "stdout": check.get("stdout", ""),
+                    "stderr": check.get("stderr", ""),
+                    "returncode": 0,
+                })
+                continue
         result = run_command(list(step.command), env=step.env or None, timeout=timeout, allow_live=allow_live)
         entry = {
             "description": step.description,
@@ -117,6 +133,24 @@ def run_install_plan(plan: PackageInstallPlan, *, timeout: int | None = None, al
 
     if not success and plan.fallback_steps:
         for step in plan.fallback_steps:
+            if step.skip_if:
+                check = run_command(list(step.skip_if), timeout=timeout, allow_live=allow_live)
+                if check.get("returncode") == 0:
+                    step_results.append({
+                        "description": step.description,
+                        "onFailure": step.on_failure,
+                        "fallback": True,
+                        "skipped": True,
+                        "skipReason": "already installed",
+                        "check": check,
+                        "dryRun": check.get("dryRun", False),
+                        "command": list(step.command),
+                        "stdout": check.get("stdout", ""),
+                        "stderr": check.get("stderr", ""),
+                        "returncode": 0,
+                    })
+                    success = True
+                    break
             result = run_command(list(step.command), env=step.env or None, timeout=timeout, allow_live=allow_live)
             entry = {
                 "description": step.description,

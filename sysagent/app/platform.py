@@ -111,6 +111,7 @@ class InstallStep:
     command: tuple[str, ...]
     env: dict[str, str] = field(default_factory=dict)
     on_failure: InstallFailureMode = "abort"
+    skip_if: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -146,6 +147,7 @@ DEBIAN_PHP82_REPO_STEPS = (
         "Enable the Ondrej PHP repository for versioned PHP packages",
         ("add-apt-repository", "-y", "ppa:ondrej/php"),
         env={"DEBIAN_FRONTEND": "noninteractive"},
+        skip_if=("sh", "-lc", "grep -R \"ondrej/php\" /etc/apt/sources.list /etc/apt/sources.list.d >/dev/null 2>&1"),
     ),
     InstallStep(
         "Refresh APT package indexes after enabling the PHP repository",
@@ -154,7 +156,7 @@ DEBIAN_PHP82_REPO_STEPS = (
     ),
 )
 DEBIAN_PHP82_SWITCH_STEPS = (
-    InstallStep("Switch the CLI php binary to php8.2", ("update-alternatives", "--set", "php", "/usr/bin/php8.2")),
+    InstallStep("Switch the CLI php binary to php8.2", ("update-alternatives", "--set", "php", "/usr/bin/php8.2"), skip_if=("sh", "-lc", "php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION >= 2 ? 0 : 1);'")),
     InstallStep("Switch the phar binary to php8.2", ("update-alternatives", "--set", "phar", "/usr/bin/phar8.2"), on_failure="continue"),
     InstallStep("Switch the phar.phar binary to php8.2", ("update-alternatives", "--set", "phar.phar", "/usr/bin/phar.phar8.2"), on_failure="continue"),
 )
@@ -484,9 +486,10 @@ def epel_prerequisite_steps(info: OsReleaseInfo | None = None) -> tuple[InstallS
         InstallStep(
             "Enable CRB repository (required by EPEL on AlmaLinux 9)",
             CRB_ENABLE_COMMAND,
+            skip_if=("sh", "-lc", "dnf repolist --enabled crb 2>/dev/null | grep -q '^crb\\b'"),
             on_failure="continue",
         ),
-        InstallStep("Install EPEL repository", EPEL_INSTALL_COMMAND),
+        InstallStep("Install EPEL repository", EPEL_INSTALL_COMMAND, skip_if=package_installed_command((EPEL_PACKAGE,), info)),
     )
 
 
@@ -496,6 +499,7 @@ def _single_package_install_step(key: str, info: OsReleaseInfo | None = None) ->
         f"Install {key} packages",
         tuple(package_install_command(packages, info)),
         env=package_install_env(info),
+        skip_if=package_installed_command(tuple(packages), info),
     )
 
 
@@ -512,6 +516,7 @@ def certbot_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPla
                     "Install Certbot with Nginx plugin from EPEL",
                     tuple(package_install_command(list(packages), info)),
                     env=package_install_env(info),
+                    skip_if=package_installed_command(packages, info),
                 ),
             ),
             notes=(
@@ -540,12 +545,14 @@ def composer_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPl
                     "Install Composer from EPEL",
                     tuple(package_install_command(list(packages), info)),
                     env=package_install_env(info),
+                    skip_if=package_installed_command(packages, info),
                 ),
             ),
             fallback_steps=(
                 InstallStep(
                     "Install Composer via official installer (fallback if EPEL package unavailable)",
                     COMPOSER_MANUAL_INSTALL_COMMAND,
+                    skip_if=("sh", "-lc", "command -v composer >/dev/null 2>&1"),
                 ),
             ),
             notes=(
@@ -577,6 +584,7 @@ def php82_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
                 "Install PHP 8.2 runtime and common Laravel extensions",
                 tuple(package_install_command(list(DEBIAN_PHP82_PACKAGES), info)),
                 env=package_install_env(info),
+                skip_if=package_installed_command(DEBIAN_PHP82_PACKAGES, info),
             ),
             *DEBIAN_PHP82_SWITCH_STEPS,
         ),
@@ -599,6 +607,7 @@ def php_runtime_install_plan(info: OsReleaseInfo | None = None) -> PackageInstal
                     "Install PHP runtime, FPM, common Laravel extensions, SOAP, and unzip",
                     tuple(package_install_command(list(packages), info)),
                     env=package_install_env(info),
+                    skip_if=package_installed_command(packages, info),
                 ),
                 InstallStep(
                     "Enable and start PHP-FPM",
@@ -633,6 +642,7 @@ def php_soap_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPl
                     "Install PHP 8.2 SOAP extension",
                     tuple(package_install_command(["php8.2-soap"], info)),
                     env=package_install_env(info),
+                    skip_if=package_installed_command(("php8.2-soap",), info),
                 ),
                 InstallStep(
                     "Restart PHP 8.2 FPM after SOAP install",
@@ -645,6 +655,7 @@ def php_soap_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPl
                     "Install PHP SOAP extension from default PHP package",
                     tuple(package_install_command(["php-soap"], info)),
                     env=package_install_env(info),
+                    skip_if=package_installed_command(("php-soap",), info),
                 ),
             ),
             notes="Installs ext-soap for the PHP CLI used by Composer, with php-soap fallback for non-8.2 defaults.",
@@ -674,6 +685,7 @@ def mysql_database_install_plan(info: OsReleaseInfo | None = None) -> PackageIns
                 "Install MySQL/MariaDB server and client packages",
                 tuple(package_install_command(list(packages), info)),
                 env=package_install_env(info),
+                skip_if=package_installed_command(packages, info),
             ),
             InstallStep(
                 f"Enable and start {service.unit}",
@@ -757,6 +769,13 @@ def package_install_env(info: OsReleaseInfo | None = None) -> dict[str, str]:
     return {}
 
 
+def package_installed_command(packages: tuple[str, ...] | list[str], info: OsReleaseInfo | None = None) -> tuple[str, ...]:
+    package_list = " ".join(packages)
+    if package_manager(info) == "dnf":
+        return ("sh", "-lc", f"rpm -q {package_list} >/dev/null 2>&1")
+    return ("sh", "-lc", f"dpkg-query -W -f='${{Status}}' {package_list} 2>/dev/null | grep -vq 'not-installed' && dpkg-query -W {package_list} >/dev/null 2>&1")
+
+
 def runtime_tool_install_plan(tool: str, info: OsReleaseInfo | None = None) -> PackageInstallPlan:
     npm_global = {
         "pm2": ("pm2", ("npm", "install", "-g", "pm2")),
@@ -768,13 +787,13 @@ def runtime_tool_install_plan(tool: str, info: OsReleaseInfo | None = None) -> P
         return PackageInstallPlan(
             key=key,
             packages=(),
-            steps=(InstallStep(f"Install {tool} globally via npm", command),),
+            steps=(InstallStep(f"Install {tool} globally via npm", command, skip_if=("sh", "-lc", f"command -v {tool} >/dev/null 2>&1")),),
         )
     if tool == "uv":
         return PackageInstallPlan(
             key="uv",
             packages=(),
-            steps=(InstallStep("Install uv via pip", ("pip3", "install", "uv")),),
+            steps=(InstallStep("Install uv via pip", ("pip3", "install", "uv"), skip_if=("sh", "-lc", "command -v uv >/dev/null 2>&1")),),
         )
     if tool == "composer":
         return composer_install_plan(info)
@@ -804,7 +823,10 @@ def runtime_tool_install_plan(tool: str, info: OsReleaseInfo | None = None) -> P
 
 def runtime_tool_install_command(tool: str, info: OsReleaseInfo | None = None) -> list[str]:
     plan = runtime_tool_install_plan(tool, info)
-    primary = plan.steps[-1] if plan.steps else None
+    install_commands = {"apt-get", "dnf", "npm", "pip3"}
+    primary = next((step for step in reversed(plan.steps) if step.command and step.command[0] in install_commands), None)
+    if primary is None:
+        primary = plan.steps[-1] if plan.steps else None
     if primary is None:
         raise KeyError(f"No install steps defined for runtime tool '{tool}'")
     return list(primary.command)

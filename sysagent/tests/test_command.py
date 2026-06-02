@@ -91,6 +91,27 @@ class RunInstallPlanTests(unittest.TestCase):
         self.assertEqual(len(result["steps"]), 2)
         self.assertTrue(result["steps"][1]["fallback"])
 
+    def test_skips_installed_step_when_check_passes(self) -> None:
+        plan = PackageInstallPlan(
+            key="demo",
+            packages=("pkg",),
+            steps=(InstallStep("Install pkg", ("apt-get", "install", "-y", "pkg"), skip_if=("dpkg-query", "-W", "pkg")),),
+        )
+
+        with mock.patch("app.command.run_command") as run_command:
+            run_command.return_value = {
+                "dryRun": False,
+                "command": ["dpkg-query", "-W", "pkg"],
+                "stdout": "pkg installed",
+                "stderr": "",
+                "returncode": 0,
+            }
+            result = run_install_plan(plan)
+
+        self.assertEqual(result["returncode"], 0)
+        self.assertTrue(result["steps"][0]["skipped"])
+        self.assertEqual(run_command.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

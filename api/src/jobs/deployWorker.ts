@@ -1387,16 +1387,25 @@ async function assertRuntimeToolsInstalled(deploymentId: string, releaseId: stri
 
   const approvalTargets = runtimeInstallTargetsForMissingExecutables(missing);
   const autoInstalled: string[] = [];
+  const autoInstallFailures: Array<{ tool: string; error: string }> = [];
 
   for (const target of approvalTargets) {
-    const installResult = await runStep(deploymentId, releaseId, "PREFLIGHT", `Auto-install ${target.tool}`, () =>
-      sysagent.deploymentInstallRuntimeTool({ tool: target.tool })
-    );
-    assertLiveResult(installResult, `Auto-install ${target.tool}`);
-    autoInstalled.push(target.tool);
+    try {
+      const installResult = await runStep(deploymentId, releaseId, "PREFLIGHT", `Auto-install ${target.tool}`, () =>
+        sysagent.deploymentInstallRuntimeTool({ tool: target.tool })
+      );
+      assertLiveResult(installResult, `Auto-install ${target.tool}`);
+      autoInstalled.push(target.tool);
+    } catch (error) {
+      autoInstallFailures.push({ tool: target.tool, error: error instanceof Error ? error.message : String(error) });
+      await writeLog(deploymentId, releaseId, "PREFLIGHT", `Auto-install ${target.tool} failed; Doctor approval will be queued`, {
+        actionKey: target.actionKey,
+        error: error instanceof Error ? error.message : String(error)
+      }, "warn");
+    }
   }
 
-  if (autoInstalled.length > 0) {
+  if (autoInstalled.length > 0 || autoInstallFailures.length > 0) {
     toolsResult = await inspectTools();
     missing = toolsResult.items.filter((tool) => !tool.installed).map((tool) => tool.name);
     if (missing.length === 0) {
@@ -1405,7 +1414,8 @@ async function assertRuntimeToolsInstalled(deploymentId: string, releaseId: stri
     }
   }
 
-  for (const target of approvalTargets) {
+  const remainingApprovalTargets = runtimeInstallTargetsForMissingExecutables(missing);
+  for (const target of remainingApprovalTargets) {
     const existing = await prisma.deploymentDoctorApproval.findFirst({
       where: {
         deploymentId,
@@ -1426,7 +1436,7 @@ async function assertRuntimeToolsInstalled(deploymentId: string, releaseId: stri
   }
 
   throw new Error(
-    `Missing runtime tools on the server: ${missing.join(", ")}. Auto-install could not finish everything. Pending repair approvals were created for installable tools. Open Deployment Doctor, approve the remaining installs, then redeploy.`
+    `Missing runtime tools on the server: ${missing.join(", ")}. Auto-install could not finish everything. Pending repair approvals were created for installable tools. Open Deployment Doctor, approve the remaining installs, then redeploy.${autoInstallFailures.length ? ` Auto-install failures: ${autoInstallFailures.map((item) => `${item.tool}: ${item.error}`).join("; ")}` : ""}`
   );
 }
 

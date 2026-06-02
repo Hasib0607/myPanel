@@ -590,8 +590,16 @@ async function runDeploymentGuardWatch() {
       const missingBeforeCount = missing.length;
 
       const installTargets = runtimeInstallTargetsForMissingExecutables(missing);
+      const installFailures: Array<{ tool: string; error: string }> = [];
       for (const target of installTargets) {
-        await sysagent.deploymentInstallRuntimeTool({ tool: target.tool });
+        try {
+          const result = await sysagent.deploymentInstallRuntimeTool({ tool: target.tool }) as { dryRun?: boolean; returncode?: number; stderr?: string; stdout?: string };
+          if (result.dryRun || (typeof result.returncode === "number" && result.returncode !== 0)) {
+            throw new Error(result.stderr || result.stdout || `exit ${result.returncode ?? "unknown"}`);
+          }
+        } catch (error) {
+          installFailures.push({ tool: target.tool, error: error instanceof Error ? error.message : String(error) });
+        }
       }
 
       const recheck = await sysagent.deploymentRuntimeTools({ tools: requiredTools });
@@ -615,6 +623,18 @@ async function runDeploymentGuardWatch() {
           }
         });
         approvalsCreated += 1;
+      }
+
+      if (installFailures.length > 0) {
+        await prisma.deploymentLog.create({
+          data: {
+            deploymentId: deployment.id,
+            step: "PREFLIGHT",
+            level: "warn",
+            message: "Guardian runtime auto-install could not finish all tools",
+            metadata: { installFailures, missing } as any
+          }
+        });
       }
 
       guarded.push({ deploymentId: deployment.id, missingBefore: missingBeforeCount, missingAfter: missing.length, approvalsCreated });

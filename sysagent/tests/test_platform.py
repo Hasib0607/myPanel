@@ -28,6 +28,7 @@ from app.platform import (
     is_rhel,
     package_install_command,
     package_install_env,
+    package_installed_command,
     package_manager,
     package_requires_epel,
     packages_for,
@@ -190,6 +191,9 @@ class PlatformMappingTests(unittest.TestCase):
             ["dnf", "install", "-y", "nginx"],
         )
         self.assertEqual(package_install_env(self.alma), {})
+        self.assertEqual(package_installed_command(("nginx",), self.ubuntu)[0:2], ("sh", "-lc"))
+        self.assertIn("dpkg-query", package_installed_command(("nginx",), self.ubuntu)[2])
+        self.assertIn("rpm -q", package_installed_command(("nginx",), self.alma)[2])
 
     def test_runtime_tool_install_command(self) -> None:
         self.assertEqual(runtime_tool_install_command("pnpm", self.ubuntu), ["npm", "install", "-g", "pnpm"])
@@ -211,6 +215,7 @@ class PlatformMappingTests(unittest.TestCase):
         self.assertEqual(runtime_tool_install_plan("php-pgsql", self.ubuntu).packages, ("php-pgsql",))
         self.assertEqual(runtime_tool_install_plan("php-mysql", self.alma).packages, ("php-mysqlnd",))
         self.assertEqual(runtime_tool_install_command("php-curl", self.ubuntu), ["apt-get", "install", "-y", "php-curl"])
+        self.assertIsNotNone(runtime_tool_install_plan("php-gd", self.ubuntu).steps[0].skip_if)
 
     def test_platform_summary_has_no_known_alma_code_gaps(self) -> None:
         summary = platform_summary(self.alma)
@@ -247,7 +252,9 @@ class AlmaPackagePlanTests(unittest.TestCase):
         self.assertEqual(len(steps), 2)
         self.assertEqual(steps[0].command, CRB_ENABLE_COMMAND)
         self.assertEqual(steps[0].on_failure, "continue")
+        self.assertIsNotNone(steps[0].skip_if)
         self.assertEqual(steps[1].command, EPEL_INSTALL_COMMAND)
+        self.assertIsNotNone(steps[1].skip_if)
         self.assertEqual(epel_prerequisite_steps(self.ubuntu), ())
 
     def test_package_requires_epel(self) -> None:
