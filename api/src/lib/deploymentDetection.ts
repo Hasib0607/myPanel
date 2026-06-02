@@ -365,6 +365,7 @@ export async function deploymentHasLaravelPublicIndex(appPath: string) {
 type DeploymentAppRootCandidate = {
   appPath: string;
   detection: DeploymentDetection;
+  hasLaravelPublicIndex: boolean;
 };
 
 async function candidatePaths(rootPath: string, rootDirectory = ".") {
@@ -401,7 +402,11 @@ export async function findDeploymentAppRoot(
     try {
       const detection = await detectDeploymentSource(candidate, ".");
       if (detection.confidence >= 0.75 || detection.detected !== "STATIC") {
-        detected.push({ appPath: candidate, detection });
+        detected.push({
+          appPath: candidate,
+          detection,
+          hasLaravelPublicIndex: detection.detected === "LARAVEL" ? await deploymentHasLaravelPublicIndex(candidate) : false
+        });
       }
     } catch {
       // Ignore unreadable or non-directory candidates.
@@ -416,8 +421,8 @@ export async function findDeploymentAppRoot(
     const rightExpected = expected && right.detection.detected === expected ? 1 : 0;
     if (leftExpected !== rightExpected) return rightExpected - leftExpected;
 
-    const leftLaravelPublic = left.detection.detected === "LARAVEL" ? Number(left.detection.suggestions.outputDirectory === "public") : 0;
-    const rightLaravelPublic = right.detection.detected === "LARAVEL" ? Number(right.detection.suggestions.outputDirectory === "public") : 0;
+    const leftLaravelPublic = left.detection.detected === "LARAVEL" ? Number(left.hasLaravelPublicIndex) : 0;
+    const rightLaravelPublic = right.detection.detected === "LARAVEL" ? Number(right.hasLaravelPublicIndex) : 0;
     if (leftLaravelPublic !== rightLaravelPublic) return rightLaravelPublic - leftLaravelPublic;
 
     return right.detection.confidence - left.detection.confidence;

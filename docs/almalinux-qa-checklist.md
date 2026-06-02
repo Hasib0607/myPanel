@@ -72,6 +72,7 @@ From Deployment Doctor or runtime-tools install:
 - [ ] PHP 8.2 repair removes old PHP 8.0 PECL ABI blockers (`php-pecl-redis*`, `php-pecl-msgpack*`, `php-pecl-igbinary*`) before module switch
 - [ ] PHP Redis extension repair removes old `php-pecl-redis*` ABI blockers and rebuilds `ext-redis` with PECL for the active PHP runtime
 - [ ] Zip uploads with one nested app folder auto-correct `rootDirectory` before runtime detection, Nginx/start/health checks for Laravel, React/Node, Next.js, Python, and Go projects
+- [ ] Laravel zip uploads where the parent has `artisan` but only the nested app has `public/index.php` choose the nested public web root, not backend-only idle mode
 - [ ] Backend-only Laravel deployments without `public/index.php` start as idle Supervisor jobs, report healthy backend-only health instead of `DEGRADED`, skip `php artisan storage:link`, and do not raise public route 502 danger warnings
 - [ ] Install Composer (EPEL or fallback)
 - [ ] Install Go if needed

@@ -1118,6 +1118,16 @@ async function optionalPublicRouteWarning(
 
   if (await deploymentRunsLaravel(deployment.framework, appPath)) {
     if (!(await deploymentHasLaravelPublicIndex(appPath))) {
+      const detectedLaravelAppRoot = await findDeploymentAppRoot(deployment.rootPath, ".", "LARAVEL");
+      if (detectedLaravelAppRoot?.detection.detected === "LARAVEL" && detectedLaravelAppRoot.hasLaravelPublicIndex) {
+        await writeLog(deploymentId, releaseId, "HEALTH_CHECK", "Laravel public root exists outside current app path", {
+          domain: domain.name,
+          appPath,
+          detectedAppPath: detectedLaravelAppRoot.appPath,
+          reason: "Current app path has no public/index.php, but a nested Laravel public web root exists. Redeploy/start will correct rootDirectory before health checks."
+        }, "warn");
+        throw new Error(`Laravel public web root exists at ${detectedLaravelAppRoot.appPath}, but deployment is running from ${appPath}. Redeploy or restart so Deployment Doctor can correct rootDirectory before Nginx health checks.`);
+      }
       await writeLog(deploymentId, releaseId, "HEALTH_CHECK", "Skipped public website check for backend-only Laravel deployment", {
         domain: domain.name,
         appPath,
