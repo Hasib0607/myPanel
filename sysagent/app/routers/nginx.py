@@ -97,14 +97,14 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
         body.forceHttps = False
 
     http_location = (
-        f"{acme_location(body.serverName)}"
+        f"{acme_location(body.serverName, root_path)}"
         "    location / {\n"
         "        try_files $uri $uri/ =404;\n"
         "    }\n"
     )
     if body.forceHttps and has_ssl:
         http_location = (
-            f"{acme_location(body.serverName)}"
+            f"{acme_location(body.serverName, root_path)}"
             "    location / {\n"
             "        return 301 https://$host$request_uri;\n"
             "    }\n"
@@ -136,7 +136,7 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
             "    ssl_protocols TLSv1.2 TLSv1.3;\n"
             "    ssl_prefer_server_ciphers off;\n"
             "\n"
-            f"{acme_location(body.serverName)}"
+            f"{acme_location(body.serverName, root_path)}"
             "    location / {\n"
             "        try_files $uri $uri/ =404;\n"
             "    }\n"

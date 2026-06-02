@@ -834,13 +834,13 @@ def nginx(body: NginxRequest) -> dict:
         )
         if body.forceSsl and has_ssl:
             http_location = (
-                f"{acme_location(server_name)}"
+                f"{acme_location(server_name, public_root)}"
                 "    location / {\n"
                 "        return 301 https://$host$request_uri;\n"
                 "    }\n"
             )
         else:
-            http_location = f"{acme_location(server_name)}{app_locations}"
+            http_location = f"{acme_location(server_name, public_root)}{app_locations}"
 
         config = f"""
 server {{
@@ -860,7 +860,7 @@ server {{
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_prefer_server_ciphers off;
 
-{acme_location(server_name)}{app_locations}
+{acme_location(server_name, public_root)}{app_locations}
 }}
 """
         info = path_info(body.rootPath)

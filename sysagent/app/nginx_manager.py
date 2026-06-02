@@ -78,8 +78,8 @@ def acme_root_for_server_name(server_name: str) -> Path:
     return safe_web_root(str(Path(settings.file_manager_root) / primary / "public_html"))
 
 
-def acme_location(server_name: str) -> str:
-    acme_root = acme_root_for_server_name(server_name)
+def acme_location(server_name: str, web_root: Path | str | None = None) -> str:
+    acme_root = safe_web_root(str(web_root)) if web_root else acme_root_for_server_name(server_name)
     return (
         "    location ^~ /.well-known/acme-challenge/ {\n"
         f"        root {acme_root};\n"
