@@ -12,6 +12,7 @@ import {
   FilePlus,
   Folder,
   FolderPlus,
+  Github,
   Image as ImageIcon,
   Info,
   RefreshCw,
@@ -103,6 +104,24 @@ type GitPullResponse = {
   stdout?: string;
   stderr?: string;
   returncode: number;
+};
+
+type GithubRepo = {
+  id?: string;
+  owner: string;
+  name: string;
+  fullName: string;
+  private: boolean;
+  defaultBranch: string;
+  url?: string;
+  updatedAt?: string;
+};
+
+type GithubRepoResponse = {
+  connected: boolean;
+  dryRun?: boolean;
+  note?: string;
+  items: GithubRepo[];
 };
 
 type UploadProgress = {
@@ -223,6 +242,8 @@ export function FileManagerClient() {
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
   const [autoPullEnabled, setAutoPullEnabled] = useState(false);
   const [autoPullBusy, setAutoPullBusy] = useState(false);
+  const [repoPickerOpen, setRepoPickerOpen] = useState(false);
+  const [repoSearch, setRepoSearch] = useState("");
   const promptResolverRef = useRef<((value: string | null) => void) | null>(null);
   const confirmResolverRef = useRef<((value: boolean) => void) | null>(null);
   const autoPullTimerRef = useRef<number | null>(null);
@@ -258,6 +279,12 @@ export function FileManagerClient() {
     queryKey: ["files-git-status", currentPath],
     queryFn: () => apiPost<GitStatusResponse>("/files/git/status", { path: currentPath }),
     enabled: Boolean(selectedRoot && !currentInTrash),
+    retry: false
+  });
+  const githubRepos = useQuery({
+    queryKey: ["files-github-repos", repoSearch],
+    queryFn: () => apiGet<GithubRepoResponse>(`/deployments/github/repos?${queryString({ search: repoSearch })}`),
+    enabled: repoPickerOpen,
     retry: false
   });
 
@@ -448,6 +475,21 @@ export function FileManagerClient() {
       await invalidateFiles();
     },
     onError: (err) => setLastResult(err instanceof Error ? err.message : "Git pull failed")
+  });
+
+  const githubPull = useMutation({
+    mutationFn: (repo: GithubRepo) => apiPost<{ ok: true; path: string; owner: string; repo: string; branch: string }>("/files/git/github/pull", {
+      owner: repo.owner,
+      repo: repo.name,
+      branch: repo.defaultBranch || "main",
+      targetParentPath: currentPath
+    }),
+    onSuccess: async (response) => {
+      setLastResult(`Pulled ${response.owner}/${response.repo} into ${response.path}`);
+      setRepoPickerOpen(false);
+      await invalidateFiles();
+    },
+    onError: (err) => setLastResult(err instanceof Error ? err.message : "Could not pull GitHub project")
   });
 
   useEffect(() => {
@@ -741,6 +783,17 @@ export function FileManagerClient() {
             >
               <RefreshCw size={15} />
               <span>Git Pull</span>
+            </button>
+            <button
+              aria-label="Pull from GitHub projects"
+              className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={currentInTrash}
+              onClick={() => setRepoPickerOpen(true)}
+              title="Choose project from GitHub and pull into this folder"
+              type="button"
+            >
+              <Github size={15} />
+              <span>GitHub Projects</span>
             </button>
             <button
               aria-label="Toggle auto pull"
@@ -1231,6 +1284,61 @@ export function FileManagerClient() {
         pending={deleteItems.isPending}
         title={currentInTrash ? "Delete permanently?" : "Move item to trash?"}
       />
+      {repoPickerOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-6">
+          <div className="flex max-h-[82vh] w-full max-w-3xl flex-col overflow-hidden rounded-md border border-panel-line bg-white shadow-xl">
+            <div className="flex items-center justify-between border-b border-panel-line p-4">
+              <div>
+                <div className="flex items-center gap-2 text-sm font-semibold"><Github size={17} />GitHub Projects</div>
+                <div className="mt-1 text-xs text-panel-muted">Choose any repository and pull it into the current folder.</div>
+              </div>
+              <button className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line" onClick={() => setRepoPickerOpen(false)} type="button">
+                <X size={16} />
+              </button>
+            </div>
+            <div className="border-b border-panel-line p-4">
+              <div className="relative">
+                <Search className="absolute left-3 top-2.5 text-panel-muted" size={15} />
+                <input
+                  className="h-9 w-full rounded-md border border-panel-line pl-9 pr-3 text-sm"
+                  onChange={(event) => setRepoSearch(event.target.value)}
+                  placeholder="Search GitHub repositories"
+                  value={repoSearch}
+                />
+              </div>
+            </div>
+            <div className="min-h-0 flex-1 overflow-auto p-4">
+              {!githubRepos.data?.connected ? (
+                <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                  GitHub not connected. Please connect from Deployments Create Project first, then come back here.
+                </div>
+              ) : null}
+              {githubRepos.isLoading ? <div className="text-sm text-panel-muted">Loading repositories...</div> : null}
+              {!githubRepos.isLoading && (githubRepos.data?.items?.length ?? 0) === 0 ? (
+                <div className="text-sm text-panel-muted">{githubRepos.data?.connected ? "No repositories found." : "No repositories to show yet."}</div>
+              ) : null}
+              <div className="space-y-2">
+                {(githubRepos.data?.items ?? []).map((repo) => (
+                  <div className="flex items-center justify-between rounded-md border border-panel-line px-3 py-2" key={repo.fullName}>
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-semibold">{repo.fullName}</div>
+                      <div className="text-xs text-panel-muted">Branch: {repo.defaultBranch || "main"}{repo.private ? " · Private" : ""}</div>
+                    </div>
+                    <button
+                      className="h-8 rounded-md border border-panel-line px-3 text-xs font-semibold hover:bg-slate-50 disabled:opacity-40"
+                      disabled={githubPull.isPending}
+                      onClick={() => githubPull.mutate(repo)}
+                      type="button"
+                    >
+                      Pull Here
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }

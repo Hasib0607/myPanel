@@ -12,6 +12,7 @@ import { z } from "zod";
 import { env } from "../config/env.js";
 import { audit } from "../lib/audit.js";
 import { ensureDomainFileStructure, ensureSubdomainFileStructure } from "../lib/domainFiles.js";
+import { getSecret } from "../lib/secrets.js";
 import { sysagent } from "../lib/sysagent.js";
 
 const execFileAsync = promisify(execFile);
@@ -283,6 +284,13 @@ const chmodSchema = z.object({ path: z.string(), mode: z.string().regex(/^[0-7]{
 const archiveSchema = z.object({ sourcePaths: z.array(z.string()).min(1).max(100), archivePath: z.string() });
 const extractSchema = z.object({ archivePath: z.string(), targetPath: z.string().default("."), overwrite: z.boolean().default(false) });
 const gitPathSchema = z.object({ path: z.string().default(".") });
+const githubRepoPullSchema = z.object({
+  owner: z.string().min(1),
+  repo: z.string().min(1),
+  branch: z.string().min(1).default("main"),
+  targetParentPath: z.string().default("."),
+  folderName: z.string().min(1).optional()
+});
 
 type GitProbeResult = {
   isRepo: boolean;
@@ -298,6 +306,25 @@ async function probeGitRepository(target: string): Promise<GitProbeResult> {
     const failed = error as Error & { stdout?: string; stderr?: string };
     return { isRepo: false, stdout: failed.stdout, stderr: failed.stderr };
   }
+}
+
+function githubTokenSecretRef() {
+  return "github:superadmin:token";
+}
+
+function commandTreeFailure(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const result = value as { dryRun?: boolean; returncode?: number; stderr?: string; stdout?: string; reason?: string };
+  if (result.dryRun) return "Command did not run live because sysagent live commands are disabled";
+  if (typeof result.returncode === "number" && result.returncode !== 0) {
+    return result.stderr || result.reason || result.stdout || `exit ${result.returncode}`;
+  }
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    if (!nested || typeof nested !== "object") continue;
+    const failed = commandTreeFailure(nested);
+    if (failed) return `${key}: ${failed}`;
+  }
+  return null;
 }
 
 export const fileRoutes: FastifyPluginAsync = async (app) => {
@@ -724,6 +751,34 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
       const failed = error as Error & { stderr?: string };
       throw app.httpErrors.badRequest(failed.stderr?.trim() || failed.message || "git pull failed");
     }
+  });
+
+  app.post("/git/github/pull", async (request) => {
+    const body = githubRepoPullSchema.parse(request.body);
+    const targetParent = safePath(body.targetParentPath);
+    const targetFolderName = body.folderName?.trim() || body.repo.trim();
+    const target = safeChild(targetParent, targetFolderName);
+    const githubOwner = body.owner.trim();
+    const githubRepo = body.repo.trim();
+    const gitUrl = `https://github.com/${encodeURIComponent(githubOwner)}/${encodeURIComponent(githubRepo)}.git`;
+    const token = await getSecret(githubTokenSecretRef());
+    const result = await sysagent.deploymentGitSync({
+      rootPath: target,
+      gitUrl,
+      gitToken: token ?? undefined,
+      branch: body.branch
+    }) as { dryRun?: boolean; [key: string]: unknown };
+    assertLiveSysagentResult(result);
+    const failure = commandTreeFailure(result);
+    if (failure) throw app.httpErrors.badRequest(failure);
+    return {
+      ok: true,
+      path: toRelative(target),
+      owner: githubOwner,
+      repo: githubRepo,
+      branch: body.branch,
+      result
+    };
   });
 
   app.post("/archive/create", async (request) => {
