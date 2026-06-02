@@ -96,6 +96,14 @@ type UploadProgress = {
   phase: "uploading" | "processing" | "done";
 };
 
+type ExtractProgress = {
+  fileName: string;
+  percent: number;
+  phase: "queued" | "extracting" | "refreshing" | "done";
+  current: number;
+  total: number;
+};
+
 type FileRootOption = {
   id: string;
   label: string;
@@ -178,6 +186,7 @@ export function FileManagerClient() {
   const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const [uploadDragActive, setUploadDragActive] = useState(false);
+  const [extractProgress, setExtractProgress] = useState<ExtractProgress | null>(null);
 
   const domains = useQuery({
     queryKey: ["domains", "file-manager"],
@@ -325,12 +334,41 @@ export function FileManagerClient() {
   });
 
   const archiveExtract = useMutation({
-    mutationFn: ({ archivePaths, targetPath }: { archivePaths: string[]; targetPath: string }) => Promise.all(archivePaths.map((archivePath) => apiPost("/files/archive/extract", { archivePath, targetPath, overwrite: false }))),
+    mutationFn: async ({ archivePaths, targetPath }: { archivePaths: string[]; targetPath: string }) => {
+      const total = archivePaths.length;
+      const results = [];
+      for (const [index, archivePath] of archivePaths.entries()) {
+        const fileName = archivePath.split("/").pop() ?? archivePath;
+        const basePercent = Math.round((index / total) * 90);
+        const maxBeforeDone = Math.round(((index + 0.92) / total) * 90);
+        setExtractProgress({ fileName, percent: Math.max(1, basePercent), phase: "extracting", current: index + 1, total });
+        const timer = window.setInterval(() => {
+          setExtractProgress((progress) => {
+            if (!progress || progress.fileName !== fileName || progress.phase !== "extracting") return progress;
+            return { ...progress, percent: Math.min(maxBeforeDone, progress.percent + 2) };
+          });
+        }, 700);
+        try {
+          results.push(await apiPost("/files/archive/extract", { archivePath, targetPath, overwrite: false }));
+        } finally {
+          window.clearInterval(timer);
+        }
+        setExtractProgress({ fileName, percent: Math.round(((index + 1) / total) * 90), phase: "extracting", current: index + 1, total });
+      }
+      setExtractProgress({ fileName: total === 1 ? (archivePaths[0]?.split("/").pop() ?? "Archive") : `${total} archives`, percent: 95, phase: "refreshing", current: total, total });
+      return results;
+    },
     onSuccess: async () => {
+      setExtractProgress((progress) => progress ? { ...progress, percent: 95, phase: "refreshing" } : progress);
       setLastResult("Archive extracted.");
       await invalidateFiles();
+      setExtractProgress((progress) => progress ? { ...progress, percent: 100, phase: "done" } : progress);
+      window.setTimeout(() => setExtractProgress(null), 900);
     },
-    onError: (err) => setLastResult(err instanceof Error ? err.message : "Could not extract archive")
+    onError: (err) => {
+      setExtractProgress(null);
+      setLastResult(err instanceof Error ? err.message : "Could not extract archive");
+    }
   });
 
   function submitSearch(event: FormEvent<HTMLFormElement>) {
@@ -528,7 +566,7 @@ export function FileManagerClient() {
         </div>
       </aside>
 
-      <main className="min-w-0 min-h-0 rounded-r-md border-y border-r border-panel-line bg-white">
+      <main className="min-w-0 min-h-0 rounded-r-md border-y border-r border-panel-line bg-white flex flex-col">
         <div className="space-y-3 border-b border-panel-line p-4">
           <div className="flex flex-wrap items-center gap-2">
             <select
@@ -652,7 +690,7 @@ export function FileManagerClient() {
           </div>
         ) : null}
 
-        <div className="h-[calc(100%-122px)] overflow-auto" onContextMenu={(event) => event.preventDefault()}>
+        <div className="min-h-0 flex-1 overflow-auto" onContextMenu={(event) => event.preventDefault()}>
           <table className="w-full min-w-[980px] table-fixed text-sm">
             <colgroup>
               <col style={{ width: "56px" }} />
@@ -910,6 +948,47 @@ export function FileManagerClient() {
                   </div>
                 </div>
               ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {extractProgress ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4">
+          <div className="w-full max-w-lg rounded-md bg-white shadow-xl">
+            <div className="flex items-center justify-between border-b border-panel-line p-5">
+              <div>
+                <div className="font-semibold text-panel-text">Extract archive</div>
+                <div className="mt-1 text-sm text-panel-muted">Please keep this page open while files are being extracted.</div>
+              </div>
+              <button
+                aria-label="Close extract progress"
+                className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line hover:bg-slate-50 disabled:opacity-50"
+                disabled={extractProgress.phase !== "done"}
+                onClick={() => setExtractProgress(null)}
+                title="Close"
+                type="button"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="p-5">
+              <div className="rounded-md border border-panel-line p-4">
+                <div className="flex items-center gap-3">
+                  <div className={`h-8 w-8 rounded-full border-2 border-panel-line border-t-panel-accent ${extractProgress.phase === "done" ? "" : "animate-spin"}`} />
+                  <div className="min-w-0 flex-1">
+                    <div className="font-semibold text-panel-text">
+                      {extractProgress.phase === "done" ? "Extract complete" : extractProgress.phase === "refreshing" ? "Refreshing file list" : "Extracting archive"}
+                    </div>
+                    <div className="mt-1 truncate text-sm text-panel-muted">
+                      {extractProgress.fileName} · {extractProgress.current}/{extractProgress.total}
+                    </div>
+                  </div>
+                  <div className="text-sm font-semibold text-panel-text">{extractProgress.percent}%</div>
+                </div>
+                <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100">
+                  <div className="h-full rounded-full bg-panel-accent transition-all" style={{ width: `${extractProgress.percent}%` }} />
+                </div>
+              </div>
             </div>
           </div>
         </div>
