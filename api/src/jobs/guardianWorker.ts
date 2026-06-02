@@ -8,6 +8,7 @@ import { prisma } from "../lib/prisma.js";
 import { sysagent } from "../lib/sysagent.js";
 import { checkPanelRemoteUpdate } from "../lib/panelUpdateMonitor.js";
 import { deployQueue } from "./queues.js";
+import { requiredRuntimeExecutables, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 
 const staleDeploymentMs = Number(process.env.GUARDIAN_STALE_DEPLOYMENT_MS ?? 15 * 60_000);
 const autoDeployRepairEnabled = process.env.GUARDIAN_AUTO_DEPLOY_REPAIR !== "false";
@@ -283,6 +284,78 @@ async function runDeploymentWatch() {
   return { checked: results.length, results };
 }
 
+async function runDeploymentGuardWatch() {
+  const deployments = await prisma.deployment.findMany({
+    where: {
+      framework: { in: ["LARAVEL", "NEXTJS", "NODEJS", "PYTHON", "GO"] },
+      status: { in: ["STOPPED", "QUEUED"] }
+    },
+    take: 40,
+    orderBy: { updatedAt: "desc" }
+  });
+
+  const guarded: Array<{ deploymentId: string; missingBefore: number; missingAfter: number; approvalsCreated: number }> = [];
+
+  for (const deployment of deployments) {
+    try {
+      const detection = await detectDeploymentSource(deployment.rootPath, deployment.rootDirectory);
+      const effectiveFramework = detection.detected;
+
+      const requiredTools = requiredRuntimeExecutables({
+        framework: effectiveFramework,
+        packageManager: detection.suggestions.packageManager ?? deployment.packageManager ?? null,
+        runtime: detection.suggestions.runtime ?? deployment.runtime ?? null,
+        processManager: deployment.processManager ?? null,
+        installCommand: deployment.installCommand ?? detection.suggestions.installCommand,
+        buildCommand: deployment.buildCommand ?? detection.suggestions.buildCommand,
+        startCommand: deployment.startCommand ?? detection.suggestions.startCommand
+      });
+
+      const toolsResult = await sysagent.deploymentRuntimeTools({ tools: requiredTools });
+      let missing = toolsResult.items.filter((tool) => !tool.installed).map((tool) => tool.name);
+      if (missing.length === 0) continue;
+      const missingBeforeCount = missing.length;
+
+      const installTargets = runtimeInstallTargetsForMissingExecutables(missing);
+      for (const target of installTargets) {
+        await sysagent.deploymentInstallRuntimeTool({ tool: target.tool });
+      }
+
+      const recheck = await sysagent.deploymentRuntimeTools({ tools: requiredTools });
+      missing = recheck.items.filter((tool) => !tool.installed).map((tool) => tool.name);
+      const approvalTargets = runtimeInstallTargetsForMissingExecutables(missing);
+
+      let approvalsCreated = 0;
+      for (const target of approvalTargets) {
+        const existing = await prisma.deploymentDoctorApproval.findFirst({
+          where: { deploymentId: deployment.id, actionKey: target.actionKey, status: { in: ["PENDING", "APPROVED"] } }
+        });
+        if (existing) continue;
+
+        await prisma.deploymentDoctorApproval.create({
+          data: {
+            deploymentId: deployment.id,
+            actionKey: target.actionKey,
+            label: target.label,
+            command: target.command,
+            reason: target.reason
+          }
+        });
+        approvalsCreated += 1;
+      }
+
+      guarded.push({ deploymentId: deployment.id, missingBefore: missingBeforeCount, missingAfter: missing.length, approvalsCreated });
+    } catch (error) {
+      logger.warn("deployment-guard-watch failed for deployment", {
+        deploymentId: deployment.id,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  return { checked: deployments.length, guarded };
+}
+
 async function runSslRenewWatch() {
   const renew = await sysagent.renewAllCertificates() as { dryRun?: boolean; returncode?: number; stderr?: string; stdout?: string };
   if (renew.dryRun || renew.returncode !== 0) {
@@ -318,6 +391,9 @@ export const guardianWorker = new Worker(
     logger.info("guardian job received", { id: job.id, name: job.name });
     if (job.name === "deployment-watch") {
       return runDeploymentWatch();
+    }
+    if (job.name === "deployment-guard-watch") {
+      return runDeploymentGuardWatch();
     }
     if (job.name === "panel-update-watch") {
       return checkPanelRemoteUpdate();

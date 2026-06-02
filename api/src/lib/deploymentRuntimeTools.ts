@@ -24,6 +24,7 @@ export type ComposerPlatformIssue = {
   currentPhpVersion: string | null;
   missingExtensions: string[];
   composerRootWarning: boolean;
+  composerLockOutdated: boolean;
 };
 
 function firstExecutable(command: string | null | undefined) {
@@ -238,17 +239,24 @@ function compareMajorMinorVersions(left: string, right: string) {
 }
 
 export function detectComposerPlatformIssue(text: string): ComposerPlatformIssue | null {
-  const requiredPhpVersion = text.match(/requires php(?:-[a-z0-9]+)?\s*(?:\^|>=|>|~)?\s*([0-9]+\.[0-9]+)/i)?.[1] ?? null;
+  const requiredPhpVersions = [...text.matchAll(/requires php(?:-[a-z0-9]+)?\s*(?:\^|>=|>|~)?\s*([0-9]+\.[0-9]+)/ig)].map((match) => match[1]);
   const currentPhpVersion = text.match(/your php(?:-[a-z0-9]+)? version \(([\d.]+)\)/i)?.[1] ?? null;
   const missingExtensions = [...text.matchAll(/requires ext-([a-z0-9_]+)/ig)].map((match) => match[1].toLowerCase());
   const composerRootWarning = /do not run composer as root\/super user/i.test(text);
+  const composerLockOutdated = /lock file is not up to date with the latest changes in composer\.json/i.test(text)
+    || /your lock file does not contain a compatible set of packages/i.test(text);
+  const requiredPhpVersion = requiredPhpVersions.reduce<string | null>((highest, candidate) => {
+    if (!highest) return candidate;
+    return compareMajorMinorVersions(candidate, highest) > 0 ? candidate : highest;
+  }, null);
 
-  if (!requiredPhpVersion && !currentPhpVersion && missingExtensions.length === 0 && !composerRootWarning) return null;
+  if (!requiredPhpVersion && !currentPhpVersion && missingExtensions.length === 0 && !composerRootWarning && !composerLockOutdated) return null;
   return {
     requiredPhpVersion,
     currentPhpVersion,
     missingExtensions: [...new Set(missingExtensions)],
-    composerRootWarning
+    composerRootWarning,
+    composerLockOutdated
   };
 }
 

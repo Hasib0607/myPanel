@@ -1578,6 +1578,35 @@ async function autoRepairComposerPlatformIssue(deploymentId: string, releaseId: 
   return autoInstalled.length > 0;
 }
 
+async function ensureComposerPlatformCompatible(
+  deploymentId: string,
+  releaseId: string | undefined,
+  appPath: string,
+  envVars: Record<string, string>
+) {
+  const verify = () =>
+    runStep(deploymentId, releaseId, "PREFLIGHT", "Composer platform requirements check", () =>
+      sysagent.deploymentBuild({
+        rootPath: appPath,
+        command: "composer check-platform-reqs --no-interaction",
+        env: envVars
+      })
+    );
+
+  let result = await verify();
+  try {
+    assertCommandTree(result, "Composer platform requirements check");
+    return;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const repaired = await autoRepairComposerPlatformIssue(deploymentId, releaseId, detail).catch(() => false);
+    if (!repaired) throw error;
+
+    result = await verify();
+    assertCommandTree(result, "Composer platform requirements check retry");
+  }
+}
+
 async function ensureComposerDeclaredPlatformExtensions(deploymentId: string, releaseId: string | undefined, appPath: string) {
   const composerJsonPath = path.join(appPath, "composer.json");
   let composerJson: unknown;
@@ -2373,6 +2402,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       const runsComposer = deployment.packageManager === "COMPOSER" || /\bcomposer\b/i.test(installCommandText ?? "");
       if (runsComposer) {
         try {
+          await ensureComposerPlatformCompatible(deployment.id, releaseId, appPath, envVars);
           await ensureComposerDeclaredPlatformExtensions(deployment.id, releaseId, appPath);
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);

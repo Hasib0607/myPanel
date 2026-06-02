@@ -615,6 +615,13 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
   if (lower.includes("vendor/autoload.php") && lower.includes("artisan")) return { message: "Laravel vendor dependencies are missing. Guardian now auto-runs composer install before restart; retry deploy/restart.", repairAction: "redeploy", category: "laravel_vendor_missing" };
   if (lower.includes("the home or composer_home environment variable must be set")) return { message: "Composer runtime HOME/COMPOSER_HOME was missing on sysagent. Guardian/sysagent now auto-sets fallback HOME paths; retry deploy.", repairAction: "redeploy", category: "composer_home_missing" };
   const composerPlatform = detectComposerPlatformIssue(text);
+  if (composerPlatform?.composerLockOutdated) {
+    return {
+      message: "Composer lockfile is out of date with composer.json or incompatible with this PHP runtime. Regenerate composer.lock on a compatible PHP version, commit it, then redeploy.",
+      repairAction: "redeploy",
+      category: "composer_lock_outdated"
+    };
+  }
   const phpVersionMismatch = Boolean(
     composerPlatform?.requiredPhpVersion
     && (!composerPlatform.currentPhpVersion || Number((composerPlatform.currentPhpVersion.split(".")[0] ?? "0")) < Number((composerPlatform.requiredPhpVersion.split(".")[0] ?? "0"))
