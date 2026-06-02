@@ -18,7 +18,8 @@ import {
   Search,
   Settings2,
   Trash2,
-  Upload
+  Upload,
+  X
 } from "lucide-react";
 import { apiDeleteBody, apiGet, apiPatch, apiPost, apiUploadWithProgress } from "@/lib/api";
 import { ConfirmModal } from "@/components/confirm-modal";
@@ -172,6 +173,8 @@ export function FileManagerClient() {
   const [selectedDomainId, setSelectedDomainId] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null);
   const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
+  const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
+  const [uploadDragActive, setUploadDragActive] = useState(false);
 
   const domains = useQuery({
     queryKey: ["domains", "file-manager"],
@@ -377,7 +380,10 @@ export function FileManagerClient() {
       setUploadProgress({ fileName: file.name, percent: 100, phase: "done" });
       setLastResult("Uploaded.");
       await invalidateFiles();
-      window.setTimeout(() => setUploadProgress(null), 700);
+      window.setTimeout(() => {
+        setUploadProgress(null);
+        setUploadDialogOpen(false);
+      }, 700);
     } catch (error) {
       setUploadProgress(null);
       if (!overwrite && error instanceof Error && /exists|already/i.test(error.message)) {
@@ -386,6 +392,12 @@ export function FileManagerClient() {
       }
       throw error;
     }
+  }
+
+  function startUpload(file: File | null | undefined) {
+    if (!file) return;
+    setUploadDialogOpen(true);
+    uploadFile(file).catch((error) => setLastResult(error instanceof Error ? error.message : "Upload failed"));
   }
 
   function selectDomain(domainId: string) {
@@ -517,14 +529,9 @@ export function FileManagerClient() {
               const name = window.prompt("New folder name");
               if (name) createFolder.mutate(name);
             }} title="New folder" type="button"><FolderPlus size={16} /></button>
-            <label aria-label="Upload" className="flex h-9 w-9 cursor-pointer items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50" title="Upload">
+            <button aria-label="Upload" className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50" onClick={() => setUploadDialogOpen(true)} title="Upload" type="button">
               <Upload size={16} />
-              <input className="hidden" onChange={(event) => {
-                const file = event.target.files?.[0];
-                if (file) uploadFile(file).catch((error) => setLastResult(error instanceof Error ? error.message : "Upload failed"));
-                event.target.value = "";
-              }} type="file" />
-            </label>
+            </button>
             <div className="mx-1 h-6 border-l border-panel-line" />
             <button
               aria-label="Zip selected"
@@ -801,24 +808,80 @@ export function FileManagerClient() {
           </div>
         </div>
       ) : null}
-      {uploadProgress ? (
+      {uploadDialogOpen || uploadProgress ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4">
-          <div className="w-full max-w-md rounded-md bg-white p-6 shadow-xl">
-            <div className="flex items-center gap-3">
-              <div className="h-9 w-9 animate-spin rounded-full border-2 border-panel-line border-t-panel-accent" />
-              <div className="min-w-0">
-                <div className="font-semibold text-panel-text">
-                  {uploadProgress.phase === "done" ? "Upload complete" : uploadProgress.phase === "processing" ? "Finishing upload" : uploadProgress.phase === "preparing" ? "Preparing upload" : "Uploading file"}
-                </div>
-                <div className="mt-1 truncate text-sm text-panel-muted">{uploadProgress.fileName}</div>
+          <div className="w-full max-w-lg rounded-md bg-white shadow-xl">
+            <div className="flex items-center justify-between border-b border-panel-line p-5">
+              <div>
+                <div className="font-semibold text-panel-text">Upload file</div>
+                <div className="mt-1 text-sm text-panel-muted">Drop a file here or choose one from your device.</div>
               </div>
+              <button
+                aria-label="Close upload"
+                className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line hover:bg-slate-50 disabled:opacity-50"
+                disabled={Boolean(uploadProgress && uploadProgress.phase !== "done")}
+                onClick={() => {
+                  setUploadDialogOpen(false);
+                  setUploadDragActive(false);
+                }}
+                title="Close"
+                type="button"
+              >
+                <X size={16} />
+              </button>
             </div>
-            <div className="mt-5 flex items-center justify-between text-sm">
-              <span className="capitalize text-panel-muted">{uploadProgress.phase}</span>
-              <span className="font-semibold text-panel-text">{uploadProgress.percent}%</span>
-            </div>
-            <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
-              <div className="h-full rounded-full bg-panel-accent transition-all" style={{ width: `${uploadProgress.percent}%` }} />
+            <div className="p-5">
+              <div
+                className={`flex min-h-44 flex-col items-center justify-center rounded-md border border-dashed p-6 text-center transition ${uploadDragActive ? "border-panel-accent bg-emerald-50" : "border-panel-line bg-slate-50"}`}
+                onDragEnter={(event) => {
+                  event.preventDefault();
+                  setUploadDragActive(true);
+                }}
+                onDragLeave={(event) => {
+                  event.preventDefault();
+                  setUploadDragActive(false);
+                }}
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  setUploadDragActive(false);
+                  startUpload(event.dataTransfer.files?.[0]);
+                }}
+              >
+                <Upload className="text-panel-muted" size={28} />
+                <div className="mt-3 font-medium text-panel-text">Drag file to upload</div>
+                <div className="mt-1 max-w-sm text-sm text-panel-muted">Files will upload to the current folder.</div>
+                <label className="mt-4 flex h-9 cursor-pointer items-center gap-2 rounded-md border border-panel-line bg-white px-4 text-sm font-medium hover:bg-slate-50">
+                  <Upload size={15} />
+                  Choose file
+                  <input
+                    className="hidden"
+                    disabled={Boolean(uploadProgress && uploadProgress.phase !== "done")}
+                    onChange={(event) => {
+                      startUpload(event.target.files?.[0]);
+                      event.target.value = "";
+                    }}
+                    type="file"
+                  />
+                </label>
+              </div>
+              {uploadProgress ? (
+                <div className="mt-5 rounded-md border border-panel-line p-4">
+                  <div className="flex items-center gap-3">
+                    <div className="h-8 w-8 animate-spin rounded-full border-2 border-panel-line border-t-panel-accent" />
+                    <div className="min-w-0 flex-1">
+                      <div className="font-semibold text-panel-text">
+                        {uploadProgress.phase === "done" ? "Upload complete" : uploadProgress.phase === "processing" ? "Finishing upload" : uploadProgress.phase === "preparing" ? "Preparing upload" : "Uploading file"}
+                      </div>
+                      <div className="mt-1 truncate text-sm text-panel-muted">{uploadProgress.fileName}</div>
+                    </div>
+                    <div className="text-sm font-semibold text-panel-text">{uploadProgress.percent}%</div>
+                  </div>
+                  <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100">
+                    <div className="h-full rounded-full bg-panel-accent transition-all" style={{ width: `${uploadProgress.percent}%` }} />
+                  </div>
+                </div>
+              ) : null}
             </div>
           </div>
         </div>
