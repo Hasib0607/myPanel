@@ -454,7 +454,12 @@ build_application() {
     create_postgresql_database
   fi
   runuser -u "$APP_USER" -- bash -lc "cd '$APP_DIR/api' && npm run prisma:generate && npx prisma migrate deploy && npm run build"
-  runuser -u "$APP_USER" -- bash -lc "cd '$APP_DIR/frontend' && npm run build"
+  if ! runuser -u "$APP_USER" -- bash -lc "cd '$APP_DIR/frontend' && npm run build"; then
+    log "Frontend build failed; cleaning stale build artifacts and retrying once"
+    rm -rf "$APP_DIR/frontend/.next" "$APP_DIR/frontend/.next.tmp" "$APP_DIR/frontend/node_modules/.cache" || true
+    chown -R "$APP_USER:$APP_USER" "$APP_DIR/frontend"
+    runuser -u "$APP_USER" -- bash -lc "cd '$APP_DIR/frontend' && npm cache clean --force || true && npm run build"
+  fi
 }
 
 write_systemd_services() {

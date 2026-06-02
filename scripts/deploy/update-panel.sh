@@ -343,6 +343,38 @@ npm_install_with_recovery() {
   return "$status"
 }
 
+frontend_build_with_recovery() {
+  local output_file=""
+  local status=0
+
+  log "+ $NPM_BIN --workspace frontend run build"
+  output_file="$(mktemp)"
+  set +e
+  "$NPM_BIN" --workspace frontend run build 2>&1 | tee "$output_file" | tee -a "$LOG_FILE"
+  status=${PIPESTATUS[0]}
+  set -e
+  if [[ "$status" == "0" ]]; then
+    rm -f "$output_file"
+    return 0
+  fi
+
+  log "frontend build failed with exit code $status; cleaning .next and retrying once"
+  rm -rf "$APP_DIR/frontend/.next" "$APP_DIR/frontend/.next.tmp" "$APP_DIR/frontend/node_modules/.cache" 2>&1 | tee -a "$LOG_FILE" || true
+  find "$APP_DIR/frontend" -maxdepth 2 -type d -name ".*-*" -print -exec rm -rf {} + 2>&1 | tee -a "$LOG_FILE" || true
+  "$NPM_BIN" cache clean --force 2>&1 | tee -a "$LOG_FILE" || true
+
+  log "+ $NPM_BIN --workspace frontend run build"
+  set +e
+  "$NPM_BIN" --workspace frontend run build 2>&1 | tee -a "$LOG_FILE"
+  status=${PIPESTATUS[0]}
+  set -e
+  rm -f "$output_file"
+  if [[ "$status" != "0" ]]; then
+    write_status "failed" "frontend build failed with exit code $status after retry" "$(current_commit)" "$(current_commit_subject)"
+    return "$status"
+  fi
+}
+
 set_env_value() {
   local key="$1"
   local value="$2"
@@ -606,7 +638,7 @@ run "$NPM_BIN" --workspace api run prisma:generate
   run "$NPM_BIN" run build
 )
 
-run "$NPM_BIN" --workspace frontend run build
+frontend_build_with_recovery
 
 patch_nginx_websocket
 
