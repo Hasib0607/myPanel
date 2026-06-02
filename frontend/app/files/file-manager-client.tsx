@@ -440,11 +440,16 @@ export function FileManagerClient() {
     } else {
       setSelectedPath(item.path);
     }
-    setContextMenu({ x: Math.min(event.clientX, window.innerWidth - 230), y: Math.min(event.clientY, window.innerHeight - 330), item });
+    setContextMenu({
+      x: Math.min(event.clientX, window.innerWidth - 260),
+      y: Math.min(event.clientY, window.innerHeight - 520),
+      item
+    });
   }
 
   const contextItem = contextMenu?.item ?? null;
   const contextCanEdit = contextItem?.type === "file" && contextItem.kind === "text";
+  const contextIsZip = contextItem?.type === "file" && (contextItem.extension.toLowerCase() === ".zip" || contextItem.name.toLowerCase().endsWith(".zip"));
   const selectedCount = selectedPaths.size;
 
   return (
@@ -666,9 +671,9 @@ export function FileManagerClient() {
 
       {contextItem ? (
         <div
-          className="fixed z-50 w-56 overflow-hidden rounded-md border border-panel-line bg-white py-1 text-sm shadow-xl"
+          className="fixed z-50 max-h-[calc(100vh-24px)] w-56 overflow-y-auto rounded-md border border-panel-line bg-white py-1 text-sm shadow-xl"
           onClick={(event) => event.stopPropagation()}
-          style={{ left: contextMenu?.x ?? 0, top: contextMenu?.y ?? 0 }}
+          style={{ left: Math.max(12, contextMenu?.x ?? 0), top: Math.max(12, contextMenu?.y ?? 0) }}
         >
           <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={() => { setInfoTarget(contextItem); setContextMenu(null); }} type="button">
             <Info size={15} /> Info
@@ -731,7 +736,7 @@ export function FileManagerClient() {
           }} type="button">
             <Archive size={15} /> Zip
           </button>
-          {contextItem.extension === ".zip" ? (
+          {contextIsZip ? (
             <button className="flex h-9 w-full items-center gap-2 px-3 text-left hover:bg-slate-50" onClick={() => { archiveExtract.mutate({ archivePath: contextItem.path, targetPath: parentPath(contextItem.path) }); setContextMenu(null); }} type="button">
               <Archive size={15} /> Extract
             </button>
