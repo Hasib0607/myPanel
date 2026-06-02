@@ -1,8 +1,10 @@
-import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { createReadStream, createWriteStream } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { Transform, type Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
 import type { FastifyPluginAsync } from "fastify";
@@ -14,8 +16,9 @@ import { sysagent } from "../lib/sysagent.js";
 
 const execFileAsync = promisify(execFile);
 const textReadLimit = 1024 * 1024;
-const uploadLimit = 10 * 1024 * 1024;
+const uploadLimit = env.FILE_MANAGER_UPLOAD_LIMIT_BYTES;
 const treeEntryLimit = 1500;
+const rawUploadContentType = "application/vnd.vps-panel.file-upload";
 
 const unsafeName = /[<>:"|?*\x00-\x1F]/;
 
@@ -240,11 +243,16 @@ const renameSchema = z.object({ path: z.string(), name: z.string() });
 const copyMoveSchema = z.object({ sourcePath: z.string(), targetParentPath: z.string().default("."), name: z.string().optional(), overwrite: z.boolean().default(false) });
 const deleteSchema = z.object({ paths: z.array(z.string()).min(1).max(100) });
 const uploadSchema = z.object({ parentPath: z.string().default("."), name: z.string(), contentBase64: z.string(), overwrite: z.boolean().default(false) });
+const rawUploadQuery = z.object({ parentPath: z.string().default("."), name: z.string(), overwrite: z.coerce.boolean().default(false) });
 const chmodSchema = z.object({ path: z.string(), mode: z.string().regex(/^[0-7]{3,4}$/) });
 const archiveSchema = z.object({ sourcePaths: z.array(z.string()).min(1).max(100), archivePath: z.string() });
 const extractSchema = z.object({ archivePath: z.string(), targetPath: z.string().default("."), overwrite: z.boolean().default(false) });
 
 export const fileRoutes: FastifyPluginAsync = async (app) => {
+  app.addContentTypeParser(rawUploadContentType, (_request, payload, done) => {
+    done(null, payload);
+  });
+
   app.addHook("preHandler", app.requireAuth);
 
   app.get("/overview", async () => {
@@ -432,7 +440,50 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
     return { ok: true, removed };
   });
 
-  app.post("/upload", { bodyLimit: uploadLimit * 1.4 }, async (request, reply) => {
+  app.post("/upload", { bodyLimit: Math.ceil(uploadLimit * 1.02) }, async (request, reply) => {
+    if (String(request.headers["content-type"] ?? "").startsWith(rawUploadContentType)) {
+      const query = rawUploadQuery.parse(request.query);
+      const parent = await ensureParentFolderReady(query.parentPath);
+      const file = safeChild(parent, query.name);
+      const contentLength = Number(request.headers["content-length"] ?? 0);
+      if (contentLength > uploadLimit) throw app.httpErrors.payloadTooLarge("Upload is too large");
+      if (!query.overwrite) {
+        await fs.access(file).then(() => {
+          throw app.httpErrors.conflict("Target already exists");
+        }).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== "ENOENT") throw error;
+        });
+      }
+
+      let bytes = 0;
+      const limiter = new Transform({
+        transform(chunk: Buffer, _encoding, callback) {
+          bytes += chunk.byteLength;
+          if (bytes > uploadLimit) {
+            const error = app.httpErrors.payloadTooLarge("Upload is too large");
+            callback(error);
+            return;
+          }
+          callback(null, chunk);
+        }
+      });
+
+      const tempFile = path.join(parent, `.upload-${process.pid}-${randomUUID()}.tmp`);
+      try {
+        await pipeline(request.body as Readable, limiter, createWriteStream(tempFile, { flags: "wx" }));
+        if (!query.overwrite) {
+          await fs.link(tempFile, file);
+          await fs.rm(tempFile, { force: true });
+        } else {
+          await fs.rename(tempFile, file);
+        }
+      } catch (error) {
+        await fs.rm(tempFile, { force: true }).catch(() => undefined);
+        throw error;
+      }
+      return reply.code(201).send(await statEntry(file));
+    }
+
     const body = uploadSchema.parse(request.body);
     const parent = await ensureParentFolderReady(body.parentPath);
     const file = safeChild(parent, body.name);

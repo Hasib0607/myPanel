@@ -92,7 +92,7 @@ type DomainScaffoldResponse = {
 type UploadProgress = {
   fileName: string;
   percent: number;
-  phase: "preparing" | "uploading" | "processing" | "done";
+  phase: "uploading" | "processing" | "done";
 };
 
 type FileRootOption = {
@@ -361,22 +361,19 @@ export function FileManagerClient() {
         return uploadFile(file, true);
       }
 
-      setUploadProgress({ fileName: file.name, percent: 0, phase: "preparing" });
-      const buffer = await file.arrayBuffer();
-      const bytes = new Uint8Array(buffer);
-      let binary = "";
-      bytes.forEach((byte) => {
-        binary += String.fromCharCode(byte);
-      });
       setUploadProgress({ fileName: file.name, percent: 0, phase: "uploading" });
-      const payload = JSON.stringify({ parentPath: currentPath, name: file.name, contentBase64: btoa(binary), overwrite });
-      await apiUploadWithProgress("/files/upload", payload, "application/json", (percent) => {
-        setUploadProgress({
-          fileName: file.name,
-          percent,
-          phase: percent >= 100 ? "processing" : "uploading"
-        });
-      });
+      await apiUploadWithProgress(
+        `/files/upload?${queryString({ parentPath: currentPath, name: file.name, overwrite: overwrite ? "true" : "false" })}`,
+        file,
+        "application/vnd.vps-panel.file-upload",
+        (percent) => {
+          setUploadProgress({
+            fileName: file.name,
+            percent,
+            phase: percent >= 100 ? "processing" : "uploading"
+          });
+        }
+      );
       setUploadProgress({ fileName: file.name, percent: 100, phase: "done" });
       setLastResult("Uploaded.");
       await invalidateFiles();
@@ -871,7 +868,7 @@ export function FileManagerClient() {
                     <div className="h-8 w-8 animate-spin rounded-full border-2 border-panel-line border-t-panel-accent" />
                     <div className="min-w-0 flex-1">
                       <div className="font-semibold text-panel-text">
-                        {uploadProgress.phase === "done" ? "Upload complete" : uploadProgress.phase === "processing" ? "Finishing upload" : uploadProgress.phase === "preparing" ? "Preparing upload" : "Uploading file"}
+                        {uploadProgress.phase === "done" ? "Upload complete" : uploadProgress.phase === "processing" ? "Finishing upload" : "Uploading file"}
                       </div>
                       <div className="mt-1 truncate text-sm text-panel-muted">{uploadProgress.fileName}</div>
                     </div>

@@ -39,7 +39,7 @@ server {
     listen $PANEL_LOGIN_PORT;
     server_name $VPS_IP _;
 
-    client_max_body_size 100M;
+    client_max_body_size 1024M;
 
     location = /health {
         proxy_pass http://127.0.0.1:$PANEL_API_PORT/health;

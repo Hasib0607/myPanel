@@ -413,6 +413,7 @@ ALLOW_PENDING_VANITY_NAMESERVER_DOMAINS=true
 DOMAIN_NAMESERVER_RESOLVERS=1.1.1.1,8.8.8.8,9.9.9.9
 DOMAIN_NAMESERVER_DOH_URLS=https://cloudflare-dns.com/dns-query,https://dns.google/resolve,https://dns.quad9.net/dns-query
 FILE_MANAGER_ROOT=/var/www
+FILE_MANAGER_UPLOAD_LIMIT_BYTES=1073741824
 NGINX_SITES_AVAILABLE=$NGINX_SITES_AVAILABLE
 NGINX_SITES_ENABLED=$NGINX_SITES_ENABLED
 ALLOW_LIVE_SYSTEM_COMMANDS=true
@@ -595,7 +596,7 @@ server {
     listen $PANEL_LOGIN_PORT$(if [[ "$PANEL_PUBLIC_SCHEME" == "https" && -n "$PANEL_DOMAIN" ]]; then printf " ssl"; fi);
     server_name $PANEL_PUBLIC_HOST $VPS_IP _;
 
-    client_max_body_size 100M;
+    client_max_body_size 1024M;
 $(if [[ "$PANEL_PUBLIC_SCHEME" == "https" && -n "$PANEL_DOMAIN" ]]; then cat <<SSL
     ssl_certificate /etc/letsencrypt/live/$PANEL_DOMAIN/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/$PANEL_DOMAIN/privkey.pem;
@@ -641,7 +642,7 @@ server {
     listen $CPANEL_LOGIN_PORT$(if [[ "$PANEL_PUBLIC_SCHEME" == "https" && -n "$PANEL_DOMAIN" ]]; then printf " ssl"; fi);
     server_name $PANEL_PUBLIC_HOST $VPS_IP _;
 
-    client_max_body_size 100M;
+    client_max_body_size 1024M;
 $(if [[ "$PANEL_PUBLIC_SCHEME" == "https" && -n "$PANEL_DOMAIN" ]]; then cat <<SSL
     ssl_certificate /etc/letsencrypt/live/$PANEL_DOMAIN/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/$PANEL_DOMAIN/privkey.pem;

@@ -175,7 +175,7 @@ server {
     listen $PANEL_LOGIN_PORT$ssl_listen;
     server_name $PANEL_PUBLIC_HOST $VPS_IP _;
 
-    client_max_body_size 100M;
+    client_max_body_size 1024M;
 $ssl_block
 
     location = /health {
@@ -217,7 +217,7 @@ server {
     listen $CPANEL_LOGIN_PORT$ssl_listen;
     server_name $PANEL_PUBLIC_HOST $VPS_IP _;
 
-    client_max_body_size 100M;
+    client_max_body_size 1024M;
 $ssl_block
 
     location /api/v1/ {
