@@ -3,13 +3,14 @@ import { redis } from "../lib/redis.js";
 import { logger } from "../lib/logger.js";
 import { expireGuardianIpBlocks, runGuardianAutoHeal, syncGuardianIncidentsOnly, type GuardianDiagnosis } from "../lib/guardianAutoHeal.js";
 import { restartDeploymentProcess, runGuardianDeploymentRepair } from "../lib/deploymentGuardianRepair.js";
-import { detectDeploymentSource } from "../lib/deploymentDetection.js";
+import { detectDeploymentSource, findLaravelAppRoot } from "../lib/deploymentDetection.js";
 import { prisma } from "../lib/prisma.js";
 import { sysagent } from "../lib/sysagent.js";
 import { checkPanelRemoteUpdate } from "../lib/panelUpdateMonitor.js";
 import { deployQueue } from "./queues.js";
 import { requiredRuntimeExecutables, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import { laravelPublicCwdMissing, permissionRepairNeeded, pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded } from "../lib/deploymentFailureRuntimeRepairs.js";
+import path from "node:path";
 
 const staleDeploymentMs = Number(process.env.GUARDIAN_STALE_DEPLOYMENT_MS ?? 15 * 60_000);
 const autoDeployRepairEnabled = process.env.GUARDIAN_AUTO_DEPLOY_REPAIR !== "false";
@@ -148,6 +149,41 @@ async function guardianApplyFailureRepairs(
             previousRootPath: deployment.rootPath,
             previousRootDirectory: deployment.rootDirectory,
             rootPath: correctedRootPath,
+            publicDirectory: deployment.publicDirectory || "public"
+          } as any
+        }
+      });
+    }
+
+    const nestedAppRoot = await findLaravelAppRoot(correctedRootPath, ".");
+    const relativeRootDirectory = nestedAppRoot ? path.relative(correctedRootPath, nestedAppRoot) : null;
+    if (
+      nestedAppRoot
+      && relativeRootDirectory
+      && !relativeRootDirectory.startsWith("..")
+      && !path.isAbsolute(relativeRootDirectory)
+    ) {
+      await prisma.deployment.update({
+        where: { id: deployment.id },
+        data: {
+          rootPath: correctedRootPath,
+          rootDirectory: relativeRootDirectory,
+          publicDirectory: deployment.publicDirectory || "public"
+        }
+      });
+      applied.push("correct-nested-laravel-root");
+      await prisma.deploymentLog.create({
+        data: {
+          deploymentId: deployment.id,
+          step: "PREFLIGHT",
+          level: "warn",
+          message: "Guardian corrected nested Laravel app root after missing public cwd",
+          metadata: {
+            previousRootPath: deployment.rootPath,
+            previousRootDirectory: deployment.rootDirectory,
+            rootPath: correctedRootPath,
+            rootDirectory: relativeRootDirectory,
+            appPath: nestedAppRoot,
             publicDirectory: deployment.publicDirectory || "public"
           } as any
         }

@@ -362,6 +362,46 @@ export async function deploymentHasLaravelPublicIndex(appPath: string) {
   }
 }
 
+async function hasLaravelArtisanAt(appPath: string) {
+  try {
+    const stat = await fs.stat(path.join(appPath, "artisan"));
+    return stat.isFile();
+  } catch {
+    return false;
+  }
+}
+
+export async function findLaravelAppRoot(rootPath: string, rootDirectory = ".") {
+  const root = path.resolve(rootPath);
+  const sourceRoot = path.resolve(root, rootDirectory || ".");
+  const candidates = [sourceRoot];
+
+  if (path.basename(sourceRoot).toLowerCase() === "public") {
+    candidates.push(path.dirname(sourceRoot));
+  }
+
+  try {
+    const entries = await fs.readdir(root, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name.startsWith(".")) continue;
+      candidates.push(path.join(root, entry.name));
+    }
+  } catch {
+    // The direct source root checks above still cover normal deployed directories.
+  }
+
+  const uniqueCandidates = Array.from(new Set(candidates.map((candidate) => path.resolve(candidate))));
+  const laravelCandidates: Array<{ appPath: string; hasPublicIndex: boolean }> = [];
+  for (const candidate of uniqueCandidates) {
+    if (await hasLaravelArtisanAt(candidate)) {
+      laravelCandidates.push({ appPath: candidate, hasPublicIndex: await deploymentHasLaravelPublicIndex(candidate) });
+    }
+  }
+  laravelCandidates.sort((left, right) => Number(right.hasPublicIndex) - Number(left.hasPublicIndex));
+  return laravelCandidates[0]?.appPath ?? null;
+}
+
 export async function deploymentRunsLaravel(framework: DeploymentFramework, appPath: string) {
   return framework === "LARAVEL" && await deploymentHasLaravelArtisan(appPath);
 }

@@ -13,6 +13,7 @@ import {
   deploymentRunsLaravel,
   detectDeploymentFiles,
   detectDeploymentSource,
+  findLaravelAppRoot,
   nodeStartUsesVitePreview
 } from "../lib/deploymentDetection.js";
 import { isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
@@ -1248,7 +1249,7 @@ async function optionalPublicRouteWarning(
       warning = null;
     }
     if (warning && (isNginxStaticRootForbidden(warning) || isPublicRouteHttp403(warning))) {
-      await republishDeploymentNginxVhost(deploymentId, releaseId, deployment, domain);
+      await republishDeploymentNginxVhost(deploymentId, releaseId, { ...deployment, rootPath: appPath }, domain);
       await guardianRepairSleep(2000);
       publicRoute = await runStep(deploymentId, releaseId, "HEALTH_CHECK", `${label} retry after nginx public route fix`, () =>
         sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain), rootPath: appPath, framework: deployment.framework, requireHttps: httpsReady })
@@ -1256,7 +1257,7 @@ async function optionalPublicRouteWarning(
       warning = await assertPublicRouteResult(publicRoute, label, deployment, appPath);
     }
     if (warning && isSslProtocolPublicRouteIssue(publicRoute, warning)) {
-      const sslRepairWarning = await repairDeploymentSslAccess(deploymentId, releaseId, deployment, domain);
+      const sslRepairWarning = await repairDeploymentSslAccess(deploymentId, releaseId, { ...deployment, rootPath: appPath }, domain);
       await guardianRepairSleep(2000);
       const retryHttpsReady = await deploymentHttpsReady(domain);
       publicRoute = await runStep(deploymentId, releaseId, "HEALTH_CHECK", `${label} retry after SSL/nginx repair`, () =>
@@ -1292,7 +1293,7 @@ async function optionalPublicRouteWarning(
     ) {
       envVars = deploymentEnvWithPublicUrl(envVars, domain, true);
       envVars = await ensureLaravelAppKey(deploymentId, releaseId, appPath, deployment.port, envVars);
-      await republishDeploymentNginxVhost(deploymentId, releaseId, deployment, domain);
+      await republishDeploymentNginxVhost(deploymentId, releaseId, { ...deployment, rootPath: appPath }, domain);
       await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Restart after HTTPS URL repair", () =>
         restartDeploymentProcess({
           deploymentId,
@@ -1919,8 +1920,28 @@ async function reconcileLaravelRootDirectory(
   if (await deploymentHasLaravelArtisan(appPath)) {
     return { deployment, appPath };
   }
+
+  const detectedLaravelAppRoot = await findLaravelAppRoot(deployment.rootPath, deployment.rootDirectory);
   const rootPath = path.resolve(deployment.rootPath);
   const parentPath = path.dirname(rootPath);
+  const appParentPath = path.dirname(path.resolve(appPath));
+  if (path.basename(path.resolve(appPath)).toLowerCase() === "public" && await deploymentHasLaravelArtisan(appParentPath)) {
+    const updated = await prisma.deployment.update({
+      where: { id: deployment.id },
+      data: { rootPath: appParentPath, rootDirectory: ".", publicDirectory: deployment.publicDirectory || "public" },
+      include: deploymentWorkerInclude
+    });
+
+    await writeLog(deployment.id, releaseId, "PREFLIGHT", "Corrected Laravel deployment root from public directory", {
+      previousRootPath: deployment.rootPath,
+      previousRootDirectory: deployment.rootDirectory,
+      appPath,
+      rootPath: appParentPath,
+      publicDirectory: updated.publicDirectory
+    }, "warn");
+
+    return { deployment: updated, appPath: appParentPath };
+  }
   if (path.basename(rootPath).toLowerCase() === "public" && await deploymentHasLaravelArtisan(parentPath)) {
     const updated = await prisma.deployment.update({
       where: { id: deployment.id },
@@ -1930,12 +1951,33 @@ async function reconcileLaravelRootDirectory(
 
     await writeLog(deployment.id, releaseId, "PREFLIGHT", "Corrected Laravel deployment root from public directory", {
       previousRootPath: deployment.rootPath,
+      previousRootDirectory: deployment.rootDirectory,
       appPath,
       rootPath: parentPath,
       publicDirectory: updated.publicDirectory
     }, "warn");
 
     return { deployment: updated, appPath: parentPath };
+  }
+  if (detectedLaravelAppRoot) {
+    const relativeRootDirectory = path.relative(rootPath, detectedLaravelAppRoot);
+    if (relativeRootDirectory && !relativeRootDirectory.startsWith("..") && !path.isAbsolute(relativeRootDirectory)) {
+      const updated = await prisma.deployment.update({
+        where: { id: deployment.id },
+        data: { rootDirectory: relativeRootDirectory, publicDirectory: deployment.publicDirectory || "public" },
+        include: deploymentWorkerInclude
+      });
+
+      await writeLog(deployment.id, releaseId, "PREFLIGHT", "Corrected nested Laravel app root directory", {
+        previousRootDirectory: deployment.rootDirectory,
+        previousAppPath: appPath,
+        appPath: detectedLaravelAppRoot,
+        rootDirectory: updated.rootDirectory,
+        publicDirectory: updated.publicDirectory
+      }, "warn");
+
+      return { deployment: updated, appPath: detectedLaravelAppRoot };
+    }
   }
   if (!(await deploymentHasLaravelArtisan(deployment.rootPath))) {
     return { deployment, appPath };
@@ -2291,7 +2333,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
             deploymentId: deployment.id,
             fqdn: serverName ?? domain.name,
             upstreamPort: deployment.port,
-            rootPath: deployment.rootPath,
+            rootPath: appPath,
             framework: deployment.framework,
             startCommand: deployment.startCommand,
             publicDirectory: deployment.publicDirectory,
@@ -2589,7 +2631,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           deploymentId: deployment.id,
           fqdn: serverName ?? domain!.name,
           upstreamPort: deployment.port,
-          rootPath: deployment.rootPath,
+          rootPath: appPath,
           framework: deployment.framework,
           startCommand: deployment.startCommand,
           publicDirectory: deployment.publicDirectory,
@@ -2629,7 +2671,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
             deploymentId: deployment.id,
             fqdn: deploymentServerName({ ...domain!, includeWww }) ?? domain!.name,
             upstreamPort: deployment.port,
-            rootPath: deployment.rootPath,
+            rootPath: appPath,
             framework: deployment.framework,
             startCommand: deployment.startCommand,
             publicDirectory: deployment.publicDirectory,
@@ -2658,7 +2700,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
             deploymentId: deployment.id,
             fqdn: serverName ?? domain!.name,
             upstreamPort: deployment.port,
-            rootPath: deployment.rootPath,
+            rootPath: appPath,
             framework: deployment.framework,
             startCommand: deployment.startCommand,
             publicDirectory: deployment.publicDirectory,
@@ -2681,7 +2723,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           deploymentId: deployment.id,
           fqdn: serverName ?? activeDomain.name,
           upstreamPort: deployment.port,
-          rootPath: deployment.rootPath,
+          rootPath: appPath,
           framework: deployment.framework,
           startCommand: deployment.startCommand,
           publicDirectory: deployment.publicDirectory,
@@ -2699,7 +2741,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       );
       if (!tlsSync.httpsReady) {
         envVars = deploymentEnvWithPublicUrl(envVars, activeDomain, false);
-        await repairDeploymentSslAccess(deployment.id, releaseId, deployment, activeDomain).catch((error) =>
+        await repairDeploymentSslAccess(deployment.id, releaseId, { ...deployment, rootPath: appPath }, activeDomain).catch((error) =>
           writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "Automatic SSL repair skipped", {
             warning: error instanceof Error ? error.message : String(error)
           }, "warn")

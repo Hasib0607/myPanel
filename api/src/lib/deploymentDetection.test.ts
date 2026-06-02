@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { detectDeploymentFiles, deploymentHasLaravelPublicIndex } from "./deploymentDetection.js";
+import { detectDeploymentFiles, deploymentHasLaravelPublicIndex, findLaravelAppRoot } from "./deploymentDetection.js";
 
 test("detectDeploymentFiles prefers React package.json over composer.json", () => {
   const detection = detectDeploymentFiles(
@@ -97,6 +97,20 @@ test("deploymentHasLaravelPublicIndex distinguishes backend-only Laravel project
     await fs.writeFile(path.join(root, "public", "index.php"), "<?php\n");
 
     assert.equal(await deploymentHasLaravelPublicIndex(root), true);
+  } finally {
+    await fs.rm(root, { force: true, recursive: true });
+  }
+});
+
+test("findLaravelAppRoot detects nested Laravel app folders from zip uploads", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "deployment-detection-"));
+  try {
+    const app = path.join(root, "eBitans_Admin_Final");
+    await fs.mkdir(path.join(app, "public"), { recursive: true });
+    await fs.writeFile(path.join(app, "artisan"), "#!/usr/bin/env php\n");
+    await fs.writeFile(path.join(app, "public", "index.php"), "<?php\n");
+
+    assert.equal(await findLaravelAppRoot(root, "."), app);
   } finally {
     await fs.rm(root, { force: true, recursive: true });
   }

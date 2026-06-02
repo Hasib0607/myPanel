@@ -71,6 +71,7 @@ From Deployment Doctor or runtime-tools install:
 - [ ] Upgrade Composer/Laravel PHP runtime to PHP 8.2 when lockfiles require PHP 8.1/8.2+
 - [ ] PHP 8.2 repair removes old PHP 8.0 PECL ABI blockers (`php-pecl-redis*`, `php-pecl-msgpack*`, `php-pecl-igbinary*`) before module switch
 - [ ] PHP Redis extension repair removes old `php-pecl-redis*` ABI blockers and rebuilds `ext-redis` with PECL for the active PHP runtime
+- [ ] Laravel zip uploads with one nested app folder, for example `deployment/eBitans_Admin_Final/public/index.php`, auto-correct `rootDirectory` before Nginx/start/health checks
 - [ ] Backend-only Laravel deployments without `public/index.php` start as idle Supervisor jobs, skip `php artisan storage:link`, and do not raise public route 502 danger warnings
 - [ ] Install Composer (EPEL or fallback)
 - [ ] Install Go if needed
