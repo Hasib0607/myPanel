@@ -15,6 +15,7 @@ import { ensureDomainFileStructure, ensureSubdomainFileStructure } from "../lib/
 import { sysagent } from "../lib/sysagent.js";
 
 const execFileAsync = promisify(execFile);
+const archiveCommandMaxBuffer = 64 * 1024 * 1024;
 const textReadLimit = 1024 * 1024;
 const uploadLimit = env.FILE_MANAGER_UPLOAD_LIMIT_BYTES;
 const uploadChunkLimit = env.FILE_MANAGER_UPLOAD_CHUNK_BYTES;
@@ -612,9 +613,9 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
     const sources = body.sourcePaths.map((itemPath) => safePath(itemPath));
     const command = process.platform === "win32"
       ? { file: "powershell.exe", args: ["-NoProfile", "-Command", "Compress-Archive", "-LiteralPath", ...sources, "-DestinationPath", archive, "-Force"], cwd: undefined }
-      : { file: "zip", args: ["-r", archive, ...sources.map((source) => path.relative(path.dirname(archive), source))], cwd: path.dirname(archive) };
+      : { file: "zip", args: ["-rq", archive, ...sources.map((source) => path.relative(path.dirname(archive), source))], cwd: path.dirname(archive) };
     try {
-      await execFileAsync(command.file, command.args, command.cwd ? { cwd: command.cwd } : undefined);
+      await execFileAsync(command.file, command.args, command.cwd ? { cwd: command.cwd, maxBuffer: archiveCommandMaxBuffer } : { maxBuffer: archiveCommandMaxBuffer });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EPERM") {
         return { dryRun: true, command: [command.file, ...command.args], reason: "Archive command blocked by local execution policy" };
@@ -631,9 +632,9 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
     if (path.extname(archive).toLowerCase() !== ".zip") throw app.httpErrors.badRequest("Only .zip extraction is supported");
     const command = process.platform === "win32"
       ? { file: "powershell.exe", args: ["-NoProfile", "-Command", "Expand-Archive", "-LiteralPath", archive, "-DestinationPath", target, ...(body.overwrite ? ["-Force"] : [])] }
-      : { file: "unzip", args: [body.overwrite ? "-o" : "-n", archive, "-d", target] };
+      : { file: "unzip", args: ["-q", body.overwrite ? "-o" : "-n", archive, "-d", target] };
     try {
-      await execFileAsync(command.file, command.args);
+      await execFileAsync(command.file, command.args, { maxBuffer: archiveCommandMaxBuffer });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EPERM") {
         return { dryRun: true, command: [command.file, ...command.args], reason: "Archive command blocked by local execution policy" };
