@@ -4,6 +4,7 @@ import { FormEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "rea
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Archive,
+  ArrowRightLeft,
   ChevronRight,
   Copy,
   Download,
@@ -233,7 +234,7 @@ export function FileManagerClient() {
   const [direction, setDirection] = useState<"asc" | "desc">("asc");
   const [lastResult, setLastResult] = useState("");
   const [selectedDomainId, setSelectedDomainId] = useState("");
-  const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null);
+  const [deleteRequest, setDeleteRequest] = useState<{ paths: string[]; permanent: boolean } | null>(null);
   const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const [uploadDragActive, setUploadDragActive] = useState(false);
@@ -381,10 +382,11 @@ export function FileManagerClient() {
   });
 
   const deleteItems = useMutation({
-    mutationFn: (paths: string[]) => apiDeleteBody<{ ok: true; movedToTrash: string[]; permanentlyRemoved: string[] }>("/files/delete", { paths }),
+    mutationFn: ({ paths, permanent }: { paths: string[]; permanent: boolean }) =>
+      apiDeleteBody<{ ok: true; movedToTrash: string[]; permanentlyRemoved: string[] }>("/files/delete", { paths, permanent }),
     onSuccess: async (result) => {
       setSelectedPath(null);
-      setDeleteTarget(null);
+      setDeleteRequest(null);
       if (result.permanentlyRemoved.length > 0 && result.movedToTrash.length === 0) setLastResult("Permanently deleted.");
       else if (result.movedToTrash.length > 0 && result.permanentlyRemoved.length === 0) setLastResult("Moved to trash.");
       else setLastResult("Moved to trash and permanently deleted selected trash items.");
@@ -392,6 +394,11 @@ export function FileManagerClient() {
     },
     onError: (err) => setLastResult(err instanceof Error ? err.message : "Could not delete")
   });
+
+  function openDeleteConfirm(paths: string[]) {
+    if (paths.length === 0) return;
+    setDeleteRequest({ paths, permanent: currentInTrash });
+  }
 
   const copyItem = useMutation({
     mutationFn: ({ sourcePath, name }: { sourcePath: string; name: string }) => apiPost("/files/copy", { sourcePath, targetParentPath: currentPath, name, overwrite: false }),
@@ -409,6 +416,38 @@ export function FileManagerClient() {
       await invalidateFiles();
     },
     onError: (err) => setLastResult(err instanceof Error ? err.message : "Could not move")
+  });
+
+  const copySelected = useMutation({
+    mutationFn: async ({ sourcePaths, targetPath }: { sourcePaths: string[]; targetPath: string }) => {
+      const results = [];
+      for (const sourcePath of sourcePaths) {
+        results.push(await apiPost("/files/copy", { sourcePath, targetParentPath: targetPath, overwrite: false }));
+      }
+      return results;
+    },
+    onSuccess: async () => {
+      setLastResult("Selected items copied.");
+      await invalidateFiles();
+    },
+    onError: (err) => setLastResult(err instanceof Error ? err.message : "Could not copy selected items")
+  });
+
+  const moveSelected = useMutation({
+    mutationFn: async ({ sourcePaths, targetPath }: { sourcePaths: string[]; targetPath: string }) => {
+      const results = [];
+      for (const sourcePath of sourcePaths) {
+        results.push(await apiPost("/files/move", { sourcePath, targetParentPath: targetPath, overwrite: false }));
+      }
+      return results;
+    },
+    onSuccess: async () => {
+      setSelectedPaths(new Set());
+      setSelectedPath(null);
+      setLastResult("Selected items moved.");
+      await invalidateFiles();
+    },
+    onError: (err) => setLastResult(err instanceof Error ? err.message : "Could not move selected items")
   });
 
   const chmodItem = useMutation({
@@ -775,36 +814,33 @@ export function FileManagerClient() {
             <button aria-label="Refresh" className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50" onClick={() => list.refetch()} title="Refresh" type="button"><RefreshCw size={16} /></button>
             <button
               aria-label="Git pull"
-              className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+              className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
               disabled={!gitStatus.data?.isRepo || gitPull.isPending}
               onClick={() => gitPull.mutate()}
               title={gitStatus.data?.isRepo ? "Pull latest changes from git remote" : "Current folder is not a git repository"}
               type="button"
             >
-              <RefreshCw size={15} />
-              <span>Git Pull</span>
+              <RefreshCw size={16} />
             </button>
             <button
               aria-label="Pull from GitHub projects"
-              className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+              className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
               disabled={currentInTrash}
               onClick={() => setRepoPickerOpen(true)}
               title="Choose project from GitHub and pull into this folder"
               type="button"
             >
-              <Github size={15} />
-              <span>GitHub Projects</span>
+              <Github size={16} />
             </button>
             <button
               aria-label="Toggle auto pull"
-              className={`flex h-9 items-center gap-2 rounded-md border px-3 text-sm ${autoPullEnabled ? "border-emerald-300 bg-emerald-50 text-emerald-700" : "border-panel-line hover:bg-slate-50"} disabled:cursor-not-allowed disabled:opacity-40`}
+              className={`flex h-9 w-9 items-center justify-center rounded-md border text-sm ${autoPullEnabled ? "border-emerald-300 bg-emerald-50 text-emerald-700" : "border-panel-line hover:bg-slate-50"} disabled:cursor-not-allowed disabled:opacity-40`}
               disabled={!gitStatus.data?.isRepo}
               onClick={() => setAutoPullEnabled((current) => !current)}
-              title={gitStatus.data?.isRepo ? "Auto pull every 1 minute for this view" : "Current folder is not a git repository"}
+              title={gitStatus.data?.isRepo ? `Auto pull ${autoPullEnabled ? "ON" : "OFF"} (every 1 minute)` : "Current folder is not a git repository"}
               type="button"
             >
-              <RefreshCw size={15} />
-              <span>Auto Pull: {autoPullEnabled ? "On" : "Off"}</span>
+              <RefreshCw size={16} className={autoPullEnabled ? "" : "opacity-60"} />
             </button>
             <button aria-label="New file" className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50" onClick={async () => {
               const name = (await requestInput({ title: "Create New File", label: "File name", placeholder: "index.html", confirmLabel: "Create" }))?.trim();
@@ -818,6 +854,44 @@ export function FileManagerClient() {
               <Upload size={16} />
             </button>
             <div className="mx-1 h-6 border-l border-panel-line" />
+            <button
+              aria-label="Copy selected items"
+              className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={selectedCount === 0 || copySelected.isPending}
+              onClick={async () => {
+                const targetPath = (await requestInput({
+                  title: "Copy Selected Items",
+                  label: "Target folder path",
+                  defaultValue: currentPath,
+                  confirmLabel: "Copy"
+                }))?.trim();
+                if (!targetPath) return;
+                copySelected.mutate({ sourcePaths: [...selectedPaths], targetPath });
+              }}
+              title={selectedCount > 0 ? `Copy ${selectedCount} selected` : "Copy selected"}
+              type="button"
+            >
+              <Copy size={16} />
+            </button>
+            <button
+              aria-label="Move selected items"
+              className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={selectedCount === 0 || moveSelected.isPending}
+              onClick={async () => {
+                const targetPath = (await requestInput({
+                  title: "Move Selected Items",
+                  label: "Target folder path",
+                  defaultValue: currentPath,
+                  confirmLabel: "Move"
+                }))?.trim();
+                if (!targetPath) return;
+                moveSelected.mutate({ sourcePaths: [...selectedPaths], targetPath });
+              }}
+              title={selectedCount > 0 ? `Move ${selectedCount} selected` : "Move selected"}
+              type="button"
+            >
+              <ArrowRightLeft size={16} />
+            </button>
             <button
               aria-label="Zip selected"
               className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
@@ -859,13 +933,7 @@ export function FileManagerClient() {
               className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-panel-danger hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
               disabled={selectedCount === 0 || deleteItems.isPending}
               onClick={async () => {
-                const ok = await requestConfirm({
-                  title: currentInTrash ? "Delete permanently?" : "Move to trash?",
-                  message: `${currentInTrash ? "Permanently delete" : "Move to trash"} ${selectedCount} selected item${selectedCount === 1 ? "" : "s"}?`,
-                  confirmLabel: currentInTrash ? "Delete permanently" : "Move to trash",
-                  tone: "danger"
-                });
-                if (ok) deleteItems.mutate([...selectedPaths]);
+                openDeleteConfirm([...selectedPaths]);
               }}
               title={selectedCount > 0
                 ? `${currentInTrash ? "Permanently delete" : "Move to trash"} ${selectedCount} selected`
@@ -1034,16 +1102,9 @@ export function FileManagerClient() {
           ) : null}
           <button className="flex h-9 w-full items-center gap-2 px-3 text-left text-panel-danger hover:bg-red-50" onClick={() => {
             if (selectedPaths.size > 1) {
-              requestConfirm({
-                title: currentInTrash ? "Delete permanently?" : "Move to trash?",
-                message: `${currentInTrash ? "Permanently delete" : "Move to trash"} ${selectedPaths.size} selected items?`,
-                confirmLabel: currentInTrash ? "Delete permanently" : "Move to trash",
-                tone: "danger"
-              }).then((ok) => {
-                if (ok) deleteItems.mutate([...selectedPaths]);
-              });
+              openDeleteConfirm([...selectedPaths]);
             } else {
-              setDeleteTarget(contextItem);
+              openDeleteConfirm([contextItem.path]);
             }
             setContextMenu(null);
           }} type="button">
@@ -1274,15 +1335,23 @@ export function FileManagerClient() {
         onConfirm={() => resolveConfirm(true)}
       />
       <ConfirmModal
-        confirmLabel={currentInTrash ? "Delete permanently" : "Move to trash"}
-        message={currentInTrash
-          ? `This will permanently delete ${deleteTarget?.name ?? "the selected item"} from trash.`
-          : `This will move ${deleteTarget?.name ?? "the selected item"} to trash.`}
-        onClose={() => setDeleteTarget(null)}
-        onConfirm={() => deleteTarget ? deleteItems.mutate([deleteTarget.path]) : undefined}
-        open={Boolean(deleteTarget)}
+        confirmLabel={deleteRequest?.permanent ? "Delete permanently" : "Move to trash"}
+        message={deleteRequest
+          ? deleteRequest.permanent
+            ? `This will permanently delete ${deleteRequest.paths.length} item${deleteRequest.paths.length === 1 ? "" : "s"}.`
+            : `This will move ${deleteRequest.paths.length} item${deleteRequest.paths.length === 1 ? "" : "s"} to trash.`
+          : "Delete selected items?"}
+        checkboxLabel={!currentInTrash ? "Permanently delete instead of moving to trash" : undefined}
+        checkboxDefaultChecked={deleteRequest?.permanent ?? currentInTrash}
+        onClose={() => setDeleteRequest(null)}
+        onConfirm={(checked) => {
+          if (!deleteRequest) return;
+          const permanent = currentInTrash ? true : Boolean(checked);
+          deleteItems.mutate({ paths: deleteRequest.paths, permanent });
+        }}
+        open={Boolean(deleteRequest)}
         pending={deleteItems.isPending}
-        title={currentInTrash ? "Delete permanently?" : "Move item to trash?"}
+        title={currentInTrash ? "Delete permanently?" : "Delete options"}
       />
       {repoPickerOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-6">

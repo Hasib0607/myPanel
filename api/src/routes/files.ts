@@ -267,7 +267,7 @@ const subdomainScaffoldSchema = z.object({ domain: z.string().trim().toLowerCase
 const saveSchema = z.object({ path: z.string(), content: z.string(), expectedModifiedAt: z.string().optional() });
 const renameSchema = z.object({ path: z.string(), name: z.string() });
 const copyMoveSchema = z.object({ sourcePath: z.string(), targetParentPath: z.string().default("."), name: z.string().optional(), overwrite: z.boolean().default(false) });
-const deleteSchema = z.object({ paths: z.array(z.string()).min(1).max(100) });
+const deleteSchema = z.object({ paths: z.array(z.string()).min(1).max(100), permanent: z.boolean().default(false) });
 const uploadSchema = z.object({ parentPath: z.string().default("."), name: z.string(), contentBase64: z.string(), overwrite: z.boolean().default(false) });
 const rawUploadQuery = z.object({ parentPath: z.string().default("."), name: z.string(), overwrite: z.coerce.boolean().default(false) });
 const chunkUploadQuery = z.object({
@@ -514,6 +514,11 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
       if (relative === ".") throw app.httpErrors.badRequest("File manager root cannot be deleted");
       if (relative === ".trash") throw app.httpErrors.badRequest("Trash root cannot be deleted directly");
       try {
+        if (body.permanent) {
+          await fs.rm(resolved, { recursive: true, force: true });
+          permanentlyRemoved.push(itemPath);
+          continue;
+        }
         if (isTrashPath(relative)) {
           await fs.rm(resolved, { recursive: true, force: true });
           permanentlyRemoved.push(itemPath);
@@ -535,10 +540,16 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
         movedToTrash.push(itemPath);
       } catch (error) {
         if (!isPermissionError(error)) throw error;
-        const result = await sysagent.trashFiles({ paths: [itemPath] });
+        const result = body.permanent
+          ? await sysagent.deleteFiles({ paths: [itemPath] })
+          : await sysagent.trashFiles({ paths: [itemPath] });
         assertLiveSysagentResult(result);
-        movedToTrash.push(...(result.movedToTrash ?? []));
-        permanentlyRemoved.push(...(result.permanentlyRemoved ?? []));
+        if (body.permanent) {
+          permanentlyRemoved.push(...(((result as { removed?: string[] }).removed) ?? [itemPath]));
+        } else {
+          movedToTrash.push(...((result as { movedToTrash?: string[] }).movedToTrash ?? []));
+          permanentlyRemoved.push(...((result as { permanentlyRemoved?: string[] }).permanentlyRemoved ?? []));
+        }
       }
     }
     await audit(request, {

@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { AlertTriangle, X } from "lucide-react";
 
 type ConfirmModalProps = {
@@ -10,7 +11,9 @@ type ConfirmModalProps = {
   cancelLabel?: string;
   pending?: boolean;
   tone?: "danger" | "warn";
-  onConfirm: () => void;
+  checkboxLabel?: string;
+  checkboxDefaultChecked?: boolean;
+  onConfirm: (checked?: boolean) => void;
   onClose: () => void;
 };
 
@@ -22,9 +25,18 @@ export function ConfirmModal({
   cancelLabel = "Cancel",
   pending = false,
   tone = "danger",
+  checkboxLabel,
+  checkboxDefaultChecked = false,
   onConfirm,
   onClose
 }: ConfirmModalProps) {
+  const [checked, setChecked] = useState(checkboxDefaultChecked);
+
+  useEffect(() => {
+    if (!open) return;
+    setChecked(checkboxDefaultChecked);
+  }, [open, checkboxDefaultChecked]);
+
   if (!open) return null;
 
   const toneClass = tone === "danger" ? "bg-red-600 hover:bg-red-700" : "bg-amber-600 hover:bg-amber-700";
@@ -45,13 +57,27 @@ export function ConfirmModal({
             <X size={16} />
           </button>
         </div>
-        <div className="flex justify-end gap-2 bg-slate-50 px-5 py-4">
-          <button className="h-10 rounded-md border border-panel-line bg-white px-4 text-sm font-semibold hover:bg-slate-100" disabled={pending} onClick={onClose} type="button">
-            {cancelLabel}
-          </button>
-          <button className={`h-10 rounded-md px-4 text-sm font-semibold text-white disabled:opacity-60 ${toneClass}`} disabled={pending} onClick={onConfirm} type="button">
-            {pending ? "Working..." : confirmLabel}
-          </button>
+        <div className="space-y-3 bg-slate-50 px-5 py-4">
+          {checkboxLabel ? (
+            <label className="flex items-center gap-2 text-sm text-panel-text">
+              <input
+                checked={checked}
+                className="h-4 w-4 rounded border-panel-line"
+                disabled={pending}
+                onChange={(event) => setChecked(event.target.checked)}
+                type="checkbox"
+              />
+              <span>{checkboxLabel}</span>
+            </label>
+          ) : null}
+          <div className="flex justify-end gap-2">
+            <button className="h-10 rounded-md border border-panel-line bg-white px-4 text-sm font-semibold hover:bg-slate-100" disabled={pending} onClick={onClose} type="button">
+              {cancelLabel}
+            </button>
+            <button className={`h-10 rounded-md px-4 text-sm font-semibold text-white disabled:opacity-60 ${toneClass}`} disabled={pending} onClick={() => onConfirm(checked)} type="button">
+              {pending ? "Working..." : confirmLabel}
+            </button>
+          </div>
         </div>
       </div>
     </div>
