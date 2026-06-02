@@ -269,6 +269,24 @@ export function detectDeploymentFiles(
     );
   }
 
+  if (names.has("requirements.txt") || names.has("pyproject.toml") || names.has("manage.py")) {
+    return {
+      detected: "PYTHON",
+      confidence: 0.86,
+      reason: "Found Python markers",
+      files,
+      suggestions: {
+        runtime: "PYTHON",
+        packageManager: names.has("pyproject.toml") ? "UV" : "PIP",
+        installCommand: names.has("pyproject.toml") ? "uv sync" : "pip3 install -r requirements.txt",
+        buildCommand: null,
+        startCommand: names.has("manage.py") ? "python3 manage.py runserver 127.0.0.1:{PORT}" : "uvicorn app.main:app --host 127.0.0.1 --port {PORT}",
+        outputDirectory: null,
+        processManager: "SUPERVISOR"
+      }
+    };
+  }
+
   if (names.has("composer.json") && isLaravelComposerPackage(composer)) {
     return {
       detected: "LARAVEL",
@@ -282,24 +300,6 @@ export function detectDeploymentFiles(
         buildCommand: null,
         startCommand: "php artisan serve --host=127.0.0.1 --port {PORT}",
         outputDirectory: "public",
-        processManager: "SUPERVISOR"
-      }
-    };
-  }
-
-  if (names.has("requirements.txt") || names.has("pyproject.toml") || names.has("manage.py")) {
-    return {
-      detected: "PYTHON",
-      confidence: 0.82,
-      reason: "Found Python markers",
-      files,
-      suggestions: {
-        runtime: "PYTHON",
-        packageManager: names.has("pyproject.toml") ? "UV" : "PIP",
-        installCommand: names.has("pyproject.toml") ? "uv sync" : "pip3 install -r requirements.txt",
-        buildCommand: null,
-        startCommand: names.has("manage.py") ? "python3 manage.py runserver 127.0.0.1:{PORT}" : "uvicorn app.main:app --host 127.0.0.1 --port {PORT}",
-        outputDirectory: null,
         processManager: "SUPERVISOR"
       }
     };

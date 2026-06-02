@@ -72,3 +72,15 @@ test("detectDeploymentFiles detects Laravel only with artisan or laravel framewo
   );
   assert.notEqual(composerOnly.detected, "LARAVEL");
 });
+
+test("detectDeploymentFiles keeps Python projects out of Laravel APP_KEY flow", () => {
+  const pythonWithComposer = detectDeploymentFiles(
+    ["requirements.txt", "composer.json", "app"],
+    null,
+    JSON.stringify({ require: { "laravel/framework": "^11.0" } })
+  );
+
+  assert.equal(pythonWithComposer.detected, "PYTHON");
+  assert.equal(pythonWithComposer.suggestions.runtime, "PYTHON");
+  assert.equal(pythonWithComposer.suggestions.processManager, "SUPERVISOR");
+});

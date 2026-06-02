@@ -267,9 +267,14 @@ def prepare_supervisor_runtime(
     panel_dir = cwd / ".panel"
     runtime_env = panel_dir / "runtime.env"
     wrapper = panel_dir / "run.sh"
-    process_env, needs_key_generate = prepare_laravel_env_for_sync(str(cwd), port, env)
-    if needs_key_generate:
-        raise ValueError("Laravel APP_KEY is missing or invalid; sync Laravel env before starting the process")
-    laravel_env_path = write_laravel_env_bundle(str(cwd), process_env)
+    laravel_env_path: Path | None = None
+    if is_laravel_artisan_command(start_command):
+        process_env, needs_key_generate = prepare_laravel_env_for_sync(str(cwd), port, env)
+        if needs_key_generate:
+            raise ValueError("Laravel APP_KEY is missing or invalid; sync Laravel env before starting the process")
+        laravel_env_path = write_laravel_env_bundle(str(cwd), process_env)
+    else:
+        process_env = normalize_process_env(port, env)
+        write_env_file(runtime_env, process_env)
     write_supervisor_wrapper(wrapper, runtime_env, str(cwd), start_command)
     return wrapper, runtime_env, laravel_env_path
