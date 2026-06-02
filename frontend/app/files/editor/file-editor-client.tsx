@@ -1,9 +1,9 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Check, Code2, RefreshCw, Save } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { apiGet, apiPut } from "@/lib/api";
 
 type FileEntry = {
@@ -66,6 +66,7 @@ function parentPath(filePath: string) {
 }
 
 export function FileEditorClient({ initialPath }: { initialPath: string }) {
+  const router = useRouter();
   const queryClient = useQueryClient();
   const editorHostRef = useRef<HTMLDivElement | null>(null);
   const editorRef = useRef<MonacoEditor | null>(null);
@@ -169,14 +170,27 @@ export function FileEditorClient({ initialPath }: { initialPath: string }) {
     }
   }
 
+  function goBack() {
+    if (typeof window !== "undefined" && window.history.length > 1) {
+      router.back();
+      return;
+    }
+    router.push(`/files?${queryString({ path: parentPath(filePath) })}`);
+  }
+
   return (
     <section className="flex h-screen min-h-0 flex-col bg-panel-bg">
       <div className="flex min-h-[81px] flex-wrap items-center justify-between gap-3 border-b border-panel-line bg-white px-8 py-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
-            <Link className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line hover:bg-slate-50" href={`/files?${queryString({ path: parentPath(filePath) })}`} title="Back to file manager">
+            <button
+              className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line hover:bg-slate-50"
+              onClick={goBack}
+              title="Back"
+              type="button"
+            >
               <ArrowLeft size={16} />
-            </Link>
+            </button>
             <div className="min-w-0">
               <h1 className="truncate text-2xl font-semibold text-panel-text">{file?.name ?? "File Editor"}</h1>
               <p className="mt-1 truncate text-sm text-panel-muted">{filePath || "Select a file from File Manager"}</p>
