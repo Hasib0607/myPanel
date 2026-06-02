@@ -23,6 +23,7 @@ ALLOWED_DEPLOY_EXECUTABLES = {
     "python3",
     "react-scripts",
     "serve",
+    "sleep",
     "true",
     "uv",
     "uvicorn",
@@ -39,10 +40,23 @@ def is_allowed_deploy_executable(executable: str) -> bool:
     return bool(re.fullmatch(r"php(\d+(?:\.\d+)?)?-fpm", executable))
 
 
-def normalize_laravel_start_command(command: str | None, port: int | None) -> str:
+def laravel_has_public_web_root(root_path: str | None) -> bool:
+    if not root_path:
+        return True
+    root = Path(root_path).resolve()
+    if root.name == "public" and (root.parent / "artisan").is_file():
+        root = root.parent
+    return (root / "public").is_dir() and (root / "public" / "index.php").is_file()
+
+
+def normalize_laravel_start_command(command: str | None, port: int | None, root_path: str | None = None) -> str:
     cleaned = (command or "").strip()
     lowered = cleaned.lower()
-    if not cleaned or lowered == "php-fpm" or (lowered.endswith("-fpm") and lowered.startswith("php")):
+    legacy_laravel_start = not cleaned or lowered == "php-fpm" or (lowered.endswith("-fpm") and lowered.startswith("php"))
+    artisan_serve = lowered.startswith("php artisan serve")
+    if (legacy_laravel_start or artisan_serve) and not laravel_has_public_web_root(root_path):
+        return "sleep infinity"
+    if legacy_laravel_start:
         effective_port = port or 8000
         return f"php artisan serve --host=127.0.0.1 --port {effective_port}"
     if port is not None:

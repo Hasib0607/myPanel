@@ -26,7 +26,7 @@ from app.deployment_env import (
     write_env_file,
     write_laravel_env_bundle,
 )
-from app.deployment_commands import normalize_laravel_start_command, parse_deployment_command, resolve_laravel_public_root
+from app.deployment_commands import laravel_has_public_web_root, normalize_laravel_start_command, parse_deployment_command, resolve_laravel_public_root
 from app.laravel_nginx import nginx_app_locations
 from app.deployment_health import curl_health_probe
 from app.platform import runtime_tool_install_plan
@@ -796,7 +796,7 @@ def process(body: ProcessRequest) -> dict:
         if body.action in {"start", "restart"}:
             try:
                 start_command = parse_deployment_command(
-                    normalize_laravel_start_command(body.startCommand, body.port) or "npm run start"
+                    normalize_laravel_start_command(body.startCommand, body.port, body.rootPath) or "npm run start"
                 )
             except ValueError as error:
                 return blocked_command(str(error), [body.startCommand or "npm run start"], path_info(body.rootPath))
@@ -809,7 +809,7 @@ def process(body: ProcessRequest) -> dict:
         if body.action in {"start", "restart"}:
             try:
                 start_command = parse_deployment_command(
-                    normalize_laravel_start_command(body.startCommand, body.port) or "true"
+                    normalize_laravel_start_command(body.startCommand, body.port, body.rootPath) or "true"
                 )
             except ValueError as error:
                 return blocked_command(str(error), [body.startCommand or "true"], path_info(body.rootPath))
@@ -1896,6 +1896,15 @@ def health(body: HealthRequest) -> dict:
             "returncode": 1,
             "stdout": "",
             "stderr": supervisor_mismatch,
+        }
+    if (body.framework or "").upper() == "LARAVEL" and not laravel_has_public_web_root(body.rootPath):
+        return {
+            "dryRun": False,
+            "command": ["backend-only-laravel-health", body.processName or ""],
+            "returncode": 0,
+            "stdout": "Laravel deployment has no public/index.php; Supervisor process is running as backend-only/worker-safe idle process.",
+            "stderr": "",
+            "degraded": True,
         }
 
     # Phase 1: wait for the process to bind (with retries for connection refused).
