@@ -685,6 +685,17 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
   if (lower.includes("unsupported engine") || lower.includes("node version") || lower.includes("requires node")) return { message: "Node version mismatch. Set a compatible runtime version or update the app engines field.", repairAction: "redeploy", category: "node_version" };
   if (lower.includes("prisma") && (lower.includes("migration") || lower.includes("p100") || lower.includes("database"))) return { message: "Prisma/database migration failed. Check DATABASE_URL, database grants, and migration state.", repairAction: "redeploy", category: "prisma_migration" };
   if (lower.includes("502 bad gateway") || lower.includes("http 502") || lower.includes("connect() failed") || lower.includes("upstream")) return { message: "Nginx cannot reach the deployment upstream. Guardian will rewrite the deployment vhost, scrub stale server_name configs, and restart the process if the route still returns 502.", repairAction: "rewrite-nginx", category: "nginx_upstream_502" };
+  if (
+    lower.includes("sqlstate[hy000]")
+    && lower.includes("access denied for user")
+    && (lower.includes("[1045]") || lower.includes("[1698]") || lower.includes("using password"))
+  ) {
+    return {
+      message: "MySQL/MariaDB rejected the deployment credentials. Check exact DB_DATABASE/DB_USERNAME case, DB_HOST user host (localhost vs 127.0.0.1), password, grants, then clear Laravel config cache and redeploy.",
+      repairAction: "request-approval",
+      category: "mysql_access_denied"
+    };
+  }
   if (lower.includes("client_encoding") && lower.includes("utf8mb4") && (lower.includes("postgres") || lower.includes("pgsql"))) return { message: "PostgreSQL deployment is using a MySQL charset value. Set DB_CHARSET=utf8 and clear DB_COLLATION, then redeploy.", repairAction: "request-approval", category: "postgres_charset" };
   if (/class\s+["']redis["']\s+not\s+found/i.test(text)) return { message: "Laravel is configured to use Redis but the PHP redis extension is not installed. Install php-redis on the VPS or set CACHE_DRIVER=file and SESSION_DRIVER=file, then redeploy.", repairAction: "request-approval", category: "php_redis_extension" };
   if (phpRedisAbiConflict) return { message: "PHP Redis extension install is blocked by old EPEL Redis PECL RPMs for the PHP 8.0 ABI. Guardian will rebuild ext-redis with PECL for the active PHP runtime, then redeploy.", repairAction: "request-approval", category: "php_redis_abi_conflict" };
@@ -1173,6 +1184,15 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
         envSuggestions.push({ key, value, reason: "Replace localhost/internal public URL with the deployment domain", repairAction: "sync-public-env" });
       }
     }
+  }
+  if (hint?.category === "mysql_access_denied" && deployment.dbType === "MYSQL") {
+    riskyActions.push({
+      key: "database-provision",
+      label: "Repair MySQL database grants",
+      command: `grant ${deployment.dbName ?? "<db>"} to ${deployment.dbUser ?? "<user>"}, rotate/sync password if needed, and rebuild Laravel database env`,
+      reason: "Laravel received MySQL access denied. The database user, host, password, or grants need to be reconciled before redeploy.",
+      approvalRequired: true
+    });
   }
   if (hint?.category === "permission") {
     riskyActions.push({
