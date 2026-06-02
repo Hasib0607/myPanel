@@ -8,7 +8,7 @@ import { prisma } from "../lib/prisma.js";
 import { sysagent } from "../lib/sysagent.js";
 import { checkPanelRemoteUpdate } from "../lib/panelUpdateMonitor.js";
 import { deployQueue } from "./queues.js";
-import { requiredRuntimeExecutables, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
+import { requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables, type RuntimeInstallTarget } from "../lib/deploymentRuntimeTools.js";
 
 const staleDeploymentMs = Number(process.env.GUARDIAN_STALE_DEPLOYMENT_MS ?? 15 * 60_000);
 const autoDeployRepairEnabled = process.env.GUARDIAN_AUTO_DEPLOY_REPAIR !== "false";
@@ -56,6 +56,236 @@ async function hasPendingDoctorApproval(deploymentId: string) {
     select: { id: true, actionKey: true }
   });
   return pending;
+}
+
+function deploymentLogDir(slug: string) {
+  return `${process.env.DEPLOYMENT_LOG_ROOT ?? "/var/log/vps-panel/deployments"}/${slug}`;
+}
+
+function metadataText(metadata: unknown) {
+  if (!metadata) return "";
+  if (typeof metadata === "string") return metadata;
+  try {
+    return JSON.stringify(metadata);
+  } catch {
+    return "";
+  }
+}
+
+function deploymentFailureText(logs: Array<{ message: string; stdout: string | null; stderr: string | null; metadata: unknown }>) {
+  return logs.map((log) => [log.message, log.stderr, log.stdout, metadataText(log.metadata)].filter(Boolean).join("\n")).join("\n");
+}
+
+async function ensureDoctorApprovalExists(deploymentId: string, target: { actionKey: string; label: string; command: string; reason: string }) {
+  const existing = await prisma.deploymentDoctorApproval.findFirst({
+    where: { deploymentId, actionKey: target.actionKey, status: { in: ["PENDING", "APPROVED"] } }
+  });
+  if (existing) return existing;
+  return prisma.deploymentDoctorApproval.create({
+    data: {
+      deploymentId,
+      actionKey: target.actionKey,
+      label: target.label,
+      command: target.command,
+      reason: target.reason
+    }
+  });
+}
+
+function uniqueRuntimeTargets(targets: RuntimeInstallTarget[]) {
+  const seen = new Set<string>();
+  return targets.filter((target) => {
+    if (seen.has(target.actionKey)) return false;
+    seen.add(target.actionKey);
+    return true;
+  });
+}
+
+function runtimeTargetsForFailedLog(text: string) {
+  const lower = text.toLowerCase();
+  const missingTools = new Set<string>();
+  const targets: RuntimeInstallTarget[] = [];
+
+  targets.push(...runtimeInstallTargetsForComposerPlatformIssue(text));
+
+  if (lower.includes("unsupported operand type") && lower.includes("for |") && lower.includes("nonetype") && lower.includes("python3.9")) {
+    missingTools.add("python3.10+");
+  }
+
+  const missingExecutable = lower.includes("command not found")
+    || lower.includes("no such file or directory")
+    || lower.includes("unsupported deployment executable")
+    || lower.includes("spawn error")
+    || lower.includes("can't spawn")
+    || lower.includes("cannot spawn");
+
+  if (missingExecutable) {
+    if (/\bcomposer\b/.test(lower)) missingTools.add("composer");
+    if (/\bphp(?:-fpm)?\b/.test(lower)) missingTools.add("php");
+    if (/\bnode\b|\bnpm\b|\bnpx\b|\bnext\b|\bvite\b/.test(lower)) {
+      missingTools.add("node");
+      missingTools.add("npm");
+    }
+    if (/\bpm2\b/.test(lower)) missingTools.add("pm2");
+    if (/\bpnpm\b/.test(lower)) missingTools.add("pnpm");
+    if (/\byarn\b/.test(lower)) missingTools.add("yarn");
+    if (/\bpython3?\b|\bpip3?\b|\buvicorn\b|\bgunicorn\b|\bflask\b/.test(lower)) {
+      missingTools.add("python3");
+      missingTools.add("pip3");
+    }
+    if (/\bgo\b|\bgolang\b/.test(lower)) missingTools.add("go");
+    if (/\bsupervisorctl\b|\bsupervisord\b|\bsupervisor\b/.test(lower)) missingTools.add("supervisorctl");
+  }
+
+  return uniqueRuntimeTargets([...targets, ...runtimeInstallTargetsForMissingExecutables([...missingTools])]);
+}
+
+function supervisorRepairNeeded(text: string) {
+  const lower = text.toLowerCase();
+  return (lower.includes("supervisor") || lower.includes("supervisorctl"))
+    && (lower.includes("spawn error") || lower.includes("can't spawn") || lower.includes("cannot spawn") || lower.includes("backoff") || lower.includes("exited too quickly"));
+}
+
+function permissionRepairNeeded(text: string) {
+  const lower = text.toLowerCase();
+  return lower.includes("permission denied")
+    || lower.includes("eacces")
+    || lower.includes("failed to open log")
+    || ((lower.includes("log") || lower.includes("supervisor")) && lower.includes("no such file or directory"));
+}
+
+function pythonRuntimeRepairNeeded(text: string) {
+  const lower = text.toLowerCase();
+  return lower.includes("unsupported operand type") && lower.includes("for |") && lower.includes("nonetype") && lower.includes("python3.9");
+}
+
+async function guardianApplyFailureRepairs(
+  deployment: Awaited<ReturnType<typeof prisma.deployment.findMany>>[number],
+  failureText: string,
+  appPath: string
+) {
+  if (!failureText.trim()) return { identified: false, applied: [], approvalsCreated: 0 };
+
+  const applied: string[] = [];
+  let approvalsCreated = 0;
+  const runtimeTargets = runtimeTargetsForFailedLog(failureText);
+
+  await prisma.deploymentLog.create({
+    data: {
+      deploymentId: deployment.id,
+      step: "PREFLIGHT",
+      level: runtimeTargets.length || supervisorRepairNeeded(failureText) || permissionRepairNeeded(failureText) || pythonRuntimeRepairNeeded(failureText) ? "warn" : "info",
+      message: "Guardian parsed failed deployment logs",
+      metadata: {
+        runtimeTargets: runtimeTargets.map((target) => target.actionKey),
+        supervisorRepair: supervisorRepairNeeded(failureText),
+        permissionRepair: permissionRepairNeeded(failureText),
+        pythonRuntimeRepair: pythonRuntimeRepairNeeded(failureText),
+        evidence: failureText.slice(0, 4000)
+      } as any
+    }
+  });
+
+  for (const target of runtimeTargets) {
+    try {
+      const install = await sysagent.deploymentInstallRuntimeTool({ tool: target.tool });
+      const failed = install.dryRun || (typeof install.returncode === "number" && install.returncode !== 0);
+      if (failed) throw new Error(install.stderr || install.stdout || `exit ${install.returncode ?? "unknown"}`);
+      applied.push(target.actionKey);
+    } catch (error) {
+      await ensureDoctorApprovalExists(deployment.id, target);
+      approvalsCreated += 1;
+      await prisma.deploymentLog.create({
+        data: {
+          deploymentId: deployment.id,
+          step: "PREFLIGHT",
+          level: "warn",
+          message: `Guardian could not auto-apply ${target.actionKey}; approval queued`,
+          metadata: { error: error instanceof Error ? error.message : String(error), target } as any
+        }
+      });
+    }
+  }
+
+  if (pythonRuntimeRepairNeeded(failureText)) {
+    try {
+      const repair = await sysagent.deploymentRepairPythonRuntime({ rootPath: appPath });
+      const failed = repair.dryRun || (typeof repair.returncode === "number" && repair.returncode !== 0);
+      if (failed) throw new Error(repair.stderr || repair.stdout || `exit ${repair.returncode ?? "unknown"}`);
+      applied.push("repair-python-venv-runtime");
+    } catch (error) {
+      await ensureDoctorApprovalExists(deployment.id, {
+        actionKey: "install-python311",
+        label: "Install Python 3.10+ runtime",
+        command: "Install Python 3.10+/3.11 via panel runtime-tools, rebuild .venv, and redeploy",
+        reason: "The app uses Python 3.10+ syntax but the VPS started it with Python 3.9."
+      });
+      approvalsCreated += 1;
+      await prisma.deploymentLog.create({
+        data: {
+          deploymentId: deployment.id,
+          step: "PREFLIGHT",
+          level: "warn",
+          message: "Guardian Python runtime repair needs approval",
+          metadata: { error: error instanceof Error ? error.message : String(error) } as any
+        }
+      });
+    }
+  }
+
+  if (permissionRepairNeeded(failureText) || supervisorRepairNeeded(failureText)) {
+    try {
+      const repair = await sysagent.deploymentRepairPermissions({ rootPath: appPath, logDir: deploymentLogDir(deployment.slug) });
+      const failed = repair.dryRun || (typeof repair.returncode === "number" && repair.returncode !== 0);
+      if (failed) throw new Error(repair.stderr || repair.stdout || `exit ${repair.returncode ?? "unknown"}`);
+      applied.push("repair-permissions");
+    } catch (error) {
+      await ensureDoctorApprovalExists(deployment.id, {
+        actionKey: "repair-permissions",
+        label: "Repair deployment ownership",
+        command: `chown -R panel:panel ${appPath} ${deploymentLogDir(deployment.slug)}`,
+        reason: "Ownership/permission repairs affect deployment files and logs."
+      });
+      approvalsCreated += 1;
+      await prisma.deploymentLog.create({
+        data: {
+          deploymentId: deployment.id,
+          step: "PREFLIGHT",
+          level: "warn",
+          message: "Guardian permission repair needs approval",
+          metadata: { error: error instanceof Error ? error.message : String(error) } as any
+        }
+      });
+    }
+  }
+
+  if (supervisorRepairNeeded(failureText)) {
+    try {
+      const repair = await sysagent.deploymentRepairSupervisor({ name: deployment.slug });
+      const failed = repair.dryRun || (typeof repair.returncode === "number" && repair.returncode !== 0);
+      if (failed) throw new Error(repair.stderr || repair.stdout || `exit ${repair.returncode ?? "unknown"}`);
+      applied.push("supervisor-config");
+    } catch (error) {
+      await ensureDoctorApprovalExists(deployment.id, {
+        actionKey: "supervisor-config",
+        label: "Rewrite Supervisor config",
+        command: `supervisorctl reread && supervisorctl update && supervisorctl restart ${deployment.slug}`,
+        reason: "Supervisor spawn/backoff errors may need a regenerated process config."
+      });
+      approvalsCreated += 1;
+      await prisma.deploymentLog.create({
+        data: {
+          deploymentId: deployment.id,
+          step: "PREFLIGHT",
+          level: "warn",
+          message: "Guardian Supervisor repair needs approval",
+          metadata: { error: error instanceof Error ? error.message : String(error) } as any
+        }
+      });
+    }
+  }
+
+  return { identified: runtimeTargets.length > 0 || supervisorRepairNeeded(failureText) || permissionRepairNeeded(failureText) || pythonRuntimeRepairNeeded(failureText), applied, approvalsCreated };
 }
 
 async function queueGuardianDeployRepair(deployment: Awaited<ReturnType<typeof prisma.deployment.findMany>>[number], action: "restart" | "deploy", reason: string) {
@@ -245,6 +475,28 @@ async function runDeploymentWatch() {
           if (shouldRedeploy && !deployment.startCommand?.trim() && deployment.framework !== "STATIC") {
             await guardianSyncRuntimeIfMissingStart(deployment);
           }
+          if (shouldRedeploy) {
+            const recentFailureLogs = await prisma.deploymentLog.findMany({
+              where: {
+                deploymentId: deployment.id,
+                OR: [{ level: "error" }, { step: "FAILED" }, { step: "PREFLIGHT" }, { step: "STARTING" }, { step: "INSTALLING" }, { step: "BUILDING" }]
+              },
+              orderBy: { createdAt: "desc" },
+              take: 12
+            });
+            const failureRepair = await guardianApplyFailureRepairs(deployment, deploymentFailureText(recentFailureLogs), appPath);
+            if (failureRepair.identified) {
+              await prisma.deploymentLog.create({
+                data: {
+                  deploymentId: deployment.id,
+                  step: "PREFLIGHT",
+                  level: failureRepair.approvalsCreated ? "warn" : "info",
+                  message: "Guardian assigned failed-deploy auto-repair",
+                  metadata: failureRepair as any
+                }
+              });
+            }
+          }
           autoRepair = await queueGuardianDeployRepair(
             deployment,
             shouldRedeploy ? "deploy" : "restart",
@@ -272,6 +524,27 @@ async function runDeploymentWatch() {
       });
       let autoRepair = null;
       if (stalePending || deployment.status === "FAILED") {
+        const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
+        const recentFailureLogs = await prisma.deploymentLog.findMany({
+          where: {
+            deploymentId: deployment.id,
+            OR: [{ level: "error" }, { step: "FAILED" }, { step: "PREFLIGHT" }, { step: "STARTING" }, { step: "INSTALLING" }, { step: "BUILDING" }]
+          },
+          orderBy: { createdAt: "desc" },
+          take: 12
+        });
+        const failureRepair = await guardianApplyFailureRepairs(deployment, deploymentFailureText(recentFailureLogs), appPath);
+        if (failureRepair.identified) {
+          await prisma.deploymentLog.create({
+            data: {
+              deploymentId: deployment.id,
+              step: "PREFLIGHT",
+              level: failureRepair.approvalsCreated ? "warn" : "info",
+              message: "Guardian assigned failed-deploy auto-repair after watch error",
+              metadata: failureRepair as any
+            }
+          });
+        }
         autoRepair = await queueGuardianDeployRepair(
           deployment,
           "deploy",
