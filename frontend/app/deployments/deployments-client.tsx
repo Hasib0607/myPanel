@@ -11,7 +11,7 @@ import { ResultNotice, actionIcon, formatDate, healthBadge, queryString, statusB
 type GithubRepo = { id?: string; owner: string; name: string; fullName: string; private: boolean; defaultBranch: string; updatedAt?: string };
 type GithubRepoResponse = { connected: boolean; dryRun: boolean; items: GithubRepo[]; note?: string };
 type GithubDetectResponse = DetectionResponse & { repository: string; dryRun: boolean };
-type Domain = { id: string; name: string; subdomains?: Array<{ id: string; name: string }> };
+type Domain = { id: string; name: string; subdomains?: Array<{ id: string; name: string; fqdn?: string; domainId?: string; isDomainAlias?: boolean }> };
 type DomainOption = { id: string; name: string };
 type DomainListResponse = { items: Domain[] };
 type DatabaseEngine = "POSTGRESQL" | "MYSQL";
@@ -192,8 +192,8 @@ function domainOptions(domains: Domain[]): DomainOption[] {
   return domains.flatMap((domain) => [
     { id: domain.id, name: domain.name },
     ...(domain.subdomains ?? []).map((subdomain) => ({
-      id: `subdomain:${subdomain.id}`,
-      name: `${subdomain.name}.${domain.name}`
+      id: subdomain.isDomainAlias && subdomain.domainId ? subdomain.domainId : `subdomain:${subdomain.id}`,
+      name: subdomain.fqdn ?? `${subdomain.name}.${domain.name}`
     }))
   ]).sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -720,8 +720,8 @@ export function DeploymentsClient({
         </main>
       </div>
 
-      {createOpen ? <ProjectModal title="Create Project" draft={draft} setDraft={setDraft} domains={domainOptions(domains.data?.items ?? [])} databaseOverview={databaseOverview.data} onClose={() => setCreateOpen(false)} onDetect={() => detect.mutate("create")} onSubmit={() => createDeployment.mutate()} submitLabel="Create" busy={createDeployment.isPending} openGithub={() => enableGithub ? setRepoPickerOpen(true) : undefined} enableGithub={enableGithub} /> : null}
-      {editingOpen ? <ProjectModal title="Edit Project" draft={editDraft} setDraft={setEditDraft} domains={domainOptions(domains.data?.items ?? [])} databaseOverview={databaseOverview.data} onClose={() => setEditingOpen(false)} onDetect={() => detect.mutate("edit")} onSubmit={() => updateDeployment.mutate()} submitLabel="Save changes" busy={updateDeployment.isPending} openGithub={() => enableGithub ? setRepoPickerOpen(true) : undefined} enableGithub={enableGithub} /> : null}
+      {createOpen ? <ProjectModal title="Create Project" draft={draft} setDraft={setDraft} domains={domainOptions(domains.data?.items ?? [])} databaseOverview={databaseOverview.data} notice={notice} onClose={() => setCreateOpen(false)} onDetect={() => detect.mutate("create")} onSubmit={() => createDeployment.mutate()} submitLabel="Create" busy={createDeployment.isPending} openGithub={() => enableGithub ? setRepoPickerOpen(true) : undefined} enableGithub={enableGithub} /> : null}
+      {editingOpen ? <ProjectModal title="Edit Project" draft={editDraft} setDraft={setEditDraft} domains={domainOptions(domains.data?.items ?? [])} databaseOverview={databaseOverview.data} notice={notice} onClose={() => setEditingOpen(false)} onDetect={() => detect.mutate("edit")} onSubmit={() => updateDeployment.mutate()} submitLabel="Save changes" busy={updateDeployment.isPending} openGithub={() => enableGithub ? setRepoPickerOpen(true) : undefined} enableGithub={enableGithub} /> : null}
       {enableGithub && repoPickerOpen ? <GithubModal repos={repos.data} loading={repos.isLoading} repoSearch={repoSearch} setRepoSearch={setRepoSearch} connection={githubConnection.data} githubToken={githubToken} setGithubToken={setGithubToken} githubUsername={githubUsername} setGithubUsername={setGithubUsername} saveToken={() => saveGithubToken.mutate()} savingToken={saveGithubToken.isPending} onClose={() => setRepoPickerOpen(false)} onDeploy={(repo) => selectGithubRepo.mutate(repo)} deploying={selectGithubRepo.isPending} /> : null}
       {logModalOpen ? <LogsModal title={logTitle} text={logText} onCopy={copyLogText} onClose={() => setLogModalOpen(false)} /> : null}
     </section>
@@ -766,12 +766,13 @@ function deploymentBindingName(binding: DeploymentDomainBinding) {
   return binding.subdomain ? `${binding.subdomain.name}.${binding.subdomain.domain.name}` : binding.domain?.name ?? "";
 }
 
-function ProjectModal({ title, draft, setDraft, domains, databaseOverview, onClose, onDetect, onSubmit, submitLabel, busy, openGithub, enableGithub = true }: { title: string; draft: Draft; setDraft: (draft: Draft) => void; domains: DomainOption[]; databaseOverview?: DatabaseOverview; onClose: () => void; onDetect: () => void; onSubmit: () => void; submitLabel: string; busy?: boolean; openGithub: () => void; enableGithub?: boolean }) {
+function ProjectModal({ title, draft, setDraft, domains, databaseOverview, notice, onClose, onDetect, onSubmit, submitLabel, busy, openGithub, enableGithub = true }: { title: string; draft: Draft; setDraft: (draft: Draft) => void; domains: DomainOption[]; databaseOverview?: DatabaseOverview; notice?: string; onClose: () => void; onDetect: () => void; onSubmit: () => void; submitLabel: string; busy?: boolean; openGithub: () => void; enableGithub?: boolean }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-6">
       <div className="flex max-h-[88vh] w-full max-w-3xl flex-col rounded-md border border-panel-line bg-white shadow-xl">
         <div className="flex items-center justify-between border-b border-panel-line p-4"><div className="text-sm font-semibold">{title}</div><button className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line" onClick={onClose} type="button"><X size={16} /></button></div>
         <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
+          {notice ? <ResultNotice message={notice} ok={okNotice(notice)} /> : null}
           <div className="grid grid-cols-4 gap-2">{sourceOptions.map((source) => <button className={`h-9 rounded-md border text-xs font-semibold ${draft.sourceProvider === source ? "border-panel-accent bg-teal-50 text-panel-accent" : "border-panel-line"}`} key={source} onClick={() => { setDraft({ ...draft, sourceProvider: source }); if (source === "GITHUB") openGithub(); }} type="button">{source.replace("_", " ")}</button>)}</div>
           {enableGithub && draft.sourceProvider === "GITHUB" ? <button className="flex h-10 w-full items-center justify-center gap-2 rounded-md border border-panel-line text-sm font-medium hover:bg-slate-50" onClick={openGithub} type="button"><Github size={15} />Choose GitHub project</button> : null}
           <DeploymentFormFields value={draft} onChange={setDraft} domains={domains} databaseOverview={databaseOverview} />

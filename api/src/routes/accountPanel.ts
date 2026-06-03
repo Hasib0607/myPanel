@@ -368,11 +368,18 @@ function serializeAccountDeployment<T extends { domainBindings?: any[]; domainId
 async function resolveAccountBindingTarget(accountId: string, selectionId: string) {
   if (isSubdomainSelectionId(selectionId)) {
     const subdomainId = selectionId.slice(subdomainSelectionPrefix.length);
-    const subdomain = await prisma.subdomain.findFirstOrThrow({
+    const subdomain = await prisma.subdomain.findFirst({
       where: { id: subdomainId, domain: { accountId } },
       include: { domain: true }
     });
-    return { domainId: null as string | null, subdomainId: subdomain.id, displayName: subdomainFqdn(subdomain) };
+    if (subdomain) {
+      return { domainId: null as string | null, subdomainId: subdomain.id, displayName: subdomainFqdn(subdomain) };
+    }
+    const aliasDomain = await prisma.domain.findFirst({ where: { id: subdomainId, accountId } });
+    if (aliasDomain) {
+      return { domainId: aliasDomain.id, subdomainId: null as string | null, displayName: aliasDomain.name };
+    }
+    throw Object.assign(new Error("Domain binding target not found"), { statusCode: 404 });
   }
   const domain = await prisma.domain.findFirstOrThrow({ where: { id: selectionId, accountId } });
   return { domainId: domain.id, subdomainId: null as string | null, displayName: domain.name };
