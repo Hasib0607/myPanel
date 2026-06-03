@@ -1,10 +1,10 @@
+import { DatabasesClient } from "@/app/databases/databases-client";
 import { AccountShell } from "@/components/account-shell";
-import { AccountClient } from "../account-client";
 
 export default function AccountDatabasesPage() {
   return (
     <AccountShell>
-      <AccountClient view="databases" />
+      <DatabasesClient apiBase="/account/databases" />
     </AccountShell>
   );
 }

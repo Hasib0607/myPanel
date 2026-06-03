@@ -1,10 +1,12 @@
 import bcrypt from "bcrypt";
 import { createHash, randomUUID } from "node:crypto";
+import { createWriteStream } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { pipeline } from "node:stream/promises";
 import { DeploymentFramework, Prisma } from "@prisma/client";
-import type { FastifyPluginAsync } from "fastify";
+import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { deployQueue, sslQueue } from "../jobs/queues.js";
 import { audit } from "../lib/audit.js";
@@ -134,11 +136,42 @@ const databaseSchema = z.object({
   username: z.string().regex(/^[a-zA-Z0-9_]+$/),
   password: z.string().min(12).max(256).optional()
 });
+const databasePasswordSchema = z.object({
+  engine: z.enum(["POSTGRESQL", "MYSQL"]),
+  username: z.string().regex(/^[a-zA-Z0-9_]+$/),
+  password: z.string().min(12).max(256).optional()
+});
+const databaseTargetSchema = z.object({
+  engine: z.enum(["POSTGRESQL", "MYSQL"]),
+  database: z.string().regex(/^[a-zA-Z0-9_]+$/)
+});
+const databaseImportSchema = databaseTargetSchema.extend({
+  sql: z.string().min(1).max(20_000_000)
+});
+const databaseGrantSchema = databaseTargetSchema.extend({
+  username: z.string().regex(/^[a-zA-Z0-9_]+$/)
+});
+const databaseUploadQuerySchema = databaseTargetSchema.extend({
+  filename: z.string().trim().min(1).max(255).optional()
+});
+const databaseTableSchema = databaseTargetSchema.extend({
+  table: z.string().regex(/^[a-zA-Z0-9_]+$/)
+});
+const databaseRowsSchema = databaseTableSchema.extend({
+  limit: z.number().int().min(1).max(500).default(50),
+  offset: z.number().int().min(0).default(0)
+});
+const databaseTableImportSchema = databaseTableSchema.extend({
+  format: z.enum(["SQL", "CSV"]),
+  content: z.string().min(1).max(20_000_000)
+});
 const sslSchema = z.object({
   email: z.string().email().optional(),
   includeWww: z.boolean().default(true)
 });
 const unsafeName = /[<>:"|?*\x00-\x1F]/;
+const maxImportUploadBytes = 3 * 1024 * 1024 * 1024;
+const importUploadContentType = "application/vnd.vps-panel.db-import";
 const deploymentPortStart = Number(process.env.DEPLOYMENT_PORT_START ?? 10000);
 const deploymentPortEnd = Number(process.env.DEPLOYMENT_PORT_END ?? 19999);
 const defaultProcessManagerByFramework: Record<DeploymentFramework, "PM2" | "SUPERVISOR" | "STATIC"> = {
@@ -149,6 +182,14 @@ const defaultProcessManagerByFramework: Record<DeploymentFramework, "PM2" | "SUP
   GO: "SUPERVISOR",
   STATIC: "STATIC"
 };
+type DatabaseOverviewEngine = {
+  engine: string;
+  installed: boolean;
+  databases: Array<{ name: string; owner?: string | null; tableCount?: number; rowCount?: number; sizeBytes?: number }>;
+  users: Array<{ name: string; host?: string | null }>;
+  checks?: Record<string, unknown>;
+};
+type DatabaseOverview = { engines?: DatabaseOverviewEngine[] };
 
 function usageFrom(account: any) {
   return {
@@ -385,10 +426,73 @@ function parentPath(value: string) {
   return value.split("/").slice(0, -1).join("/") || ".";
 }
 
+function failedCommand(result: unknown) {
+  const value = result as { returncode?: number; stderr?: string };
+  return typeof value?.returncode === "number" && value.returncode !== 0 ? value.stderr || `exit ${value.returncode}` : null;
+}
+
+function commandTreeFailure(result: unknown): string | null {
+  if (!result || typeof result !== "object") return null;
+  const direct = failedCommand(result);
+  if (direct) return direct;
+  for (const [key, value] of Object.entries(result as Record<string, unknown>)) {
+    if (key === "checks") continue;
+    const nested = failedCommand(value);
+    if (nested) return `${key}: ${nested}`;
+  }
+  return null;
+}
+
+function assertDatabaseResult(result: unknown, label: string) {
+  const failure = commandTreeFailure(result);
+  if (failure) throw new Error(`${label} failed: ${failure}`);
+}
+
+async function findAccountDatabase(request: any, engine: "POSTGRESQL" | "MYSQL", database: string) {
+  return prisma.accountDatabase.findFirstOrThrow({
+    where: { accountId: accountId(request), engine, database }
+  });
+}
+
+async function assertAccountDatabaseUser(request: any, engine: "POSTGRESQL" | "MYSQL", username: string) {
+  return prisma.accountDatabase.findFirstOrThrow({
+    where: { accountId: accountId(request), engine, username }
+  });
+}
+
+async function writeDatabaseUploadToTemp(payload: NodeJS.ReadableStream, filename?: string) {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "panel-account-db-import-"));
+  const safeName = (filename || "database.sql").replace(/[^a-zA-Z0-9._-]/g, "_");
+  const filePath = path.join(tmpDir, safeName.endsWith(".sql") ? safeName : `${safeName}.sql`);
+  const output = createWriteStream(filePath);
+  let sizeBytes = 0;
+
+  payload.on("data", (chunk) => {
+    sizeBytes += Buffer.isBuffer(chunk) ? chunk.byteLength : Buffer.byteLength(String(chunk));
+    if (sizeBytes > maxImportUploadBytes) {
+      (payload as NodeJS.ReadableStream & { destroy?: (error?: Error) => void }).destroy?.(new Error("Database upload is too large. Maximum size is 3GB."));
+    }
+  });
+
+  try {
+    await pipeline(payload, output);
+    return { tmpDir, filePath, sizeBytes };
+  } catch (error) {
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
 export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
   app.addContentTypeParser("application/vnd.vps-panel.file-upload", (_request, payload, done) => {
     done(null, payload);
   });
+  if (!app.hasContentTypeParser(importUploadContentType)) {
+    app.addContentTypeParser(importUploadContentType, async (request: FastifyRequest, payload: NodeJS.ReadableStream) => {
+      const query = databaseUploadQuerySchema.parse(request.query);
+      return writeDatabaseUploadToTemp(payload, query.filename);
+    });
+  }
   app.addHook("preHandler", app.requireAccount);
 
   app.get("/me", async (request: any) => {
@@ -998,14 +1102,35 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
 
   app.get("/databases", async (request: any) => {
     const databases = await prisma.accountDatabase.findMany({ where: { accountId: accountId(request) }, orderBy: { createdAt: "desc" } });
+    let systemOverview: DatabaseOverview | null = null;
+    try {
+      systemOverview = await sysagent.databaseOverview() as DatabaseOverview;
+    } catch {
+      systemOverview = null;
+    }
     const engines = (["POSTGRESQL", "MYSQL"] as const).map((engine) => {
       const items = databases.filter((database) => database.engine === engine);
+      const systemEngine = systemOverview?.engines?.find((item) => item.engine === engine);
+      const statsByName = new Map((systemEngine?.databases ?? []).map((database) => [database.name, database]));
+      const usersByName = new Map((systemEngine?.users ?? []).map((user) => [user.name, user]));
       return {
         engine,
-        installed: true,
-        databases: items.map((database) => ({ name: database.database, owner: database.username })),
-        users: items.map((database) => ({ name: database.username, host: null })),
-        checks: {}
+        installed: systemEngine?.installed ?? true,
+        databases: items.map((database) => {
+          const stats = statsByName.get(database.database);
+          return {
+            name: database.database,
+            owner: stats?.owner ?? database.username,
+            tableCount: stats?.tableCount ?? 0,
+            rowCount: stats?.rowCount ?? 0,
+            sizeBytes: stats?.sizeBytes ?? 0
+          };
+        }),
+        users: items.map((database) => {
+          const user = usersByName.get(database.username);
+          return { name: database.username, host: user?.host ?? null };
+        }),
+        checks: systemEngine?.checks ?? {}
       };
     });
     return { engines };
@@ -1023,6 +1148,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       throw app.httpErrors.badRequest(`Database and username must start with ${prefix}`);
     }
     const result = await sysagent.provisionDatabase(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Database create");
     const accountDatabase = await prisma.accountDatabase.create({
       data: {
         accountId: account.id,
@@ -1032,7 +1158,128 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       }
     });
     await audit(request, { action: "CREATE", resource: "database", resourceId: accountDatabase.id, description: `Account created ${body.engine} database ${body.database}`, metadata: { result } as any });
-    return reply.code(201).send({ ...accountDatabase, result });
+    return reply.code(201).send({ engine: body.engine, database: accountDatabase.database, username: accountDatabase.username, password: (result as { password?: string }).password, result });
+  });
+
+  app.post("/databases/password", async (request: any) => {
+    const body = databasePasswordSchema.parse(request.body);
+    const accountDatabase = await assertAccountDatabaseUser(request, body.engine, body.username);
+    const result = await sysagent.databasePassword(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Database password change");
+    await audit(request, { action: "UPDATE", resource: "database-user", resourceId: accountDatabase.id, description: `Account changed DB password for ${body.username}`, metadata: { result } as any });
+    return { engine: body.engine, username: body.username, password: (result as { password?: string }).password ?? body.password, result };
+  });
+
+  app.post("/databases/grant", async (request: any) => {
+    const body = databaseGrantSchema.parse(request.body);
+    const accountDatabase = await findAccountDatabase(request, body.engine, body.database);
+    await assertAccountDatabaseUser(request, body.engine, body.username);
+    const result = await sysagent.databaseGrant(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Database grant");
+    await audit(request, { action: "UPDATE", resource: "database", resourceId: accountDatabase.id, description: `Account granted ${body.username} access to ${body.database}`, metadata: { result } as any });
+    return result;
+  });
+
+  app.delete("/databases", async (request: any) => {
+    const body = databaseTargetSchema.parse(request.body);
+    const accountDatabase = await findAccountDatabase(request, body.engine, body.database);
+    const result = await sysagent.databaseDelete(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Database delete");
+    await prisma.accountDatabase.delete({ where: { id: accountDatabase.id } });
+    await audit(request, { action: "DELETE", resource: "database", resourceId: accountDatabase.id, description: `Account deleted database ${accountDatabase.database}`, metadata: { result } as any });
+    return result;
+  });
+
+  app.post("/databases/export", async (request: any) => {
+    const body = databaseTargetSchema.parse(request.body);
+    await findAccountDatabase(request, body.engine, body.database);
+    const result = await sysagent.databaseExport(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Database export");
+    await audit(request, { action: "APPLY", resource: "database", resourceId: body.database, description: `Account exported ${body.engine} database ${body.database}` });
+    return { engine: result.engine, database: result.database, dump: result.dump };
+  });
+
+  app.post("/databases/import", async (request: any) => {
+    const body = databaseImportSchema.parse(request.body);
+    await findAccountDatabase(request, body.engine, body.database);
+    const result = await sysagent.databaseImport(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Database import");
+    await audit(request, { action: "APPLY", resource: "database", resourceId: body.database, description: `Account imported SQL into ${body.engine} database ${body.database}` });
+    return result;
+  });
+
+  app.post("/databases/import/upload", { bodyLimit: maxImportUploadBytes }, async (request: any) => {
+    const query = databaseUploadQuerySchema.parse(request.query);
+    await findAccountDatabase(request, query.engine, query.database);
+    const upload = request.body as { tmpDir: string; filePath: string; sizeBytes: number };
+    try {
+      const result = await sysagent.databaseImportFile({ engine: query.engine, database: query.database, path: upload.filePath });
+      assertDatabaseResult((result as { result?: unknown }).result, "Database import");
+      await audit(request, {
+        action: "APPLY",
+        resource: "database",
+        resourceId: query.database,
+        description: `Account imported uploaded SQL into ${query.engine} database ${query.database}`,
+        metadata: { sizeBytes: upload.sizeBytes, filename: query.filename ?? path.basename(upload.filePath) }
+      });
+      return Object.assign({}, result as Record<string, unknown>, {
+        sizeBytes: upload.sizeBytes,
+        filename: query.filename ?? path.basename(upload.filePath)
+      });
+    } finally {
+      await fs.rm(upload.tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  app.post("/databases/tables", async (request: any) => {
+    const body = databaseTargetSchema.parse(request.body);
+    await findAccountDatabase(request, body.engine, body.database);
+    const result = await sysagent.databaseTables(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Table list");
+    return result;
+  });
+
+  app.post("/databases/columns", async (request: any) => {
+    const body = databaseTableSchema.parse(request.body);
+    await findAccountDatabase(request, body.engine, body.database);
+    const result = await sysagent.databaseColumns(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Column list");
+    return result;
+  });
+
+  app.post("/databases/rows", async (request: any) => {
+    const body = databaseRowsSchema.parse(request.body);
+    await findAccountDatabase(request, body.engine, body.database);
+    const result = await sysagent.databaseRows(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Row preview");
+    return result;
+  });
+
+  app.post("/databases/table/export", async (request: any) => {
+    const body = databaseTableSchema.parse(request.body);
+    await findAccountDatabase(request, body.engine, body.database);
+    const result = await sysagent.databaseTableExport(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Table export");
+    await audit(request, { action: "APPLY", resource: "database-table", resourceId: `${body.database}.${body.table}`, description: `Account exported ${body.engine} table ${body.database}.${body.table}` });
+    return { engine: result.engine, database: result.database, table: result.table, dump: result.dump };
+  });
+
+  app.post("/databases/table/export-csv", async (request: any) => {
+    const body = databaseTableSchema.parse(request.body);
+    await findAccountDatabase(request, body.engine, body.database);
+    const result = await sysagent.databaseTableExportCsv(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Table CSV export");
+    await audit(request, { action: "APPLY", resource: "database-table", resourceId: `${body.database}.${body.table}`, description: `Account exported ${body.engine} table ${body.database}.${body.table} as ${result.format}` });
+    return { engine: result.engine, database: result.database, table: result.table, format: result.format, content: result.content };
+  });
+
+  app.post("/databases/table/import", async (request: any) => {
+    const body = databaseTableImportSchema.parse(request.body);
+    await findAccountDatabase(request, body.engine, body.database);
+    const result = await sysagent.databaseTableImport(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Table import");
+    await audit(request, { action: "APPLY", resource: "database-table", resourceId: `${body.database}.${body.table}`, description: `Account imported ${body.format} into ${body.engine} table ${body.database}.${body.table}` });
+    return result;
   });
 
   app.post("/databases/:databaseId/password", async (request: any) => {

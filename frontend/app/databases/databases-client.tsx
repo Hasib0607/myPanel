@@ -64,7 +64,11 @@ function downloadText(filename: string, content: string, type: string) {
   URL.revokeObjectURL(url);
 }
 
-export function DatabasesClient() {
+type DatabasesClientProps = {
+  apiBase?: string;
+};
+
+export function DatabasesClient({ apiBase = "/databases" }: DatabasesClientProps = {}) {
   const queryClient = useQueryClient();
   const [notice, setNotice] = useState("");
   const [form, setForm] = useState(initialForm);
@@ -82,16 +86,16 @@ export function DatabasesClient() {
   const rowImportInputRef = useRef<HTMLInputElement | null>(null);
 
   const overview = useQuery({
-    queryKey: ["databases-overview"],
-    queryFn: () => apiGet<DatabaseOverview>("/databases")
+    queryKey: ["databases-overview", apiBase],
+    queryFn: () => apiGet<DatabaseOverview>(apiBase)
   });
 
   const refresh = async () => {
-    await queryClient.invalidateQueries({ queryKey: ["databases-overview"] });
+    await queryClient.invalidateQueries({ queryKey: ["databases-overview", apiBase] });
   };
 
   const createDb = useMutation({
-    mutationFn: () => apiPost<CredentialResult>("/databases", { ...form, password: form.password || undefined }),
+    mutationFn: () => apiPost<CredentialResult>(apiBase, { ...form, password: form.password || undefined }),
     onSuccess: async (result) => {
       setLastSecret(result);
       setNotice(`${form.database} created.`);
@@ -102,7 +106,7 @@ export function DatabasesClient() {
   });
 
   const changePassword = useMutation({
-    mutationFn: () => apiPost<CredentialResult>("/databases/password", { ...passwordForm, password: passwordForm.password || undefined }),
+    mutationFn: () => apiPost<CredentialResult>(`${apiBase}/password`, { ...passwordForm, password: passwordForm.password || undefined }),
     onSuccess: async (result) => {
       setLastSecret(result);
       setNotice(`${passwordForm.username} password changed.`);
@@ -113,7 +117,7 @@ export function DatabasesClient() {
   });
 
   const grantAccess = useMutation({
-    mutationFn: () => apiPost("/databases/grant", grant),
+    mutationFn: () => apiPost(`${apiBase}/grant`, grant),
     onSuccess: async () => {
       setNotice(`Granted ${grant.username} access to ${grant.database}.`);
       setGrant({ ...grant, database: "", username: "" });
@@ -123,7 +127,7 @@ export function DatabasesClient() {
   });
 
   const deleteDatabase = useMutation({
-    mutationFn: (input: { engine: Engine; database: string }) => apiDeleteBody("/databases", input),
+    mutationFn: (input: { engine: Engine; database: string }) => apiDeleteBody(apiBase, input),
     onSuccess: async (_result, input) => {
       setNotice(`${input.database} deleted.`);
       await refresh();
@@ -132,7 +136,7 @@ export function DatabasesClient() {
   });
 
   const exportDatabase = useMutation({
-    mutationFn: (input: { engine: Engine; database: string }) => apiPost<ExportResult>("/databases/export", input),
+    mutationFn: (input: { engine: Engine; database: string }) => apiPost<ExportResult>(`${apiBase}/export`, input),
     onSuccess: (result) => {
       downloadText(`${result.database}.sql`, result.dump, "application/sql;charset=utf-8");
       setNotice(`${result.database} exported.`);
@@ -141,7 +145,7 @@ export function DatabasesClient() {
   });
 
   const importDatabase = useMutation({
-    mutationFn: () => apiPost("/databases/import", transfer),
+    mutationFn: () => apiPost(`${apiBase}/import`, transfer),
     onSuccess: async () => {
       setNotice(`Imported SQL into ${transfer.database}.`);
       setTransfer({ ...transfer, sql: "" });
@@ -159,7 +163,7 @@ export function DatabasesClient() {
         filename: input.file.name
       });
       setImportProgress({ database: input.database, file: input.file.name, percent: 0, phase: "uploading" });
-      return apiUploadWithProgress(`/databases/import/upload?${params.toString()}`, input.file, "application/vnd.vps-panel.db-import", (percent) => {
+      return apiUploadWithProgress(`${apiBase}/import/upload?${params.toString()}`, input.file, "application/vnd.vps-panel.db-import", (percent) => {
         setImportProgress({ database: input.database, file: input.file.name, percent, phase: percent >= 100 ? "importing" : "uploading" });
       });
     },
@@ -181,7 +185,7 @@ export function DatabasesClient() {
   });
 
   const listTables = useMutation({
-    mutationFn: () => apiPost<TableListResult>("/databases/tables", { engine: tableTools.engine, database: tableTools.database }),
+    mutationFn: () => apiPost<TableListResult>(`${apiBase}/tables`, { engine: tableTools.engine, database: tableTools.database }),
     onSuccess: (result) => {
       setTables(result.tables);
       setColumns([]);
@@ -192,7 +196,7 @@ export function DatabasesClient() {
   });
 
   const listColumns = useMutation({
-    mutationFn: () => apiPost<ColumnListResult>("/databases/columns", tableTools),
+    mutationFn: () => apiPost<ColumnListResult>(`${apiBase}/columns`, tableTools),
     onSuccess: (result) => {
       setColumns(result.columns);
       setNotice(`${result.table} columns loaded.`);
@@ -201,7 +205,7 @@ export function DatabasesClient() {
   });
 
   const previewRows = useMutation({
-    mutationFn: () => apiPost<RowPreviewResult>("/databases/rows", { ...tableTools, limit: 50, offset: 0 }),
+    mutationFn: () => apiPost<RowPreviewResult>(`${apiBase}/rows`, { ...tableTools, limit: 50, offset: 0 }),
     onSuccess: (result) => {
       setRowPreview(result.rows);
       setNotice(`${result.table} row preview loaded.`);
@@ -210,7 +214,7 @@ export function DatabasesClient() {
   });
 
   const exportTableSql = useMutation({
-    mutationFn: () => apiPost<TableExportResult>("/databases/table/export", tableTools),
+    mutationFn: () => apiPost<TableExportResult>(`${apiBase}/table/export`, tableTools),
     onSuccess: (result) => {
       downloadText(`${result.database}.${result.table}.sql`, result.dump, "application/sql;charset=utf-8");
       setNotice(`${result.table} SQL exported.`);
@@ -219,7 +223,7 @@ export function DatabasesClient() {
   });
 
   const exportTableCsv = useMutation({
-    mutationFn: () => apiPost<TableCsvExportResult>("/databases/table/export-csv", tableTools),
+    mutationFn: () => apiPost<TableCsvExportResult>(`${apiBase}/table/export-csv`, tableTools),
     onSuccess: (result) => {
       downloadText(`${result.database}.${result.table}.${result.format === "CSV" ? "csv" : "tsv"}`, result.content, "text/plain;charset=utf-8");
       setNotice(`${result.table} ${result.format} exported.`);
@@ -228,7 +232,7 @@ export function DatabasesClient() {
   });
 
   const importTable = useMutation({
-    mutationFn: () => apiPost("/databases/table/import", { ...tableTools, content: tableTools.content }),
+    mutationFn: () => apiPost(`${apiBase}/table/import`, { ...tableTools, content: tableTools.content }),
     onSuccess: async () => {
       setNotice(`Imported ${tableTools.format} into ${tableTools.table}.`);
       setTableTools({ ...tableTools, content: "" });
