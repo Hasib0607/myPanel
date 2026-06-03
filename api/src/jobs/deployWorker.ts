@@ -1803,6 +1803,10 @@ function databaseConnectionDiagnostics(envVars: Record<string, string>) {
   };
 }
 
+function laravelDatabaseVerifyCommand() {
+  return `php -r 'require "vendor/autoload.php"; $app = require "bootstrap/app.php"; $kernel = $app->make(Illuminate\\Contracts\\Console\\Kernel::class); $kernel->bootstrap(); $app["db"]->connection()->getPdo(); echo "database-ok\\n";'`;
+}
+
 async function ensureLaravelDatabaseConnection(
   deployment: DeploymentDatabaseRuntime,
   releaseId: string | undefined,
@@ -1832,7 +1836,7 @@ async function ensureLaravelDatabaseConnection(
     runStep(deployment.id, releaseId, "PREFLIGHT", "Verify Laravel database connection", () =>
       sysagent.deploymentBuild({
         rootPath: appPath,
-        command: "php artisan db:show --no-interaction",
+        command: laravelDatabaseVerifyCommand(),
         env: envVars
       })
     );
@@ -1862,7 +1866,7 @@ async function ensureLaravelDatabaseConnection(
     result = await runStep(deployment.id, releaseId, "PREFLIGHT", "Verify Laravel database connection retry", () =>
       sysagent.deploymentBuild({
         rootPath: appPath,
-        command: "php artisan db:show --no-interaction",
+        command: laravelDatabaseVerifyCommand(),
         env: nextEnv
       })
     );

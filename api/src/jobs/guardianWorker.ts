@@ -521,10 +521,11 @@ async function runDeploymentWatch() {
         }
       }
       const stalePending = ["DEPLOYING", "BUILDING", "QUEUED"].includes(deployment.status) && Date.now() - deployment.updatedAt.getTime() >= staleDeploymentMs;
+      const keepFailedStatus = deployment.status === "FAILED" && healthy;
       await prisma.deployment.update({
         where: { id: deployment.id },
         data: {
-          status: healthy ? "RUNNING" : stalePending ? "FAILED" : deployment.status,
+          status: keepFailedStatus ? "FAILED" : healthy ? "RUNNING" : stalePending ? "FAILED" : deployment.status,
           healthStatus: healthy ? (result.degraded ? "DEGRADED" : "HEALTHY") : "DOWN",
           lastHealthCheckAt: new Date()
         }
@@ -535,11 +536,13 @@ async function runDeploymentWatch() {
           step: "HEALTH_CHECK",
           level: healthy ? "info" : "warn",
           message: healthy
-            ? "Scheduled deployment watch passed"
+            ? keepFailedStatus
+              ? "Scheduled deployment watch passed but kept failed deploy status"
+              : "Scheduled deployment watch passed"
             : stalePending
               ? "Scheduled deployment watch marked stale deployment as failed"
               : "Scheduled deployment watch failed",
-          metadata: { result, stalePending } as any
+          metadata: { result, stalePending, keptFailedStatus: keepFailedStatus } as any
         }
       });
       let autoRepair = null;
