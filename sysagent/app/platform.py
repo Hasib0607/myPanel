@@ -47,6 +47,13 @@ RHEL_PHP_RUNTIME_PACKAGES = (
     "unzip",
 )
 RHEL_PHP82_PACKAGES = RHEL_PHP_RUNTIME_PACKAGES
+RHEL_PHP83_PACKAGES = RHEL_PHP_RUNTIME_PACKAGES
+RHEL_REMI_RELEASE_COMMAND = (
+    "dnf",
+    "install",
+    "-y",
+    "https://rpms.remirepo.net/enterprise/remi-release-9.rpm",
+)
 RHEL_PHP82_CONFLICTING_PECL_PATTERNS = (
     "php-pecl-redis*",
     "php-pecl-msgpack*",
@@ -60,6 +67,7 @@ RHEL_PHP82_CONFLICT_CLEANUP_COMMAND = (
 RHEL_PHP_REDIS_BUILD_PACKAGES = ("php-pear", "php-devel", "gcc", "make")
 PHP_REDIS_EXTENSION_LOADED_COMMAND = ("sh", "-lc", "php -m 2>/dev/null | grep -qi '^redis$'")
 PHP_REDIS_PECL_INSTALL_COMMAND = ("sh", "-lc", "printf '\\n' | pecl install -f redis && echo 'extension=redis.so' > /etc/php.d/50-redis.ini")
+PHP_SODIUM_EXTENSION_LOADED_COMMAND = ("sh", "-lc", "php -m 2>/dev/null | grep -qi '^sodium$'")
 DEBIAN_DOVECOT_PACKAGES = ("dovecot-core", "dovecot-imapd", "dovecot-lmtpd")
 RHEL_DOVECOT_PACKAGES = ("dovecot",)
 DEBIAN_PYTHON311_PACKAGES = ("python3", "python3-venv", "python3-pip")
@@ -150,6 +158,7 @@ DEBIAN_PHP82_PACKAGES = (
     "php8.2-redis",
     "php8.2-soap",
 )
+DEBIAN_PHP83_PACKAGES = tuple(package.replace("8.2", "8.3") for package in DEBIAN_PHP82_PACKAGES)
 DEBIAN_PHP82_REPO_PACKAGES = ("software-properties-common", "ca-certificates", "apt-transport-https")
 DEBIAN_PHP82_REPO_STEPS = (
     InstallStep(
@@ -173,6 +182,11 @@ DEBIAN_PHP82_SWITCH_STEPS = (
     InstallStep("Switch the CLI php binary to php8.2", ("update-alternatives", "--set", "php", "/usr/bin/php8.2"), skip_if=("sh", "-lc", "php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION >= 2 ? 0 : 1);'")),
     InstallStep("Switch the phar binary to php8.2", ("update-alternatives", "--set", "phar", "/usr/bin/phar8.2"), on_failure="continue"),
     InstallStep("Switch the phar.phar binary to php8.2", ("update-alternatives", "--set", "phar.phar", "/usr/bin/phar.phar8.2"), on_failure="continue"),
+)
+DEBIAN_PHP83_SWITCH_STEPS = (
+    InstallStep("Switch the CLI php binary to php8.3", ("update-alternatives", "--set", "php", "/usr/bin/php8.3"), skip_if=("sh", "-lc", "php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION >= 3 ? 0 : 1);'")),
+    InstallStep("Switch the phar binary to php8.3", ("update-alternatives", "--set", "phar", "/usr/bin/phar8.3"), on_failure="continue"),
+    InstallStep("Switch the phar.phar binary to php8.3", ("update-alternatives", "--set", "phar.phar", "/usr/bin/phar.phar8.3"), on_failure="continue"),
 )
 
 
@@ -320,12 +334,14 @@ PACKAGE_SETS: dict[OsFamily, dict[str, tuple[str, ...]]] = {
             "php-soap",
         ),
         "php82_runtime": DEBIAN_PHP82_PACKAGES,
+        "php83_runtime": DEBIAN_PHP83_PACKAGES,
         "php_mbstring": ("php-mbstring",),
         "php_xml": ("php-xml",),
         "php_curl": ("php-curl",),
         "php_zip": ("php-zip",),
         "php_gd": ("php-gd",),
         "php_redis": ("php-redis",),
+        "php_sodium": ("php-common",),
         "php_soap": ("php-soap",),
         "php_mysql": ("php-mysql",),
         "php_pgsql": ("php-pgsql",),
@@ -374,12 +390,14 @@ PACKAGE_SETS: dict[OsFamily, dict[str, tuple[str, ...]]] = {
         "mysql_database": ("mariadb", "mariadb-server"),
         "certbot": RHEL_CERTBOT_PACKAGES,
         "php_runtime": RHEL_PHP_RUNTIME_PACKAGES,
+        "php83_runtime": RHEL_PHP83_PACKAGES,
         "php_mbstring": ("php-mbstring",),
         "php_xml": ("php-xml",),
         "php_curl": ("php-curl",),
         "php_zip": ("php-zip",),
         "php_gd": ("php-gd",),
         "php_redis": ("php-redis",),
+        "php_sodium": ("php-sodium",),
         "php_soap": ("php-soap",),
         "php_mysql": ("php-mysqlnd",),
         "php_pgsql": ("php-pgsql",),
@@ -454,12 +472,14 @@ RUNTIME_TOOL_KEYS = frozenset({
     "golang",
     "php_runtime",
     "php82_runtime",
+    "php83_runtime",
     "php_mbstring",
     "php_xml",
     "php_curl",
     "php_zip",
     "php_gd",
     "php_redis",
+    "php_sodium",
     "php_soap",
     "php_mysql",
     "php_pgsql",
@@ -642,6 +662,91 @@ def php82_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
     )
 
 
+def php_sodium_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
+    family = _resolve_family(info)
+    packages = ("php-sodium",) if family is OsFamily.RHEL else ("php-common",)
+    return PackageInstallPlan(
+        key="php_sodium",
+        packages=packages,
+        steps=(
+            InstallStep(
+                "Install or enable PHP Sodium extension",
+                tuple(package_install_command(list(packages), info)),
+                env=package_install_env(info),
+                on_failure="continue",
+                skip_if=PHP_SODIUM_EXTENSION_LOADED_COMMAND,
+            ),
+        ),
+        notes="PHP Sodium may be bundled with php-common on Debian/Ubuntu and available as php-sodium on RHEL/Remi.",
+    )
+
+
+def php83_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
+    family = _resolve_family(info)
+    if family is OsFamily.RHEL:
+        return PackageInstallPlan(
+            key="php83_runtime",
+            packages=RHEL_PHP83_PACKAGES,
+            steps=(
+                InstallStep(
+                    "Install Remi repository for PHP 8.3 packages",
+                    RHEL_REMI_RELEASE_COMMAND,
+                    on_failure="continue",
+                    skip_if=("sh", "-lc", "rpm -q remi-release >/dev/null 2>&1"),
+                ),
+                InstallStep(
+                    "Reset existing PHP module stream",
+                    ("dnf", "module", "reset", "-y", "php"),
+                    on_failure="continue",
+                    skip_if=("sh", "-lc", "php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION >= 3 ? 0 : 1);'"),
+                ),
+                InstallStep(
+                    "Remove PHP PECL packages that block PHP 8.3 module switch",
+                    RHEL_PHP82_CONFLICT_CLEANUP_COMMAND,
+                    skip_if=("sh", "-lc", "php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION >= 3 ? 0 : 1);'"),
+                ),
+                InstallStep(
+                    "Enable PHP 8.3 module stream",
+                    ("dnf", "module", "enable", "-y", "php:remi-8.3"),
+                    skip_if=("sh", "-lc", "php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION >= 3 ? 0 : 1);'"),
+                ),
+                InstallStep(
+                    "Install PHP 8.3 runtime, FPM, and common Laravel extensions",
+                    tuple(package_install_command(list(RHEL_PHP83_PACKAGES), info)),
+                    env=package_install_env(info),
+                    skip_if=("sh", "-lc", "php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION >= 3 ? 0 : 1);'"),
+                ),
+                InstallStep(
+                    "Enable and restart PHP-FPM after PHP 8.3 install",
+                    ("systemctl", "enable", "--now", "php-fpm"),
+                    on_failure="continue",
+                ),
+            ),
+            notes="AlmaLinux/RHEL PHP 8.3 runtime via Remi for Composer lockfiles that require PHP 8.3+.",
+        )
+    if family is not OsFamily.DEBIAN:
+        raise KeyError("PHP 8.3 auto-upgrade is currently supported on Debian/Ubuntu and AlmaLinux/RHEL hosts only")
+
+    return PackageInstallPlan(
+        key="php83_runtime",
+        packages=DEBIAN_PHP83_PACKAGES,
+        steps=(
+            *DEBIAN_PHP82_REPO_STEPS,
+            InstallStep(
+                "Install PHP 8.3 runtime and common Laravel extensions",
+                tuple(package_install_command(list(DEBIAN_PHP83_PACKAGES), info)),
+                env=package_install_env(info),
+                skip_if=package_installed_command(DEBIAN_PHP83_PACKAGES, info),
+            ),
+            *DEBIAN_PHP83_SWITCH_STEPS,
+        ),
+        notes=(
+            "Uses the Ondrej PHP repository to install PHP 8.3 packages, then switches the CLI default "
+            "to php8.3 so Composer and artisan use the newer runtime."
+        ),
+    )
+
+
 def php_runtime_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
     family = _resolve_family(info)
     packages = tuple(packages_for("php_runtime", info))
@@ -796,10 +901,14 @@ def install_plan_for(key: str, info: OsReleaseInfo | None = None) -> PackageInst
         return mysql_database_install_plan(info)
     if key == "php82_runtime":
         return php82_install_plan(info)
+    if key == "php83_runtime":
+        return php83_install_plan(info)
     if key == "php_runtime":
         return php_runtime_install_plan(info)
     if key == "php_soap":
         return php_soap_install_plan(info)
+    if key == "php_sodium":
+        return php_sodium_install_plan(info)
     if key == "dovecot":
         return dovecot_install_plan(info)
 
@@ -880,8 +989,12 @@ def runtime_tool_install_plan(tool: str, info: OsReleaseInfo | None = None) -> P
         return composer_install_plan(info)
     if tool == "php82":
         return php82_install_plan(info)
+    if tool == "php83":
+        return php83_install_plan(info)
     if tool == "php-redis":
         return php_redis_install_plan(info)
+    if tool == "php-sodium":
+        return php_sodium_install_plan(info)
 
     package_key = {
         "php": "php_runtime",
@@ -891,6 +1004,7 @@ def runtime_tool_install_plan(tool: str, info: OsReleaseInfo | None = None) -> P
         "php-zip": "php_zip",
         "php-gd": "php_gd",
         "php-redis": "php_redis",
+        "php-sodium": "php_sodium",
         "php-soap": "php_soap",
         "php-mysql": "php_mysql",
         "php-pgsql": "php_pgsql",

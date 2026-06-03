@@ -28,6 +28,21 @@ test("composer lock warning with PHP mismatch still queues PHP runtime repair", 
   assert.deepEqual(runtimeInstallTargetsForComposerPlatformIssue(text).map((target) => target.actionKey), ["install-php82"]);
 });
 
+test("composer PHP 8.3 and sodium requirements queue matching repairs", () => {
+  const text = `
+    Your lock file does not contain a compatible set of packages.
+    lcobucci/clock 3.5.0 requires php ~8.3.0 || ~8.4.0 -> your php version (8.2.31) does not satisfy that requirement.
+    lcobucci/jwt 4.3.0 requires ext-sodium * -> it is missing from your system.
+    maennchen/zipstream-php 3.2.0 requires php-64bit ^8.3 -> your php-64bit version (8.2.31) does not satisfy that requirement.
+  `;
+
+  const issue = detectComposerPlatformIssue(text);
+  assert.equal(issue?.requiredPhpVersion, "8.3");
+  assert.equal(issue?.currentPhpVersion, "8.2.31");
+  assert.deepEqual(issue?.missingExtensions, ["sodium"]);
+  assert.deepEqual(runtimeInstallTargetsForComposerPlatformIssue(text).map((target) => target.actionKey), ["install-php83", "install-php-extension-sodium"]);
+});
+
 test("composer platform parser keeps highest required PHP and lockfile-outdated signal", () => {
   const issue = detectComposerPlatformIssue(`
     Warning: The lock file is not up to date with the latest changes in composer.json.

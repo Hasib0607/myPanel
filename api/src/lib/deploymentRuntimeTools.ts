@@ -16,9 +16,11 @@ export type RuntimeInstallTarget = {
     | "composer"
     | "php"
     | "php82"
+    | "php83"
     | "php-gd"
     | "php-soap"
     | "php-redis"
+    | "php-sodium"
     | "php-mbstring"
     | "php-xml"
     | "php-curl"
@@ -73,6 +75,7 @@ const phpExtensionRepairActions: Record<string, string> = {
   zip: "install-php-extension-zip",
   gd: "install-php-extension-gd",
   redis: "install-php-extension-redis",
+  sodium: "install-php-extension-sodium",
   soap: "install-php-extension-soap",
   mysql: "install-php-extension-mysql",
   mysqli: "install-php-extension-mysql",
@@ -202,12 +205,28 @@ const installTargetCatalog: RuntimeInstallTarget[] = [
     executables: []
   },
   {
+    actionKey: "install-php83",
+    tool: "php83",
+    label: "Upgrade PHP runtime to 8.3",
+    command: "Install PHP 8.3 runtime, common Laravel extensions, and switch the CLI default to php8.3",
+    reason: "Composer reported that the project lockfile requires PHP 8.3 or newer.",
+    executables: []
+  },
+  {
     actionKey: "install-php-extension-gd",
     tool: "php-gd",
     label: "Install PHP GD extension",
     command: "Install the PHP GD extension via panel runtime-tools",
     reason: "Composer reported that the GD extension is required by this deployment.",
     executables: ["php-ext-gd"]
+  },
+  {
+    actionKey: "install-php-extension-sodium",
+    tool: "php-sodium",
+    label: "Install PHP Sodium extension",
+    command: "Install the PHP Sodium extension via panel runtime-tools",
+    reason: "Composer reported that the Sodium extension is required by this deployment.",
+    executables: ["php-ext-sodium"]
   },
   {
     actionKey: "install-php-extension-soap",
@@ -400,16 +419,16 @@ export function runtimeInstallTargetsForComposerPlatformIssue(text: string) {
 
   if (issue.requiredPhpVersion) {
     const needsUpgrade = !issue.currentPhpVersion || compareMajorMinorVersions(issue.currentPhpVersion, issue.requiredPhpVersion) < 0;
-    if (needsUpgrade && compareMajorMinorVersions(issue.requiredPhpVersion, "8.1") >= 0) {
+    if (needsUpgrade && compareMajorMinorVersions(issue.requiredPhpVersion, "8.3") >= 0) {
+      addTarget("install-php83");
+    } else if (needsUpgrade && compareMajorMinorVersions(issue.requiredPhpVersion, "8.1") >= 0) {
       addTarget("install-php82");
     }
   }
 
-  if (!targets.some((item) => item.actionKey === "install-php82")) {
-    for (const extension of issue.missingExtensions) {
-      const actionKey = phpExtensionRepairActions[extension];
-      if (actionKey) addTarget(actionKey);
-    }
+  for (const extension of issue.missingExtensions) {
+    const actionKey = phpExtensionRepairActions[extension];
+    if (actionKey) addTarget(actionKey);
   }
 
   return targets;
