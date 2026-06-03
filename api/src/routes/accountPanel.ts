@@ -122,11 +122,7 @@ const deploymentSchema = z.object({
   dbType: z.enum(["POSTGRESQL", "MYSQL"]).nullable().optional(),
   dbName: z.string().nullable().optional(),
   dbUser: z.string().nullable().optional(),
-  envVars: z.array(z.object({
-    key: z.string().trim().regex(/^[A-Z_][A-Z0-9_]*$/i),
-    value: z.string().nullable().optional(),
-    isSecret: z.boolean().default(false)
-  })).default([]),
+  envVars: z.record(z.string()).default({}),
   autoDeployEnabled: z.boolean().default(false)
 });
 const deploymentUpdateSchema = deploymentSchema.partial().extend({
@@ -701,6 +697,21 @@ function safeAccountPath(account: { homeRoot: string }, inputPath = ".") {
     throw error;
   }
   return { root, resolved, relative: path.relative(root, resolved).replaceAll(path.sep, "/") || "." };
+}
+
+function accountDeploymentRootPath(account: { homeRoot: string }, requestedPath: string | undefined, slug: string) {
+  const fallback = path.join(account.homeRoot, "deployments", slug);
+  if (!requestedPath) return fallback;
+  const cleanRequested = requestedPath.replaceAll("\\", "/");
+  const accountRoot = path.resolve(account.homeRoot);
+  const resolvedRequested = path.resolve(cleanRequested);
+  if (resolvedRequested === accountRoot || resolvedRequested.startsWith(`${accountRoot}${path.sep}`)) {
+    return resolvedRequested;
+  }
+  if (cleanRequested.startsWith("/var/www/deployments/")) {
+    return path.join(account.homeRoot, "deployments", path.basename(cleanRequested));
+  }
+  return safeAccountPath(account, cleanRequested).resolved;
 }
 
 function safeChildPath(account: { homeRoot: string }, parentPath: string, name: string) {
@@ -1387,7 +1398,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     assertLimit(account._count.deployments, account.deploymentLimit, "Deployment");
     const bindingTarget = body.domainId ? await resolveAccountBindingTarget(account.id, body.domainId) : null;
     const slug = await uniqueDeploymentSlug(body.slug || body.name);
-    const rootPath = body.rootPath ? safeAccountPath(account, body.rootPath).resolved : path.join(account.homeRoot, "deployments", slug);
+    const rootPath = accountDeploymentRootPath(account, body.rootPath, slug);
     await fs.mkdir(rootPath, { recursive: true });
     const deployment = await prisma.deployment.create({
       data: {
@@ -1420,11 +1431,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
         autoDeployEnabled: body.autoDeployEnabled,
         status: "STOPPED",
         env: {
-          create: body.envVars.map((item) => ({
-            key: item.key.toUpperCase(),
-            value: item.value ?? "",
-            isSecret: item.isSecret
-          }))
+          create: Object.entries(body.envVars).map(([key, value]) => ({ key: key.toUpperCase(), value, isSecret: false }))
         }
       }
     });
@@ -1440,7 +1447,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const existing = await findAccountDeployment(request, deploymentId);
     const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
     const bindingTarget = body.domainId ? await resolveAccountBindingTarget(account.id, body.domainId) : null;
-    const rootPath = body.rootPath === undefined ? undefined : safeAccountPath(account, body.rootPath).resolved;
+    const rootPath = body.rootPath === undefined ? undefined : accountDeploymentRootPath(account, body.rootPath, body.slug ?? existing.slug);
     if (rootPath) await fs.mkdir(rootPath, { recursive: true });
     const { envVars: _envVars, domainId: _domainId, rootPath: _rootPath, ...data } = body;
     const deployment = await prisma.deployment.update({
@@ -1459,11 +1466,11 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       await syncAccountPrimaryBinding(deployment.id, account.id, body.domainId);
     }
     if (body.envVars !== undefined) {
-      for (const item of body.envVars) {
+      for (const [key, value] of Object.entries(body.envVars)) {
         await prisma.deploymentEnvVar.upsert({
-          where: { deploymentId_key: { deploymentId: deployment.id, key: item.key.toUpperCase() } },
-          update: { value: item.value ?? "", isSecret: item.isSecret },
-          create: { deploymentId: deployment.id, key: item.key.toUpperCase(), value: item.value ?? "", isSecret: item.isSecret }
+          where: { deploymentId_key: { deploymentId: deployment.id, key: key.toUpperCase() } },
+          update: { value, isSecret: false },
+          create: { deploymentId: deployment.id, key: key.toUpperCase(), value, isSecret: false }
         });
       }
     }

@@ -23,6 +23,7 @@ type DatabaseOverview = {
     users: Array<{ name: string; host: string | null }>;
   }>;
 };
+type AccountInfo = { homeRoot: string };
 type LogType = "build" | "running";
 
 type Draft = {
@@ -77,8 +78,8 @@ function slugify(value: string) {
   return value.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 }
 
-function deploymentRootForRepo(repoName: string) {
-  return `/var/www/deployments/${slugify(repoName)}`;
+function deploymentRootForRepo(repoName: string, rootBase = "/var/www/deployments") {
+  return `${rootBase.replace(/\/+$/, "")}/${slugify(repoName)}`;
 }
 
 function parseEnv(text: string) {
@@ -280,6 +281,11 @@ export function DeploymentsClient({
   });
   const domains = useQuery({ queryKey: ["domains", domainsApiBase, "deployment-create"], queryFn: () => apiGet<DomainListResponse>(`${domainsApiBase}?page=1&pageSize=100`) });
   const databaseOverview = useQuery({ queryKey: ["databases-overview", databasesApiBase, "deployment-create"], queryFn: () => apiGet<DatabaseOverview>(databasesApiBase) });
+  const accountInfo = useQuery({
+    enabled: apiBase === "/account/deployments",
+    queryKey: ["account-info", "deployments"],
+    queryFn: () => apiGet<AccountInfo>("/account")
+  });
   const nextPort = useQuery({ queryKey: ["deployments-next-port", apiBase], queryFn: () => apiGet<{ port: number }>(`${apiBase}/ports/next`) });
   const repos = useQuery({ enabled: enableGithub && repoPickerOpen, queryKey: ["deployments-github-repos", githubApiBase, repoSearch], queryFn: () => apiGet<GithubRepoResponse>(`${githubApiBase}/repos?${queryString({ search: repoSearch })}`) });
   const githubConnection = useQuery({ enabled: enableGithub && repoPickerOpen, queryKey: ["deployments-github-connection", githubApiBase], queryFn: () => apiGet<{ connected: boolean; username: string | null; scopes: string[] }>(`${githubApiBase}/connection`) });
@@ -299,6 +305,17 @@ export function DeploymentsClient({
   useEffect(() => {
     if (!draft.port && nextPort.data?.port) setDraft((current) => ({ ...current, port: String(nextPort.data.port) }));
   }, [draft.port, nextPort.data?.port]);
+
+  const rootBase = apiBase === "/account/deployments" && accountInfo.data?.homeRoot
+    ? `${accountInfo.data.homeRoot.replace(/\/+$/, "")}/deployments`
+    : "/var/www/deployments";
+
+  useEffect(() => {
+    if (apiBase !== "/account/deployments" || !accountInfo.data?.homeRoot) return;
+    setDraft((current) => current.rootPath.startsWith("/var/www/deployments/")
+      ? { ...current, rootPath: deploymentRootForRepo(current.slug || current.name || "new-app", rootBase) }
+      : current);
+  }, [accountInfo.data?.homeRoot, apiBase, rootBase]);
 
   const invalidateDeployments = async () => {
     await queryClient.invalidateQueries({ queryKey: ["deployments"] });
@@ -446,7 +463,7 @@ export function DeploymentsClient({
   const selectGithubRepo = useMutation({
     mutationFn: async (repo: GithubRepo) => {
       const detection = await apiGet<GithubDetectResponse>(`${githubApiBase}/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/detect?${queryString({ branch: repo.defaultBranch, rootDirectory: draft.rootDirectory || "." })}`);
-      const repoDraft = { ...draft, name: repo.name, slug: slugify(repo.name), githubOwner: repo.owner, githubRepo: repo.name, gitUrl: `https://github.com/${repo.fullName}.git`, branch: repo.defaultBranch, rootPath: deploymentRootForRepo(repo.name), sourceProvider: "GITHUB" as const, framework: detection.detected, installCommand: detection.suggestions.installCommand ?? "", buildCommand: detection.suggestions.buildCommand ?? "", startCommand: detection.suggestions.startCommand ?? "", outputDirectory: detection.suggestions.outputDirectory ?? "", autoDeployEnabled: true };
+      const repoDraft = { ...draft, name: repo.name, slug: slugify(repo.name), githubOwner: repo.owner, githubRepo: repo.name, gitUrl: `https://github.com/${repo.fullName}.git`, branch: repo.defaultBranch, rootPath: deploymentRootForRepo(repo.name, rootBase), sourceProvider: "GITHUB" as const, framework: detection.detected, installCommand: detection.suggestions.installCommand ?? "", buildCommand: detection.suggestions.buildCommand ?? "", startCommand: detection.suggestions.startCommand ?? "", outputDirectory: detection.suggestions.outputDirectory ?? "", autoDeployEnabled: true };
       return { repoDraft, detection };
     },
     onSuccess: ({ repoDraft, detection }) => {
