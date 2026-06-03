@@ -2502,6 +2502,182 @@ function isNodePackageManager(packageManager: DeploymentPackageManager | null) {
   return packageManager === "NPM" || packageManager === "PNPM" || packageManager === "YARN";
 }
 
+type JsPackageManager = "NPM" | "PNPM" | "YARN";
+
+type LaravelFrontendAssets = {
+  hasPackageJson: boolean;
+  hasFrontendMarkers: boolean;
+  hasBuiltAssets: boolean;
+  packageManager: JsPackageManager;
+  installCommand: string;
+  buildCommand: string | null;
+  evidence: string[];
+};
+
+function jsPackageManagerForFiles(files: Set<string>): JsPackageManager {
+  if (files.has("pnpm-lock.yaml")) return "PNPM";
+  if (files.has("yarn.lock")) return "YARN";
+  return "NPM";
+}
+
+function jsInstallCommand(packageManager: JsPackageManager) {
+  if (packageManager === "PNPM") return "pnpm install";
+  if (packageManager === "YARN") return "yarn install";
+  return "npm install";
+}
+
+function jsRunCommand(packageManager: JsPackageManager, script: string) {
+  if (packageManager === "PNPM") return `pnpm run ${script}`;
+  if (packageManager === "YARN") return `yarn ${script}`;
+  return `npm run ${script}`;
+}
+
+async function pathExists(filePath: string) {
+  return fs.access(filePath).then(() => true).catch(() => false);
+}
+
+async function inspectLaravelFrontendAssets(appPath: string, publicDirectory: string | null | undefined): Promise<LaravelFrontendAssets> {
+  const files = new Set<string>();
+  const rootEntries = await fs.readdir(appPath).catch(() => []);
+  for (const entry of rootEntries) files.add(entry.toLowerCase());
+  const packageManager = jsPackageManagerForFiles(files);
+  const packageJsonText = await fs.readFile(path.join(appPath, "package.json"), "utf8").catch(() => null);
+  if (!packageJsonText) {
+    return {
+      hasPackageJson: false,
+      hasFrontendMarkers: false,
+      hasBuiltAssets: false,
+      packageManager,
+      installCommand: jsInstallCommand(packageManager),
+      buildCommand: null,
+      evidence: ["package.json not found"]
+    };
+  }
+
+  let pkg: { scripts?: Record<string, string>; dependencies?: Record<string, string>; devDependencies?: Record<string, string> } = {};
+  try {
+    pkg = JSON.parse(packageJsonText) as typeof pkg;
+  } catch {
+    pkg = {};
+  }
+  const scripts = pkg.scripts ?? {};
+  const deps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) };
+  const publicRoot = path.join(appPath, publicDirectory || "public");
+  const viteConfig = files.has("vite.config.js") || files.has("vite.config.ts") || files.has("vite.config.mjs") || files.has("vite.config.cjs");
+  const mixConfig = files.has("webpack.mix.js") || files.has("webpack.mix.cjs");
+  const hasFrontendMarkers = Boolean(
+    viteConfig
+    || mixConfig
+    || deps.vite
+    || deps["laravel-vite-plugin"]
+    || deps["laravel-mix"]
+    || scripts.build
+    || scripts.production
+    || scripts.prod
+  );
+  const hasBuiltAssets = await pathExists(path.join(publicRoot, "build", "manifest.json"))
+    || await pathExists(path.join(publicRoot, "mix-manifest.json"))
+    || await pathExists(path.join(publicRoot, "css"))
+    || await pathExists(path.join(publicRoot, "assets"));
+  const buildScript = scripts.build ? "build" : scripts.production ? "production" : scripts.prod ? "prod" : null;
+  return {
+    hasPackageJson: true,
+    hasFrontendMarkers,
+    hasBuiltAssets,
+    packageManager,
+    installCommand: jsInstallCommand(packageManager),
+    buildCommand: buildScript ? jsRunCommand(packageManager, buildScript) : null,
+    evidence: [
+      `packageManager=${packageManager}`,
+      `vite=${Boolean(viteConfig || deps.vite || deps["laravel-vite-plugin"])}`,
+      `mix=${Boolean(mixConfig || deps["laravel-mix"])}`,
+      `builtAssets=${hasBuiltAssets}`,
+      `buildCommand=${buildScript ?? "none"}`
+    ]
+  };
+}
+
+async function ensureLaravelFrontendAssets(
+  deploymentId: string,
+  releaseId: string | undefined,
+  appPath: string,
+  publicDirectory: string | null | undefined,
+  envVars: Record<string, string>,
+  existingBuildCommand: string | null | undefined
+) {
+  const assets = await inspectLaravelFrontendAssets(appPath, publicDirectory);
+  if (!assets.hasPackageJson || !assets.hasFrontendMarkers) return;
+  if (assets.hasBuiltAssets && !assets.buildCommand) return;
+  if (existingBuildCommand) {
+    await writeLog(deploymentId, releaseId, "BUILDING", "Laravel frontend asset build deferred to deployment build command", {
+      buildCommand: existingBuildCommand,
+      evidence: assets.evidence
+    });
+    return;
+  }
+  if (!assets.buildCommand) {
+    await writeLog(deploymentId, releaseId, "BUILDING", "Laravel frontend assets may be missing but no build script exists", {
+      evidence: assets.evidence
+    }, "warn");
+    return;
+  }
+
+  await assertRuntimeToolsInstalled(deploymentId, releaseId, {
+    framework: "NODEJS",
+    packageManager: assets.packageManager,
+    runtime: "NODE",
+    processManager: "PM2",
+    installCommand: assets.installCommand,
+    buildCommand: assets.buildCommand,
+    startCommand: null
+  });
+
+  const installResult = await runStep(deploymentId, releaseId, "INSTALLING", "Laravel frontend dependency install", () =>
+    sysagent.deploymentInstall({
+      rootPath: appPath,
+      command: assets.installCommand,
+      packageManager: assets.packageManager,
+      env: envVars
+    })
+  );
+  assertCommandTree(installResult, "Laravel frontend dependency install");
+
+  const runFrontendBuild = () => runStep(deploymentId, releaseId, "BUILDING", "Laravel frontend asset build", () =>
+    sysagent.deploymentBuild({
+      rootPath: appPath,
+      command: assets.buildCommand!,
+      env: envVars
+    })
+  );
+  let buildResult = await runFrontendBuild();
+  try {
+    assertCommandTree(buildResult, "Laravel frontend asset build");
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    if (!nodePackageBinaryMissing(detail)) throw error;
+    await writeLog(deploymentId, releaseId, "BUILDING", "Laravel frontend build binary missing; reinstalling dev dependencies", {
+      packageManager: assets.packageManager,
+      evidence: detail.slice(0, 2000)
+    }, "warn");
+    const repairInstall = await runStep(deploymentId, releaseId, "INSTALLING", "Repair Laravel frontend dependencies", () =>
+      sysagent.deploymentInstall({
+        rootPath: appPath,
+        command: nodeDependencyRepairCommand(assets.packageManager),
+        packageManager: assets.packageManager,
+        env: envVars
+      })
+    );
+    assertCommandTree(repairInstall, "Repair Laravel frontend dependencies");
+    buildResult = await runFrontendBuild();
+    assertCommandTree(buildResult, "Laravel frontend asset build retry");
+  }
+
+  const after = await inspectLaravelFrontendAssets(appPath, publicDirectory);
+  await writeLog(deploymentId, releaseId, "BUILDING", after.hasBuiltAssets ? "Laravel frontend assets ready" : "Laravel frontend build completed but assets were not detected", {
+    evidence: after.evidence
+  }, after.hasBuiltAssets ? "info" : "warn");
+}
+
 async function processLifecycleAction(action: string, deploymentId: string, releaseId: string | undefined) {
   let deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: deploymentWorkerInclude });
   const processAction = action === "redeploy" || action === "deploy" ? "start" : action;
@@ -2851,6 +3027,15 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           assertCommandTree(migrateResult, "Database migration");
         }
       }
+
+      await ensureLaravelFrontendAssets(
+        deployment.id,
+        releaseId,
+        appPath,
+        deployment.publicDirectory,
+        envVars,
+        deployment.buildCommand
+      );
     } else {
       await writeLog(deployment.id, releaseId, "MIGRATING", "Migration skipped for framework", { framework: deployment.framework });
     }

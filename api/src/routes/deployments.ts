@@ -862,6 +862,55 @@ function publicUrlEnv(domain: { name: string } | null | undefined) {
   };
 }
 
+async function inspectLaravelFrontendAssets(appPath: string, publicDirectory: string | null | undefined) {
+  const entries = await fs.readdir(appPath).catch(() => []);
+  const names = new Set(entries.map((entry) => entry.toLowerCase()));
+  const packageJsonText = await fs.readFile(path.join(appPath, "package.json"), "utf8").catch(() => null);
+  if (!packageJsonText) return null;
+
+  let pkg: { scripts?: Record<string, string>; dependencies?: Record<string, string>; devDependencies?: Record<string, string> } = {};
+  try {
+    pkg = JSON.parse(packageJsonText) as typeof pkg;
+  } catch {
+    pkg = {};
+  }
+  const scripts = pkg.scripts ?? {};
+  const deps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) };
+  const hasFrontendMarkers = Boolean(
+    names.has("vite.config.js")
+    || names.has("vite.config.ts")
+    || names.has("vite.config.mjs")
+    || names.has("vite.config.cjs")
+    || names.has("webpack.mix.js")
+    || deps.vite
+    || deps["laravel-vite-plugin"]
+    || deps["laravel-mix"]
+    || scripts.build
+    || scripts.production
+    || scripts.prod
+  );
+  if (!hasFrontendMarkers) return null;
+
+  const publicRoot = path.join(appPath, publicDirectory || "public");
+  const candidates = [
+    path.join(publicRoot, "build", "manifest.json"),
+    path.join(publicRoot, "mix-manifest.json"),
+    path.join(publicRoot, "css"),
+    path.join(publicRoot, "assets")
+  ];
+  const hasBuiltAssets = await Promise.all(
+    candidates.map((candidate) => fs.access(candidate).then(() => true).catch(() => false))
+  ).then((results) => results.some(Boolean));
+  const buildScript = scripts.build ? "build" : scripts.production ? "production" : scripts.prod ? "prod" : null;
+  return {
+    hasBuiltAssets,
+    buildScript,
+    detail: hasBuiltAssets
+      ? `Laravel frontend assets exist under ${publicRoot}.`
+      : `Laravel frontend markers exist but no built assets were found under ${publicRoot}.`
+  };
+}
+
 function evidenceLines(text: string) {
   return text
     .split("\n")
@@ -1112,6 +1161,20 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
       fix: outputExists ? undefined : "Redeploy to rerun the build, then verify the output directory setting and build command.",
       repairAction: outputExists ? undefined : "redeploy"
     });
+  }
+
+  if ((detection?.detected ?? deployment.framework) === "LARAVEL" && rootExists) {
+    const frontendAssets = await inspectLaravelFrontendAssets(appPath, deployment.publicDirectory);
+    if (frontendAssets) {
+      checks.push({
+        key: "laravel_frontend_assets",
+        label: "Laravel frontend assets",
+        status: frontendAssets.hasBuiltAssets ? "pass" : "warn",
+        detail: frontendAssets.detail,
+        fix: frontendAssets.hasBuiltAssets ? undefined : frontendAssets.buildScript ? "Redeploy so Guardian runs the Laravel frontend asset build before publishing Nginx." : "Add a Laravel frontend build script or commit the compiled public assets.",
+        repairAction: frontendAssets.hasBuiltAssets ? undefined : "redeploy"
+      });
+    }
   }
 
   const runtimeTools = requiredRuntimeExecutables({
