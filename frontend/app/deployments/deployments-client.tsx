@@ -409,9 +409,9 @@ export function DeploymentsClient({
   });
 
   const toggleAutoDeploy = useMutation({
-    mutationFn: (deployment: Deployment) => apiPatch<Deployment>(`${apiBase}/${deployment.slug}`, { autoDeployEnabled: !deployment.autoDeployEnabled }),
+    mutationFn: (deployment: Deployment) => apiPatch<Deployment>(`${apiBase}/${deployment.slug}`, { autoDeployEnabled: true }),
     onSuccess: async (deployment) => {
-      setNotice(`Auto deploy ${deployment.autoDeployEnabled ? "enabled" : "disabled"} for ${deployment.name}.`);
+      setNotice(`Auto deploy webhook configured for ${deployment.name}.`);
       await invalidateDeployments();
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not update auto deploy")
@@ -698,7 +698,7 @@ export function DeploymentsClient({
                       type="button"
                     >
                       {selected.autoDeployEnabled ? <ToggleRight size={16} /> : <ToggleLeft size={16} />}
-                      Auto deploy {selected.autoDeployEnabled ? "on" : "off"}
+                      Auto deploy {selected.autoDeployEnabled ? "on" : "enable"}
                     </button>
                     <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium hover:bg-slate-50" onClick={openEdit} type="button"><Pencil size={15} />Edit</button>
                   </div>

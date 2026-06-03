@@ -1,5 +1,5 @@
 import bcrypt from "bcrypt";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -255,6 +255,14 @@ function accountGithubTokenSecretRef(accountId: string) {
   return `github:account:${accountId}:token`;
 }
 
+function deploymentWebhookSecretRef(deploymentSlug: string) {
+  return `deployment:${deploymentSlug}:webhook`;
+}
+
+function sha256(value: string) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
 async function githubJson<T>(githubPath: string, token: string): Promise<T> {
   const response = await fetch(`https://api.github.com${githubPath}`, {
     headers: {
@@ -289,6 +297,77 @@ async function githubRequest<T>(githubPath: string, token: string, init?: Reques
     data: (text ? JSON.parse(text) : null) as T,
     scopes: (response.headers.get("x-oauth-scopes") ?? "").split(",").map((scope) => scope.trim()).filter(Boolean)
   };
+}
+
+async function ensureAccountGithubWebhook(
+  accountId: string,
+  deployment: { id: string; slug: string; githubOwner: string | null; githubRepo: string | null; webhookSecretHash: string | null }
+) {
+  const connection = await prisma.gitHubConnection.findUnique({ where: { id: accountGithubConnectionId(accountId) } });
+  const token = connection?.tokenSecretRef ? await getSecret(connection.tokenSecretRef) : null;
+  if (!token || !deployment.githubOwner || !deployment.githubRepo) {
+    return { configured: false, reason: "GitHub token or repository is missing" };
+  }
+
+  const secretRef = deploymentWebhookSecretRef(deployment.slug);
+  const existingSecret = await getSecret(secretRef);
+  const secret = existingSecret ?? randomBytes(32).toString("hex");
+  if (!existingSecret) {
+    await putSecret({
+      ref: secretRef,
+      value: secret,
+      kind: "WEBHOOK_SECRET",
+      label: `${deployment.slug} GitHub webhook secret`,
+      metadata: { accountId, deploymentId: deployment.id, deploymentSlug: deployment.slug }
+    });
+    await prisma.deployment.update({
+      where: { id: deployment.id },
+      data: { webhookSecretHash: sha256(secret) }
+    });
+  }
+
+  const webhookUrl = `${env.FRONTEND_URL.replace(/\/$/, "")}/api/v1/webhooks/github`;
+  if (/^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0)(:|\/|$)/i.test(webhookUrl)) {
+    return { configured: false, webhookUrl, reason: "FRONTEND_URL points to localhost; set it to the public panel URL before enabling auto deploy" };
+  }
+
+  const hookBody = {
+    name: "web",
+    active: true,
+    events: ["push"],
+    config: {
+      url: webhookUrl,
+      content_type: "json",
+      secret,
+      insecure_ssl: "0"
+    }
+  };
+
+  try {
+    await githubRequest(`/repos/${encodeURIComponent(deployment.githubOwner)}/${encodeURIComponent(deployment.githubRepo)}/hooks`, token, {
+      method: "POST",
+      body: JSON.stringify(hookBody)
+    });
+    return { configured: true, webhookUrl };
+  } catch (error) {
+    try {
+      const hooks = await githubRequest<Array<{ id: number; config?: { url?: string } }>>(
+        `/repos/${encodeURIComponent(deployment.githubOwner)}/${encodeURIComponent(deployment.githubRepo)}/hooks?per_page=100`,
+        token
+      );
+      const existing = hooks.data.find((hook) => hook.config?.url === webhookUrl);
+      if (existing) {
+        await githubRequest(`/repos/${encodeURIComponent(deployment.githubOwner)}/${encodeURIComponent(deployment.githubRepo)}/hooks/${existing.id}`, token, {
+          method: "PATCH",
+          body: JSON.stringify(hookBody)
+        });
+        return { configured: true, webhookUrl, updatedExisting: true };
+      }
+    } catch {
+      // Keep the original hook creation error below.
+    }
+    return { configured: false, webhookUrl, reason: error instanceof Error ? error.message : "Could not create GitHub webhook" };
+  }
 }
 
 async function uniqueDeploymentSlug(base: string) {
@@ -1443,6 +1522,29 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       }
     });
     await syncAccountPrimaryBinding(deployment.id, account.id, body.domainId ?? null);
+    if (body.autoDeployEnabled && body.sourceProvider === "GITHUB") {
+      const webhook = await ensureAccountGithubWebhook(account.id, deployment);
+      if (!webhook.configured) {
+        await prisma.deployment.update({ where: { id: deployment.id }, data: { autoDeployEnabled: false } });
+        await prisma.deploymentLog.create({
+          data: {
+            deploymentId: deployment.id,
+            step: "QUEUED",
+            message: "Auto deploy disabled because GitHub webhook could not be configured",
+            metadata: webhook as Prisma.InputJsonObject
+          }
+        });
+      } else {
+        await prisma.deploymentLog.create({
+          data: {
+            deploymentId: deployment.id,
+            step: "QUEUED",
+            message: "Auto deploy GitHub webhook configured",
+            metadata: webhook as Prisma.InputJsonObject
+          }
+        });
+      }
+    }
     await audit(request, { action: "CREATE", resource: "deployment", resourceId: deployment.id, description: `Account created deployment ${deployment.slug}` });
     const created = await prisma.deployment.findUniqueOrThrow({ where: { id: deployment.id }, include: includeAccountDeployment() });
     return reply.code(201).send(serializeAccountDeployment(created));
@@ -1469,6 +1571,30 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       },
       include: includeAccountDeployment()
     });
+    if (body.autoDeployEnabled === true) {
+      const webhookTarget = {
+        id: deployment.id,
+        slug: deployment.slug,
+        githubOwner: deployment.githubOwner,
+        githubRepo: deployment.githubRepo,
+        webhookSecretHash: deployment.webhookSecretHash
+      };
+      if (deployment.sourceProvider !== "GITHUB" || !webhookTarget.githubOwner || !webhookTarget.githubRepo) {
+        throw app.httpErrors.badRequest("Auto deploy requires a GitHub source with owner and repository configured.");
+      }
+      const webhook = await ensureAccountGithubWebhook(account.id, webhookTarget);
+      if (!webhook.configured) {
+        throw app.httpErrors.badRequest(`Auto deploy could not be enabled: ${webhook.reason ?? "GitHub webhook could not be configured"}`);
+      }
+      await prisma.deploymentLog.create({
+        data: {
+          deploymentId: deployment.id,
+          step: "QUEUED",
+          message: "Auto deploy GitHub webhook configured",
+          metadata: webhook as Prisma.InputJsonObject
+        }
+      });
+    }
     if (body.domainId !== undefined) {
       await syncAccountPrimaryBinding(deployment.id, account.id, body.domainId);
     }
