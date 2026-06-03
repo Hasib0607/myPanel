@@ -57,25 +57,30 @@ export function AccountsClient() {
     queryFn: () => apiGet<{ items: HostingPackage[] }>("/packages")
   });
   const passwordMismatch = Boolean(draft.password || draft.confirmPassword) && draft.password !== draft.confirmPassword;
+  const validationMessage = accountValidationMessage(draft);
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["accounts"] });
 
   const createAccount = useMutation({
-    mutationFn: () => apiPost<Account>("/accounts", {
-      username: draft.username,
-      domainName: draft.domainName || undefined,
-      email: draft.email || null,
-      ownerName: draft.ownerName || null,
-      password: draft.password || undefined,
-      confirmPassword: draft.password ? draft.confirmPassword : undefined,
-      packageId: draft.packageId || null,
-      packageName: draft.packageName || null,
-      diskLimitMb: draft.diskLimitGb ? Number(draft.diskLimitGb) * 1024 : null,
-      domainLimit: draft.domainLimit ? Number(draft.domainLimit) : null,
-      mailboxLimit: draft.mailboxLimit ? Number(draft.mailboxLimit) : null,
-      databaseLimit: draft.databaseLimit ? Number(draft.databaseLimit) : null,
-      deploymentLimit: draft.deploymentLimit ? Number(draft.deploymentLimit) : null
-    }),
+    mutationFn: () => {
+      const validation = accountValidationMessage(draft);
+      if (validation) throw new Error(validation);
+      return apiPost<Account>("/accounts", {
+        username: draft.username,
+        domainName: draft.domainName || undefined,
+        email: draft.email || null,
+        ownerName: draft.ownerName || null,
+        password: draft.password || undefined,
+        confirmPassword: draft.password ? draft.confirmPassword : undefined,
+        packageId: draft.packageId || null,
+        packageName: draft.packageName || null,
+        diskLimitMb: draft.diskLimitGb ? Number(draft.diskLimitGb) * 1024 : null,
+        domainLimit: draft.domainLimit ? Number(draft.domainLimit) : null,
+        mailboxLimit: draft.mailboxLimit ? Number(draft.mailboxLimit) : null,
+        databaseLimit: draft.databaseLimit ? Number(draft.databaseLimit) : null,
+        deploymentLimit: draft.deploymentLimit ? Number(draft.deploymentLimit) : null
+      });
+    },
     onSuccess: async (account) => {
       setDraft(initialDraft);
       setNotice(account.generatedPassword ? `Account ${account.username} created. Password: ${account.generatedPassword}` : `Account ${account.username} created.`);
@@ -138,6 +143,7 @@ export function AccountsClient() {
           <Input label="Password" value={draft.password} onChange={(password) => setDraft({ ...draft, password })} type="password" />
           <Input label="Confirm password" value={draft.confirmPassword} onChange={(confirmPassword) => setDraft({ ...draft, confirmPassword })} type="password" />
           {passwordMismatch ? <div className="text-xs font-medium text-panel-danger">Passwords do not match.</div> : null}
+          {validationMessage ? <div className="text-xs font-medium text-panel-danger">{validationMessage}</div> : null}
           <label className="block space-y-1 text-xs font-medium text-panel-muted">
             <span>Package template</span>
             <select
@@ -169,7 +175,7 @@ export function AccountsClient() {
             <Input label="Deployments" value={draft.deploymentLimit} onChange={(deploymentLimit) => setDraft({ ...draft, deploymentLimit: digitsOnly(deploymentLimit) })} />
           </div>
           <Input label="Package" value={draft.packageName} onChange={(packageName) => setDraft({ ...draft, packageName })} />
-          <button className="flex h-10 w-full items-center justify-center gap-2 rounded-md bg-panel-accent text-sm font-semibold text-white disabled:opacity-60" disabled={!draft.username || passwordMismatch || createAccount.isPending} onClick={() => createAccount.mutate()} type="button">
+          <button className="flex h-10 w-full items-center justify-center gap-2 rounded-md bg-panel-accent text-sm font-semibold text-white disabled:opacity-60" disabled={Boolean(validationMessage) || createAccount.isPending} onClick={() => createAccount.mutate()} type="button">
             <Plus size={15} />
             Create Account
           </button>
@@ -279,6 +285,38 @@ export function AccountsClient() {
 
 function cleanUsername(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 32);
+}
+
+function accountValidationMessage(draft: typeof initialDraft) {
+  if (!/^[a-z0-9][a-z0-9_-]{2,31}$/.test(draft.username)) {
+    return "Username must be 3-32 characters and start with a letter or number.";
+  }
+  if (draft.domainName) {
+    const labels = draft.domainName.split(".");
+    const labelsValid = labels.every((label) => /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(label));
+    const tld = labels.at(-1) ?? "";
+    if (labels.length < 2 || draft.domainName.length > 253 || !labelsValid || !/^[a-z]{2,63}$/.test(tld)) {
+      return "Enter a valid domain, like example.com.";
+    }
+  }
+  if (draft.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(draft.email)) {
+    return "Enter a valid email address.";
+  }
+  if (draft.password && draft.password.length < 10) {
+    return "Password must be at least 10 characters, or leave it empty to auto-generate.";
+  }
+  if (draft.password && draft.password !== draft.confirmPassword) {
+    return "Passwords do not match.";
+  }
+  const limits = [
+    ["Disk GB", draft.diskLimitGb],
+    ["Domains", draft.domainLimit],
+    ["Mailboxes", draft.mailboxLimit],
+    ["Databases", draft.databaseLimit],
+    ["Deployments", draft.deploymentLimit]
+  ] as const;
+  const invalidLimit = limits.find(([, value]) => value && Number(value) < 0);
+  return invalidLimit ? `${invalidLimit[0]} must be 0 or more.` : null;
 }
 
 function cleanDomain(value: string) {

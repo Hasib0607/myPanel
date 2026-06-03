@@ -37,7 +37,13 @@ async function fetchJson<T>(path: string, init: RequestInit): Promise<T> {
     if (response.status === 401 && typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
       window.location.assign("/api/v1/auth/logout?next=/login");
     }
-    throw new Error(data?.error ?? `API request failed: ${response.status}`);
+    const issueText = Array.isArray(data?.issues)
+      ? data.issues
+          .map((issue: { path?: string; message?: string }) => [issue.path, issue.message].filter(Boolean).join(": "))
+          .filter(Boolean)
+          .join("; ")
+      : "";
+    throw new Error(issueText || data?.error || `API request failed: ${response.status}`);
   }
   return data as T;
 }
