@@ -23,7 +23,7 @@ type Domain = {
   redirectUrl: string | null;
   hostingDeploymentId: string | null;
   createdAt: string;
-  subdomains: Array<{ id: string; name: string; target: string; sslEnabled: boolean }>;
+  subdomains: Array<{ id: string; name: string; target: string; sslEnabled: boolean; fqdn?: string; domainId?: string; isDomainAlias?: boolean; dnsRecords?: number }>;
   _count: {
     subdomains: number;
     dnsRecords: number;
@@ -481,11 +481,11 @@ export function DomainsClient({
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2 pl-4">
                           <Split className="text-panel-muted" size={15} />
-                          <span className="font-medium">{subdomain.name}.{domain.name}</span>
+                          <span className="font-medium">{subdomain.fqdn ?? `${subdomain.name}.${domain.name}`}</span>
                         </div>
                       </td>
                       <td className="px-4 py-3"><span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-semibold text-panel-muted">SUBDOMAIN</span></td>
-                      <td className="px-4 py-3">1</td>
+                      <td className="px-4 py-3">{subdomain.dnsRecords ?? 1}</td>
                       <td className="px-4 py-3">-</td>
                       <td className="px-4 py-3">-</td>
                       <td className="px-4 py-3">
@@ -497,30 +497,32 @@ export function DomainsClient({
                       <td className="px-4 py-3">{subdomain.sslEnabled ? "enabled" : "pending"}</td>
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
-                          <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line bg-white hover:bg-slate-100" href={`${linkBase}/${domain.id}/subdomains`} title="Manage subdomains">
+                          <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line bg-white hover:bg-slate-100" href={subdomain.isDomainAlias && subdomain.domainId ? `${linkBase}/${subdomain.domainId}/overview` : `${linkBase}/${domain.id}/subdomains`} title="Manage subdomains">
                             <Split size={15} />
                           </Link>
-                          <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line bg-white hover:bg-slate-100" href={`${linkBase}/${domain.id}/dns`} title="DNS records">
+                          <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line bg-white hover:bg-slate-100" href={`${linkBase}/${subdomain.isDomainAlias && subdomain.domainId ? subdomain.domainId : domain.id}/dns`} title="DNS records">
                             <Network size={15} />
                           </Link>
-                          <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line bg-white hover:bg-slate-100" href={`${linkBase}/${domain.id}/subdomains/${subdomain.id}/ssl`} title="SSL">
+                          <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line bg-white hover:bg-slate-100" href={subdomain.isDomainAlias && subdomain.domainId ? `${linkBase}/${subdomain.domainId}/ssl` : `${linkBase}/${domain.id}/subdomains/${subdomain.id}/ssl`} title="SSL">
                             <ShieldCheck size={15} />
                           </Link>
-                          <button
-                            className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line bg-white text-panel-danger hover:bg-red-50 disabled:opacity-60"
-                            disabled={deleteSubdomain.isPending}
-                            onClick={() => {
-                              setDeleteSubdomainTarget({
-                                domainId: domain.id,
-                                subdomainId: subdomain.id,
-                                fqdn: `${subdomain.name}.${domain.name}`
-                              });
-                            }}
-                            title="Delete subdomain"
-                            type="button"
-                          >
-                            <Trash2 size={15} />
-                          </button>
+                          {subdomain.isDomainAlias ? null : (
+                            <button
+                              className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line bg-white text-panel-danger hover:bg-red-50 disabled:opacity-60"
+                              disabled={deleteSubdomain.isPending}
+                              onClick={() => {
+                                setDeleteSubdomainTarget({
+                                  domainId: domain.id,
+                                  subdomainId: subdomain.id,
+                                  fqdn: `${subdomain.name}.${domain.name}`
+                                });
+                              }}
+                              title="Delete subdomain"
+                              type="button"
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>

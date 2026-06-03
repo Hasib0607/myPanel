@@ -355,6 +355,42 @@ async function ensureAccountDomainDns(request: any, domain: { id: string; name: 
   }
 }
 
+function groupAccountDomainRows(items: any[]) {
+  const domainsById = new Map(items.map((domain) => [domain.id, {
+    ...domain,
+    subdomains: [...(domain.subdomains ?? [])],
+    _count: { ...domain._count }
+  }]));
+  const roots = new Set(items.map((domain) => domain.id));
+
+  for (const child of items) {
+    const parent = items
+      .filter((candidate) => candidate.id !== child.id && domainLabelInsideParent(child.name, candidate.name))
+      .sort((a, b) => b.name.length - a.name.length)[0];
+    if (!parent) continue;
+    const parentRow = domainsById.get(parent.id);
+    if (!parentRow) continue;
+    const label = domainLabelInsideParent(child.name, parent.name);
+    if (!label) continue;
+    parentRow.subdomains.push({
+      id: child.id,
+      name: label,
+      fqdn: child.name,
+      target: child.documentRoot || "public_html",
+      sslEnabled: child.sslEnabled,
+      domainId: child.id,
+      isDomainAlias: true,
+      dnsRecords: child._count?.dnsRecords ?? 0
+    });
+    parentRow._count.subdomains = parentRow.subdomains.length;
+    roots.delete(child.id);
+  }
+
+  return [...domainsById.values()]
+    .filter((domain) => roots.has(domain.id))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
 async function optionalPublicA(hostname: string) {
   try {
     const records = await resolvePublicA(hostname);
@@ -678,17 +714,15 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
           }
         : {})
     };
-    const [items, total] = await Promise.all([
-      prisma.domain.findMany({
-        where,
-        orderBy: { name: "asc" },
-        skip: (query.page - 1) * query.pageSize,
-        take: query.pageSize,
-        include: domainInclude()
-      }),
-      prisma.domain.count({ where })
-    ]);
-    return { items, total, page: query.page, pageSize: query.pageSize };
+    const rawItems = await prisma.domain.findMany({
+      where,
+      orderBy: { name: "asc" },
+      include: domainInclude()
+    });
+    const groupedItems = groupAccountDomainRows(rawItems);
+    const start = (query.page - 1) * query.pageSize;
+    const items = groupedItems.slice(start, start + query.pageSize);
+    return { items, total: groupedItems.length, page: query.page, pageSize: query.pageSize };
   });
 
   app.post("/domains", async (request: any, reply) => {
