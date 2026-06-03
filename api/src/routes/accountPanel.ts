@@ -8,6 +8,8 @@ import { deployQueue, sslQueue } from "../jobs/queues.js";
 import { audit } from "../lib/audit.js";
 import { prisma } from "../lib/prisma.js";
 import { sysagent } from "../lib/sysagent.js";
+import { defaultRecords } from "./domains.js";
+import { renderZone } from "./dns.js";
 
 function accountId(request: any) {
   return request.user.accountId as string;
@@ -38,7 +40,24 @@ const domainNameSchema = z.string().transform((value) => normalizeDomainName(val
 
 const createDomainSchema = z.object({
   name: domainNameSchema,
-  forceSsl: z.boolean().default(true)
+  forceSsl: z.boolean().default(true),
+  hostingMode: z.enum(["PUBLIC_HTML", "DEPLOYMENT_PROXY", "REDIRECT"]).default("PUBLIC_HTML"),
+  documentRoot: z.string().default("public_html"),
+  redirectUrl: z.string().url().nullable().optional(),
+  hostingDeploymentId: z.string().nullable().optional()
+});
+const domainUpdateSchema = z.object({
+  forceSsl: z.boolean().optional(),
+  hostingMode: z.enum(["PUBLIC_HTML", "DEPLOYMENT_PROXY", "REDIRECT"]).optional(),
+  documentRoot: z.string().optional(),
+  redirectUrl: z.string().url().nullable().optional(),
+  hostingDeploymentId: z.string().nullable().optional()
+});
+const bulkDomainSchema = z.object({
+  domains: z.array(domainNameSchema).min(1).max(500),
+  forceSsl: z.boolean().default(true),
+  skipExisting: z.boolean().default(true),
+  publish: z.boolean().default(true)
 });
 const fileQuerySchema = z.object({ path: z.string().default(".") });
 const fileWriteSchema = z.object({ path: z.string(), content: z.string().max(1024 * 1024) });
@@ -78,6 +97,11 @@ const dnsRecordSchema = z.object({
   value: z.string().trim().min(1),
   ttl: z.number().int().min(60).max(86400).default(3600),
   priority: z.number().int().min(0).max(65535).nullable().optional()
+});
+const subdomainSchema = z.object({
+  name: z.string().trim().toLowerCase().regex(/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/),
+  target: z.string().trim().min(1),
+  sslEnabled: z.boolean().default(false)
 });
 const databaseSchema = z.object({
   engine: z.enum(["POSTGRESQL", "MYSQL"]),
@@ -187,6 +211,53 @@ function assertLimit(current: number, limit: number | null | undefined, label: s
   }
 }
 
+function domainInclude() {
+  return {
+    _count: { select: { subdomains: true, dnsRecords: true, mailAccounts: true } },
+    subdomains: { orderBy: { name: "asc" as const } }
+  };
+}
+
+function normalizeDocumentRoot(value?: string | null) {
+  const root = (value || "public_html").trim().replace(/^\/+/, "").replace(/\/+$/, "");
+  if (!root || root.includes("..") || path.isAbsolute(root)) {
+    const error = new Error("Document root must be a folder inside the account.");
+    (error as Error & { statusCode?: number }).statusCode = 400;
+    throw error;
+  }
+  return root;
+}
+
+function normalizeRedirectUrl(value?: string | null) {
+  return value ? value.replace(/\/+$/, "") : null;
+}
+
+function dnsRecordTypeForTarget(target: string) {
+  if (/^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/.test(target)) return "A" as const;
+  if (target.includes(":")) return "AAAA" as const;
+  return "CNAME" as const;
+}
+
+async function validateAccountHostingSettings(accountId: string, input: {
+  hostingMode?: "PUBLIC_HTML" | "DEPLOYMENT_PROXY" | "REDIRECT";
+  hostingDeploymentId?: string | null;
+  redirectUrl?: string | null;
+}) {
+  if (input.hostingMode === "DEPLOYMENT_PROXY") {
+    if (!input.hostingDeploymentId) {
+      const error = new Error("Select a deployment before using deployment proxy hosting.");
+      (error as Error & { statusCode?: number }).statusCode = 400;
+      throw error;
+    }
+    await prisma.deployment.findFirstOrThrow({ where: { id: input.hostingDeploymentId, accountId } });
+  }
+  if (input.hostingMode === "REDIRECT" && !input.redirectUrl) {
+    const error = new Error("Set a redirect URL before using redirect hosting.");
+    (error as Error & { statusCode?: number }).statusCode = 400;
+    throw error;
+  }
+}
+
 function safeAccountPath(account: { homeRoot: string }, inputPath = ".") {
   const root = path.resolve(account.homeRoot);
   const normalized = inputPath.replaceAll("\\", "/");
@@ -253,9 +324,37 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     };
   });
 
-  app.get("/domains", async (request: any) =>
-    prisma.domain.findMany({ where: { accountId: accountId(request) }, orderBy: { createdAt: "desc" } })
-  );
+  app.get("/domains", async (request: any) => {
+    const query = z.object({
+      search: z.string().optional(),
+      page: z.coerce.number().min(1).default(1),
+      pageSize: z.coerce.number().min(1).max(100).default(50)
+    }).parse(request.query);
+    const id = accountId(request);
+    const subdomainSearch = query.search?.split(".")[0];
+    const where = {
+      accountId: id,
+      ...(query.search
+        ? {
+            OR: [
+              { name: { contains: query.search, mode: "insensitive" as const } },
+              ...(subdomainSearch ? [{ subdomains: { some: { name: { contains: subdomainSearch, mode: "insensitive" as const } } } }] : [])
+            ]
+          }
+        : {})
+    };
+    const [items, total] = await Promise.all([
+      prisma.domain.findMany({
+        where,
+        orderBy: { name: "asc" },
+        skip: (query.page - 1) * query.pageSize,
+        take: query.pageSize,
+        include: domainInclude()
+      }),
+      prisma.domain.count({ where })
+    ]);
+    return { items, total, page: query.page, pageSize: query.pageSize };
+  });
 
   app.post("/domains", async (request: any, reply) => {
     const body = createDomainSchema.parse(request.body);
@@ -264,15 +363,25 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       include: { _count: { select: { domains: true, deployments: true, mailAccounts: true } } }
     });
     assertLimit(account._count.domains, account.domainLimit, "Domain");
+    const documentRoot = normalizeDocumentRoot(body.documentRoot || "public_html");
+    const redirectUrl = normalizeRedirectUrl(body.redirectUrl);
+    await validateAccountHostingSettings(account.id, { ...body, redirectUrl });
     try {
-      const domain = await prisma.domain.create({
-        data: {
-          name: body.name,
-          accountId: account.id,
-          forceSsl: body.forceSsl,
-          hostingMode: "PUBLIC_HTML",
-          documentRoot: `accounts/${account.username}/public_html`
-        }
+      const domain = await prisma.$transaction(async (tx) => {
+        const created = await tx.domain.create({
+          data: {
+            name: body.name,
+            accountId: account.id,
+            status: "ACTIVE",
+            forceSsl: body.forceSsl,
+            hostingMode: body.hostingMode,
+            documentRoot,
+            redirectUrl,
+            hostingDeploymentId: body.hostingDeploymentId ?? null
+          }
+        });
+        await tx.dnsRecord.createMany({ data: defaultRecords(created.id, created.name), skipDuplicates: true });
+        return tx.domain.findUniqueOrThrow({ where: { id: created.id }, include: domainInclude() });
       });
       await audit(request, { action: "CREATE", resource: "domain", resourceId: domain.id, description: `Account created domain ${domain.name}` });
       return reply.code(201).send(domain);
@@ -282,6 +391,156 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       }
       throw error;
     }
+  });
+
+  app.post("/domains/bulk", async (request: any, reply) => {
+    const body = bulkDomainSchema.parse(request.body);
+    const account = await prisma.account.findUniqueOrThrow({
+      where: { id: accountId(request) },
+      include: { _count: { select: { domains: true } } }
+    });
+    const uniqueDomains = [...new Set(body.domains)];
+    const results: Array<{ input: string; name: string; status: "created" | "skipped" | "failed"; error?: string; publishWarning?: string }> = [];
+    let currentDomainCount = account._count.domains;
+
+    for (const name of uniqueDomains) {
+      try {
+        const existing = await prisma.domain.findUnique({ where: { name } });
+        if (existing && body.skipExisting) {
+          results.push({ input: name, name, status: "skipped", error: "Domain already exists" });
+          continue;
+        }
+        assertLimit(currentDomainCount, account.domainLimit, "Domain");
+        const domain = await prisma.$transaction(async (tx) => {
+          const created = await tx.domain.create({
+            data: {
+              name,
+              accountId: account.id,
+              status: "ACTIVE",
+              forceSsl: body.forceSsl,
+              hostingMode: "PUBLIC_HTML",
+              documentRoot: "public_html"
+            }
+          });
+          await tx.dnsRecord.createMany({ data: defaultRecords(created.id, created.name), skipDuplicates: true });
+          return tx.domain.findUniqueOrThrow({ where: { id: created.id }, include: domainInclude() });
+        });
+        currentDomainCount += 1;
+        let publishWarning: string | undefined;
+        if (body.publish) {
+          try {
+            const records = await prisma.dnsRecord.findMany({ where: { domainId: domain.id } });
+            await sysagent.applyDnsZone({ domain: domain.name, zone: renderZone(domain.name, records) });
+          } catch (error) {
+            publishWarning = error instanceof Error ? error.message : "Domain DNS publish failed";
+          }
+        }
+        await audit(request, { action: "CREATE", resource: "domain", resourceId: domain.id, description: `Account bulk-created domain ${domain.name}` });
+        results.push({ input: name, name: domain.name, status: "created", publishWarning });
+      } catch (error) {
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002" && body.skipExisting) {
+          results.push({ input: name, name, status: "skipped", error: "Domain already exists" });
+          continue;
+        }
+        results.push({ input: name, name, status: "failed", error: error instanceof Error ? error.message : "Could not add domain" });
+      }
+    }
+    const summary = {
+      created: results.filter((result) => result.status === "created").length,
+      skipped: results.filter((result) => result.status === "skipped").length,
+      failed: results.filter((result) => result.status === "failed").length
+    };
+    return reply.code(summary.failed > 0 ? 207 : 201).send({ ...summary, total: results.length, results });
+  });
+
+  app.patch("/domains/:domainId/status", async (request: any) => {
+    const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
+    const body = z.object({ status: z.enum(["ACTIVE", "PENDING", "SUSPENDED"]) }).parse(request.body);
+    const domain = await prisma.domain.update({
+      where: { id: (await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } })).id },
+      data: { status: body.status },
+      include: domainInclude()
+    });
+    await audit(request, { action: "UPDATE", resource: "domain", resourceId: domain.id, description: `Account updated ${domain.name} status to ${body.status}` });
+    return domain;
+  });
+
+  app.patch("/domains/:domainId", async (request: any) => {
+    const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
+    const body = domainUpdateSchema.parse(request.body);
+    const existing = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
+    const nextHostingMode = body.hostingMode ?? existing.hostingMode;
+    const nextRedirectUrl = normalizeRedirectUrl(body.redirectUrl === undefined ? existing.redirectUrl : body.redirectUrl);
+    const nextHostingDeploymentId = body.hostingDeploymentId === undefined ? existing.hostingDeploymentId : body.hostingDeploymentId;
+    await validateAccountHostingSettings(accountId(request), { hostingMode: nextHostingMode, hostingDeploymentId: nextHostingDeploymentId, redirectUrl: nextRedirectUrl });
+    const domain = await prisma.domain.update({
+      where: { id: existing.id },
+      data: {
+        ...body,
+        ...(body.documentRoot !== undefined ? { documentRoot: normalizeDocumentRoot(body.documentRoot) } : {}),
+        ...(body.redirectUrl !== undefined ? { redirectUrl: nextRedirectUrl } : {})
+      },
+      include: domainInclude()
+    });
+    await audit(request, { action: "UPDATE", resource: "domain", resourceId: domain.id, description: `Account updated domain ${domain.name}` });
+    return domain;
+  });
+
+  app.post("/domains/:domainId/publish", async (request: any, reply) => {
+    const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
+    const domain = await prisma.domain.findFirstOrThrow({
+      where: { id: domainId, accountId: accountId(request) },
+      include: { dnsRecords: true }
+    });
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    const dnsResult = await sysagent.applyDnsZone({ domain: domain.name, zone: renderZone(domain.name, domain.dnsRecords) });
+    const nginxResult = domain.hostingMode === "REDIRECT"
+      ? await sysagent.writeRedirectNginxVhost({
+          name: `account-domain-${domain.name}`,
+          serverName: `${domain.name} www.${domain.name}`,
+          redirectUrl: normalizeRedirectUrl(domain.redirectUrl)
+        })
+      : await sysagent.writeStaticNginxVhost({
+          name: `account-domain-${domain.name}`,
+          serverName: `${domain.name} www.${domain.name}`,
+          rootPath: path.join(account.homeRoot, normalizeDocumentRoot(domain.documentRoot)),
+          forceHttps: domain.forceSsl && domain.sslEnabled,
+          ...(domain.sslEnabled
+            ? {
+                sslCertificate: `/etc/letsencrypt/live/${domain.name}/fullchain.pem`,
+                sslCertificateKey: `/etc/letsencrypt/live/${domain.name}/privkey.pem`
+              }
+            : {})
+        });
+    await audit(request, { action: "APPLY", resource: "domain", resourceId: domain.id, description: `Account published DNS and website for ${domain.name}`, metadata: { dnsResult, nginxResult } as any });
+    return reply.code(202).send({ domain, dnsResult, nginxResult });
+  });
+
+  app.delete("/domains/:domainId", async (request: any) => {
+    const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
+    const body = z.object({ confirmName: z.string() }).parse(request.body ?? {});
+    const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
+    if (body.confirmName !== domain.name) throw app.httpErrors.badRequest("Domain deletion requires exact domain name confirmation");
+    await prisma.domain.delete({ where: { id: domain.id } });
+    await audit(request, { action: "DELETE", resource: "domain", resourceId: domain.id, description: `Account deleted domain ${domain.name}` });
+    return { ok: true };
+  });
+
+  app.post("/domains/:domainId/subdomains", async (request: any, reply) => {
+    const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
+    const body = subdomainSchema.parse(request.body);
+    const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
+    const recordType = dnsRecordTypeForTarget(body.target);
+    const result = await prisma.$transaction(async (tx) => {
+      const subdomain = await tx.subdomain.create({ data: { domainId: domain.id, name: body.name, target: body.target, sslEnabled: body.sslEnabled } });
+      await tx.dnsRecord.createMany({
+        data: [{ domainId: domain.id, type: recordType, name: body.name, value: body.target }],
+        skipDuplicates: true
+      });
+      return { subdomain, dnsRecord: { type: recordType, name: body.name, value: body.target } };
+    });
+    await audit(request, { action: "CREATE", resource: "subdomain", resourceId: result.subdomain.id, description: `Account created subdomain ${body.name}.${domain.name}` });
+    return reply.code(201).send(result);
   });
 
   app.get("/domains/:domainId/dns", async (request: any) => {

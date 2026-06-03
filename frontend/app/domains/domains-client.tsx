@@ -101,7 +101,21 @@ function validDomainInput(value: string) {
   );
 }
 
-export function DomainsClient() {
+type DomainsClientProps = {
+  apiBase?: "/domains" | "/account/domains";
+  deploymentApiBase?: "/deployments" | "/account/deployments";
+  linkBase?: "/domains" | "/account/domains";
+  showBulkAdd?: boolean;
+  headerDescription?: string;
+};
+
+export function DomainsClient({
+  apiBase = "/domains",
+  deploymentApiBase = "/deployments",
+  linkBase = "/domains",
+  showBulkAdd = true,
+  headerDescription = "Manage root domains, subdomains, SSL, and default records for high-volume hosting."
+}: DomainsClientProps = {}) {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [draftSearch, setDraftSearch] = useState("");
@@ -130,21 +144,22 @@ export function DomainsClient() {
   const queryPath = useMemo(() => {
     const params = new URLSearchParams({ page: "1", pageSize: "50" });
     if (search) params.set("search", search);
-    return `/domains?${params.toString()}`;
-  }, [search]);
+    return `${apiBase}?${params.toString()}`;
+  }, [apiBase, search]);
 
   const domains = useQuery({
-    queryKey: ["domains", search],
+    queryKey: ["domains", apiBase, search],
     queryFn: () => apiGet<DomainListResponse>(queryPath)
   });
 
   const deployments = useQuery({
-    queryKey: ["deployments", "domain-hosting"],
-    queryFn: () => apiGet<DeploymentListResponse>("/deployments?page=1&pageSize=100")
+    queryKey: ["deployments", deploymentApiBase, "domain-hosting"],
+    queryFn: () => apiGet<DeploymentListResponse | Deployment[]>(`${deploymentApiBase}?page=1&pageSize=100`)
   });
+  const deploymentItems = Array.isArray(deployments.data) ? deployments.data : deployments.data?.items ?? [];
 
   const createDomain = useMutation({
-    mutationFn: () => apiPost<Domain>("/domains", { name: normalizedNewDomain, forceSsl }),
+    mutationFn: () => apiPost<Domain>(apiBase, { name: normalizedNewDomain, forceSsl }),
     onSuccess: async (domain) => {
       setNewDomain("");
       setForceSsl(true);
@@ -159,7 +174,7 @@ export function DomainsClient() {
   });
 
   const createBulkDomains = useMutation({
-    mutationFn: () => apiPost<BulkDomainResponse>("/domains/bulk", {
+    mutationFn: () => apiPost<BulkDomainResponse>(`${apiBase}/bulk`, {
       domains: parsedBulkDomains,
       forceSsl: bulkForceSsl,
       skipExisting: bulkSkipExisting,
@@ -177,7 +192,7 @@ export function DomainsClient() {
   });
 
   const updateStatus = useMutation({
-    mutationFn: ({ id, status }: { id: string; status: DomainStatus }) => apiPatch(`/domains/${id}/status`, { status }),
+    mutationFn: ({ id, status }: { id: string; status: DomainStatus }) => apiPatch(`${apiBase}/${id}/status`, { status }),
     onSuccess: async () => {
       setError("");
       setNotice("Domain status updated.");
@@ -188,7 +203,7 @@ export function DomainsClient() {
   });
 
   const deleteDomain = useMutation({
-    mutationFn: (domain: Domain) => apiDeleteBody(`/domains/${domain.id}`, { confirmName: domain.name }),
+    mutationFn: (domain: Domain) => apiDeleteBody(`${apiBase}/${domain.id}`, { confirmName: domain.name }),
     onSuccess: async () => {
       setError("");
       setNotice("Domain deleted.");
@@ -201,7 +216,7 @@ export function DomainsClient() {
 
   const deleteSubdomain = useMutation({
     mutationFn: ({ domainId, subdomainId }: { domainId: string; subdomainId: string }) =>
-      apiDeleteBody<{ ok: true; publishWarning?: string }>(`/domains/${domainId}/subdomains/${subdomainId}`, {}),
+      apiDeleteBody<{ ok: true; publishWarning?: string }>(`${apiBase}/${domainId}/subdomains/${subdomainId}`, {}),
     onSuccess: async (result) => {
       setError("");
       setNotice(result.publishWarning ? `Subdomain deleted. ${result.publishWarning}` : "Subdomain deleted.");
@@ -212,7 +227,7 @@ export function DomainsClient() {
   });
 
   const publishDomain = useMutation({
-    mutationFn: (domain: Domain) => apiPost(`/domains/${domain.id}/publish`, {}),
+    mutationFn: (domain: Domain) => apiPost(`${apiBase}/${domain.id}/publish`, {}),
     onSuccess: async () => {
       setError("");
       setNotice("DNS zone and website vhost published.");
@@ -223,7 +238,7 @@ export function DomainsClient() {
   });
 
   const updateHosting = useMutation({
-    mutationFn: (draft: HostingDraft) => apiPatch(`/domains/${draft.domain.id}`, {
+    mutationFn: (draft: HostingDraft) => apiPatch(`${apiBase}/${draft.domain.id}`, {
       hostingMode: draft.hostingMode,
       documentRoot: draft.documentRoot.trim() || "public_html",
       redirectUrl: draft.hostingMode === "REDIRECT" ? draft.redirectUrl.trim() : null,
@@ -253,7 +268,7 @@ export function DomainsClient() {
 
   function hostingLabel(domain: Domain) {
     if (domain.hostingMode === "DEPLOYMENT_PROXY") {
-      const deployment = deployments.data?.items.find((item) => item.id === domain.hostingDeploymentId);
+      const deployment = deploymentItems.find((item) => item.id === domain.hostingDeploymentId);
       return deployment ? `${deployment.name} :${deployment.port}` : "deployment proxy";
     }
     if (domain.hostingMode === "REDIRECT") return domain.redirectUrl || "redirect";
@@ -301,7 +316,7 @@ export function DomainsClient() {
     <>
       <PageHeader
         title="Domains"
-        description="Manage root domains, subdomains, SSL, and default records for high-volume hosting."
+        description={headerDescription}
         action={
           <div className="flex items-center gap-2">
             <form className="flex items-center gap-2" onSubmit={submitNewDomain}>
@@ -320,7 +335,7 @@ export function DomainsClient() {
                 {createDomain.isPending ? "Adding" : "Add"}
               </button>
             </form>
-            <button
+            {showBulkAdd ? <button
               className="flex h-10 items-center gap-2 rounded-md border border-panel-line bg-white px-4 text-sm font-semibold hover:bg-slate-50"
               onClick={() => {
                 setBulkOpen(true);
@@ -330,7 +345,7 @@ export function DomainsClient() {
             >
               <ListPlus size={16} />
               Bulk Add
-            </button>
+            </button> : null}
           </div>
         }
       />
@@ -414,19 +429,19 @@ export function DomainsClient() {
                     <td className="px-4 py-3">{domain.sslEnabled ? "enabled" : domain.forceSsl ? "pending" : "off"}</td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2">
-                        <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`/domains/${domain.id}/overview`} title="View domain">
+                        <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`${linkBase}/${domain.id}/overview`} title="View domain">
                           <Eye size={15} />
                         </Link>
-                        <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`/domains/${domain.id}/dns`} title="DNS records">
+                        <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`${linkBase}/${domain.id}/dns`} title="DNS records">
                           <Network size={15} />
                         </Link>
-                        <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`/domains/${domain.id}/subdomains`} title="Subdomains">
+                        <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`${linkBase}/${domain.id}/subdomains`} title="Subdomains">
                           <Split size={15} />
                         </Link>
-                        <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`/domains/${domain.id}/ssl`} title="SSL">
+                        <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`${linkBase}/${domain.id}/ssl`} title="SSL">
                           <ShieldCheck size={15} />
                         </Link>
-                        <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`/domains/${domain.id}/mail/accounts`} title="Mail accounts">
+                        <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`${linkBase}/${domain.id}/mail/accounts`} title="Mail accounts">
                           <Mail size={15} />
                         </Link>
                         <button
@@ -482,13 +497,13 @@ export function DomainsClient() {
                       <td className="px-4 py-3">{subdomain.sslEnabled ? "enabled" : "pending"}</td>
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
-                          <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line bg-white hover:bg-slate-100" href={`/domains/${domain.id}/subdomains`} title="Manage subdomains">
+                          <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line bg-white hover:bg-slate-100" href={`${linkBase}/${domain.id}/subdomains`} title="Manage subdomains">
                             <Split size={15} />
                           </Link>
-                          <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line bg-white hover:bg-slate-100" href={`/domains/${domain.id}/dns`} title="DNS records">
+                          <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line bg-white hover:bg-slate-100" href={`${linkBase}/${domain.id}/dns`} title="DNS records">
                             <Network size={15} />
                           </Link>
-                          <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line bg-white hover:bg-slate-100" href={`/domains/${domain.id}/subdomains/${subdomain.id}/ssl`} title="SSL">
+                          <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line bg-white hover:bg-slate-100" href={`${linkBase}/${domain.id}/subdomains/${subdomain.id}/ssl`} title="SSL">
                             <ShieldCheck size={15} />
                           </Link>
                           <button
@@ -654,7 +669,7 @@ export function DomainsClient() {
                     value={hostingDraft.hostingDeploymentId}
                   >
                     <option value="">Select deployment</option>
-                    {(deployments.data?.items ?? []).map((deployment) => (
+                    {deploymentItems.map((deployment) => (
                       <option key={deployment.id} value={deployment.id}>{deployment.name} :{deployment.port}</option>
                     ))}
                   </select>
