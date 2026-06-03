@@ -15,6 +15,7 @@ import { publishDomainDnsZone } from "../lib/domainDnsPublish.js";
 import { prisma } from "../lib/prisma.js";
 import { resolvePublicA } from "../lib/publicDns.js";
 import { sysagent } from "../lib/sysagent.js";
+import { nginxResourceName } from "../lib/nginxNames.js";
 import { defaultRecords } from "./domains.js";
 import { renderZone } from "./dns.js";
 
@@ -391,7 +392,7 @@ async function accountSslPreflight(request: any, domain: { id: string; name: str
   const webRoot = path.join(account.homeRoot, normalizeDocumentRoot(domain.documentRoot));
   await fs.mkdir(path.join(webRoot, ".well-known", "acme-challenge"), { recursive: true });
   const nginxResult = await sysagent.writeStaticNginxVhost({
-    name: `account-domain-${domain.name}`,
+    name: `domain-${nginxResourceName(domain.name)}`,
     serverName: effectiveIncludeWww ? `${domain.name} www.${domain.name}` : domain.name,
     rootPath: webRoot,
     forceHttps: false
@@ -845,12 +846,12 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const dnsResult = await sysagent.applyDnsZone({ domain: domain.name, zone: renderZone(domain.name, domain.dnsRecords) });
     const nginxResult = domain.hostingMode === "REDIRECT"
       ? await sysagent.writeRedirectNginxVhost({
-          name: `account-domain-${domain.name}`,
+          name: `domain-${nginxResourceName(domain.name)}`,
           serverName: `${domain.name} www.${domain.name}`,
           redirectUrl: normalizeRedirectUrl(domain.redirectUrl)
         })
       : await sysagent.writeStaticNginxVhost({
-          name: `account-domain-${domain.name}`,
+          name: `domain-${nginxResourceName(domain.name)}`,
           serverName: `${domain.name} www.${domain.name}`,
           rootPath: path.join(account.homeRoot, normalizeDocumentRoot(domain.documentRoot)),
           forceHttps: domain.forceSsl && domain.sslEnabled,
