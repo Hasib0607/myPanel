@@ -1781,6 +1781,28 @@ async function autoRepairDatabaseAccess(
   return nextEnv;
 }
 
+function databaseConnectionDiagnostics(envVars: Record<string, string>) {
+  const databaseUrl = envVars.DATABASE_URL || "";
+  let databaseUrlSummary: string | null = null;
+  if (databaseUrl) {
+    try {
+      const parsed = new URL(databaseUrl);
+      databaseUrlSummary = `${parsed.protocol}//${parsed.hostname}${parsed.port ? `:${parsed.port}` : ""}${parsed.pathname}`;
+    } catch {
+      databaseUrlSummary = "present but invalid URL";
+    }
+  }
+  return {
+    DB_CONNECTION: envVars.DB_CONNECTION ?? null,
+    DB_HOST: envVars.DB_HOST ?? null,
+    DB_PORT: envVars.DB_PORT ?? null,
+    DB_DATABASE: envVars.DB_DATABASE ?? null,
+    DB_USERNAME: envVars.DB_USERNAME ?? null,
+    hasDbPassword: Boolean(envVars.DB_PASSWORD),
+    DATABASE_URL: databaseUrlSummary
+  };
+}
+
 async function ensureLaravelDatabaseConnection(
   deployment: DeploymentDatabaseRuntime,
   releaseId: string | undefined,
@@ -1789,6 +1811,22 @@ async function ensureLaravelDatabaseConnection(
   envVars: Record<string, string>
 ) {
   if (!deployment.dbType || !deployment.dbName || !deployment.dbUser) return envVars;
+
+  const clearConfig = await runStep(deployment.id, releaseId, "PREFLIGHT", "Clear Laravel config cache before database check", () =>
+    sysagent.deploymentBuild({
+      rootPath: appPath,
+      command: "php artisan config:clear",
+      env: envVars
+    })
+  );
+  try {
+    assertCommandTree(clearConfig, "Clear Laravel config cache before database check");
+  } catch (error) {
+    await writeLog(deployment.id, releaseId, "PREFLIGHT", "Laravel config cache clear warning", {
+      warning: error instanceof Error ? error.message : String(error),
+      result: JSON.parse(JSON.stringify(clearConfig ?? null))
+    }, "warn");
+  }
 
   const verify = () =>
     runStep(deployment.id, releaseId, "PREFLIGHT", "Verify Laravel database connection", () =>
@@ -1805,6 +1843,16 @@ async function ensureLaravelDatabaseConnection(
     return envVars;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    await writeLog(deployment.id, releaseId, "PREFLIGHT", "Laravel database connection diagnostic", {
+      error: message,
+      selectedDatabase: {
+        dbType: deployment.dbType,
+        dbName: deployment.dbName,
+        dbUser: deployment.dbUser
+      },
+      env: databaseConnectionDiagnostics(envVars),
+      result: JSON.parse(JSON.stringify(result ?? null))
+    }, "error");
     if (!isMysqlAccessDenied(message)) throw error;
     await writeLog(deployment.id, releaseId, "PREFLIGHT", "Laravel database connection failed; repairing credentials", {
       evidence: message.slice(0, 4000)
