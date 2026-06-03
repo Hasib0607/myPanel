@@ -630,6 +630,39 @@ async function markRelease(releaseId: string | undefined, status: "RUNNING" | "S
   });
 }
 
+type GitSyncCommitInfo = {
+  sha: string | null;
+  message: string | null;
+  author: string | null;
+};
+
+function gitSyncCommitInfo(result: unknown): GitSyncCommitInfo | null {
+  if (!result || typeof result !== "object") return null;
+  const commit = (result as { commit?: unknown }).commit;
+  if (!commit || typeof commit !== "object") return null;
+  const value = commit as { sha?: unknown; message?: unknown; author?: unknown };
+  const sha = typeof value.sha === "string" && value.sha ? value.sha : null;
+  const message = typeof value.message === "string" && value.message ? value.message : null;
+  const author = typeof value.author === "string" && value.author ? value.author : null;
+  return sha || message || author ? { sha, message, author } : null;
+}
+
+async function syncReleaseCommitInfo(deploymentId: string, releaseId: string | undefined, commit: GitSyncCommitInfo | null) {
+  if (!commit?.sha) return;
+  const data = {
+    commitSha: commit.sha,
+    commitMessage: commit.message,
+    commitAuthor: commit.author
+  };
+  await prisma.deployment.update({ where: { id: deploymentId }, data: { commitSha: commit.sha } });
+  if (releaseId) {
+    await prisma.deploymentRelease.update({
+      where: { id: releaseId },
+      data
+    });
+  }
+}
+
 function renderDeploymentCommand(command: string | null | undefined, port: number) {
   return command?.replaceAll("{PORT}", String(port)).replaceAll("$PORT", String(port)) ?? null;
 }
@@ -2649,6 +2682,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         })
       );
       assertCommandTree(syncResult, "Source sync");
+      await syncReleaseCommitInfo(deployment.id, releaseId, gitSyncCommitInfo(syncResult));
     } else {
       await writeLog(deployment.id, releaseId, "CLONING", "Source sync skipped for non-Git source", { sourceProvider: deployment.sourceProvider });
     }

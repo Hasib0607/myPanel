@@ -360,6 +360,22 @@ def git_command_with_safe_directory(root_path: str, target: Path, command: list[
     return result
 
 
+def git_commit_info(root_path: str, target: Path, env: dict[str, str] | None = None) -> dict:
+    sha = git_command_with_safe_directory(root_path, target, ["git", "-C", str(target), "rev-parse", "HEAD"], env=env)
+    message = git_command_with_safe_directory(root_path, target, ["git", "-C", str(target), "log", "-1", "--pretty=%s"], env=env)
+    author = git_command_with_safe_directory(root_path, target, ["git", "-C", str(target), "log", "-1", "--pretty=%an"], env=env)
+    return {
+        "sha": (sha.get("stdout") or "").strip() if sha.get("returncode") == 0 else None,
+        "message": (message.get("stdout") or "").strip() if message.get("returncode") == 0 else None,
+        "author": (author.get("stdout") or "").strip() if author.get("returncode") == 0 else None,
+        "commands": {
+            "sha": sha,
+            "message": message,
+            "author": author,
+        },
+    }
+
+
 def deployment_cwd(root_path: str) -> str:
     return str(Path(root_path).resolve())
 
@@ -906,7 +922,7 @@ def git_sync(body: GitSyncRequest) -> dict:
         reset_target = body.commitSha or "FETCH_HEAD"
         reset = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "reset", "--hard", reset_target], env=env)
         clean = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "clean", "-fd"], env=env)
-        return {"safeDirectory": safe, "remote": remote, "sync": fetch, "reset": reset, "clean": clean}
+        return {"safeDirectory": safe, "remote": remote, "sync": fetch, "reset": reset, "clean": clean, "commit": git_commit_info(body.rootPath, target, env)}
     if body.gitUrl:
         command = ["git", "clone", "--branch", body.branch, body.gitUrl, str(target)]
     else:
@@ -917,7 +933,7 @@ def git_sync(body: GitSyncRequest) -> dict:
         checkout = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "checkout", body.commitSha], env=env)
     elif not body.gitUrl:
         checkout = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "checkout", body.branch], env=env)
-    return {"safeDirectory": safe, "sync": result, "checkout": checkout}
+    return {"safeDirectory": safe, "sync": result, "checkout": checkout, "commit": git_commit_info(body.rootPath, target, env) if target.joinpath(".git").exists() else None}
 
 
 @router.post("/install")
