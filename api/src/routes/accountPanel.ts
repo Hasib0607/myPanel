@@ -286,6 +286,30 @@ function expiryStatus(expiry: Date | null) {
   };
 }
 
+async function accountSslJobStatus(request: any, jobId: string) {
+  const job = await sslQueue.getJob(jobId);
+  if (!job) {
+    throw Object.assign(new Error("SSL job not found. It may have already been cleaned up."), { statusCode: 404 });
+  }
+  if (job.data?.domainId) {
+    await prisma.domain.findFirstOrThrow({ where: { id: job.data.domainId, accountId: accountId(request) } });
+  }
+  const state = await job.getState();
+  return {
+    id: job.id,
+    name: job.name,
+    state,
+    progress: job.progress,
+    failedReason: job.failedReason,
+    stacktrace: job.stacktrace,
+    returnvalue: job.returnvalue,
+    attemptsMade: job.attemptsMade,
+    timestamp: job.timestamp,
+    processedOn: job.processedOn,
+    finishedOn: job.finishedOn
+  };
+}
+
 function assertLimit(current: number, limit: number | null | undefined, label: string) {
   if (limit !== null && limit !== undefined && current >= limit) {
     const error = new Error(`${label} package limit reached`);
@@ -653,6 +677,21 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     return reply.code(summary.failed > 0 ? 207 : 201).send({ ...summary, total: results.length, results });
   });
 
+  app.get("/domains/:domainId", async (request: any) => {
+    const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
+    const domain = await prisma.domain.findFirstOrThrow({
+      where: { id: domainId, accountId: accountId(request) },
+      include: {
+        dnsRecords: { orderBy: [{ type: "asc" as const }, { name: "asc" as const }] },
+        subdomains: { orderBy: { name: "asc" as const } },
+        mailAccounts: { orderBy: { username: "asc" as const } },
+        deployments: { orderBy: { createdAt: "desc" as const }, take: 1 }
+      }
+    });
+    const { deployments, ...rest } = domain;
+    return { ...rest, deployment: deployments[0] ?? null };
+  });
+
   app.patch("/domains/:domainId/status", async (request: any) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const body = z.object({ status: z.enum(["ACTIVE", "PENDING", "SUSPENDED"]) }).parse(request.body);
@@ -774,6 +813,62 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     if (deleted.count === 0) throw app.httpErrors.notFound("DNS record not found");
     await audit(request, { action: "DELETE", resource: "dns_record", resourceId: recordId, description: `Account deleted DNS record for ${domain.name}` });
     return { ok: true };
+  });
+
+  app.get("/ssl/jobs/:jobId", async (request: any) => {
+    const { jobId } = z.object({ jobId: z.string() }).parse(request.params);
+    return accountSslJobStatus(request, jobId);
+  });
+
+  app.get("/ssl/domains/:domainId/status", async (request: any) => {
+    const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
+    const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
+    const effectiveExpiry = domain.sslEnabled ? domain.sslExpiry : null;
+    return {
+      domainId: domain.id,
+      domain: domain.name,
+      sslEnabled: domain.sslEnabled,
+      sslExpiry: effectiveExpiry,
+      forceSsl: domain.forceSsl,
+      ...expiryStatus(effectiveExpiry)
+    };
+  });
+
+  app.post("/ssl/domains/:domainId/preflight", async (request: any) => {
+    const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
+    const body = sslSchema.parse(request.body ?? {});
+    const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    return {
+      webRoot: path.join(account.homeRoot, "public_html"),
+      includeWww: body.includeWww,
+      dnsChecks: [
+        { host: domain.name, records: [], ok: true, skipped: false },
+        ...(body.includeWww ? [{ host: `www.${domain.name}`, records: [], ok: true, skipped: true }] : [])
+      ]
+    };
+  });
+
+  app.post("/ssl/domains/:domainId/:action", async (request: any, reply) => {
+    const { domainId, action } = z.object({ domainId: z.string(), action: z.enum(["issue", "renew"]) }).parse(request.params);
+    const body = sslSchema.parse(request.body ?? {});
+    const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    const webRoot = path.join(account.homeRoot, "public_html");
+    const job = await sslQueue.add(action, {
+      domainId: domain.id,
+      domain: domain.name,
+      email: body.email ?? `admin@${domain.name}`,
+      webRoot,
+      includeWww: body.includeWww,
+      forceSsl: domain.forceSsl,
+      source: "account"
+    });
+    if (action === "issue") {
+      await prisma.domain.update({ where: { id: domain.id }, data: { sslEnabled: false, sslExpiry: null } });
+    }
+    await audit(request, { action: "APPLY", resource: "ssl", resourceId: domain.id, description: `Account queued SSL ${action} for ${domain.name}` });
+    return reply.code(202).send({ queued: true, jobId: job.id });
   });
 
   app.get("/domains/:domainId/ssl", async (request: any) => {

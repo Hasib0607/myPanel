@@ -47,16 +47,23 @@ type SslPreflight = {
   dnsChecks: Array<{ host: string; records: string[]; ok?: boolean; skipped?: boolean }>;
 };
 
-export function SslClient({ domainId, subdomainId }: { domainId: string; subdomainId?: string }) {
+type SslClientProps = {
+  domainId: string;
+  subdomainId?: string;
+  domainApiBase?: string;
+  sslApiBase?: string;
+};
+
+export function SslClient({ domainId, subdomainId, domainApiBase = "/domains", sslApiBase = "/ssl" }: SslClientProps) {
   const queryClient = useQueryClient();
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
-  const sslBase = subdomainId ? `/ssl/subdomains/${subdomainId}` : `/ssl/domains/${domainId}`;
+  const sslBase = subdomainId ? `${sslApiBase}/subdomains/${subdomainId}` : `${sslApiBase}/domains/${domainId}`;
   const resourceKey = subdomainId ?? domainId;
-  const domain = useQuery({ queryKey: ["domain", domainId], queryFn: () => apiGet<DomainDetail>(`/domains/${domainId}`) });
-  const ssl = useQuery({ queryKey: ["ssl-status", resourceKey], queryFn: () => apiGet<SslStatus>(`${sslBase}/status`) });
+  const domain = useQuery({ queryKey: ["domain", domainApiBase, domainId], queryFn: () => apiGet<DomainDetail>(`${domainApiBase}/${domainId}`) });
+  const ssl = useQuery({ queryKey: ["ssl-status", sslApiBase, resourceKey], queryFn: () => apiGet<SslStatus>(`${sslBase}/status`) });
   const jobStatus = useQuery({
-    queryKey: ["ssl-job", activeJobId],
-    queryFn: () => apiGet<SslJobStatus>(`/ssl/jobs/${activeJobId}`),
+    queryKey: ["ssl-job", sslApiBase, activeJobId],
+    queryFn: () => apiGet<SslJobStatus>(`${sslApiBase}/jobs/${activeJobId}`),
     enabled: Boolean(activeJobId),
     refetchInterval: (query) => {
       const state = query.state.data?.state;
@@ -64,40 +71,40 @@ export function SslClient({ domainId, subdomainId }: { domainId: string; subdoma
     }
   });
   const update = useMutation({
-    mutationFn: (forceSsl: boolean) => apiPatch(`/domains/${domainId}`, { forceSsl }),
+    mutationFn: (forceSsl: boolean) => apiPatch(`${domainApiBase}/${domainId}`, { forceSsl }),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["domain", domainId] });
-      await queryClient.invalidateQueries({ queryKey: ["ssl-status", resourceKey] });
+      await queryClient.invalidateQueries({ queryKey: ["domain", domainApiBase, domainId] });
+      await queryClient.invalidateQueries({ queryKey: ["ssl-status", sslApiBase, resourceKey] });
     }
   });
   const issue = useMutation({
     mutationFn: () => apiPost<SslQueueResponse>(`${sslBase}/issue`, {}),
     onSuccess: async (data) => {
       setActiveJobId(data.jobId);
-      await queryClient.invalidateQueries({ queryKey: ["ssl-status", resourceKey] });
+      await queryClient.invalidateQueries({ queryKey: ["ssl-status", sslApiBase, resourceKey] });
     }
   });
   const renew = useMutation({
     mutationFn: () => apiPost<SslQueueResponse>(`${sslBase}/renew`, {}),
     onSuccess: async (data) => {
       setActiveJobId(data.jobId);
-      await queryClient.invalidateQueries({ queryKey: ["ssl-status", resourceKey] });
+      await queryClient.invalidateQueries({ queryKey: ["ssl-status", sslApiBase, resourceKey] });
     }
   });
   const preflight = useMutation({
     mutationFn: () => apiPost<SslPreflight>(`${sslBase}/preflight`, {}),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["ssl-status", resourceKey] });
+      await queryClient.invalidateQueries({ queryKey: ["ssl-status", sslApiBase, resourceKey] });
     }
   });
 
   useEffect(() => {
     if (jobStatus.data?.state === "completed") {
-      void queryClient.invalidateQueries({ queryKey: ["domain", domainId] });
-      void queryClient.invalidateQueries({ queryKey: ["ssl-status", resourceKey] });
+      void queryClient.invalidateQueries({ queryKey: ["domain", domainApiBase, domainId] });
+      void queryClient.invalidateQueries({ queryKey: ["ssl-status", sslApiBase, resourceKey] });
       void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     }
-  }, [domainId, jobStatus.data?.state, queryClient, resourceKey]);
+  }, [domainApiBase, domainId, jobStatus.data?.state, queryClient, resourceKey, sslApiBase]);
 
   const status = ssl.data;
   const statusText = status?.state ?? "missing";
