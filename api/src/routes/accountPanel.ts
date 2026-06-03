@@ -112,11 +112,21 @@ const deploymentSchema = z.object({
   githubVisibility: z.string().nullable().optional(),
   branch: z.string().default("main"),
   rootDirectory: z.string().default("."),
+  rootPath: z.string().min(1).optional(),
+  port: z.coerce.number().int().min(1).max(65535).optional(),
   installCommand: z.string().nullable().optional(),
   buildCommand: z.string().nullable().optional(),
   startCommand: z.string().nullable().optional(),
   outputDirectory: z.string().nullable().optional(),
   publicDirectory: z.string().nullable().optional(),
+  dbType: z.enum(["POSTGRESQL", "MYSQL"]).nullable().optional(),
+  dbName: z.string().nullable().optional(),
+  dbUser: z.string().nullable().optional(),
+  envVars: z.array(z.object({
+    key: z.string().trim().regex(/^[A-Z_][A-Z0-9_]*$/i),
+    value: z.string().nullable().optional(),
+    isSecret: z.boolean().default(false)
+  })).default([]),
   autoDeployEnabled: z.boolean().default(false)
 });
 const deploymentUpdateSchema = deploymentSchema.partial().extend({
@@ -320,11 +330,99 @@ function logMetadataText(metadata: Prisma.JsonValue | null) {
   }
 }
 
+const subdomainSelectionPrefix = "subdomain:";
+
+function isSubdomainSelectionId(value: string) {
+  return value.startsWith(subdomainSelectionPrefix);
+}
+
+function subdomainFqdn(subdomain: { name: string; domain: { name: string } }) {
+  return `${subdomain.name}.${subdomain.domain.name}`;
+}
+
+function serializeAccountDeploymentBinding(binding: any) {
+  if (binding.subdomain) {
+    const id = `${subdomainSelectionPrefix}${binding.subdomain.id}`;
+    return {
+      ...binding,
+      domainId: id,
+      domain: {
+        id,
+        name: subdomainFqdn(binding.subdomain),
+        forceSsl: binding.subdomain.sslEnabled,
+        sslEnabled: binding.subdomain.sslEnabled,
+        documentRoot: binding.subdomain.domain.documentRoot,
+        includeWww: false
+      }
+    };
+  }
+  return binding;
+}
+
+function serializeAccountDeployment<T extends { domainBindings?: any[]; domainId?: string | null }>(deployment: T) {
+  const domainBindings = deployment.domainBindings?.map(serializeAccountDeploymentBinding);
+  const primary = domainBindings?.find((binding) => binding.role === "primary") ?? domainBindings?.[0];
+  return {
+    ...deployment,
+    domainId: primary?.domainId ?? deployment.domainId ?? null,
+    domainBindings
+  };
+}
+
+async function resolveAccountBindingTarget(accountId: string, selectionId: string) {
+  if (isSubdomainSelectionId(selectionId)) {
+    const subdomainId = selectionId.slice(subdomainSelectionPrefix.length);
+    const subdomain = await prisma.subdomain.findFirstOrThrow({
+      where: { id: subdomainId, domain: { accountId } },
+      include: { domain: true }
+    });
+    return { domainId: null as string | null, subdomainId: subdomain.id, displayName: subdomainFqdn(subdomain) };
+  }
+  const domain = await prisma.domain.findFirstOrThrow({ where: { id: selectionId, accountId } });
+  return { domainId: domain.id, subdomainId: null as string | null, displayName: domain.name };
+}
+
+async function syncAccountPrimaryBinding(deploymentId: string, accountId: string, selectionId: string | null | undefined) {
+  if (selectionId === undefined) return null;
+  if (selectionId === null || selectionId === "") {
+    await prisma.deploymentDomain.updateMany({ where: { deploymentId, role: "primary" }, data: { role: "alias" } });
+    await prisma.deployment.update({ where: { id: deploymentId }, data: { domainId: null } });
+    return null;
+  }
+  const target = await resolveAccountBindingTarget(accountId, selectionId);
+  if (target.subdomainId) {
+    await prisma.$transaction([
+      prisma.deploymentDomain.upsert({
+        where: { deploymentId_subdomainId: { deploymentId, subdomainId: target.subdomainId } },
+        update: { role: "primary" },
+        create: { deploymentId, subdomainId: target.subdomainId, role: "primary" }
+      }),
+      prisma.deploymentDomain.updateMany({ where: { deploymentId, subdomainId: { not: target.subdomainId }, role: "primary" }, data: { role: "alias" } }),
+      prisma.deploymentDomain.updateMany({ where: { deploymentId, domainId: { not: null }, role: "primary" }, data: { role: "alias" } }),
+      prisma.deployment.update({ where: { id: deploymentId }, data: { domainId: null } })
+    ]);
+    return target;
+  }
+  await prisma.$transaction([
+    prisma.deploymentDomain.upsert({
+      where: { deploymentId_domainId: { deploymentId, domainId: target.domainId ?? "" } },
+      update: { role: "primary" },
+      create: { deploymentId, domainId: target.domainId, role: "primary" }
+    }),
+    prisma.deploymentDomain.updateMany({ where: { deploymentId, domainId: { not: target.domainId }, role: "primary" }, data: { role: "alias" } }),
+    prisma.deploymentDomain.updateMany({ where: { deploymentId, subdomainId: { not: null }, role: "primary" }, data: { role: "alias" } }),
+    prisma.deployment.update({ where: { id: deploymentId }, data: { domainId: target.domainId } }),
+    prisma.domain.update({ where: { id: target.domainId ?? "" }, data: { hostingMode: "DEPLOYMENT_PROXY", hostingDeploymentId: deploymentId } })
+  ]);
+  return target;
+}
+
 async function findAccountDeployment(request: any, idOrSlug: string) {
-  return prisma.deployment.findFirstOrThrow({
+  const deployment = await prisma.deployment.findFirstOrThrow({
     where: { accountId: accountId(request), OR: [{ id: idOrSlug }, { slug: idOrSlug }] },
     include: includeAccountDeployment()
   });
+  return serializeAccountDeployment(deployment);
 }
 
 async function nextDeploymentPort() {
@@ -1149,7 +1247,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       }),
       prisma.deployment.count({ where })
     ]);
-    return { items, total, page: query.page, pageSize: query.pageSize };
+    return { items: items.map(serializeAccountDeployment), total, page: query.page, pageSize: query.pageSize };
   });
 
   app.get("/deployments/ports/next", async () => ({ port: await nextDeploymentPort() }));
@@ -1287,14 +1385,14 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       include: { _count: { select: { domains: true, deployments: true, mailAccounts: true, databases: true } } }
     });
     assertLimit(account._count.deployments, account.deploymentLimit, "Deployment");
-    const domain = body.domainId ? await prisma.domain.findFirstOrThrow({ where: { id: body.domainId, accountId: account.id } }) : null;
+    const bindingTarget = body.domainId ? await resolveAccountBindingTarget(account.id, body.domainId) : null;
     const slug = await uniqueDeploymentSlug(body.slug || body.name);
-    const rootPath = path.join(account.homeRoot, "deployments", slug);
+    const rootPath = body.rootPath ? safeAccountPath(account, body.rootPath).resolved : path.join(account.homeRoot, "deployments", slug);
     await fs.mkdir(rootPath, { recursive: true });
     const deployment = await prisma.deployment.create({
       data: {
         accountId: account.id,
-        domainId: domain?.id ?? null,
+        domainId: bindingTarget?.domainId ?? null,
         name: body.name,
         slug,
         framework: body.framework,
@@ -1314,52 +1412,64 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
         startCommand: body.startCommand ?? null,
         outputDirectory: body.outputDirectory ?? null,
         publicDirectory: body.publicDirectory ?? null,
+        dbType: body.dbType ?? null,
+        dbName: body.dbName ?? null,
+        dbUser: body.dbUser ?? null,
         processManager: defaultProcessManagerByFramework[body.framework],
-        port: await nextDeploymentPort(),
+        port: body.port ?? await nextDeploymentPort(),
         autoDeployEnabled: body.autoDeployEnabled,
-        status: "STOPPED"
+        status: "STOPPED",
+        env: {
+          create: body.envVars.map((item) => ({
+            key: item.key.toUpperCase(),
+            value: item.value ?? "",
+            isSecret: item.isSecret
+          }))
+        }
       }
     });
-    if (domain) {
-      await prisma.deploymentDomain.upsert({
-        where: { deploymentId_domainId: { deploymentId: deployment.id, domainId: domain.id } },
-        update: { role: "primary" },
-        create: { deploymentId: deployment.id, domainId: domain.id, role: "primary" }
-      });
-      await prisma.domain.update({ where: { id: domain.id }, data: { hostingMode: "DEPLOYMENT_PROXY", hostingDeploymentId: deployment.id } });
-    }
+    await syncAccountPrimaryBinding(deployment.id, account.id, body.domainId ?? null);
     await audit(request, { action: "CREATE", resource: "deployment", resourceId: deployment.id, description: `Account created deployment ${deployment.slug}` });
-    return reply.code(201).send(await prisma.deployment.findUniqueOrThrow({ where: { id: deployment.id }, include: includeAccountDeployment() }));
+    const created = await prisma.deployment.findUniqueOrThrow({ where: { id: deployment.id }, include: includeAccountDeployment() });
+    return reply.code(201).send(serializeAccountDeployment(created));
   });
 
   app.patch("/deployments/:deploymentId", async (request: any) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const body = deploymentUpdateSchema.parse(request.body);
     const existing = await findAccountDeployment(request, deploymentId);
-    const domain = body.domainId ? await prisma.domain.findFirstOrThrow({ where: { id: body.domainId, accountId: accountId(request) } }) : body.domainId === null ? null : undefined;
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    const bindingTarget = body.domainId ? await resolveAccountBindingTarget(account.id, body.domainId) : null;
+    const rootPath = body.rootPath === undefined ? undefined : safeAccountPath(account, body.rootPath).resolved;
+    if (rootPath) await fs.mkdir(rootPath, { recursive: true });
+    const { envVars: _envVars, domainId: _domainId, rootPath: _rootPath, ...data } = body;
     const deployment = await prisma.deployment.update({
       where: { id: existing.id },
       data: {
-        ...body,
-        domainId: domain === undefined ? existing.domainId : domain?.id ?? null,
+        ...data,
+        ...(rootPath !== undefined ? { rootPath } : {}),
+        ...(body.domainId !== undefined ? { domainId: bindingTarget?.domainId ?? null } : {}),
         gitUrl: body.gitUrl ?? undefined,
         repoUrl: (body as any).repoUrl ?? undefined,
         processManager: body.framework ? defaultProcessManagerByFramework[body.framework] : undefined
       },
       include: includeAccountDeployment()
     });
-    if (domain !== undefined) {
-      await prisma.deploymentDomain.deleteMany({ where: { deploymentId: deployment.id, role: "primary" } });
-      if (domain) {
-        await prisma.deploymentDomain.upsert({
-          where: { deploymentId_domainId: { deploymentId: deployment.id, domainId: domain.id } },
-          update: { role: "primary" },
-          create: { deploymentId: deployment.id, domainId: domain.id, role: "primary" }
+    if (body.domainId !== undefined) {
+      await syncAccountPrimaryBinding(deployment.id, account.id, body.domainId);
+    }
+    if (body.envVars !== undefined) {
+      for (const item of body.envVars) {
+        await prisma.deploymentEnvVar.upsert({
+          where: { deploymentId_key: { deploymentId: deployment.id, key: item.key.toUpperCase() } },
+          update: { value: item.value ?? "", isSecret: item.isSecret },
+          create: { deploymentId: deployment.id, key: item.key.toUpperCase(), value: item.value ?? "", isSecret: item.isSecret }
         });
       }
     }
     await audit(request, { action: "UPDATE", resource: "deployment", resourceId: deployment.id, description: `Account updated deployment ${deployment.slug}` });
-    return prisma.deployment.findUniqueOrThrow({ where: { id: deployment.id }, include: includeAccountDeployment() });
+    const updated = await prisma.deployment.findUniqueOrThrow({ where: { id: deployment.id }, include: includeAccountDeployment() });
+    return serializeAccountDeployment(updated);
   });
 
   app.get("/deployments/:deploymentId/releases", async (request: any) => {
@@ -1390,36 +1500,46 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const body = z.object({ domainId: z.string(), primary: z.boolean().default(false) }).parse(request.body);
     const deployment = await findAccountDeployment(request, deploymentId);
-    const domain = await prisma.domain.findFirstOrThrow({ where: { id: body.domainId, accountId: accountId(request) } });
+    const target = await resolveAccountBindingTarget(accountId(request), body.domainId);
     if (body.primary) await prisma.deploymentDomain.updateMany({ where: { deploymentId: deployment.id }, data: { role: "alias" } });
-    const binding = await prisma.deploymentDomain.upsert({
-      where: { deploymentId_domainId: { deploymentId: deployment.id, domainId: domain.id } },
-      update: { role: body.primary ? "primary" : "alias" },
-      create: { deploymentId: deployment.id, domainId: domain.id, role: body.primary ? "primary" : "alias" },
-      include: { domain: true, subdomain: { include: { domain: true } } }
-    });
-    await prisma.domain.update({ where: { id: domain.id }, data: { hostingMode: "DEPLOYMENT_PROXY", hostingDeploymentId: deployment.id } });
-    if (body.primary) await prisma.deployment.update({ where: { id: deployment.id }, data: { domainId: domain.id } });
-    return reply.code(201).send(binding);
+    const binding = target.subdomainId
+      ? await prisma.deploymentDomain.upsert({
+          where: { deploymentId_subdomainId: { deploymentId: deployment.id, subdomainId: target.subdomainId } },
+          update: { role: body.primary ? "primary" : "alias" },
+          create: { deploymentId: deployment.id, subdomainId: target.subdomainId, role: body.primary ? "primary" : "alias" },
+          include: { domain: true, subdomain: { include: { domain: true } } }
+        })
+      : await prisma.deploymentDomain.upsert({
+          where: { deploymentId_domainId: { deploymentId: deployment.id, domainId: target.domainId ?? "" } },
+          update: { role: body.primary ? "primary" : "alias" },
+          create: { deploymentId: deployment.id, domainId: target.domainId, role: body.primary ? "primary" : "alias" },
+          include: { domain: true, subdomain: { include: { domain: true } } }
+        });
+    if (target.domainId) await prisma.domain.update({ where: { id: target.domainId }, data: { hostingMode: "DEPLOYMENT_PROXY", hostingDeploymentId: deployment.id } });
+    if (body.primary || !deployment.domainId) {
+      await syncAccountPrimaryBinding(deployment.id, accountId(request), body.domainId);
+    }
+    await audit(request, { action: "UPDATE", resource: "deployment", resourceId: deployment.id, description: `Account bound domain ${target.displayName} to ${deployment.slug}` });
+    return reply.code(201).send(serializeAccountDeploymentBinding(binding));
   });
 
   app.patch("/deployments/:deploymentId/domains/:domainId/primary", async (request: any) => {
     const { deploymentId, domainId } = z.object({ deploymentId: z.string(), domainId: z.string() }).parse(request.params);
     const deployment = await findAccountDeployment(request, deploymentId);
-    const binding = await prisma.deploymentDomain.findFirstOrThrow({ where: { deploymentId: deployment.id, domainId } });
-    const domain = await prisma.domain.findFirstOrThrow({ where: { id: binding.domainId ?? "", accountId: accountId(request) } });
-    await prisma.deploymentDomain.updateMany({ where: { deploymentId: deployment.id }, data: { role: "alias" } });
-    await prisma.deploymentDomain.update({ where: { id: binding.id }, data: { role: "primary" } });
-    await prisma.deployment.update({ where: { id: deployment.id }, data: { domainId: domain.id } });
+    await resolveAccountBindingTarget(accountId(request), domainId);
+    await syncAccountPrimaryBinding(deployment.id, accountId(request), domainId);
     return { ok: true };
   });
 
   app.delete("/deployments/:deploymentId/domains/:domainId", async (request: any) => {
     const { deploymentId, domainId } = z.object({ deploymentId: z.string(), domainId: z.string() }).parse(request.params);
     const deployment = await findAccountDeployment(request, deploymentId);
-    const deleted = await prisma.deploymentDomain.deleteMany({ where: { deploymentId: deployment.id, domainId } });
+    const target = await resolveAccountBindingTarget(accountId(request), domainId);
+    const deleted = target.subdomainId
+      ? await prisma.deploymentDomain.deleteMany({ where: { deploymentId: deployment.id, subdomainId: target.subdomainId } })
+      : await prisma.deploymentDomain.deleteMany({ where: { deploymentId: deployment.id, domainId: target.domainId } });
     if (deleted.count === 0) throw app.httpErrors.notFound("Domain binding not found");
-    if (deployment.domainId === domainId) await prisma.deployment.update({ where: { id: deployment.id }, data: { domainId: null } });
+    if (deployment.domainId === domainId || deployment.domainId === target.domainId) await prisma.deployment.update({ where: { id: deployment.id }, data: { domainId: null } });
     return { ok: true };
   });
 
