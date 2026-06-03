@@ -433,3 +433,54 @@ export function runtimeInstallTargetsForComposerPlatformIssue(text: string) {
 
   return targets;
 }
+
+export type FrontendModuleNotFound = {
+  missingImport: string;
+  importerDirectory: string | null;
+  importerFile: string | null;
+};
+
+function frontendBuildContext(text: string) {
+  const lower = text.toLowerCase();
+  return lower.includes("webpack")
+    || lower.includes("laravel mix")
+    || lower.includes("mix --production")
+    || lower.includes("laravel frontend asset build")
+    || lower.includes("vite")
+    || lower.includes("compiled with some errors");
+}
+
+export function detectFrontendModuleNotFound(text: string): FrontendModuleNotFound | null {
+  if (!frontendBuildContext(text)) return null;
+
+  const resolveMatch = text.match(/can't resolve\s+['"]([^'"]+)['"]\s+in\s+['"]([^'"]+)['"]/i)
+    ?? text.match(/cannot resolve\s+['"]([^'"]+)['"]\s+in\s+['"]([^'"]+)['"]/i);
+  const bareModuleMatch = !resolveMatch
+    ? text.match(/module not found:\s*(?:error:\s*)?(?:can't resolve|cannot resolve)\s+['"]([^'"]+)['"]/i)
+      ?? text.match(/error:\s*cannot find module\s+['"]([^'"]+)['"]/i)
+    : null;
+
+  const missingImport = resolveMatch?.[1] ?? bareModuleMatch?.[1];
+  if (!missingImport) return null;
+
+  const importerDirectory = resolveMatch?.[2] ?? null;
+  const importerFile = text.match(/error in\s+(\.\/[^\s?]+)/i)?.[1]
+    ?? text.match(/\(\.\/node_modules\/[^)]+\/(\.\/[^\s?]+\.vue)/i)?.[1]
+    ?? null;
+
+  return { missingImport, importerDirectory, importerFile };
+}
+
+export function formatFrontendModuleNotFoundMessage(issue: FrontendModuleNotFound) {
+  const importPath = issue.missingImport.startsWith(".") ? issue.missingImport : `./${issue.missingImport}`;
+  const base = issue.importerDirectory ?? "the frontend source tree";
+  const importer = issue.importerFile ? ` (referenced from ${issue.importerFile})` : "";
+  return `Laravel Mix/Vite/webpack cannot find source file ${importPath} under ${base}${importer}. Add the missing file to Git, fix the import path, or commit pre-built public assets (mix-manifest.json / public/build) and redeploy. The VPS cannot create missing application source files automatically.`;
+}
+
+export function appendFrontendModuleNotFoundHint(text: string) {
+  const issue = detectFrontendModuleNotFound(text);
+  if (!issue) return text;
+  const hint = formatFrontendModuleNotFoundMessage(issue);
+  return text.includes(hint) ? text : `${text}\n\n${hint}`;
+}

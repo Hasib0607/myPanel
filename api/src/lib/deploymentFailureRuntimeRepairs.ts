@@ -1,4 +1,4 @@
-import { runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables, type RuntimeInstallTarget } from "./deploymentRuntimeTools.js";
+import { detectFrontendModuleNotFound, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables, type RuntimeInstallTarget } from "./deploymentRuntimeTools.js";
 
 function uniqueRuntimeTargets(targets: RuntimeInstallTarget[]) {
   const seen = new Set<string>();
@@ -30,6 +30,10 @@ export function nodePackageBinaryMissing(text: string) {
     || /sh:\s+line\s+\d+:\s+(vite|next|react-scripts):\s+command not found/i.test(text);
 }
 
+export function frontendModuleNotFound(text: string) {
+  return detectFrontendModuleNotFound(text) !== null;
+}
+
 export function permissionRepairNeeded(text: string) {
   const lower = text.toLowerCase();
   return lower.includes("permission denied")
@@ -49,7 +53,7 @@ export function runtimeTargetsForFailedDeploymentLog(text: string) {
     missingTools.add("python3.10+");
   }
 
-  if (nodePackageBinaryMissing(text)) {
+  if (nodePackageBinaryMissing(text) || frontendModuleNotFound(text)) {
     return uniqueRuntimeTargets(targets);
   }
 

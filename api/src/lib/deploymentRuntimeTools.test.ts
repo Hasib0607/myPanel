@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { detectComposerPlatformIssue, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "./deploymentRuntimeTools.js";
-import { laravelPublicCwdMissing, nodePackageBinaryMissing, pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded } from "./deploymentFailureRuntimeRepairs.js";
+import { appendFrontendModuleNotFoundHint, detectComposerPlatformIssue, detectFrontendModuleNotFound, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "./deploymentRuntimeTools.js";
+import { frontendModuleNotFound, laravelPublicCwdMissing, nodePackageBinaryMissing, pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded } from "./deploymentFailureRuntimeRepairs.js";
 
 test("composer PHP 8.1 requirement on PHP 8.0 queues PHP 8.2 runtime repair", () => {
   const targets = runtimeInstallTargetsForComposerPlatformIssue(`
@@ -267,4 +267,23 @@ test("failed deploy parser treats missing Vite as project dependency repair", ()
 
   assert.equal(nodePackageBinaryMissing(log), true);
   assert.deepEqual(runtimeTargetsForFailedDeploymentLog(log), []);
+});
+
+test("detects Laravel Mix missing Vue source files", () => {
+  const log = `
+    Laravel frontend asset build failed with exit code 1:
+    ERROR in ./resources/js/Pos.vue?vue&type=script&setup=true&lang=js
+    Module not found: Error: Can't resolve './components/HeaderTop.vue' in '/var/www/deployments/ebitans-admin-final/resources/js'
+    webpack compiled with 1 error
+  `;
+
+  const issue = detectFrontendModuleNotFound(log);
+  assert.ok(issue);
+  assert.equal(issue?.missingImport, "./components/HeaderTop.vue");
+  assert.equal(issue?.importerDirectory, "/var/www/deployments/ebitans-admin-final/resources/js");
+  assert.equal(issue?.importerFile, "./resources/js/Pos.vue");
+  assert.equal(frontendModuleNotFound(log), true);
+  assert.deepEqual(runtimeTargetsForFailedDeploymentLog(log), []);
+  assert.match(appendFrontendModuleNotFoundHint(log), /HeaderTop\.vue/);
+  assert.match(appendFrontendModuleNotFoundHint(log), /cannot create missing application source files/i);
 });

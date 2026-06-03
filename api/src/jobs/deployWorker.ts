@@ -18,7 +18,7 @@ import {
   nodeStartUsesVitePreview
 } from "../lib/deploymentDetection.js";
 import { nodePackageBinaryMissing } from "../lib/deploymentFailureRuntimeRepairs.js";
-import { isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
+import { appendFrontendModuleNotFoundHint, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import {
   deploymentRecoveryAttempts,
   isRecoverableHealthFailure,
@@ -2479,11 +2479,22 @@ async function buildDatabaseRuntimeEnv(
   return { envVars: nextEnv, changed };
 }
 
+function enrichDeployBuildError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  const enriched = appendFrontendModuleNotFoundHint(message);
+  if (enriched === message) return error instanceof Error ? error : new Error(message);
+  return new Error(enriched);
+}
+
 function assertCommandTree(result: unknown, label: string) {
   if (!result || typeof result !== "object") return;
   const value = result as { dryRun?: boolean; returncode?: number; stderr?: string; reason?: string; command?: unknown };
   if (Array.isArray(value.command) || typeof value.returncode === "number" || value.dryRun !== undefined) {
-    assertLiveResult(value, label);
+    try {
+      assertLiveResult(value, label);
+    } catch (error) {
+      throw enrichDeployBuildError(error);
+    }
     return;
   }
   for (const [key, child] of Object.entries(result)) {

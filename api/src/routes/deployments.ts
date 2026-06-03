@@ -7,7 +7,7 @@ import { z } from "zod";
 import { env } from "../config/env.js";
 import { deployQueue } from "../jobs/queues.js";
 import { laravelPublicCwdMissing, nodePackageBinaryMissing } from "../lib/deploymentFailureRuntimeRepairs.js";
-import { detectComposerPlatformIssue, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
+import { detectComposerPlatformIssue, detectFrontendModuleNotFound, formatFrontendModuleNotFoundMessage, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import { audit } from "../lib/audit.js";
 import { detectDeploymentFiles, detectDeploymentSource } from "../lib/deploymentDetection.js";
 import {
@@ -818,6 +818,14 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
       category: "node_package_bin_missing"
     };
   }
+  const frontendModule = detectFrontendModuleNotFound(text);
+  if (frontendModule) {
+    return {
+      message: formatFrontendModuleNotFoundMessage(frontendModule),
+      repairAction: "redeploy",
+      category: "frontend_module_not_found"
+    };
+  }
   if ((lower.includes("no such file or directory") || lower.includes("command not found") || lower.includes("unsupported deployment executable")) && (lower.includes("composer") || lower.includes("php") || lower.includes("python") || lower.includes("pip") || lower.includes("uv") || lower.includes("uvicorn") || lower.includes("gunicorn") || lower.includes("node") || lower.includes("npm") || lower.includes("pnpm") || lower.includes("yarn") || lower.includes("next") || lower.includes("vite") || lower.includes("pm2") || lower.includes("supervisor"))) {
     return { message: "A required runtime tool is missing on the VPS. Use Deployment Doctor to request approval for the missing tool install, then redeploy.", repairAction: "request-approval", category: "missing_runtime_tool" };
   }
@@ -1163,20 +1171,6 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
     });
   }
 
-  if ((detection?.detected ?? deployment.framework) === "LARAVEL" && rootExists) {
-    const frontendAssets = await inspectLaravelFrontendAssets(appPath, deployment.publicDirectory);
-    if (frontendAssets) {
-      checks.push({
-        key: "laravel_frontend_assets",
-        label: "Laravel frontend assets",
-        status: frontendAssets.hasBuiltAssets ? "pass" : "warn",
-        detail: frontendAssets.detail,
-        fix: frontendAssets.hasBuiltAssets ? undefined : frontendAssets.buildScript ? "Redeploy so Guardian runs the Laravel frontend asset build before publishing Nginx." : "Add a Laravel frontend build script or commit the compiled public assets.",
-        repairAction: frontendAssets.hasBuiltAssets ? undefined : "redeploy"
-      });
-    }
-  }
-
   const runtimeTools = requiredRuntimeExecutables({
     framework: detection?.detected ?? deployment.framework,
     packageManager: detection?.suggestions.packageManager ?? deployment.packageManager,
@@ -1321,6 +1315,26 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
     runtimeLogs
   ].join("\n");
   const hint = knownErrorHint(recentErrors);
+
+  if ((detection?.detected ?? deployment.framework) === "LARAVEL" && rootExists) {
+    const frontendAssets = await inspectLaravelFrontendAssets(appPath, deployment.publicDirectory);
+    const frontendModuleIssue = detectFrontendModuleNotFound(recentErrors);
+    if (frontendAssets) {
+      checks.push({
+        key: "laravel_frontend_assets",
+        label: "Laravel frontend assets",
+        status: frontendModuleIssue ? "fail" : frontendAssets.hasBuiltAssets ? "pass" : "warn",
+        detail: frontendModuleIssue
+          ? formatFrontendModuleNotFoundMessage(frontendModuleIssue)
+          : frontendAssets.detail,
+        fix: frontendModuleIssue
+          ? formatFrontendModuleNotFoundMessage(frontendModuleIssue)
+          : frontendAssets.hasBuiltAssets ? undefined : frontendAssets.buildScript ? "Redeploy so Guardian runs the Laravel frontend asset build before publishing Nginx." : "Add a Laravel frontend build script or commit the compiled public assets.",
+        repairAction: frontendModuleIssue || !frontendAssets.hasBuiltAssets ? "redeploy" : undefined
+      });
+    }
+  }
+
   if (hint?.repairAction === "set-node-memory") {
     envSuggestions.push({ key: "NODE_OPTIONS", value: "--max-old-space-size=512", reason: "Reduce Node build/runtime memory pressure", repairAction: "set-node-memory" });
   }
