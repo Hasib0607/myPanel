@@ -1414,6 +1414,10 @@ function githubTokenSecretRef() {
   return "github:superadmin:token";
 }
 
+function accountGithubTokenSecretRef(accountId: string) {
+  return `github:account:${accountId}:token`;
+}
+
 async function assertRuntimeToolsInstalled(deploymentId: string, releaseId: string | undefined, deployment: {
   framework: DeploymentFramework;
   packageManager: DeploymentPackageManager | null;
@@ -2211,8 +2215,12 @@ async function shouldRunDatabaseMigration(
   return true;
 }
 
-async function githubCloneToken(sourceProvider: string, gitUrl: string | null) {
+async function githubCloneToken(sourceProvider: string, gitUrl: string | null, accountId?: string | null) {
   if (sourceProvider !== "GITHUB" || !gitUrl?.startsWith("https://github.com/")) return null;
+  if (accountId) {
+    const accountToken = await getSecret(accountGithubTokenSecretRef(accountId));
+    if (accountToken) return accountToken;
+  }
   return getSecret(githubTokenSecretRef());
 }
 
@@ -2551,7 +2559,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     );
 
     if (deployment.gitUrl || action === "pull") {
-      const gitToken = await githubCloneToken(deployment.sourceProvider, deployment.gitUrl);
+      const gitToken = await githubCloneToken(deployment.sourceProvider, deployment.gitUrl, deployment.accountId);
       const syncResult = await runStep(deployment.id, releaseId, "CLONING", "Source sync", () =>
         sysagent.deploymentGitSync({
           rootPath: deployment.rootPath,

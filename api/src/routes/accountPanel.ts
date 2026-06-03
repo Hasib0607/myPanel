@@ -241,8 +241,12 @@ function accountDatabaseIdentifier(prefix: string, value: string) {
   return clean.startsWith(prefix) ? clean : `${prefix}${clean}`.slice(0, 63);
 }
 
-function githubTokenSecretRef() {
-  return "github:superadmin:token";
+function accountGithubConnectionId(accountId: string) {
+  return `account:${accountId}`;
+}
+
+function accountGithubTokenSecretRef(accountId: string) {
+  return `github:account:${accountId}:token`;
 }
 
 async function githubJson<T>(githubPath: string, token: string): Promise<T> {
@@ -1142,8 +1146,8 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     suggestions: { runtime: "STATIC", packageManager: null, installCommand: null, buildCommand: null, startCommand: null, outputDirectory: "public" }
   }));
 
-  app.get("/deployments/github/connection", async () => {
-    const connection = await prisma.gitHubConnection.findUnique({ where: { id: "superadmin" } });
+  app.get("/deployments/github/connection", async (request: any) => {
+    const connection = await prisma.gitHubConnection.findUnique({ where: { id: accountGithubConnectionId(accountId(request)) } });
     return {
       connected: Boolean(connection?.tokenSecretRef || connection?.installationId),
       username: connection?.username ?? null,
@@ -1155,7 +1159,8 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
 
   app.put("/deployments/github/connection", async (request: any) => {
     const body = githubConnectionSchema.parse(request.body);
-    const tokenSecretRef = githubTokenSecretRef();
+    const connectionId = accountGithubConnectionId(accountId(request));
+    const tokenSecretRef = accountGithubTokenSecretRef(accountId(request));
     let verifiedUsername = body.username ?? null;
     let verifiedScopes = body.scopes;
     if (typeof body.token === "string") {
@@ -1173,7 +1178,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       await deleteSecret(tokenSecretRef);
     }
     const connection = await prisma.gitHubConnection.upsert({
-      where: { id: "superadmin" },
+      where: { id: connectionId },
       update: {
         username: verifiedUsername ?? undefined,
         tokenSecretRef: typeof body.token === "string" ? tokenSecretRef : body.token === null ? null : undefined,
@@ -1182,7 +1187,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
         connectedAt: body.token || body.installationId ? new Date() : undefined
       },
       create: {
-        id: "superadmin",
+        id: connectionId,
         username: verifiedUsername ?? undefined,
         tokenSecretRef: typeof body.token === "string" ? tokenSecretRef : undefined,
         installationId: body.installationId ?? undefined,
@@ -1195,7 +1200,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
 
   app.get("/deployments/github/repos", async (request: any) => {
     const query = z.object({ search: z.string().optional() }).parse(request.query);
-    const connection = await prisma.gitHubConnection.findUnique({ where: { id: "superadmin" } });
+    const connection = await prisma.gitHubConnection.findUnique({ where: { id: accountGithubConnectionId(accountId(request)) } });
     if (!connection?.tokenSecretRef && !connection?.installationId) {
       return {
         connected: false,
@@ -1228,7 +1233,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
   app.get("/deployments/github/repos/:owner/:repo/detect", async (request: any) => {
     const params = z.object({ owner: z.string(), repo: z.string() }).parse(request.params);
     const query = z.object({ branch: z.string().default("main"), rootDirectory: z.string().default(".") }).parse(request.query);
-    const connection = await prisma.gitHubConnection.findUnique({ where: { id: "superadmin" } });
+    const connection = await prisma.gitHubConnection.findUnique({ where: { id: accountGithubConnectionId(accountId(request)) } });
     const token = connection?.tokenSecretRef ? await getSecret(connection.tokenSecretRef) : null;
     if (!token) {
       return {
