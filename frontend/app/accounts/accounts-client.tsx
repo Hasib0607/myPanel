@@ -100,9 +100,20 @@ export function AccountsClient() {
   });
 
   const loginAsAccount = useMutation({
-    mutationFn: (id: string) => apiPost<{ redirectTo?: string }>(`/auth/account/${id}/impersonate`, {}),
-    onSuccess: (result) => window.location.assign(result.redirectTo ?? "/account"),
-    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not login as account.")
+    mutationFn: ({ id }: { id: string; targetWindow: Window | null }) => apiPost<{ redirectTo?: string }>(`/auth/account/${id}/impersonate`, {}),
+    onSuccess: (result, variables) => {
+      const redirectTo = result.redirectTo ?? "/account";
+      if (variables.targetWindow && !variables.targetWindow.closed) {
+        variables.targetWindow.location.href = redirectTo;
+        variables.targetWindow.focus();
+        return;
+      }
+      window.open(redirectTo, "_blank");
+    },
+    onError: (error, variables) => {
+      variables.targetWindow?.close();
+      setNotice(error instanceof Error ? error.message : "Could not login as account.");
+    }
   });
 
   const deleteAccount = useMutation({
@@ -205,8 +216,8 @@ export function AccountsClient() {
                           <button
                             className="shrink-0 rounded-md border border-panel-line p-1.5 text-panel-muted hover:bg-slate-50 hover:text-panel-accent disabled:cursor-not-allowed disabled:opacity-50"
                             disabled={account.status !== "ACTIVE" || loginAsAccount.isPending}
-                            onClick={() => loginAsAccount.mutate(account.id)}
-                            title="Login as account"
+                            onClick={() => loginAsAccount.mutate({ id: account.id, targetWindow: window.open("about:blank", "_blank") })}
+                            title="Login as account in new tab"
                             type="button"
                           >
                             <LogIn size={13} />

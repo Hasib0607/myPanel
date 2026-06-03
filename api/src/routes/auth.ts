@@ -122,7 +122,6 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     }
 
     const token = app.jwt.sign({ sub: account.username, role: "account", accountId: account.id }, { expiresIn: env.JWT_EXPIRY });
-    reply.clearCookie("panel_session", { path: "/" });
     reply.setCookie("account_session", token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
