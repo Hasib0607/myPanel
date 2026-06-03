@@ -903,9 +903,10 @@ def git_sync(body: GitSyncRequest) -> dict:
     if target.joinpath(".git").exists():
         remote = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "remote", "set-url", "origin", body.gitUrl], env=env) if body.gitUrl else None
         fetch = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "fetch", "origin", body.branch, "--prune"], env=env)
-        checkout = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "checkout", body.commitSha or body.branch], env=env)
-        pull = None if body.commitSha else git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "pull", "--ff-only", "origin", body.branch], env=env)
-        return {"safeDirectory": safe, "remote": remote, "sync": fetch, "checkout": checkout, "pull": pull}
+        reset_target = body.commitSha or "FETCH_HEAD"
+        reset = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "reset", "--hard", reset_target], env=env)
+        clean = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "clean", "-fd"], env=env)
+        return {"safeDirectory": safe, "remote": remote, "sync": fetch, "reset": reset, "clean": clean}
     if body.gitUrl:
         command = ["git", "clone", "--branch", body.branch, body.gitUrl, str(target)]
     else:
