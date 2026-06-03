@@ -311,7 +311,7 @@ function includeAccountDeployment() {
       },
       orderBy: [{ role: "asc" as const }, { createdAt: "asc" as const }]
     },
-    env: { orderBy: { key: "asc" as const } },
+    env: { orderBy: [{ createdAt: "asc" as const }, { key: "asc" as const }] },
     releases: { orderBy: { createdAt: "desc" as const }, take: 10 },
     logs: { orderBy: { createdAt: "desc" as const }, take: 100 }
   };
@@ -1438,7 +1438,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
         autoDeployEnabled: body.autoDeployEnabled,
         status: "STOPPED",
         env: {
-          create: Object.entries(body.envVars).map(([key, value]) => ({ key: key.toUpperCase(), value, isSecret: false }))
+          create: Object.entries(body.envVars).map(([key, value], index) => ({ key: key.toUpperCase(), value, isSecret: false, createdAt: new Date(Date.now() + index) }))
         }
       }
     });
@@ -1473,11 +1473,12 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       await syncAccountPrimaryBinding(deployment.id, account.id, body.domainId);
     }
     if (body.envVars !== undefined) {
-      for (const [key, value] of Object.entries(body.envVars)) {
+      const importedAt = Date.now();
+      for (const [index, [key, value]] of Object.entries(body.envVars).entries()) {
         await prisma.deploymentEnvVar.upsert({
           where: { deploymentId_key: { deploymentId: deployment.id, key: key.toUpperCase() } },
-          update: { value, isSecret: false },
-          create: { deploymentId: deployment.id, key: key.toUpperCase(), value, isSecret: false }
+          update: { value, isSecret: false, createdAt: new Date(importedAt + index) },
+          create: { deploymentId: deployment.id, key: key.toUpperCase(), value, isSecret: false, createdAt: new Date(importedAt + index) }
         });
       }
     }
@@ -1580,11 +1581,12 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const body = z.object({ env: z.array(envVarSchema).max(200) }).parse(request.body);
     const deployment = await findAccountDeployment(request, deploymentId);
     const items = [];
-    for (const item of body.env) {
+    const importedAt = Date.now();
+    for (const [index, item] of body.env.entries()) {
       items.push(await prisma.deploymentEnvVar.upsert({
         where: { deploymentId_key: { deploymentId: deployment.id, key: item.key } },
-        update: { value: item.value ?? "", isSecret: item.isSecret, secretRef: item.secretRef ?? null },
-        create: { deploymentId: deployment.id, key: item.key, value: item.value ?? "", isSecret: item.isSecret, secretRef: item.secretRef ?? null }
+        update: { value: item.value ?? "", isSecret: item.isSecret, secretRef: item.secretRef ?? null, createdAt: new Date(importedAt + index) },
+        create: { deploymentId: deployment.id, key: item.key, value: item.value ?? "", isSecret: item.isSecret, secretRef: item.secretRef ?? null, createdAt: new Date(importedAt + index) }
       }));
     }
     return { ok: true, items };

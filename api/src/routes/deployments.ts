@@ -142,7 +142,7 @@ function includeFullDeployment() {
   return {
     domain: true,
     domainBindings: { include: { domain: true, subdomain: { include: { domain: true } } }, orderBy: [{ role: "asc" as const }, { createdAt: "asc" as const }] },
-    env: { orderBy: { key: "asc" as const } },
+    env: { orderBy: [{ createdAt: "asc" as const }, { key: "asc" as const }] },
     releases: { orderBy: { createdAt: "desc" as const }, take: 10 },
     logs: { orderBy: { createdAt: "desc" as const }, take: 100 }
   };
@@ -1447,7 +1447,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     const [items, total] = await Promise.all([
       prisma.deployment.findMany({
         where,
-        include: { domain: true, domainBindings: { include: { domain: true, subdomain: { include: { domain: true } } }, orderBy: [{ role: "asc" }, { createdAt: "asc" }] }, env: { orderBy: { key: "asc" } }, releases: { orderBy: { createdAt: "desc" }, take: 1 }, _count: { select: { releases: true, logs: true, env: true } } },
+        include: { domain: true, domainBindings: { include: { domain: true, subdomain: { include: { domain: true } } }, orderBy: [{ role: "asc" }, { createdAt: "asc" }] }, env: { orderBy: [{ createdAt: "asc" }, { key: "asc" }] }, releases: { orderBy: { createdAt: "desc" }, take: 1 }, _count: { select: { releases: true, logs: true, env: true } } },
         orderBy: { createdAt: "desc" },
         skip: (query.page - 1) * query.pageSize,
         take: query.pageSize
@@ -1706,7 +1706,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
         slug: await uniqueDeploymentSlug(body.slug || body.name),
         status: "STOPPED",
         env: {
-          create: Object.entries(body.envVars).map(([key, value]) => ({ key, value, isSecret: false }))
+          create: Object.entries(body.envVars).map(([key, value], index) => ({ key, value, isSecret: false, createdAt: new Date(Date.now() + index) }))
         }
       }
     });
@@ -1957,7 +1957,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
   app.get("/:deploymentId/env", async (request) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const deployment = await findDeployment(deploymentId);
-    const env = await prisma.deploymentEnvVar.findMany({ where: { deploymentId: deployment.id }, orderBy: { key: "asc" } });
+    const env = await prisma.deploymentEnvVar.findMany({ where: { deploymentId: deployment.id }, orderBy: [{ createdAt: "asc" }, { key: "asc" }] });
     return env.map((item) => ({ ...item, value: item.isSecret ? null : item.value, masked: item.isSecret }));
   });
 
@@ -1986,12 +1986,13 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     const body = z.object({ env: z.array(envVarSchema).max(200) }).parse(request.body);
     const deployment = await findDeployment(deploymentId);
     const results = [];
-    for (const item of body.env) {
+    const importedAt = Date.now();
+    for (const [index, item] of body.env.entries()) {
       const normalized = await normalizeEnvSecret(deployment.slug, item);
       results.push(await prisma.deploymentEnvVar.upsert({
         where: { deploymentId_key: { deploymentId: deployment.id, key: item.key } },
-        update: normalized,
-        create: { deploymentId: deployment.id, key: item.key, ...normalized }
+        update: { ...normalized, createdAt: new Date(importedAt + index) },
+        create: { deploymentId: deployment.id, key: item.key, ...normalized, createdAt: new Date(importedAt + index) }
       }));
     }
     return { ok: true, items: results };
