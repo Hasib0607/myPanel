@@ -8,9 +8,12 @@ import { pipeline } from "node:stream/promises";
 import { DeploymentFramework, Prisma } from "@prisma/client";
 import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { env } from "../config/env.js";
 import { deployQueue, sslQueue } from "../jobs/queues.js";
 import { audit } from "../lib/audit.js";
+import { publishDomainDnsZone } from "../lib/domainDnsPublish.js";
 import { prisma } from "../lib/prisma.js";
+import { resolvePublicA } from "../lib/publicDns.js";
 import { sysagent } from "../lib/sysagent.js";
 import { defaultRecords } from "./domains.js";
 import { renderZone } from "./dns.js";
@@ -307,6 +310,102 @@ async function accountSslJobStatus(request: any, jobId: string) {
     timestamp: job.timestamp,
     processedOn: job.processedOn,
     finishedOn: job.finishedOn
+  };
+}
+
+function domainLabelInsideParent(domainName: string, parentName: string) {
+  if (!domainName.endsWith(`.${parentName}`)) return null;
+  const label = domainName.slice(0, -(parentName.length + 1));
+  return label && !label.includes("..") ? label : null;
+}
+
+async function upsertAccountARecord(domainId: string, name: string) {
+  const existing = await prisma.dnsRecord.findFirst({ where: { domainId, type: "A", name } });
+  if (existing) {
+    if (existing.value === env.VPS_IP && existing.ttl <= 3600) return existing;
+    return prisma.dnsRecord.update({ where: { id: existing.id }, data: { value: env.VPS_IP, ttl: 300 } });
+  }
+  return prisma.dnsRecord.create({ data: { domainId, type: "A", name, value: env.VPS_IP, ttl: 300 } });
+}
+
+async function ensureAccountDomainDns(request: any, domain: { id: string; name: string }) {
+  await upsertAccountARecord(domain.id, "@");
+  await publishDomainDnsZone(domain.id);
+
+  const parentDomain = await prisma.domain.findFirst({
+    where: {
+      accountId: accountId(request),
+      id: { not: domain.id },
+      name: { endsWith: `.${domain.name.split(".").slice(-2).join(".")}` }
+    },
+    orderBy: { name: "asc" }
+  });
+  const accountDomains = await prisma.domain.findMany({
+    where: { accountId: accountId(request), id: { not: domain.id } },
+    select: { id: true, name: true }
+  });
+  const parent = accountDomains
+    .filter((item) => domainLabelInsideParent(domain.name, item.name))
+    .sort((a, b) => b.name.length - a.name.length)[0] ?? parentDomain;
+  const label = parent ? domainLabelInsideParent(domain.name, parent.name) : null;
+  if (parent && label) {
+    await upsertAccountARecord(parent.id, label);
+    await publishDomainDnsZone(parent.id);
+  }
+}
+
+async function optionalPublicA(hostname: string) {
+  try {
+    const records = await resolvePublicA(hostname);
+    return { host: hostname, records, ok: records.includes(env.VPS_IP), skipped: !records.includes(env.VPS_IP) };
+  } catch {
+    return { host: hostname, records: [] as string[], ok: false, skipped: true };
+  }
+}
+
+async function waitForPublicA(hostname: string, expectedIp: string, timeoutMs = 30_000) {
+  const startedAt = Date.now();
+  let lastRecords: string[] = [];
+  let lastError: string | null = null;
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const records = await resolvePublicA(hostname);
+      lastRecords = records;
+      lastError = null;
+      if (records.includes(expectedIp)) return records;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : "lookup failed";
+    }
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  }
+  const detail = lastRecords.length ? `${hostname} resolves to ${lastRecords.join(", ")}` : lastError ?? `${hostname} has no public A record`;
+  throw Object.assign(new Error(`SSL cannot be issued yet. ${detail}, but this VPS is ${expectedIp}. DNS has been published where this panel controls the zone; wait for propagation or update the registrar DNS.`), { statusCode: 400 });
+}
+
+async function accountSslPreflight(request: any, domain: { id: string; name: string }, includeWww: boolean) {
+  await ensureAccountDomainDns(request, domain);
+  const records = await waitForPublicA(domain.name, env.VPS_IP);
+  const wwwCheck = includeWww ? await optionalPublicA(`www.${domain.name}`) : null;
+  const effectiveIncludeWww = Boolean(wwwCheck?.ok);
+  const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+  const webRoot = path.join(account.homeRoot, "public_html");
+  const preflight = await sysagent.sslPreflight({ domain: domain.name, webRoot, includeWww: effectiveIncludeWww });
+  const certbotFailure = failedCommand(preflight.certbot);
+  if (certbotFailure) {
+    throw Object.assign(new Error(`Certbot is not ready for ${domain.name}. ${certbotFailure}`), { statusCode: 400 });
+  }
+  const failedCheck = preflight.checks.find((check) => failedCommand(check));
+  if (failedCheck) {
+    throw Object.assign(new Error(`HTTP ACME challenge failed for ${domain.name}. Publish the website and keep port 80 open. ${failedCommand(failedCheck) ?? ""}`.trim()), { statusCode: 400 });
+  }
+  return {
+    webRoot,
+    includeWww: effectiveIncludeWww,
+    dnsChecks: [
+      { host: domain.name, records, ok: true, skipped: false },
+      ...(wwwCheck ? [wwwCheck] : [])
+    ],
+    preflight
   };
 }
 
@@ -838,14 +937,11 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const body = sslSchema.parse(request.body ?? {});
     const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
-    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    const preflight = await accountSslPreflight(request, domain, body.includeWww);
     return {
-      webRoot: path.join(account.homeRoot, "public_html"),
-      includeWww: body.includeWww,
-      dnsChecks: [
-        { host: domain.name, records: [], ok: true, skipped: false },
-        ...(body.includeWww ? [{ host: `www.${domain.name}`, records: [], ok: true, skipped: true }] : [])
-      ]
+      webRoot: preflight.webRoot,
+      includeWww: preflight.includeWww,
+      dnsChecks: preflight.dnsChecks
     };
   });
 
@@ -853,14 +949,13 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const { domainId, action } = z.object({ domainId: z.string(), action: z.enum(["issue", "renew"]) }).parse(request.params);
     const body = sslSchema.parse(request.body ?? {});
     const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
-    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
-    const webRoot = path.join(account.homeRoot, "public_html");
+    const preflight = await accountSslPreflight(request, domain, body.includeWww);
     const job = await sslQueue.add(action, {
       domainId: domain.id,
       domain: domain.name,
       email: body.email ?? `admin@${domain.name}`,
-      webRoot,
-      includeWww: body.includeWww,
+      webRoot: preflight.webRoot,
+      includeWww: preflight.includeWww,
       forceSsl: domain.forceSsl,
       source: "account"
     });
