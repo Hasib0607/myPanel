@@ -229,7 +229,21 @@ async function writeClipboardText(text: string) {
   }
 }
 
-export function DeploymentsClient() {
+export function DeploymentsClient({
+  apiBase = "/deployments",
+  domainsApiBase = "/domains",
+  databasesApiBase = "/databases",
+  githubApiBase = "/deployments/github",
+  showPanelUpdate = true,
+  enableGithub = true
+}: {
+  apiBase?: "/deployments" | "/account/deployments";
+  domainsApiBase?: "/domains" | "/account/domains";
+  databasesApiBase?: "/databases" | "/account/databases";
+  githubApiBase?: string;
+  showPanelUpdate?: boolean;
+  enableGithub?: boolean;
+} = {}) {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [draftSearch, setDraftSearch] = useState("");
@@ -260,21 +274,21 @@ export function DeploymentsClient() {
   const [revealedEnvValues, setRevealedEnvValues] = useState<Record<string, string>>({});
 
   const deployments = useQuery({
-    queryKey: ["deployments", search, statusFilter, sourceFilter],
-    queryFn: () => apiGet<DeploymentListResponse>(`/deployments?${queryString({ search, status: statusFilter, sourceProvider: sourceFilter, page: 1, pageSize: 50 })}`),
+    queryKey: ["deployments", apiBase, search, statusFilter, sourceFilter],
+    queryFn: () => apiGet<DeploymentListResponse>(`${apiBase}?${queryString({ search, status: statusFilter, sourceProvider: sourceFilter, page: 1, pageSize: 50 })}`),
     refetchInterval: 8000
   });
-  const domains = useQuery({ queryKey: ["domains", "deployment-create"], queryFn: () => apiGet<DomainListResponse>("/domains?page=1&pageSize=100") });
-  const databaseOverview = useQuery({ queryKey: ["databases-overview", "deployment-create"], queryFn: () => apiGet<DatabaseOverview>("/databases") });
-  const nextPort = useQuery({ queryKey: ["deployments-next-port"], queryFn: () => apiGet<{ port: number }>("/deployments/ports/next") });
-  const repos = useQuery({ enabled: repoPickerOpen, queryKey: ["deployments-github-repos", repoSearch], queryFn: () => apiGet<GithubRepoResponse>(`/deployments/github/repos?${queryString({ search: repoSearch })}`) });
-  const githubConnection = useQuery({ enabled: repoPickerOpen, queryKey: ["deployments-github-connection"], queryFn: () => apiGet<{ connected: boolean; username: string | null; scopes: string[] }>("/deployments/github/connection") });
+  const domains = useQuery({ queryKey: ["domains", domainsApiBase, "deployment-create"], queryFn: () => apiGet<DomainListResponse>(`${domainsApiBase}?page=1&pageSize=100`) });
+  const databaseOverview = useQuery({ queryKey: ["databases-overview", databasesApiBase, "deployment-create"], queryFn: () => apiGet<DatabaseOverview>(databasesApiBase) });
+  const nextPort = useQuery({ queryKey: ["deployments-next-port", apiBase], queryFn: () => apiGet<{ port: number }>(`${apiBase}/ports/next`) });
+  const repos = useQuery({ enabled: enableGithub && repoPickerOpen, queryKey: ["deployments-github-repos", githubApiBase, repoSearch], queryFn: () => apiGet<GithubRepoResponse>(`${githubApiBase}/repos?${queryString({ search: repoSearch })}`) });
+  const githubConnection = useQuery({ enabled: enableGithub && repoPickerOpen, queryKey: ["deployments-github-connection", githubApiBase], queryFn: () => apiGet<{ connected: boolean; username: string | null; scopes: string[] }>(`${githubApiBase}/connection`) });
 
   const selected = useMemo(() => (deployments.data?.items ?? []).find((item) => item.id === selectedId) ?? deployments.data?.items?.[0] ?? null, [deployments.data?.items, selectedId]);
   const releases = useQuery({
     enabled: Boolean(selected?.slug),
-    queryKey: ["deployment-releases", selected?.slug],
-    queryFn: () => apiGet<DeploymentRelease[]>(`/deployments/${selected!.slug}/releases`),
+    queryKey: ["deployment-releases", apiBase, selected?.slug],
+    queryFn: () => apiGet<DeploymentRelease[]>(`${apiBase}/${selected!.slug}/releases`),
     refetchInterval: activeTab === "history" ? 5000 : false
   });
 
@@ -297,7 +311,7 @@ export function DeploymentsClient() {
   };
 
   const createDeployment = useMutation({
-    mutationFn: () => apiPost<Deployment>("/deployments", formPayload(draft)),
+    mutationFn: () => apiPost<Deployment>(apiBase, formPayload(draft)),
     onSuccess: async (deployment) => {
       setNotice(`${deployment.name} created.`);
       setSelectedId(deployment.id);
@@ -311,7 +325,7 @@ export function DeploymentsClient() {
   const updateDeployment = useMutation({
     mutationFn: () => {
       if (!selected) throw new Error("Select a project first");
-      return apiPatch<Deployment>(`/deployments/${selected.slug}`, formPayload(editDraft));
+      return apiPatch<Deployment>(`${apiBase}/${selected.slug}`, formPayload(editDraft));
     },
     onSuccess: async (deployment) => {
       setNotice(`${deployment.name} updated.`);
@@ -323,7 +337,7 @@ export function DeploymentsClient() {
   });
 
   const detect = useMutation({
-    mutationFn: (target: "create" | "edit") => apiPost<DetectionResponse>("/deployments/detect", { rootPath: target === "create" ? draft.rootPath : editDraft.rootPath }),
+    mutationFn: (target: "create" | "edit") => apiPost<DetectionResponse>(`${apiBase}/detect`, { rootPath: target === "create" ? draft.rootPath : editDraft.rootPath }),
     onSuccess: (result, target) => {
       const apply = (current: Draft) => ({ ...current, framework: result.detected, installCommand: result.suggestions.installCommand ?? "", buildCommand: result.suggestions.buildCommand ?? "", startCommand: result.suggestions.startCommand ?? "", outputDirectory: result.suggestions.outputDirectory ?? "" });
       if (target === "create") setDraft(apply);
@@ -334,7 +348,7 @@ export function DeploymentsClient() {
   });
 
   const action = useMutation({
-    mutationFn: ({ deployment, name }: { deployment: Deployment; name: "deploy" | "start" | "stop" | "restart" }) => apiPost<QueueResponse>(`/deployments/${deployment.slug}/${name}`, {}),
+    mutationFn: ({ deployment, name }: { deployment: Deployment; name: "deploy" | "start" | "stop" | "restart" }) => apiPost<QueueResponse>(`${apiBase}/${deployment.slug}/${name}`, {}),
     onSuccess: async (result, variables) => {
       const queued = result.queue?.queued;
       const reason = result.queue?.reason ?? result.reason;
@@ -354,7 +368,7 @@ export function DeploymentsClient() {
   });
 
   const guardianFix = useMutation({
-    mutationFn: (deployment: Deployment) => apiPost<any>(`/deployments/${deployment.slug}/doctor/repair`, { action: "auto" }),
+    mutationFn: (deployment: Deployment) => apiPost<any>(`${apiBase}/${deployment.slug}/doctor/repair`, { action: "auto" }),
     onSuccess: async (result, deployment) => {
       if (result?.approvalRequired) {
         setNotice(`Guardian prepared approval fixes for ${deployment.name}. Open project overview to approve risky actions.`);
@@ -377,7 +391,7 @@ export function DeploymentsClient() {
   });
 
   const toggleAutoDeploy = useMutation({
-    mutationFn: (deployment: Deployment) => apiPatch<Deployment>(`/deployments/${deployment.slug}`, { autoDeployEnabled: !deployment.autoDeployEnabled }),
+    mutationFn: (deployment: Deployment) => apiPatch<Deployment>(`${apiBase}/${deployment.slug}`, { autoDeployEnabled: !deployment.autoDeployEnabled }),
     onSuccess: async (deployment) => {
       setNotice(`Auto deploy ${deployment.autoDeployEnabled ? "enabled" : "disabled"} for ${deployment.name}.`);
       await invalidateDeployments();
@@ -386,7 +400,7 @@ export function DeploymentsClient() {
   });
 
   const rollbackRelease = useMutation({
-    mutationFn: ({ deployment, releaseId }: { deployment: Deployment; releaseId: string }) => apiPost<QueueResponse>(`/deployments/${deployment.slug}/rollback`, { releaseId }),
+    mutationFn: ({ deployment, releaseId }: { deployment: Deployment; releaseId: string }) => apiPost<QueueResponse>(`${apiBase}/${deployment.slug}/rollback`, { releaseId }),
     onSuccess: async (_result, variables) => {
       setNotice(`Rollback queued for ${variables.deployment.name}.`);
       setActiveTab("history");
@@ -397,7 +411,7 @@ export function DeploymentsClient() {
 
   const openLogs = useMutation({
     mutationFn: async ({ deployment, type }: { deployment: Deployment; type: LogType }) => {
-      const text = await apiGetText(`/deployments/${deployment.slug}/logs/export?${queryString({ type, limit: 500 })}`);
+      const text = await apiGetText(`${apiBase}/${deployment.slug}/logs/export?${queryString({ type, limit: 500 })}`);
       return { deployment, text, type };
     },
     onSuccess: ({ deployment, text, type }) => {
@@ -419,7 +433,7 @@ export function DeploymentsClient() {
   }
 
   const saveGithubToken = useMutation({
-    mutationFn: () => apiPut("/deployments/github/connection", { username: githubUsername || null, token: githubToken, scopes: [] }),
+    mutationFn: () => apiPut(`${githubApiBase}/connection`, { username: githubUsername || null, token: githubToken, scopes: [] }),
     onSuccess: async () => {
       setGithubToken("");
       setNotice("GitHub token connected. Repository list refreshed.");
@@ -431,7 +445,7 @@ export function DeploymentsClient() {
 
   const selectGithubRepo = useMutation({
     mutationFn: async (repo: GithubRepo) => {
-      const detection = await apiGet<GithubDetectResponse>(`/deployments/github/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/detect?${queryString({ branch: repo.defaultBranch, rootDirectory: draft.rootDirectory || "." })}`);
+      const detection = await apiGet<GithubDetectResponse>(`${githubApiBase}/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/detect?${queryString({ branch: repo.defaultBranch, rootDirectory: draft.rootDirectory || "." })}`);
       const repoDraft = { ...draft, name: repo.name, slug: slugify(repo.name), githubOwner: repo.owner, githubRepo: repo.name, gitUrl: `https://github.com/${repo.fullName}.git`, branch: repo.defaultBranch, rootPath: deploymentRootForRepo(repo.name), sourceProvider: "GITHUB" as const, framework: detection.detected, installCommand: detection.suggestions.installCommand ?? "", buildCommand: detection.suggestions.buildCommand ?? "", startCommand: detection.suggestions.startCommand ?? "", outputDirectory: detection.suggestions.outputDirectory ?? "", autoDeployEnabled: true };
       return { repoDraft, detection };
     },
@@ -451,7 +465,7 @@ export function DeploymentsClient() {
   const addDomain = useMutation({
     mutationFn: () => {
       if (!selected) throw new Error("Select a project first");
-      return apiPost<DeploymentDomainBinding>(`/deployments/${selected.slug}/domains`, { domainId: domainToAdd, primary: !selected.domainId });
+      return apiPost<DeploymentDomainBinding>(`${apiBase}/${selected.slug}/domains`, { domainId: domainToAdd, primary: !selected.domainId });
     },
     onSuccess: async () => {
       setDomainToAdd("");
@@ -462,7 +476,7 @@ export function DeploymentsClient() {
   });
 
   const setPrimaryDomain = useMutation({
-    mutationFn: (binding: DeploymentDomainBinding) => apiPatch(`/deployments/${selected?.slug}/domains/${binding.domainId}/primary`, {}),
+    mutationFn: (binding: DeploymentDomainBinding) => apiPatch(`${apiBase}/${selected?.slug}/domains/${binding.domainId}/primary`, {}),
     onSuccess: async () => {
       setNotice("Primary domain updated.");
       await invalidateDeployments();
@@ -471,7 +485,7 @@ export function DeploymentsClient() {
   });
 
   const removeDomain = useMutation({
-    mutationFn: (binding: DeploymentDomainBinding) => apiDelete(`/deployments/${selected?.slug}/domains/${binding.domainId}`),
+    mutationFn: (binding: DeploymentDomainBinding) => apiDelete(`${apiBase}/${selected?.slug}/domains/${binding.domainId}`),
     onSuccess: async () => {
       setNotice("Domain removed.");
       await invalidateDeployments();
@@ -484,7 +498,7 @@ export function DeploymentsClient() {
       if (!selected) throw new Error("Select a project first");
       const key = envKey.trim().toUpperCase();
       if (!key) throw new Error("Enter an environment key");
-      return apiPut<DeploymentEnvVar>(`/deployments/${selected.slug}/env/${encodeURIComponent(key)}`, { value: normalizeEnvValue(envValue), isSecret: envSecret });
+      return apiPut<DeploymentEnvVar>(`${apiBase}/${selected.slug}/env/${encodeURIComponent(key)}`, { value: normalizeEnvValue(envValue), isSecret: envSecret });
     },
     onSuccess: async () => {
       setNotice(`${envKey.trim().toUpperCase()} saved.`);
@@ -497,14 +511,14 @@ export function DeploymentsClient() {
   });
 
   const revealEnv = useMutation({
-    mutationFn: async (key: string) => apiGet<{ key: string; value: string; isSecret: boolean }>(`/deployments/${selected!.slug}/env/${encodeURIComponent(key)}/reveal`),
+    mutationFn: async (key: string) => apiGet<{ key: string; value: string; isSecret: boolean }>(`${apiBase}/${selected!.slug}/env/${encodeURIComponent(key)}/reveal`),
     onSuccess: (result) => setRevealedEnvValues((current) => ({ ...current, [result.key]: result.value })),
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not reveal env value")
   });
 
   const saveEnvLine = useMutation({
     mutationFn: ({ item, value }: { item: DeploymentEnvVar; value: string }) =>
-      apiPut<DeploymentEnvVar>(`/deployments/${selected!.slug}/env/${encodeURIComponent(item.key)}`, { value: normalizeEnvValue(value), isSecret: item.isSecret }),
+      apiPut<DeploymentEnvVar>(`${apiBase}/${selected!.slug}/env/${encodeURIComponent(item.key)}`, { value: normalizeEnvValue(value), isSecret: item.isSecret }),
     onSuccess: async (item) => {
       setNotice(`${item.key} updated.`);
       setRevealedEnvValues((current) => {
@@ -518,7 +532,7 @@ export function DeploymentsClient() {
   });
 
   const removeEnv = useMutation({
-    mutationFn: (key: string) => apiDelete(`/deployments/${selected?.slug}/env/${encodeURIComponent(key)}`),
+    mutationFn: (key: string) => apiDelete(`${apiBase}/${selected?.slug}/env/${encodeURIComponent(key)}`),
     onSuccess: async () => {
       setNotice("Environment variable removed.");
       await invalidateDeployments();
@@ -529,7 +543,7 @@ export function DeploymentsClient() {
   const removeBulkEnv = useMutation({
     mutationFn: async (keys: string[]) => {
       if (!selected) throw new Error("Select a project first");
-      return apiPost<{ ok: true; removed: string[] }>(`/deployments/${selected.slug}/env/bulk-delete`, { keys });
+      return apiPost<{ ok: true; removed: string[] }>(`${apiBase}/${selected.slug}/env/bulk-delete`, { keys });
     },
     onSuccess: async (result) => {
       setNotice(`${result.removed.length} environment variable(s) removed.`);
@@ -539,7 +553,7 @@ export function DeploymentsClient() {
   });
 
   const clearDatabaseEnvOverrides = useMutation({
-    mutationFn: () => apiPost<{ ok: true; removed: string[] }>(`/deployments/${selected!.slug}/env/clear-database-overrides`, {}),
+    mutationFn: () => apiPost<{ ok: true; removed: string[] }>(`${apiBase}/${selected!.slug}/env/clear-database-overrides`, {}),
     onSuccess: async (result) => {
       setNotice(
         result.removed.length
@@ -556,7 +570,7 @@ export function DeploymentsClient() {
       if (!selected) throw new Error("Select a project first");
       const env = parseBulkEnvItems(bulkEnvText, bulkEnvSecret);
       if (!env.length) throw new Error("Paste a JS object or KEY=value lines first");
-      return apiPost<{ ok: true; items: DeploymentEnvVar[] }>(`/deployments/${selected.slug}/env/bulk`, { env });
+      return apiPost<{ ok: true; items: DeploymentEnvVar[] }>(`${apiBase}/${selected.slug}/env/bulk`, { env });
     },
     onSuccess: async (result) => {
       setNotice(`${result.items.length} environment variables imported.`);
@@ -570,7 +584,7 @@ export function DeploymentsClient() {
   const deleteProject = useMutation({
     mutationFn: () => {
       if (!selected) throw new Error("Select a project first");
-      return apiDeleteBody(`/deployments/${selected.slug}`, { confirmSlug: deleteText });
+      return apiDeleteBody(`${apiBase}/${selected.slug}`, { confirmSlug: deleteText });
     },
     onSuccess: async () => {
       setNotice("Project deleted.");
@@ -658,7 +672,7 @@ export function DeploymentsClient() {
                     <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium hover:bg-slate-50 disabled:opacity-50" disabled={openLogs.isPending} onClick={() => openLogs.mutate({ deployment: selected, type: "build" })} type="button"><Clipboard size={15} />Build log</button>
                     <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium hover:bg-slate-50 disabled:opacity-50" disabled={openLogs.isPending} onClick={() => openLogs.mutate({ deployment: selected, type: "running" })} type="button"><Clipboard size={15} />Running log</button>
                     <button className="flex h-9 items-center gap-2 rounded-md border border-sky-200 bg-sky-50 px-3 text-sm font-semibold text-sky-700 hover:bg-sky-100 disabled:opacity-50" disabled={guardianFix.isPending} onClick={() => guardianFix.mutate(selected)} type="button"><ShieldCheck size={15} />Guardian fix</button>
-                    <button className="flex h-9 items-center gap-2 rounded-md border border-violet-200 bg-violet-50 px-3 text-sm font-semibold text-violet-700 hover:bg-violet-100 disabled:opacity-50" disabled={panelUpdate.isPending} onClick={() => panelUpdate.mutate()} type="button"><Rocket size={15} />Update panel</button>
+                    {showPanelUpdate ? <button className="flex h-9 items-center gap-2 rounded-md border border-violet-200 bg-violet-50 px-3 text-sm font-semibold text-violet-700 hover:bg-violet-100 disabled:opacity-50" disabled={panelUpdate.isPending} onClick={() => panelUpdate.mutate()} type="button"><Rocket size={15} />Update panel</button> : null}
                     <button
                       className={`flex h-9 items-center gap-2 rounded-md border px-3 text-sm font-medium disabled:opacity-50 ${selected.autoDeployEnabled ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-panel-line text-panel-muted hover:bg-slate-50"}`}
                       disabled={toggleAutoDeploy.isPending}
@@ -688,9 +702,9 @@ export function DeploymentsClient() {
         </main>
       </div>
 
-      {createOpen ? <ProjectModal title="Create Project" draft={draft} setDraft={setDraft} domains={domainOptions(domains.data?.items ?? [])} databaseOverview={databaseOverview.data} onClose={() => setCreateOpen(false)} onDetect={() => detect.mutate("create")} onSubmit={() => createDeployment.mutate()} submitLabel="Create" busy={createDeployment.isPending} openGithub={() => setRepoPickerOpen(true)} /> : null}
-      {editingOpen ? <ProjectModal title="Edit Project" draft={editDraft} setDraft={setEditDraft} domains={domainOptions(domains.data?.items ?? [])} databaseOverview={databaseOverview.data} onClose={() => setEditingOpen(false)} onDetect={() => detect.mutate("edit")} onSubmit={() => updateDeployment.mutate()} submitLabel="Save changes" busy={updateDeployment.isPending} openGithub={() => setRepoPickerOpen(true)} /> : null}
-      {repoPickerOpen ? <GithubModal repos={repos.data} loading={repos.isLoading} repoSearch={repoSearch} setRepoSearch={setRepoSearch} connection={githubConnection.data} githubToken={githubToken} setGithubToken={setGithubToken} githubUsername={githubUsername} setGithubUsername={setGithubUsername} saveToken={() => saveGithubToken.mutate()} savingToken={saveGithubToken.isPending} onClose={() => setRepoPickerOpen(false)} onDeploy={(repo) => selectGithubRepo.mutate(repo)} deploying={selectGithubRepo.isPending} /> : null}
+      {createOpen ? <ProjectModal title="Create Project" draft={draft} setDraft={setDraft} domains={domainOptions(domains.data?.items ?? [])} databaseOverview={databaseOverview.data} onClose={() => setCreateOpen(false)} onDetect={() => detect.mutate("create")} onSubmit={() => createDeployment.mutate()} submitLabel="Create" busy={createDeployment.isPending} openGithub={() => enableGithub ? setRepoPickerOpen(true) : undefined} enableGithub={enableGithub} /> : null}
+      {editingOpen ? <ProjectModal title="Edit Project" draft={editDraft} setDraft={setEditDraft} domains={domainOptions(domains.data?.items ?? [])} databaseOverview={databaseOverview.data} onClose={() => setEditingOpen(false)} onDetect={() => detect.mutate("edit")} onSubmit={() => updateDeployment.mutate()} submitLabel="Save changes" busy={updateDeployment.isPending} openGithub={() => enableGithub ? setRepoPickerOpen(true) : undefined} enableGithub={enableGithub} /> : null}
+      {enableGithub && repoPickerOpen ? <GithubModal repos={repos.data} loading={repos.isLoading} repoSearch={repoSearch} setRepoSearch={setRepoSearch} connection={githubConnection.data} githubToken={githubToken} setGithubToken={setGithubToken} githubUsername={githubUsername} setGithubUsername={setGithubUsername} saveToken={() => saveGithubToken.mutate()} savingToken={saveGithubToken.isPending} onClose={() => setRepoPickerOpen(false)} onDeploy={(repo) => selectGithubRepo.mutate(repo)} deploying={selectGithubRepo.isPending} /> : null}
       {logModalOpen ? <LogsModal title={logTitle} text={logText} onCopy={copyLogText} onClose={() => setLogModalOpen(false)} /> : null}
     </section>
   );
@@ -734,14 +748,14 @@ function deploymentBindingName(binding: DeploymentDomainBinding) {
   return binding.subdomain ? `${binding.subdomain.name}.${binding.subdomain.domain.name}` : binding.domain?.name ?? "";
 }
 
-function ProjectModal({ title, draft, setDraft, domains, databaseOverview, onClose, onDetect, onSubmit, submitLabel, busy, openGithub }: { title: string; draft: Draft; setDraft: (draft: Draft) => void; domains: DomainOption[]; databaseOverview?: DatabaseOverview; onClose: () => void; onDetect: () => void; onSubmit: () => void; submitLabel: string; busy?: boolean; openGithub: () => void }) {
+function ProjectModal({ title, draft, setDraft, domains, databaseOverview, onClose, onDetect, onSubmit, submitLabel, busy, openGithub, enableGithub = true }: { title: string; draft: Draft; setDraft: (draft: Draft) => void; domains: DomainOption[]; databaseOverview?: DatabaseOverview; onClose: () => void; onDetect: () => void; onSubmit: () => void; submitLabel: string; busy?: boolean; openGithub: () => void; enableGithub?: boolean }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-6">
       <div className="flex max-h-[88vh] w-full max-w-3xl flex-col rounded-md border border-panel-line bg-white shadow-xl">
         <div className="flex items-center justify-between border-b border-panel-line p-4"><div className="text-sm font-semibold">{title}</div><button className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line" onClick={onClose} type="button"><X size={16} /></button></div>
         <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
           <div className="grid grid-cols-4 gap-2">{sourceOptions.map((source) => <button className={`h-9 rounded-md border text-xs font-semibold ${draft.sourceProvider === source ? "border-panel-accent bg-teal-50 text-panel-accent" : "border-panel-line"}`} key={source} onClick={() => { setDraft({ ...draft, sourceProvider: source }); if (source === "GITHUB") openGithub(); }} type="button">{source.replace("_", " ")}</button>)}</div>
-          {draft.sourceProvider === "GITHUB" ? <button className="flex h-10 w-full items-center justify-center gap-2 rounded-md border border-panel-line text-sm font-medium hover:bg-slate-50" onClick={openGithub} type="button"><Github size={15} />Choose GitHub project</button> : null}
+          {enableGithub && draft.sourceProvider === "GITHUB" ? <button className="flex h-10 w-full items-center justify-center gap-2 rounded-md border border-panel-line text-sm font-medium hover:bg-slate-50" onClick={openGithub} type="button"><Github size={15} />Choose GitHub project</button> : null}
           <DeploymentFormFields value={draft} onChange={setDraft} domains={domains} databaseOverview={databaseOverview} />
         </div>
         <div className="flex justify-between border-t border-panel-line p-4"><button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm" onClick={onDetect} type="button"><Wand2 size={15} />Detect</button><div className="flex gap-2"><button className="h-9 rounded-md border border-panel-line px-3 text-sm" onClick={onClose} type="button">Cancel</button><button className="h-9 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={!draft.name || !draft.rootPath || !draft.port || busy} onClick={onSubmit} type="button">{submitLabel}</button></div></div>

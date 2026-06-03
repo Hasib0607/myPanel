@@ -1,10 +1,16 @@
 import { AccountShell } from "@/components/account-shell";
-import { AccountClient } from "../account-client";
+import { DeploymentsClient } from "@/app/deployments/deployments-client";
 
 export default function AccountDeploymentsPage() {
   return (
     <AccountShell>
-      <AccountClient view="deployments" />
+      <DeploymentsClient
+        apiBase="/account/deployments"
+        databasesApiBase="/account/databases"
+        domainsApiBase="/account/domains"
+        enableGithub={false}
+        showPanelUpdate={false}
+      />
     </AccountShell>
   );
 }
