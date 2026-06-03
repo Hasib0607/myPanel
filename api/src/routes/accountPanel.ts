@@ -1558,28 +1558,16 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const bindingTarget = body.domainId ? await resolveAccountBindingTarget(account.id, body.domainId) : null;
     const rootPath = body.rootPath === undefined ? undefined : accountDeploymentRootPath(account, body.rootPath, body.slug ?? existing.slug);
     if (rootPath) await fs.mkdir(rootPath, { recursive: true });
-    const { envVars: _envVars, domainId: _domainId, rootPath: _rootPath, ...data } = body;
-    const deployment = await prisma.deployment.update({
-      where: { id: existing.id },
-      data: {
-        ...data,
-        ...(rootPath !== undefined ? { rootPath } : {}),
-        ...(body.domainId !== undefined ? { domainId: bindingTarget?.domainId ?? null } : {}),
-        gitUrl: body.gitUrl ?? undefined,
-        repoUrl: (body as any).repoUrl ?? undefined,
-        processManager: body.framework ? defaultProcessManagerByFramework[body.framework] : undefined
-      },
-      include: includeAccountDeployment()
-    });
+    const { envVars: _envVars, domainId: _domainId, rootPath: _rootPath, autoDeployEnabled: _autoDeployEnabled, ...data } = body;
     if (body.autoDeployEnabled === true) {
       const webhookTarget = {
-        id: deployment.id,
-        slug: deployment.slug,
-        githubOwner: deployment.githubOwner,
-        githubRepo: deployment.githubRepo,
-        webhookSecretHash: deployment.webhookSecretHash
+        id: existing.id,
+        slug: body.slug ?? existing.slug,
+        githubOwner: body.githubOwner ?? existing.githubOwner,
+        githubRepo: body.githubRepo ?? existing.githubRepo,
+        webhookSecretHash: existing.webhookSecretHash
       };
-      if (deployment.sourceProvider !== "GITHUB" || !webhookTarget.githubOwner || !webhookTarget.githubRepo) {
+      if ((body.sourceProvider ?? existing.sourceProvider) !== "GITHUB" || !webhookTarget.githubOwner || !webhookTarget.githubRepo) {
         throw app.httpErrors.badRequest("Auto deploy requires a GitHub source with owner and repository configured.");
       }
       const webhook = await ensureAccountGithubWebhook(account.id, webhookTarget);
@@ -1588,13 +1576,26 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       }
       await prisma.deploymentLog.create({
         data: {
-          deploymentId: deployment.id,
+          deploymentId: existing.id,
           step: "QUEUED",
           message: "Auto deploy GitHub webhook configured",
           metadata: webhook as Prisma.InputJsonObject
         }
       });
     }
+    const deployment = await prisma.deployment.update({
+      where: { id: existing.id },
+      data: {
+        ...data,
+        ...(body.autoDeployEnabled !== undefined ? { autoDeployEnabled: body.autoDeployEnabled } : {}),
+        ...(rootPath !== undefined ? { rootPath } : {}),
+        ...(body.domainId !== undefined ? { domainId: bindingTarget?.domainId ?? null } : {}),
+        gitUrl: body.gitUrl ?? undefined,
+        repoUrl: (body as any).repoUrl ?? undefined,
+        processManager: body.framework ? defaultProcessManagerByFramework[body.framework] : undefined
+      },
+      include: includeAccountDeployment()
+    });
     if (body.domainId !== undefined) {
       await syncAccountPrimaryBinding(deployment.id, account.id, body.domainId);
     }

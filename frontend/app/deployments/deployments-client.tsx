@@ -409,9 +409,9 @@ export function DeploymentsClient({
   });
 
   const toggleAutoDeploy = useMutation({
-    mutationFn: (deployment: Deployment) => apiPatch<Deployment>(`${apiBase}/${deployment.slug}`, { autoDeployEnabled: true }),
+    mutationFn: (deployment: Deployment) => apiPatch<Deployment>(`${apiBase}/${deployment.slug}`, { autoDeployEnabled: !deployment.autoDeployEnabled }),
     onSuccess: async (deployment) => {
-      setNotice(`Auto deploy webhook configured for ${deployment.name}.`);
+      setNotice(deployment.autoDeployEnabled ? `Auto deploy webhook configured for ${deployment.name}.` : `Auto deploy disabled for ${deployment.name}.`);
       await invalidateDeployments();
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not update auto deploy")
