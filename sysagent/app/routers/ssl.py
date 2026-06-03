@@ -1,6 +1,7 @@
 from __future__ import annotations
 import secrets
 import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from app.command import run_command
 from app.config import settings
+from app.routers.dns import effective_dns_paths, safe_zone_path
 from app.nginx_manager import acme_root_for_server_name, letsencrypt_certificate_exists, run_live_step, safe_web_root
 
 router = APIRouter()
@@ -26,6 +28,18 @@ class CertificateRequest(BaseModel):
     email: str
     webRoot: str
     includeWww: bool = True
+    certName: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_.-]+$")
+
+
+class DnsCertificateRequest(BaseModel):
+    domain: str = Field(pattern=r"^\*\.[a-zA-Z0-9.-]+$")
+    parentDomain: str = Field(pattern=r"^[a-zA-Z0-9.-]+$")
+    email: str
+    certName: str = Field(pattern=r"^[a-zA-Z0-9_.-]+$")
+    propagationSeconds: int = Field(default=30, ge=0, le=300)
+    zoneDir: str = "/etc/bind/zones"
+    namedConfLocal: str = "/etc/bind/named.conf.local"
+    namedConfOptions: str = "/etc/bind/named.conf.options"
 
 
 class CertificatePreflightRequest(BaseModel):
@@ -116,10 +130,124 @@ def issue_certificate(payload: CertificateRequest) -> dict:
         "-d",
         payload.domain,
     ]
+    if payload.certName:
+        command.extend(["--cert-name", payload.certName])
     if certbot_should_include_www(payload.domain, payload.includeWww):
         command.extend(["-d", f"www.{payload.domain}"])
 
     return run_command(command, allow_live=settings.allow_live_ssl)
+
+
+def dns_hook_script(zone_path: Path, parent_domain: str, action: str, propagation_seconds: int) -> str:
+    return f"""#!/usr/bin/env python3
+from __future__ import annotations
+import os
+import re
+import subprocess
+import time
+from datetime import datetime
+from pathlib import Path
+
+zone_path = Path({str(zone_path)!r})
+parent_domain = {parent_domain!r}.rstrip(".")
+action = {action!r}
+propagation_seconds = {propagation_seconds}
+
+
+def relative_challenge_name(certbot_domain: str) -> str:
+    domain = certbot_domain.strip().lower().rstrip(".")
+    if domain.startswith("*."):
+        domain = domain[2:]
+    suffix = "." + parent_domain
+    if domain == parent_domain:
+        return "_acme-challenge"
+    if domain.endswith(suffix):
+        label = domain[:-len(suffix)]
+        return f"_acme-challenge.{{label}}"
+    return "_acme-challenge"
+
+
+def bump_serial(text: str) -> str:
+    today = datetime.utcnow().strftime("%Y%m%d")
+
+    def repl(match):
+        current = match.group(2)
+        next_serial = int(current) + 1
+        if not current.startswith(today):
+            next_serial = int(today + "01")
+        return f"{{match.group(1)}}{{next_serial}}{{match.group(3)}}"
+
+    return re.sub(r"(\\n\\s*)(\\d{{10}})(\\s*;\\s*serial)", repl, text, count=1, flags=re.IGNORECASE)
+
+
+validation = os.environ.get("CERTBOT_VALIDATION", "").strip()
+certbot_domain = os.environ.get("CERTBOT_DOMAIN", "").strip()
+if not validation or not certbot_domain:
+    raise SystemExit("CERTBOT_DOMAIN/CERTBOT_VALIDATION missing")
+
+name = relative_challenge_name(certbot_domain)
+line = f'{{name}} 60 IN TXT "{{validation}}"'
+text = zone_path.read_text(encoding="utf-8") if zone_path.exists() else ""
+lines = text.splitlines()
+if action == "auth":
+    if line not in lines:
+        lines.append(line)
+elif action == "cleanup":
+    lines = [item for item in lines if validation not in item]
+else:
+    raise SystemExit(f"Unsupported action: {{action}}")
+
+next_text = bump_serial("\\n".join(lines).rstrip() + "\\n")
+zone_path.write_text(next_text, encoding="utf-8")
+subprocess.run(["named-checkzone", parent_domain, str(zone_path)], check=True)
+subprocess.run(["rndc", "reload", parent_domain], check=False)
+subprocess.run(["rndc", "reconfig"], check=False)
+if action == "auth" and propagation_seconds > 0:
+    time.sleep(propagation_seconds)
+"""
+
+
+@router.post("/issue-dns")
+def issue_dns_certificate(payload: DnsCertificateRequest) -> dict:
+    zone_dir, _named_conf_local, _named_conf_options = effective_dns_paths(payload)
+    zone_path = safe_zone_path(zone_dir, payload.parentDomain.lower().rstrip("."))
+    if not settings.allow_live_ssl or not settings.allow_live_dns:
+        return {
+            "dryRun": True,
+            "command": ["certbot", "certonly", "--manual", "-d", payload.domain, "--cert-name", payload.certName],
+            "stdout": "",
+            "stderr": "Set ALLOW_LIVE_SSL=true and ALLOW_LIVE_DNS=true to issue wildcard DNS-01 certificates.",
+            "returncode": 1,
+        }
+
+    with tempfile.TemporaryDirectory(prefix="vps-panel-certbot-dns-") as tmp:
+        auth_path = Path(tmp) / "auth.py"
+        cleanup_path = Path(tmp) / "cleanup.py"
+        auth_path.write_text(dns_hook_script(zone_path, payload.parentDomain, "auth", payload.propagationSeconds), encoding="utf-8")
+        cleanup_path.write_text(dns_hook_script(zone_path, payload.parentDomain, "cleanup", 0), encoding="utf-8")
+        auth_path.chmod(0o700)
+        cleanup_path.chmod(0o700)
+        command = [
+            "certbot",
+            "certonly",
+            "--manual",
+            "--preferred-challenges",
+            "dns",
+            "--manual-auth-hook",
+            str(auth_path),
+            "--manual-cleanup-hook",
+            str(cleanup_path),
+            "--non-interactive",
+            "--agree-tos",
+            "--keep-until-expiring",
+            "--cert-name",
+            payload.certName,
+            "-m",
+            payload.email,
+            "-d",
+            payload.domain,
+        ]
+        return run_command(command, allow_live=True)
 
 
 @router.post("/renew/{domain}")

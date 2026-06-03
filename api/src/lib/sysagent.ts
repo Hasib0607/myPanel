@@ -201,6 +201,8 @@ export const sysagent = {
     request<{ certbot: SysagentCommandResult; write: SysagentCommandResult; checks: SysagentCommandResult[]; webRoot: string }>("/ssl/preflight", { method: "POST", body: JSON.stringify(body) }),
   issueCertificate: (body: unknown) =>
     request<SysagentCommandResult>("/ssl/issue", { method: "POST", body: JSON.stringify(body) }),
+  issueDnsCertificate: (body: unknown) =>
+    request<SysagentCommandResult>("/ssl/issue-dns", { method: "POST", body: JSON.stringify(body) }),
   renewCertificate: (domain: string) =>
     request<SysagentCommandResult>(`/ssl/renew/${encodeURIComponent(domain)}`, { method: "POST" }),
   renewAllCertificates: () =>

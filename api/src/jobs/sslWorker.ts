@@ -5,7 +5,7 @@ import { env } from "../config/env.js";
 import { prisma } from "../lib/prisma.js";
 import { sysagent, type SysagentCommandResult } from "../lib/sysagent.js";
 import { subdomainFolderName } from "../lib/domainFiles.js";
-import { isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
+import { certbotCertificateName, isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
 import {
   deploymentFallbackRootPath,
   deploymentIsRoutable,
@@ -26,9 +26,10 @@ function assertLiveCommandSucceeded(action: string, result: SysagentCommandResul
 }
 
 function certificatePaths(domain: string) {
+  const certName = certbotCertificateName(domain);
   return {
-    sslCertificate: `/etc/letsencrypt/live/${domain}/fullchain.pem`,
-    sslCertificateKey: `/etc/letsencrypt/live/${domain}/privkey.pem`
+    sslCertificate: `/etc/letsencrypt/live/${certName}/fullchain.pem`,
+    sslCertificateKey: `/etc/letsencrypt/live/${certName}/privkey.pem`
   };
 }
 
@@ -177,16 +178,21 @@ export const sslWorker = new Worker(
     logger.info("ssl job received", { id: job.id, name: job.name, data: job.data });
 
     if (job.name === "issue") {
-      if (isWildcardHostname(job.data.domain)) {
-        throw new Error(`Wildcard SSL for ${job.data.domain} requires DNS-01 validation. HTTP webroot validation cannot issue wildcard certificates yet.`);
-      }
       const includeWww = job.data.includeWww ?? true;
-      const result = await sysagent.issueCertificate({
-        domain: job.data.domain,
-        email: job.data.email,
-        webRoot: job.data.webRoot ?? `${env.FILE_MANAGER_ROOT}/${job.data.domain}/public_html`,
-        includeWww
-      });
+      const result = isWildcardHostname(job.data.domain) || job.data.dnsChallenge
+        ? await sysagent.issueDnsCertificate({
+            domain: job.data.domain,
+            parentDomain: job.data.parentDomain ?? job.data.domain.replace(/^\*\./, ""),
+            email: job.data.email,
+            certName: job.data.certName ?? certbotCertificateName(job.data.domain)
+          })
+        : await sysagent.issueCertificate({
+            domain: job.data.domain,
+            email: job.data.email,
+            webRoot: job.data.webRoot ?? `${env.FILE_MANAGER_ROOT}/${job.data.domain}/public_html`,
+            includeWww,
+            certName: certbotCertificateName(job.data.domain)
+          });
       assertLiveCommandSucceeded("Certbot issue", result);
 
       const domain = job.data.domainId
@@ -200,10 +206,14 @@ export const sslWorker = new Worker(
     }
 
     if (job.name === "renew") {
-      if (isWildcardHostname(job.data.domain)) {
-        throw new Error(`Wildcard SSL for ${job.data.domain} requires DNS-01 validation. HTTP webroot validation cannot renew wildcard certificates yet.`);
-      }
-      const result = await sysagent.renewCertificate(job.data.domain);
+      const result = isWildcardHostname(job.data.domain) || job.data.dnsChallenge
+        ? await sysagent.issueDnsCertificate({
+            domain: job.data.domain,
+            parentDomain: job.data.parentDomain ?? job.data.domain.replace(/^\*\./, ""),
+            email: job.data.email ?? `admin@${job.data.parentDomain ?? job.data.domain.replace(/^\*\./, "")}`,
+            certName: job.data.certName ?? certbotCertificateName(job.data.domain)
+          })
+        : await sysagent.renewCertificate(certbotCertificateName(job.data.domain));
       assertLiveCommandSucceeded("Certbot renew", result);
 
       const domain = job.data.domainId

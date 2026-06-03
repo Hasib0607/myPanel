@@ -9,7 +9,7 @@ import { sslQueue } from "../jobs/queues.js";
 import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
 import { sysagent, type SysagentCommandResult } from "../lib/sysagent.js";
-import { isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
+import { certbotCertificateName, isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
 
 const sslActionSchema = z.object({
   email: z.string().email().optional(),
@@ -153,7 +153,21 @@ async function publishSubdomainHttpVhost(target: Awaited<ReturnType<typeof subdo
 async function runSubdomainSslPreflight(subdomainId: string) {
   const target = await subdomainSslTarget(subdomainId);
   if (isWildcardHostname(target.fqdn)) {
-    throw Object.assign(new Error(`Wildcard SSL for ${target.fqdn} requires DNS-01 validation. HTTP webroot validation cannot issue wildcard certificates yet; issue a normal subdomain certificate such as app.${target.parentDomain.name}, or add DNS-01 provider support before enabling wildcard SSL.`), { statusCode: 400 });
+    await publishDomainDnsZone(target.parentDomain.id);
+    const certbot = await sysagent.certbotStatus();
+    if (!commandSucceeded(certbot)) {
+      const detail = commandFailureDetail(certbot);
+      throw Object.assign(new Error(`Certbot is not ready. Install certbot and enable ALLOW_LIVE_SSL. ${detail}`.trim()), { statusCode: 400 });
+    }
+    return {
+      ...target,
+      dnsChecks: [{ host: `_acme-challenge.${target.parentDomain.name}`, records: [] as string[], ok: true, skipped: false, dns01: true }],
+      httpVhost: null,
+      preflight: { certbot, write: certbot, checks: [] as SysagentCommandResult[], webRoot: target.webRoot },
+      includeWww: false,
+      dnsChallenge: true,
+      certName: certbotCertificateName(target.fqdn)
+    };
   }
   await publishDomainDnsZone(target.parentDomain.id);
   const records = await assertARecordPointsToVps(target.fqdn, target.parentDomain.id, target.parentDomain.name);
@@ -172,7 +186,7 @@ async function runSubdomainSslPreflight(subdomainId: string) {
     throw Object.assign(new Error(`HTTP ACME challenge failed for ${target.fqdn}. Publish the subdomain first and keep port 80 open.${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
   }
 
-  return { ...target, dnsChecks, httpVhost, preflight, includeWww: false };
+  return { ...target, dnsChecks, httpVhost, preflight, includeWww: false, dnsChallenge: false, certName: certbotCertificateName(target.fqdn) };
 }
 
 export const sslRoutes: FastifyPluginAsync = async (app) => {
@@ -200,7 +214,7 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
   app.get("/subdomains/:subdomainId/status", async (request) => {
     const { subdomainId } = z.object({ subdomainId: z.string() }).parse(request.params);
     const target = await subdomainSslTarget(subdomainId);
-    const cert = await sysagent.certificateStatus(target.fqdn);
+    const cert = await sysagent.certificateStatus(certbotCertificateName(target.fqdn));
     const expiry = cert.exists && cert.expiry ? new Date(cert.expiry) : null;
     return {
       subdomainId,
@@ -261,6 +275,9 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
       webRoot: preflight.webRoot,
       includeWww: false,
       forceSsl: true,
+      dnsChallenge: preflight.dnsChallenge ?? false,
+      parentDomain: preflight.parentDomain.name,
+      certName: preflight.certName ?? certbotCertificateName(preflight.fqdn),
       source: "subdomain-ssl"
     });
 
@@ -299,6 +316,9 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
       webRoot: preflight.webRoot,
       includeWww: false,
       forceSsl: true,
+      dnsChallenge: preflight.dnsChallenge ?? false,
+      parentDomain: preflight.parentDomain.name,
+      certName: preflight.certName ?? certbotCertificateName(preflight.fqdn),
       source: "subdomain-ssl"
     });
 
