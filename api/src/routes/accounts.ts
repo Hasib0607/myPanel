@@ -1,19 +1,31 @@
 import bcrypt from "bcrypt";
 import crypto from "node:crypto";
+import path from "node:path";
 import type { FastifyPluginAsync } from "fastify";
+import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { env } from "../config/env.js";
 import { audit } from "../lib/audit.js";
+import { nginxResourceName } from "../lib/nginxNames.js";
 import { prisma } from "../lib/prisma.js";
 import { sysagent } from "../lib/sysagent.js";
+import { renderZone } from "./dns.js";
+import { defaultRecords, normalizeDomainName } from "./domains.js";
 
 const usernameSchema = z.string().trim().toLowerCase().regex(/^[a-z0-9][a-z0-9_-]{2,31}$/);
 
-const accountSchema = z.object({
+const accountBaseSchema = z.object({
   username: usernameSchema,
+  domainName: z.string().trim().optional().transform((value) => value ? normalizeDomainName(value) : undefined).refine((value) => {
+    if (!value) return true;
+    const labels = value.split(".");
+    const validLabels = labels.every((label) => /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(label));
+    return labels.length >= 2 && value.length <= 253 && validLabels && /^[a-z]{2,63}$/.test(labels[labels.length - 1] ?? "");
+  }, "Enter a valid domain, like example.com"),
   email: z.string().email().nullable().optional(),
   ownerName: z.string().trim().min(1).nullable().optional(),
   password: z.string().min(10).max(128).optional(),
+  confirmPassword: z.string().max(128).optional(),
   packageId: z.string().nullable().optional(),
   packageName: z.string().trim().min(1).nullable().optional(),
   diskLimitMb: z.number().int().min(0).nullable().optional(),
@@ -23,7 +35,12 @@ const accountSchema = z.object({
   deploymentLimit: z.number().int().min(0).nullable().optional()
 });
 
-const accountUpdateSchema = accountSchema.omit({ username: true, password: true }).partial().extend({
+const accountSchema = accountBaseSchema.refine((body) => !body.password || body.password === body.confirmPassword, {
+  path: ["confirmPassword"],
+  message: "Passwords do not match"
+});
+
+const accountUpdateSchema = accountBaseSchema.omit({ username: true, domainName: true, password: true, confirmPassword: true }).partial().extend({
   status: z.enum(["ACTIVE", "SUSPENDED"]).optional()
 });
 const assignmentSchema = z.object({
@@ -42,6 +59,10 @@ function accountHomeRoot(username: string) {
   return `${env.FILE_MANAGER_ROOT.replace(/\/+$/, "")}/accounts/${username}`;
 }
 
+function accountDocumentRoot(username: string) {
+  return `accounts/${username}/public_html`;
+}
+
 function publicAccount(account: any, generated?: string) {
   const { passwordHash: _passwordHash, ...safe } = account;
   return generated ? { ...safe, generatedPassword: generated } : safe;
@@ -55,6 +76,30 @@ async function usageFor(accountId: string) {
     prisma.accountDatabase.count({ where: { accountId } })
   ]);
   return { domains, deployments, mailAccounts, databases };
+}
+
+async function activeNameServers() {
+  return prisma.nameServer.findMany({
+    where: { active: true },
+    orderBy: [{ sortOrder: "asc" }, { hostname: "asc" }],
+    select: { hostname: true, ipv4: true, ipv6: true }
+  });
+}
+
+async function publishAccountDomain(domainId: string) {
+  const domain = await prisma.domain.findUniqueOrThrow({
+    where: { id: domainId },
+    include: { dnsRecords: { orderBy: [{ type: "asc" }, { name: "asc" }] } }
+  });
+  const zone = renderZone(domain.name, domain.dnsRecords);
+  const dnsResult = await sysagent.applyDnsZone({ domain: domain.name, zone });
+  const nginxResult = await sysagent.writeStaticNginxVhost({
+    name: `domain-${nginxResourceName(domain.name)}`,
+    serverName: `${domain.name} www.${domain.name}`,
+    rootPath: path.join(env.FILE_MANAGER_ROOT, domain.documentRoot),
+    forceHttps: domain.forceSsl && domain.sslEnabled
+  });
+  return { domain, zone, dnsResult, nginxResult };
 }
 
 export const accountRoutes: FastifyPluginAsync = async (app) => {
@@ -93,26 +138,59 @@ export const accountRoutes: FastifyPluginAsync = async (app) => {
         : await prisma.accountPackage.findFirst({ where: { isDefault: true }, orderBy: { name: "asc" } });
     const password = body.password ?? generatedPassword();
     const passwordHash = await bcrypt.hash(password, 12);
-    const account = await prisma.account.create({
-      data: {
-        username: body.username,
-        email: body.email ?? null,
-        ownerName: body.ownerName ?? null,
-        passwordHash,
-        packageId: selectedPackage?.id ?? body.packageId ?? null,
-        homeRoot: accountHomeRoot(body.username),
-        packageName: selectedPackage?.name ?? body.packageName ?? null,
-        diskLimitMb: body.diskLimitMb ?? selectedPackage?.diskLimitMb ?? null,
-        domainLimit: body.domainLimit ?? selectedPackage?.domainLimit ?? null,
-        mailboxLimit: body.mailboxLimit ?? selectedPackage?.mailboxLimit ?? null,
-        databaseLimit: body.databaseLimit ?? selectedPackage?.databaseLimit ?? null,
-        deploymentLimit: body.deploymentLimit ?? selectedPackage?.deploymentLimit ?? null
-      },
-      include: { _count: { select: { domains: true, deployments: true, mailAccounts: true } } }
-    });
+    const nameServers = body.domainName ? await activeNameServers() : [];
+    let account;
+    let createdDomainId: string | undefined;
+    try {
+      const created = await prisma.$transaction(async (tx) => {
+        const newAccount = await tx.account.create({
+          data: {
+            username: body.username,
+            email: body.email ?? null,
+            ownerName: body.ownerName ?? null,
+            passwordHash,
+            packageId: selectedPackage?.id ?? body.packageId ?? null,
+            homeRoot: accountHomeRoot(body.username),
+            packageName: selectedPackage?.name ?? body.packageName ?? null,
+            diskLimitMb: body.diskLimitMb ?? selectedPackage?.diskLimitMb ?? null,
+            domainLimit: body.domainLimit ?? selectedPackage?.domainLimit ?? null,
+            mailboxLimit: body.mailboxLimit ?? selectedPackage?.mailboxLimit ?? null,
+            databaseLimit: body.databaseLimit ?? selectedPackage?.databaseLimit ?? null,
+            deploymentLimit: body.deploymentLimit ?? selectedPackage?.deploymentLimit ?? null
+          }
+        });
+        if (body.domainName) {
+          const domain = await tx.domain.create({
+            data: {
+              name: body.domainName,
+              status: "ACTIVE",
+              accountId: newAccount.id,
+              forceSsl: true,
+              hostingMode: "PUBLIC_HTML",
+              documentRoot: accountDocumentRoot(body.username)
+            }
+          });
+          await tx.dnsRecord.createMany({ data: defaultRecords(domain.id, domain.name, nameServers), skipDuplicates: true });
+          createdDomainId = domain.id;
+        }
+        return tx.account.findUniqueOrThrow({
+          where: { id: newAccount.id },
+          include: { _count: { select: { domains: true, deployments: true, mailAccounts: true } } }
+        });
+      });
+      account = created;
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        return reply.code(409).send({ error: "Account, email, or domain already exists" });
+      }
+      throw error;
+    }
     const scaffold = await sysagent.createAccountScaffold({ username: account.username }).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }));
-    await audit(request, { action: "CREATE", resource: "account", resourceId: account.id, description: `Created account ${account.username}`, metadata: { scaffold } as any });
-    return reply.code(201).send({ ...publicAccount(account, body.password ? undefined : password), scaffold });
+    const domainPublish = createdDomainId
+      ? await publishAccountDomain(createdDomainId).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }))
+      : null;
+    await audit(request, { action: "CREATE", resource: "account", resourceId: account.id, description: `Created account ${account.username}`, metadata: { scaffold, domainId: createdDomainId, domainPublish } as any });
+    return reply.code(201).send({ ...publicAccount(account, body.password ? undefined : password), scaffold, domainPublish });
   });
 
   app.get("/:accountId", async (request) => {

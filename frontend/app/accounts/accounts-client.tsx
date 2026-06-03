@@ -27,12 +27,14 @@ type HostingPackage = { id: string; name: string; diskLimitMb: number | null; do
 
 const initialDraft = {
   username: "",
+  domainName: "",
   email: "",
   ownerName: "",
   password: "",
+  confirmPassword: "",
   packageId: "",
   packageName: "Default",
-  diskLimitMb: "10240",
+  diskLimitGb: "10",
   domainLimit: "5",
   mailboxLimit: "10",
   databaseLimit: "3",
@@ -54,18 +56,21 @@ export function AccountsClient() {
     queryKey: ["packages"],
     queryFn: () => apiGet<{ items: HostingPackage[] }>("/packages")
   });
+  const passwordMismatch = Boolean(draft.password || draft.confirmPassword) && draft.password !== draft.confirmPassword;
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["accounts"] });
 
   const createAccount = useMutation({
     mutationFn: () => apiPost<Account>("/accounts", {
       username: draft.username,
+      domainName: draft.domainName || undefined,
       email: draft.email || null,
       ownerName: draft.ownerName || null,
       password: draft.password || undefined,
+      confirmPassword: draft.password ? draft.confirmPassword : undefined,
       packageId: draft.packageId || null,
       packageName: draft.packageName || null,
-      diskLimitMb: draft.diskLimitMb ? Number(draft.diskLimitMb) : null,
+      diskLimitMb: draft.diskLimitGb ? Number(draft.diskLimitGb) * 1024 : null,
       domainLimit: draft.domainLimit ? Number(draft.domainLimit) : null,
       mailboxLimit: draft.mailboxLimit ? Number(draft.mailboxLimit) : null,
       databaseLimit: draft.databaseLimit ? Number(draft.databaseLimit) : null,
@@ -110,9 +115,12 @@ export function AccountsClient() {
         <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Create Account</div>
         <div className="space-y-3 p-4">
           <Input label="Username" value={draft.username} onChange={(username) => setDraft({ ...draft, username: cleanUsername(username) })} />
+          <Input label="Domain" value={draft.domainName} onChange={(domainName) => setDraft({ ...draft, domainName: cleanDomain(domainName) })} placeholder="example.com" />
           <Input label="Email" value={draft.email} onChange={(email) => setDraft({ ...draft, email })} />
           <Input label="Owner" value={draft.ownerName} onChange={(ownerName) => setDraft({ ...draft, ownerName })} />
-          <Input label="Password (optional)" value={draft.password} onChange={(password) => setDraft({ ...draft, password })} type="password" />
+          <Input label="Password" value={draft.password} onChange={(password) => setDraft({ ...draft, password })} type="password" />
+          <Input label="Confirm password" value={draft.confirmPassword} onChange={(confirmPassword) => setDraft({ ...draft, confirmPassword })} type="password" />
+          {passwordMismatch ? <div className="text-xs font-medium text-panel-danger">Passwords do not match.</div> : null}
           <label className="block space-y-1 text-xs font-medium text-panel-muted">
             <span>Package template</span>
             <select
@@ -123,7 +131,7 @@ export function AccountsClient() {
                   ...draft,
                   packageId: event.target.value,
                   packageName: selected?.name ?? draft.packageName,
-                  diskLimitMb: selected?.diskLimitMb?.toString() ?? draft.diskLimitMb,
+                  diskLimitGb: selected?.diskLimitMb != null ? mbToGbInput(selected.diskLimitMb) : draft.diskLimitGb,
                   domainLimit: selected?.domainLimit?.toString() ?? draft.domainLimit,
                   mailboxLimit: selected?.mailboxLimit?.toString() ?? draft.mailboxLimit,
                   databaseLimit: selected?.databaseLimit?.toString() ?? draft.databaseLimit,
@@ -137,14 +145,14 @@ export function AccountsClient() {
             </select>
           </label>
           <div className="grid grid-cols-2 gap-3">
-            <Input label="Disk MB" value={draft.diskLimitMb} onChange={(diskLimitMb) => setDraft({ ...draft, diskLimitMb: digitsOnly(diskLimitMb) })} />
+            <Input label="Disk GB" value={draft.diskLimitGb} onChange={(diskLimitGb) => setDraft({ ...draft, diskLimitGb: decimalNumber(diskLimitGb) })} />
             <Input label="Domains" value={draft.domainLimit} onChange={(domainLimit) => setDraft({ ...draft, domainLimit: digitsOnly(domainLimit) })} />
             <Input label="Mailboxes" value={draft.mailboxLimit} onChange={(mailboxLimit) => setDraft({ ...draft, mailboxLimit: digitsOnly(mailboxLimit) })} />
             <Input label="Databases" value={draft.databaseLimit} onChange={(databaseLimit) => setDraft({ ...draft, databaseLimit: digitsOnly(databaseLimit) })} />
             <Input label="Deployments" value={draft.deploymentLimit} onChange={(deploymentLimit) => setDraft({ ...draft, deploymentLimit: digitsOnly(deploymentLimit) })} />
           </div>
           <Input label="Package" value={draft.packageName} onChange={(packageName) => setDraft({ ...draft, packageName })} />
-          <button className="flex h-10 w-full items-center justify-center gap-2 rounded-md bg-panel-accent text-sm font-semibold text-white disabled:opacity-60" disabled={!draft.username || createAccount.isPending} onClick={() => createAccount.mutate()} type="button">
+          <button className="flex h-10 w-full items-center justify-center gap-2 rounded-md bg-panel-accent text-sm font-semibold text-white disabled:opacity-60" disabled={!draft.username || passwordMismatch || createAccount.isPending} onClick={() => createAccount.mutate()} type="button">
             <Plus size={15} />
             Create Account
           </button>
@@ -201,7 +209,7 @@ export function AccountsClient() {
                     <div>{account._count?.mailAccounts ?? 0} mailboxes</div>
                   </td>
                   <td className="px-4 py-3 text-xs text-panel-muted">
-                    <div>{account.diskLimitMb ?? "-"} MB disk</div>
+                    <div>{formatDiskGb(account.diskLimitMb)} disk</div>
                     <div>{account.deploymentLimit ?? "-"} deploy limit</div>
                   </td>
                   <td className="px-4 py-3">
@@ -245,15 +253,35 @@ function cleanUsername(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 32);
 }
 
+function cleanDomain(value: string) {
+  return value.toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/[^a-z0-9.-]/g, "").slice(0, 253);
+}
+
 function digitsOnly(value: string) {
   return value.replace(/\D/g, "");
 }
 
-function Input({ label, value, onChange, type = "text" }: { label: string; value: string; onChange: (value: string) => void; type?: string }) {
+function decimalNumber(value: string) {
+  const cleaned = value.replace(/[^\d.]/g, "");
+  const [head, ...tail] = cleaned.split(".");
+  return tail.length > 0 ? `${head}.${tail.join("")}` : head;
+}
+
+function mbToGbInput(value: number) {
+  const gb = value / 1024;
+  return Number.isInteger(gb) ? gb.toString() : gb.toFixed(2).replace(/\.?0+$/, "");
+}
+
+function formatDiskGb(value: number | null) {
+  if (value == null) return "unlimited";
+  return `${mbToGbInput(value)} GB`;
+}
+
+function Input({ label, value, onChange, type = "text", placeholder }: { label: string; value: string; onChange: (value: string) => void; type?: string; placeholder?: string }) {
   return (
     <label className="block space-y-1 text-xs font-medium text-panel-muted">
       <span>{label}</span>
-      <input className="h-10 w-full rounded-md border border-panel-line px-3 text-sm text-panel-ink" onChange={(event) => onChange(event.target.value)} type={type} value={value} />
+      <input className="h-10 w-full rounded-md border border-panel-line px-3 text-sm text-panel-ink" onChange={(event) => onChange(event.target.value)} placeholder={placeholder} type={type} value={value} />
     </label>
   );
 }
