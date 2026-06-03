@@ -297,12 +297,27 @@ async function uniqueDeploymentSlug(base: string) {
 
 function includeAccountDeployment() {
   return {
-    domain: true,
-    domainBindings: { include: { domain: true, subdomain: { include: { domain: true } } }, orderBy: [{ role: "asc" as const }, { createdAt: "asc" as const }] },
+    domain: { include: { account: true } },
+    domainBindings: {
+      include: {
+        domain: { include: { account: true } },
+        subdomain: { include: { domain: { include: { account: true } } } }
+      },
+      orderBy: [{ role: "asc" as const }, { createdAt: "asc" as const }]
+    },
     env: { orderBy: { key: "asc" as const } },
     releases: { orderBy: { createdAt: "desc" as const }, take: 10 },
     logs: { orderBy: { createdAt: "desc" as const }, take: 100 }
   };
+}
+
+function logMetadataText(metadata: Prisma.JsonValue | null) {
+  if (!metadata) return "";
+  try {
+    return `\n${JSON.stringify(metadata, null, 2)}`;
+  } catch {
+    return "";
+  }
 }
 
 async function findAccountDeployment(request: any, idOrSlug: string) {
@@ -1368,7 +1383,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const deployment = await findAccountDeployment(request, deploymentId);
     const logs = await prisma.deploymentLog.findMany({ where: { deploymentId: deployment.id }, orderBy: { createdAt: "asc" }, take: 500 });
     reply.type("text/plain");
-    return logs.map((log) => `[${log.createdAt.toISOString()}] ${log.step}: ${log.message}`).join("\n") || "No logs yet.";
+    return logs.map((log) => `[${log.createdAt.toISOString()}] ${log.step}: ${log.message}${logMetadataText(log.metadata)}`).join("\n") || "No logs yet.";
   });
 
   app.post("/deployments/:deploymentId/domains", async (request: any, reply) => {

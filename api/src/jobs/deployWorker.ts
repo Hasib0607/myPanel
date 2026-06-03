@@ -61,8 +61,14 @@ type DeployJobData = {
 type DeployStep = "PREFLIGHT" | "CLONING" | "INSTALLING" | "MIGRATING" | "BUILDING" | "CONFIGURING_PROXY" | "STARTING" | "HEALTH_CHECK" | "SUCCEEDED" | "FAILED" | "ROLLBACK";
 const buildLogRetentionMs = 24 * 60 * 60 * 1000;
 const deploymentWorkerInclude = Prisma.validator<Prisma.DeploymentInclude>()({
-  domain: true,
-  domainBindings: { include: { domain: true, subdomain: { include: { domain: true } } }, orderBy: [{ role: "asc" }, { createdAt: "asc" }] },
+  domain: { include: { account: true } },
+  domainBindings: {
+    include: {
+      domain: { include: { account: true } },
+      subdomain: { include: { domain: { include: { account: true } } } }
+    },
+    orderBy: [{ role: "asc" }, { createdAt: "asc" }]
+  },
   env: true
 });
 
@@ -2427,7 +2433,13 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
     const runtimeEnvVars = deploymentEnvWithPublicUrl(envVars, domain);
 
     if (processAction !== "stop" && domain) {
-      await ensureParentDomainDeploymentProxy(deployment.id, domain);
+      await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Link deployment domain", () =>
+        ensureParentDomainDeploymentProxy(deployment.id, domain).then(() => ({
+          domain: domain.name,
+          domainId: domain.id,
+          fallbackRootPath: deploymentFallbackRootPath(domain)
+        }))
+      );
       const serverName = deploymentServerName(domain);
       const nginxResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config", async () =>
         sysagent.deploymentNginx(
@@ -2781,7 +2793,16 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       }
     }
 
-    await ensureParentDomainDeploymentProxy(deployment.id, domain);
+    if (domain) {
+      const linkedDomain = domain;
+      await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Link deployment domain", () =>
+        ensureParentDomainDeploymentProxy(deployment.id, linkedDomain).then(() => ({
+          domain: linkedDomain.name,
+          domainId: linkedDomain.id,
+          fallbackRootPath: deploymentFallbackRootPath(linkedDomain)
+        }))
+      );
+    }
     await repairSysagentLiveCommandsForDeployment(
       deployment.id,
       releaseId,

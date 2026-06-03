@@ -16,6 +16,7 @@ export type BoundDomain = {
   documentRoot?: string | null;
   publicRootPath?: string | null;
   includeWww?: boolean;
+  account?: { homeRoot?: string | null } | null;
 };
 
 function normalizeDocumentRoot(value?: string | null) {
@@ -26,19 +27,34 @@ function publicHtmlRootPath(domainName: string, documentRoot?: string | null) {
   return path.join(env.FILE_MANAGER_ROOT, domainName, normalizeDocumentRoot(documentRoot));
 }
 
+function accountPublicRootPath(domain: { name: string; documentRoot?: string | null; account?: { homeRoot?: string | null } | null }) {
+  if (domain.account?.homeRoot) return path.join(domain.account.homeRoot, normalizeDocumentRoot(domain.documentRoot));
+  return publicHtmlRootPath(domain.name, domain.documentRoot);
+}
+
 export function boundDomainFromBinding(binding: {
   domain?: BoundDomain | null;
-  subdomain?: { id: string; name: string; sslEnabled: boolean; domainId: string; domain: { name: string; documentRoot?: string | null } } | null;
+  subdomain?: {
+    id: string;
+    name: string;
+    sslEnabled: boolean;
+    domainId: string;
+    domain: { name: string; documentRoot?: string | null; account?: { homeRoot?: string | null } | null };
+  } | null;
 }): BoundDomain | null {
   if (binding.subdomain) {
+    const parent = binding.subdomain.domain;
+    const publicRootPath = parent.account?.homeRoot
+      ? path.join(parent.account.homeRoot, "subdomains", subdomainFolderName(binding.subdomain.name))
+      : path.join(env.FILE_MANAGER_ROOT, parent.name, "subdomains", subdomainFolderName(binding.subdomain.name));
     return {
       id: `subdomain:${binding.subdomain.id}`,
       parentDomainId: binding.subdomain.domainId,
-      name: `${binding.subdomain.name}.${binding.subdomain.domain.name}`,
+      name: `${binding.subdomain.name}.${parent.name}`,
       forceSsl: binding.subdomain.sslEnabled,
       sslEnabled: binding.subdomain.sslEnabled,
-      documentRoot: binding.subdomain.domain.documentRoot,
-      publicRootPath: path.join(env.FILE_MANAGER_ROOT, binding.subdomain.domain.name, "subdomains", subdomainFolderName(binding.subdomain.name)),
+      documentRoot: parent.documentRoot,
+      publicRootPath,
       includeWww: false
     };
   }
@@ -47,7 +63,7 @@ export function boundDomainFromBinding(binding: {
       ...binding.domain,
       forceSsl: binding.domain.forceSsl ?? true,
       sslEnabled: binding.domain.sslEnabled ?? false,
-      publicRootPath: binding.domain.publicRootPath ?? publicHtmlRootPath(binding.domain.name, binding.domain.documentRoot)
+      publicRootPath: binding.domain.publicRootPath ?? accountPublicRootPath(binding.domain)
     };
   }
   return null;
@@ -92,7 +108,7 @@ export async function deploymentSslCertificatePathsWhenReady(domain: BoundDomain
 
 export function deploymentFallbackRootPath(domain: BoundDomain | null) {
   if (!domain?.name) return null;
-  return domain.publicRootPath ?? publicHtmlRootPath(domain.name, domain.documentRoot);
+  return domain.publicRootPath ?? accountPublicRootPath(domain);
 }
 
 function nginxResourceName(prefix: string, name: string) {

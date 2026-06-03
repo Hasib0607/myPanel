@@ -46,6 +46,16 @@ export function formatLogTime(value?: string | null) {
   return `${hh}:${mm}:${ss}.${ms}`;
 }
 
+function logMetadataPreview(metadata: DeploymentLog["metadata"]) {
+  if (!metadata || typeof metadata !== "object") return "";
+  try {
+    const text = JSON.stringify(metadata, null, 2);
+    return text === "{}" ? "" : text;
+  } catch {
+    return "";
+  }
+}
+
 export function formatDuration(ms?: number | null) {
   if (!ms) return "-";
   if (ms < 1000) return `${ms}ms`;
@@ -140,11 +150,15 @@ export function actionIcon(action: "deploy" | "start" | "stop" | "restart" | "ro
 
 export function LogLine({ log }: { log: DeploymentLog }) {
   const hasError = log.step === "FAILED" || /fail|error/i.test(log.message);
+  const metadata = logMetadataPreview(log.metadata);
   return (
     <div className="grid grid-cols-[110px_150px_1fr] gap-3 border-b border-slate-800 px-4 py-2 font-mono text-xs">
       <span className="text-slate-400 tabular-nums">{formatLogTime(log.createdAt)}</span>
       <span className={hasError ? "text-red-300" : "text-cyan-300"}>{log.step}</span>
-      <span className="text-slate-100">{log.message}</span>
+      <span className="min-w-0 text-slate-100">
+        <span>{log.message}</span>
+        {metadata ? <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-5 text-slate-400">{metadata}</pre> : null}
+      </span>
     </div>
   );
 }
