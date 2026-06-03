@@ -382,13 +382,24 @@ async function waitForPublicA(hostname: string, expectedIp: string, timeoutMs = 
   throw Object.assign(new Error(`SSL cannot be issued yet. ${detail}, but this VPS is ${expectedIp}. DNS has been published where this panel controls the zone; wait for propagation or update the registrar DNS.`), { statusCode: 400 });
 }
 
-async function accountSslPreflight(request: any, domain: { id: string; name: string }, includeWww: boolean) {
+async function accountSslPreflight(request: any, domain: { id: string; name: string; documentRoot?: string | null }, includeWww: boolean) {
   await ensureAccountDomainDns(request, domain);
   const records = await waitForPublicA(domain.name, env.VPS_IP);
   const wwwCheck = includeWww ? await optionalPublicA(`www.${domain.name}`) : null;
   const effectiveIncludeWww = Boolean(wwwCheck?.ok);
   const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
-  const webRoot = path.join(account.homeRoot, "public_html");
+  const webRoot = path.join(account.homeRoot, normalizeDocumentRoot(domain.documentRoot));
+  await fs.mkdir(path.join(webRoot, ".well-known", "acme-challenge"), { recursive: true });
+  const nginxResult = await sysagent.writeStaticNginxVhost({
+    name: `account-domain-${domain.name}`,
+    serverName: effectiveIncludeWww ? `${domain.name} www.${domain.name}` : domain.name,
+    rootPath: webRoot,
+    forceHttps: false
+  });
+  const nginxFailure = failedCommand(nginxResult.test) ?? failedCommand(nginxResult.reload);
+  if (nginxFailure) {
+    throw Object.assign(new Error(`Could not publish HTTP challenge vhost for ${domain.name}. ${nginxFailure}`), { statusCode: 400 });
+  }
   const preflight = await sysagent.sslPreflight({ domain: domain.name, webRoot, includeWww: effectiveIncludeWww });
   const certbotFailure = failedCommand(preflight.certbot);
   if (certbotFailure) {
