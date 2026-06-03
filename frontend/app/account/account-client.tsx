@@ -40,8 +40,19 @@ type Dashboard = {
 };
 type FileList = { current: FileEntry; root: string; items: FileEntry[] };
 type FileRead = { file: FileEntry; content: string };
+export type AccountView = "dashboard" | "domains" | "files" | "mail" | "deployments" | "databases" | "profile";
 
-export function AccountClient() {
+const viewTitles: Record<AccountView, string> = {
+  dashboard: "Account Dashboard",
+  domains: "Domains",
+  files: "File Manager",
+  mail: "Mailboxes",
+  deployments: "Deployments",
+  databases: "Databases",
+  profile: "Profile"
+};
+
+export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
   const queryClient = useQueryClient();
   const [notice, setNotice] = useState("");
   const [domainName, setDomainName] = useState("");
@@ -244,12 +255,19 @@ export function AccountClient() {
 
   const data = dashboard.data;
   const domains = data?.domains ?? [];
+  const isDashboard = view === "dashboard";
+  const showDomains = view === "domains";
+  const showMail = view === "mail";
+  const showFiles = view === "files";
+  const showDeployments = view === "deployments";
+  const showDatabases = view === "databases";
+  const showProfile = view === "profile";
 
   return (
     <section className="space-y-6 p-8">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold">Account Dashboard</h1>
+          <h1 className="text-2xl font-semibold">{viewTitles[view]}</h1>
           <p className="mt-1 text-sm text-panel-muted">{data?.account.username ?? "Loading"} · {data?.account.packageName ?? "No package"}</p>
         </div>
         <button className="flex h-10 items-center gap-2 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50" onClick={() => refresh()} type="button">
@@ -260,16 +278,16 @@ export function AccountClient() {
 
       {notice ? <div className="rounded-md border border-panel-line bg-white p-3 text-sm text-slate-700">{notice}</div> : null}
 
-      <div className="grid grid-cols-5 gap-3">
+      {isDashboard ? <div className="grid grid-cols-5 gap-3">
         <Metric label="Domains" value={data?.usage.domains} limit={data?.usage.domainLimit} />
         <Metric label="Mailboxes" value={data?.usage.mailAccounts} limit={data?.usage.mailboxLimit} />
         <Metric label="Deployments" value={data?.usage.deployments} limit={data?.usage.deploymentLimit} />
         <Metric label="Databases" value={data?.usage.databases} limit={data?.usage.databaseLimit} />
         <Metric label="Disk MB" value={data?.usage.diskUsedMb} limit={data?.usage.diskLimitMb} />
-      </div>
+      </div> : null}
 
-      <div className="grid grid-cols-[1.1fr_0.9fr] gap-6">
-        <Panel id="domains" title="Domains" icon={<Globe2 size={17} />}>
+      {showDomains || showMail ? <div className={isDashboard ? "grid grid-cols-[1.1fr_0.9fr] gap-6" : "grid grid-cols-1 gap-6"}>
+        {showDomains ? <Panel id="domains" title="Domains" icon={<Globe2 size={17} />}>
           <div className="mb-4 flex gap-2">
             <input className="h-10 min-w-0 flex-1 rounded-md border border-panel-line px-3 text-sm" onChange={(event) => setDomainName(event.target.value)} placeholder="example.com" value={domainName} />
             <button className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={!domainName || createDomain.isPending} onClick={() => createDomain.mutate()} type="button">
@@ -300,9 +318,9 @@ export function AccountClient() {
             <input className="h-10 rounded-md border border-panel-line px-3 text-sm" onChange={(event) => setDnsDraft({ ...dnsDraft, value: event.target.value })} placeholder="DNS value" value={dnsDraft.value} />
             <button className="h-10 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50" disabled={!dnsDraft.domainId || !dnsDraft.value} onClick={() => createDns.mutate()} type="button">DNS</button>
           </div>
-        </Panel>
+        </Panel> : null}
 
-        <Panel id="mail" title="Mailboxes" icon={<Inbox size={17} />}>
+        {showMail ? <Panel id="mail" title="Mailboxes" icon={<Inbox size={17} />}>
           <div className="mb-4 grid grid-cols-2 gap-2">
             <select className="h-10 rounded-md border border-panel-line px-2 text-sm" onChange={(event) => setMailDraft({ ...mailDraft, domainId: event.target.value })} value={mailDraft.domainId}>
               <option value="">Domain</option>
@@ -337,11 +355,11 @@ export function AccountClient() {
               </div>
             </div>
           ))}
-        </Panel>
-      </div>
+        </Panel> : null}
+      </div> : null}
 
-      <div className="grid grid-cols-[1.1fr_0.9fr] gap-6">
-        <Panel id="files" title="Files" icon={<FileText size={17} />}>
+      {showFiles || showDeployments || showDatabases || showProfile ? <div className={isDashboard ? "grid grid-cols-[1.1fr_0.9fr] gap-6" : "grid grid-cols-1 gap-6"}>
+        {showFiles ? <Panel id="files" title="Files" icon={<FileText size={17} />}>
           <div className="mb-3 truncate rounded-md border border-panel-line bg-slate-50 px-3 py-2 font-mono text-xs text-panel-muted">{data?.fileRoot ?? ""}/{filePath === "." ? "" : filePath}</div>
           <div className="mb-4 grid grid-cols-[1fr_auto] gap-2">
             <input className="h-10 rounded-md border border-panel-line px-3 text-sm" onChange={(event) => setFileDraft({ ...fileDraft, name: event.target.value })} placeholder="new-file.html" value={fileDraft.name} />
@@ -377,10 +395,10 @@ export function AccountClient() {
               </button>
             </div>
           ) : null}
-        </Panel>
+        </Panel> : null}
 
-        <div className="space-y-6">
-          <Panel id="deployments" title="Deployments" icon={<CheckCircle2 size={17} />}>
+        {showDeployments || showDatabases || showProfile ? <div className="space-y-6">
+          {showDeployments ? <Panel id="deployments" title="Deployments" icon={<CheckCircle2 size={17} />}>
             <div className="mb-4 grid grid-cols-2 gap-2">
               <input className="h-10 rounded-md border border-panel-line px-3 text-sm" onChange={(event) => setDeploymentDraft({ ...deploymentDraft, name: event.target.value })} placeholder="App name" value={deploymentDraft.name} />
               <select className="h-10 rounded-md border border-panel-line px-2 text-sm" onChange={(event) => setDeploymentDraft({ ...deploymentDraft, framework: event.target.value })} value={deploymentDraft.framework}>
@@ -409,8 +427,8 @@ export function AccountClient() {
                 </div>
               </div>
             ))}
-          </Panel>
-          <Panel id="databases" title="Databases" icon={<Database size={17} />}>
+          </Panel> : null}
+          {showDatabases ? <Panel id="databases" title="Databases" icon={<Database size={17} />}>
             <div className="mb-4 grid grid-cols-2 gap-2">
               <select className="h-10 rounded-md border border-panel-line px-2 text-sm" onChange={(event) => setDatabaseDraft({ ...databaseDraft, engine: event.target.value })} value={databaseDraft.engine}>
                 <option value="POSTGRESQL">PostgreSQL</option>
@@ -436,8 +454,8 @@ export function AccountClient() {
                 </button>
               </div>
             ))}
-          </Panel>
-          <Panel id="profile" title="Profile" icon={<CheckCircle2 size={17} />}>
+          </Panel> : null}
+          {showProfile ? <Panel id="profile" title="Profile" icon={<CheckCircle2 size={17} />}>
             <div className="mb-3 text-sm text-panel-muted">{data?.account.email ?? "No email"} · {data?.account.ownerName ?? "No owner"}</div>
             <div className="space-y-2">
               <input className="h-10 w-full rounded-md border border-panel-line px-3 text-sm" onChange={(event) => setPasswordDraft({ ...passwordDraft, currentPassword: event.target.value })} placeholder="Current password" type="password" value={passwordDraft.currentPassword} />
@@ -447,9 +465,9 @@ export function AccountClient() {
                 Change Password
               </button>
             </div>
-          </Panel>
-        </div>
-      </div>
+          </Panel> : null}
+        </div> : null}
+      </div> : null}
     </section>
   );
 }

@@ -8,12 +8,12 @@ import { LogoutButton } from "@/components/logout-button";
 
 const nav = [
   { href: "/account", label: "Dashboard", icon: Gauge },
-  { href: "/account#domains", label: "Domains", icon: Globe2 },
-  { href: "/account#files", label: "Files", icon: HardDrive },
-  { href: "/account#mail", label: "Mail", icon: Inbox },
-  { href: "/account#deployments", label: "Deployments", icon: Blocks },
-  { href: "/account#databases", label: "Databases", icon: Database },
-  { href: "/account#profile", label: "Profile", icon: UserRound }
+  { href: "/account/domains", label: "Domains", icon: Globe2 },
+  { href: "/account/files", label: "Files", icon: HardDrive },
+  { href: "/account/mail", label: "Mail", icon: Inbox },
+  { href: "/account/deployments", label: "Deployments", icon: Blocks },
+  { href: "/account/databases", label: "Databases", icon: Database },
+  { href: "/account/profile", label: "Profile", icon: UserRound }
 ];
 
 export function AccountShell({ children }: { children: ReactNode }) {
@@ -36,7 +36,7 @@ export function AccountShell({ children }: { children: ReactNode }) {
         <nav className="flex gap-1 overflow-x-auto pb-1 lg:block lg:space-y-1 lg:overflow-y-auto lg:overflow-x-visible">
           {nav.map((item) => {
             const Icon = item.icon;
-            const active = pathname === "/account" && item.href === "/account";
+            const active = item.href === "/account" ? pathname === "/account" : pathname.startsWith(item.href);
             return (
               <Link
                 className={`flex h-10 shrink-0 items-center gap-3 rounded-md px-3 text-sm transition-colors ${active ? "bg-white font-semibold text-slate-950 shadow-sm" : "text-slate-300 hover:bg-white/10 hover:text-white"}`}
