@@ -23,7 +23,7 @@ type DatabaseOverview = {
     users: Array<{ name: string; host: string | null }>;
   }>;
 };
-type AccountInfo = { homeRoot: string };
+type AccountInfo = { account?: { homeRoot?: string }; fileRoot?: string; homeRoot?: string };
 type LogType = "build" | "running";
 
 type Draft = {
@@ -306,16 +306,17 @@ export function DeploymentsClient({
     if (!draft.port && nextPort.data?.port) setDraft((current) => ({ ...current, port: String(nextPort.data.port) }));
   }, [draft.port, nextPort.data?.port]);
 
-  const rootBase = apiBase === "/account/deployments" && accountInfo.data?.homeRoot
-    ? `${accountInfo.data.homeRoot.replace(/\/+$/, "")}/deployments`
+  const accountRoot = accountInfo.data?.fileRoot ?? accountInfo.data?.account?.homeRoot ?? accountInfo.data?.homeRoot;
+  const rootBase = apiBase === "/account/deployments" && accountRoot
+    ? `${accountRoot.replace(/\/+$/, "")}/deployments`
     : "/var/www/deployments";
 
   useEffect(() => {
-    if (apiBase !== "/account/deployments" || !accountInfo.data?.homeRoot) return;
+    if (apiBase !== "/account/deployments" || !accountRoot) return;
     setDraft((current) => current.rootPath.startsWith("/var/www/deployments/")
       ? { ...current, rootPath: deploymentRootForRepo(current.slug || current.name || "new-app", rootBase) }
       : current);
-  }, [accountInfo.data?.homeRoot, apiBase, rootBase]);
+  }, [accountRoot, apiBase, rootBase]);
 
   const invalidateDeployments = async () => {
     await queryClient.invalidateQueries({ queryKey: ["deployments"] });
