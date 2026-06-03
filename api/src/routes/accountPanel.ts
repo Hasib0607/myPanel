@@ -12,8 +12,10 @@ import { env } from "../config/env.js";
 import { deployQueue, sslQueue } from "../jobs/queues.js";
 import { audit } from "../lib/audit.js";
 import { publishDomainDnsZone } from "../lib/domainDnsPublish.js";
+import { detectDeploymentFiles } from "../lib/deploymentDetection.js";
 import { prisma } from "../lib/prisma.js";
 import { resolvePublicA } from "../lib/publicDns.js";
+import { deleteSecret, getSecret, putSecret } from "../lib/secrets.js";
 import { sysagent } from "../lib/sysagent.js";
 import { nginxResourceName } from "../lib/nginxNames.js";
 import { defaultRecords } from "./domains.js";
@@ -101,8 +103,13 @@ const deploymentSchema = z.object({
   name: z.string().min(1),
   slug: z.string().trim().toLowerCase().regex(/^[a-z0-9-]+$/).optional(),
   framework: z.enum(["LARAVEL", "NEXTJS", "NODEJS", "PYTHON", "GO", "STATIC"]).default("STATIC"),
-  sourceProvider: z.enum(["MANUAL", "GIT_URL", "FILE_MANAGER", "UPLOAD"]).default("FILE_MANAGER"),
+  sourceProvider: z.enum(["MANUAL", "GIT_URL", "GITHUB", "FILE_MANAGER", "UPLOAD"]).default("FILE_MANAGER"),
+  repoUrl: z.string().url().nullable().optional(),
   gitUrl: z.string().url().nullable().optional(),
+  githubOwner: z.string().nullable().optional(),
+  githubRepo: z.string().nullable().optional(),
+  githubRepoId: z.string().nullable().optional(),
+  githubVisibility: z.string().nullable().optional(),
   branch: z.string().default("main"),
   rootDirectory: z.string().default("."),
   installCommand: z.string().nullable().optional(),
@@ -115,6 +122,12 @@ const deploymentSchema = z.object({
 const deploymentUpdateSchema = deploymentSchema.partial().extend({
   status: z.enum(["QUEUED", "RUNNING", "STOPPED", "DEPLOYING", "BUILDING", "FAILED"]).optional(),
   healthStatus: z.enum(["UNKNOWN", "HEALTHY", "DEGRADED", "DOWN"]).optional()
+});
+const githubConnectionSchema = z.object({
+  username: z.string().trim().min(1).nullable().optional(),
+  token: z.string().min(8).nullable().optional(),
+  installationId: z.string().nullable().optional(),
+  scopes: z.array(z.string()).default([])
 });
 const envVarSchema = z.object({
   key: z.string().trim().regex(/^[A-Z_][A-Z0-9_]*$/i),
@@ -226,6 +239,46 @@ function cleanDatabaseIdentifier(value: string) {
 function accountDatabaseIdentifier(prefix: string, value: string) {
   const clean = cleanDatabaseIdentifier(value);
   return clean.startsWith(prefix) ? clean : `${prefix}${clean}`.slice(0, 63);
+}
+
+function githubTokenSecretRef() {
+  return "github:superadmin:token";
+}
+
+async function githubJson<T>(githubPath: string, token: string): Promise<T> {
+  const response = await fetch(`https://api.github.com${githubPath}`, {
+    headers: {
+      accept: "application/vnd.github+json",
+      authorization: `Bearer ${token}`,
+      "user-agent": "vps-panel",
+      "x-github-api-version": "2022-11-28"
+    }
+  });
+  if (!response.ok) throw new Error(`GitHub API failed with ${response.status}`);
+  return response.json() as Promise<T>;
+}
+
+async function githubRequest<T>(githubPath: string, token: string, init?: RequestInit): Promise<{ data: T; scopes: string[] }> {
+  const response = await fetch(`https://api.github.com${githubPath}`, {
+    ...init,
+    headers: {
+      accept: "application/vnd.github+json",
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "user-agent": "vps-panel",
+      "x-github-api-version": "2022-11-28",
+      ...(init?.headers ?? {})
+    }
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`GitHub API failed with ${response.status}${detail ? `: ${detail.slice(0, 200)}` : ""}`);
+  }
+  const text = await response.text();
+  return {
+    data: (text ? JSON.parse(text) : null) as T,
+    scopes: (response.headers.get("x-oauth-scopes") ?? "").split(",").map((scope) => scope.trim()).filter(Boolean)
+  };
 }
 
 async function uniqueDeploymentSlug(base: string) {
@@ -1089,6 +1142,124 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     suggestions: { runtime: "STATIC", packageManager: null, installCommand: null, buildCommand: null, startCommand: null, outputDirectory: "public" }
   }));
 
+  app.get("/deployments/github/connection", async () => {
+    const connection = await prisma.gitHubConnection.findUnique({ where: { id: "superadmin" } });
+    return {
+      connected: Boolean(connection?.tokenSecretRef || connection?.installationId),
+      username: connection?.username ?? null,
+      installationId: connection?.installationId ?? null,
+      scopes: connection?.scopes ?? [],
+      connectedAt: connection?.connectedAt ?? null
+    };
+  });
+
+  app.put("/deployments/github/connection", async (request: any) => {
+    const body = githubConnectionSchema.parse(request.body);
+    const tokenSecretRef = githubTokenSecretRef();
+    let verifiedUsername = body.username ?? null;
+    let verifiedScopes = body.scopes;
+    if (typeof body.token === "string") {
+      const verified = await githubRequest<{ login: string }>("/user", body.token);
+      verifiedUsername = verifiedUsername || verified.data.login;
+      verifiedScopes = verified.scopes;
+      await putSecret({
+        ref: tokenSecretRef,
+        value: body.token,
+        kind: "GITHUB_TOKEN",
+        label: verifiedUsername ? `${verifiedUsername} GitHub token` : "GitHub token",
+        metadata: { username: verifiedUsername, scopes: verifiedScopes }
+      });
+    } else if (body.token === null) {
+      await deleteSecret(tokenSecretRef);
+    }
+    const connection = await prisma.gitHubConnection.upsert({
+      where: { id: "superadmin" },
+      update: {
+        username: verifiedUsername ?? undefined,
+        tokenSecretRef: typeof body.token === "string" ? tokenSecretRef : body.token === null ? null : undefined,
+        installationId: body.installationId ?? undefined,
+        scopes: verifiedScopes,
+        connectedAt: body.token || body.installationId ? new Date() : undefined
+      },
+      create: {
+        id: "superadmin",
+        username: verifiedUsername ?? undefined,
+        tokenSecretRef: typeof body.token === "string" ? tokenSecretRef : undefined,
+        installationId: body.installationId ?? undefined,
+        scopes: verifiedScopes,
+        connectedAt: body.token || body.installationId ? new Date() : undefined
+      }
+    });
+    return { connected: Boolean(connection.tokenSecretRef || connection.installationId), username: connection.username, scopes: connection.scopes };
+  });
+
+  app.get("/deployments/github/repos", async (request: any) => {
+    const query = z.object({ search: z.string().optional() }).parse(request.query);
+    const connection = await prisma.gitHubConnection.findUnique({ where: { id: "superadmin" } });
+    if (!connection?.tokenSecretRef && !connection?.installationId) {
+      return {
+        connected: false,
+        dryRun: true,
+        items: query.search
+          ? [{ owner: "example", name: `${slugify(query.search)}-app`, fullName: `example/${slugify(query.search)}-app`, private: false, defaultBranch: "main" }]
+          : []
+      };
+    }
+    if (!connection.tokenSecretRef) return { connected: true, dryRun: true, items: [], note: "GitHub App installation listing is pending" };
+    const token = await getSecret(connection.tokenSecretRef);
+    if (!token) return { connected: false, dryRun: true, items: [], note: "GitHub token secret is missing" };
+    const repos = await githubJson<Array<{ id: number; owner: { login: string }; name: string; full_name: string; private: boolean; default_branch: string; html_url: string; updated_at: string }>>("/user/repos?per_page=100&sort=updated", token);
+    const search = query.search?.toLowerCase();
+    const items = repos
+      .filter((repo) => !search || repo.full_name.toLowerCase().includes(search) || repo.name.toLowerCase().includes(search))
+      .map((repo) => ({
+        id: String(repo.id),
+        owner: repo.owner.login,
+        name: repo.name,
+        fullName: repo.full_name,
+        private: repo.private,
+        defaultBranch: repo.default_branch,
+        url: repo.html_url,
+        updatedAt: repo.updated_at
+      }));
+    return { connected: true, dryRun: false, items };
+  });
+
+  app.get("/deployments/github/repos/:owner/:repo/detect", async (request: any) => {
+    const params = z.object({ owner: z.string(), repo: z.string() }).parse(request.params);
+    const query = z.object({ branch: z.string().default("main"), rootDirectory: z.string().default(".") }).parse(request.query);
+    const connection = await prisma.gitHubConnection.findUnique({ where: { id: "superadmin" } });
+    const token = connection?.tokenSecretRef ? await getSecret(connection.tokenSecretRef) : null;
+    if (!token) {
+      return {
+        repository: `${params.owner}/${params.repo}`,
+        dryRun: true,
+        ...(detectDeploymentFiles(["package.json", "next.config.js"], null, null))
+      };
+    }
+    const requestedPath = query.rootDirectory === "." ? "" : query.rootDirectory.replace(/^\/+|\/+$/g, "");
+    const contentsPath = `/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/contents/${requestedPath}?ref=${encodeURIComponent(query.branch)}`;
+    const contents = await githubJson<Array<{ name: string; type: string }>>(contentsPath, token);
+    const files = Array.isArray(contents) ? contents.map((item) => item.name) : [];
+    let packageJson: string | null = null;
+    let composerJson: string | null = null;
+    if (files.some((file) => file.toLowerCase() === "package.json")) {
+      const packagePath = `/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/contents/${requestedPath ? `${requestedPath}/` : ""}package.json?ref=${encodeURIComponent(query.branch)}`;
+      const packageFile = await githubJson<{ content: string; encoding: string }>(packagePath, token);
+      if (packageFile.encoding === "base64") packageJson = Buffer.from(packageFile.content, "base64").toString("utf8");
+    }
+    if (files.some((file) => file.toLowerCase() === "composer.json")) {
+      const composerPath = `/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/contents/${requestedPath ? `${requestedPath}/` : ""}composer.json?ref=${encodeURIComponent(query.branch)}`;
+      const composerFile = await githubJson<{ content: string; encoding: string }>(composerPath, token);
+      if (composerFile.encoding === "base64") composerJson = Buffer.from(composerFile.content, "base64").toString("utf8");
+    }
+    return {
+      repository: `${params.owner}/${params.repo}`,
+      dryRun: false,
+      ...detectDeploymentFiles(files, packageJson, composerJson)
+    };
+  });
+
   app.post("/deployments", async (request: any, reply) => {
     const body = deploymentSchema.parse(request.body);
     const account = await prisma.account.findUniqueOrThrow({
@@ -1109,7 +1280,12 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
         framework: body.framework,
         runtime: body.framework === "STATIC" ? "STATIC" : null,
         sourceProvider: body.sourceProvider,
+        repoUrl: body.repoUrl ?? (body.githubOwner && body.githubRepo ? `https://github.com/${body.githubOwner}/${body.githubRepo}` : null),
         gitUrl: body.gitUrl ?? null,
+        githubOwner: body.githubOwner ?? null,
+        githubRepo: body.githubRepo ?? null,
+        githubRepoId: body.githubRepoId ?? null,
+        githubVisibility: body.githubVisibility ?? null,
         branch: body.branch,
         rootDirectory: body.rootDirectory,
         rootPath,

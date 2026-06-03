@@ -8,7 +8,8 @@ export default function AccountDeploymentsPage() {
         apiBase="/account/deployments"
         databasesApiBase="/account/databases"
         domainsApiBase="/account/domains"
-        enableGithub={false}
+        githubApiBase="/account/deployments/github"
+        enableGithub
         showPanelUpdate={false}
       />
     </AccountShell>
