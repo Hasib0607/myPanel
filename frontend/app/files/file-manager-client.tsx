@@ -186,8 +186,8 @@ function queryString(values: Record<string, string | number>) {
   return params.toString();
 }
 
-function editorHref(filePath: string) {
-  return `/files/editor?${queryString({ path: filePath })}`;
+function editorHref(filePath: string, editorBase: string) {
+  return `${editorBase}?${queryString({ path: filePath })}`;
 }
 
 function isZipEntry(item: Pick<FileEntry, "extension" | "name" | "type">) {
@@ -221,7 +221,21 @@ function TreeNode({ node, currentPath, onOpen }: { node: TreeEntry; currentPath:
   );
 }
 
-export function FileManagerClient() {
+export function FileManagerClient({
+  apiBase = "/files",
+  domainsApiBase = "/domains",
+  githubReposApiBase = "/deployments/github/repos",
+  editorBase = "/files/editor",
+  rootHintPrefix = "/var/www",
+  enableGithubPull = true
+}: {
+  apiBase?: "/files" | "/account/files";
+  domainsApiBase?: "/domains" | "/account/domains";
+  githubReposApiBase?: string;
+  editorBase?: string;
+  rootHintPrefix?: string;
+  enableGithubPull?: boolean;
+} = {}) {
   const queryClient = useQueryClient();
   const [currentPath, setCurrentPath] = useState(".");
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -251,41 +265,41 @@ export function FileManagerClient() {
   const currentInTrash = currentPath === ".trash" || currentPath.startsWith(".trash/");
 
   const domains = useQuery({
-    queryKey: ["domains", "file-manager"],
-    queryFn: () => apiGet<DomainListResponse>("/domains?page=1&pageSize=100")
+    queryKey: ["domains", domainsApiBase, "file-manager"],
+    queryFn: () => apiGet<DomainListResponse>(`${domainsApiBase}?page=1&pageSize=100`)
   });
   const rootOptions = useMemo<FileRootOption[]>(() => {
     const items = domains.data?.items ?? [];
     const roots = items.flatMap((domain) => [
-      { id: `domain:${domain.id}`, label: domain.name, path: domain.name, hint: `/var/www/${domain.name}` },
+      { id: `domain:${domain.id}`, label: domain.name, path: domain.name, hint: `${rootHintPrefix}/${domain.name}` },
       ...(domain.subdomains ?? []).map((subdomain) => ({
         id: `subdomain:${subdomain.id}`,
         label: `${subdomain.name}.${domain.name}`,
         path: `${domain.name}/subdomains/${subdomain.name}`,
-        hint: `/var/www/${domain.name}/subdomains/${subdomain.name}`
+        hint: `${rootHintPrefix}/${domain.name}/subdomains/${subdomain.name}`
       }))
     ]);
-    roots.push({ id: "trash:global", label: "Trash", path: ".trash", hint: "/var/www/.trash" });
+    roots.push({ id: "trash:global", label: "Trash", path: ".trash", hint: `${rootHintPrefix}/.trash` });
     return roots;
   }, [domains.data?.items]);
   const selectedRoot = rootOptions.find((item) => item.id === selectedDomainId) ?? null;
   const domainRootPath = selectedRoot?.path ?? ".";
 
-  const listPath = `/files/list?${queryString({ path: currentPath, search, sort, direction, page: 1, pageSize: 200 })}`;
+  const listPath = `${apiBase}/list?${queryString({ path: currentPath, search, sort, direction, page: 1, pageSize: 200 })}`;
 
-  const overview = useQuery({ queryKey: ["files-overview"], queryFn: () => apiGet<Overview>("/files/overview") });
-  const list = useQuery({ queryKey: ["files-list", currentPath, search, sort, direction], queryFn: () => apiGet<ListResponse>(listPath), enabled: Boolean(selectedRoot) });
-  const tree = useQuery({ queryKey: ["files-tree", domainRootPath], queryFn: () => apiGet<TreeResponse>(`/files/tree?${queryString({ path: domainRootPath, depth: 4 })}`), enabled: Boolean(selectedRoot) });
+  const overview = useQuery({ queryKey: ["files-overview", apiBase], queryFn: () => apiGet<Overview>(`${apiBase}/overview`) });
+  const list = useQuery({ queryKey: ["files-list", apiBase, currentPath, search, sort, direction], queryFn: () => apiGet<ListResponse>(listPath), enabled: Boolean(selectedRoot) });
+  const tree = useQuery({ queryKey: ["files-tree", apiBase, domainRootPath], queryFn: () => apiGet<TreeResponse>(`${apiBase}/tree?${queryString({ path: domainRootPath, depth: 4 })}`), enabled: Boolean(selectedRoot) });
   const gitStatus = useQuery({
-    queryKey: ["files-git-status", currentPath],
-    queryFn: () => apiPost<GitStatusResponse>("/files/git/status", { path: currentPath }),
-    enabled: Boolean(selectedRoot && !currentInTrash),
+    queryKey: ["files-git-status", apiBase, currentPath],
+    queryFn: () => apiPost<GitStatusResponse>(`${apiBase}/git/status`, { path: currentPath }),
+    enabled: Boolean(enableGithubPull && selectedRoot && !currentInTrash),
     retry: false
   });
   const githubRepos = useQuery({
     queryKey: ["files-github-repos", repoSearch],
-    queryFn: () => apiGet<GithubRepoResponse>(`/deployments/github/repos?${queryString({ search: repoSearch })}`),
-    enabled: repoPickerOpen,
+    queryFn: () => apiGet<GithubRepoResponse>(`${githubReposApiBase}?${queryString({ search: repoSearch })}`),
+    enabled: enableGithubPull && repoPickerOpen,
     retry: false
   });
 
@@ -336,7 +350,7 @@ export function FileManagerClient() {
   }, [autoPullEnabled]);
 
   const createFile = useMutation({
-    mutationFn: ({ name, value }: { name: string; value: string }) => apiPost<FileEntry>("/files/files", { parentPath: currentPath, name, content: value }),
+    mutationFn: ({ name, value }: { name: string; value: string }) => apiPost<FileEntry>(`${apiBase}/files`, { parentPath: currentPath, name, content: value }),
     onSuccess: async (file) => {
       setSelectedPath(file.path);
       setLastResult("File created.");
@@ -346,7 +360,7 @@ export function FileManagerClient() {
   });
 
   const createFolder = useMutation({
-    mutationFn: (name: string) => apiPost<FileEntry>("/files/folders", { parentPath: currentPath, name }),
+    mutationFn: (name: string) => apiPost<FileEntry>(`${apiBase}/folders`, { parentPath: currentPath, name }),
     onSuccess: async () => {
       setLastResult("Folder created.");
       await invalidateFiles();
@@ -358,9 +372,9 @@ export function FileManagerClient() {
     mutationFn: (root: FileRootOption) => {
       if (root.id.startsWith("subdomain:")) {
         const [domain, , subdomain] = root.path.split("/");
-        return apiPost<DomainScaffoldResponse>("/files/subdomain-scaffold", { domain, subdomain });
+        return apiPost<DomainScaffoldResponse>(`${apiBase}/subdomain-scaffold`, { domain, subdomain });
       }
-      return apiPost<DomainScaffoldResponse>("/files/domain-scaffold", { domain: root.path });
+      return apiPost<DomainScaffoldResponse>(`${apiBase}/domain-scaffold`, { domain: root.path });
     },
     onSuccess: async (response) => {
       setCurrentPath(response.root.path);
@@ -372,7 +386,7 @@ export function FileManagerClient() {
   });
 
   const renameItem = useMutation({
-    mutationFn: ({ path, name }: { path: string; name: string }) => apiPatch<{ ok: true; file: FileEntry }>("/files/rename", { path, name }),
+    mutationFn: ({ path, name }: { path: string; name: string }) => apiPatch<{ ok: true; file: FileEntry }>(`${apiBase}/rename`, { path, name }),
     onSuccess: async (response) => {
       setSelectedPath(response.file.path);
       setLastResult("Renamed.");
@@ -383,7 +397,7 @@ export function FileManagerClient() {
 
   const deleteItems = useMutation({
     mutationFn: ({ paths, permanent }: { paths: string[]; permanent: boolean }) =>
-      apiDeleteBody<{ ok: true; movedToTrash: string[]; permanentlyRemoved: string[] }>("/files/delete", { paths, permanent }),
+      apiDeleteBody<{ ok: true; movedToTrash: string[]; permanentlyRemoved: string[] }>(`${apiBase}/delete`, { paths, permanent }),
     onSuccess: async (result) => {
       setSelectedPath(null);
       setDeleteRequest(null);
@@ -401,7 +415,7 @@ export function FileManagerClient() {
   }
 
   const copyItem = useMutation({
-    mutationFn: ({ sourcePath, name }: { sourcePath: string; name: string }) => apiPost("/files/copy", { sourcePath, targetParentPath: currentPath, name, overwrite: false }),
+    mutationFn: ({ sourcePath, name }: { sourcePath: string; name: string }) => apiPost(`${apiBase}/copy`, { sourcePath, targetParentPath: currentPath, name, overwrite: false }),
     onSuccess: async () => {
       setLastResult("Copied.");
       await invalidateFiles();
@@ -410,7 +424,7 @@ export function FileManagerClient() {
   });
 
   const moveItem = useMutation({
-    mutationFn: ({ sourcePath, name }: { sourcePath: string; name: string }) => apiPost("/files/move", { sourcePath, targetParentPath: currentPath, name, overwrite: false }),
+    mutationFn: ({ sourcePath, name }: { sourcePath: string; name: string }) => apiPost(`${apiBase}/move`, { sourcePath, targetParentPath: currentPath, name, overwrite: false }),
     onSuccess: async () => {
       setLastResult("Moved.");
       await invalidateFiles();
@@ -422,7 +436,7 @@ export function FileManagerClient() {
     mutationFn: async ({ sourcePaths, targetPath }: { sourcePaths: string[]; targetPath: string }) => {
       const results = [];
       for (const sourcePath of sourcePaths) {
-        results.push(await apiPost("/files/copy", { sourcePath, targetParentPath: targetPath, overwrite: false }));
+        results.push(await apiPost(`${apiBase}/copy`, { sourcePath, targetParentPath: targetPath, overwrite: false }));
       }
       return results;
     },
@@ -437,7 +451,7 @@ export function FileManagerClient() {
     mutationFn: async ({ sourcePaths, targetPath }: { sourcePaths: string[]; targetPath: string }) => {
       const results = [];
       for (const sourcePath of sourcePaths) {
-        results.push(await apiPost("/files/move", { sourcePath, targetParentPath: targetPath, overwrite: false }));
+        results.push(await apiPost(`${apiBase}/move`, { sourcePath, targetParentPath: targetPath, overwrite: false }));
       }
       return results;
     },
@@ -451,7 +465,7 @@ export function FileManagerClient() {
   });
 
   const chmodItem = useMutation({
-    mutationFn: ({ paths, mode }: { paths: string[]; mode: string }) => Promise.all(paths.map((path) => apiPost("/files/chmod", { path, mode }))),
+    mutationFn: ({ paths, mode }: { paths: string[]; mode: string }) => Promise.all(paths.map((path) => apiPost(`${apiBase}/chmod`, { path, mode }))),
     onSuccess: async () => {
       setLastResult("Permissions updated.");
       await invalidateFiles();
@@ -460,7 +474,7 @@ export function FileManagerClient() {
   });
 
   const archiveCreate = useMutation({
-    mutationFn: ({ sourcePaths, archivePath }: { sourcePaths: string[]; archivePath: string }) => apiPost("/files/archive/create", { sourcePaths, archivePath }),
+    mutationFn: ({ sourcePaths, archivePath }: { sourcePaths: string[]; archivePath: string }) => apiPost(`${apiBase}/archive/create`, { sourcePaths, archivePath }),
     onSuccess: async () => {
       setLastResult("Archive created.");
       await invalidateFiles();
@@ -484,7 +498,7 @@ export function FileManagerClient() {
           });
         }, 700);
         try {
-          results.push(await apiPost("/files/archive/extract", { archivePath, targetPath, overwrite: false }));
+          results.push(await apiPost(`${apiBase}/archive/extract`, { archivePath, targetPath, overwrite: false }));
         } finally {
           window.clearInterval(timer);
         }
@@ -507,7 +521,7 @@ export function FileManagerClient() {
   });
 
   const gitPull = useMutation({
-    mutationFn: () => apiPost<GitPullResponse>("/files/git/pull", { path: currentPath }),
+    mutationFn: () => apiPost<GitPullResponse>(`${apiBase}/git/pull`, { path: currentPath }),
     onSuccess: async (response) => {
       const gitOutput = response.stdout?.trim() || response.stderr?.trim() || "Already up to date.";
       setLastResult(`Git pull done: ${gitOutput.slice(0, 200)}`);
@@ -517,7 +531,7 @@ export function FileManagerClient() {
   });
 
   const githubPull = useMutation({
-    mutationFn: (repo: GithubRepo) => apiPost<{ ok: true; path: string; owner: string; repo: string; branch: string }>("/files/git/github/pull", {
+    mutationFn: (repo: GithubRepo) => apiPost<{ ok: true; path: string; owner: string; repo: string; branch: string }>(`${apiBase}/git/github/pull`, {
       owner: repo.owner,
       repo: repo.name,
       branch: repo.defaultBranch || "main",
@@ -590,7 +604,7 @@ export function FileManagerClient() {
   }
 
   async function download(pathValue: string) {
-    const response = await apiGet<DownloadResponse>(`/files/download?${queryString({ path: pathValue })}`);
+    const response = await apiGet<DownloadResponse>(`${apiBase}/download?${queryString({ path: pathValue })}`);
     const binary = atob(response.contentBase64);
     const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
     const url = URL.createObjectURL(new Blob([bytes], { type: response.file.mime ?? "application/octet-stream" }));
@@ -602,7 +616,7 @@ export function FileManagerClient() {
   }
 
   async function checksum(pathValue: string) {
-    const response = await apiGet<{ hash: string }>(`/files/checksum?${queryString({ path: pathValue })}`);
+    const response = await apiGet<{ hash: string }>(`${apiBase}/checksum?${queryString({ path: pathValue })}`);
     await navigator.clipboard.writeText(response.hash);
     setLastResult(`SHA256 copied: ${response.hash}`);
   }
@@ -637,7 +651,7 @@ export function FileManagerClient() {
         const offset = index * chunkSize;
         const chunk = file.slice(offset, Math.min(file.size, offset + chunkSize));
         await apiUploadWithProgress(
-          `/files/upload/chunk?${queryString({
+          `${apiBase}/upload/chunk?${queryString({
             parentPath: currentPath,
             name: file.name,
             uploadId,
@@ -735,7 +749,7 @@ export function FileManagerClient() {
       setSelectedPath(null);
       setSelectedPaths(new Set());
     } else if (item.kind === "text") {
-      window.location.href = editorHref(item.path);
+      window.location.href = editorHref(item.path, editorBase);
     }
   }
 
@@ -825,7 +839,7 @@ export function FileManagerClient() {
             <button
               aria-label="Pull from GitHub projects"
               className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
-              disabled={currentInTrash}
+              disabled={!enableGithubPull || currentInTrash}
               onClick={() => setRepoPickerOpen(true)}
               title="Choose project from GitHub and pull into this folder"
               type="button"
@@ -1086,7 +1100,7 @@ export function FileManagerClient() {
             </button>
           ) : null}
           {contextCanEdit ? (
-            <Link className="flex h-9 w-full items-center gap-2 px-3 hover:bg-slate-50" href={editorHref(contextItem.path)} onClick={() => setContextMenu(null)}>
+            <Link className="flex h-9 w-full items-center gap-2 px-3 hover:bg-slate-50" href={editorHref(contextItem.path, editorBase)} onClick={() => setContextMenu(null)}>
               <Edit3 size={15} /> Edit
             </Link>
           ) : null}

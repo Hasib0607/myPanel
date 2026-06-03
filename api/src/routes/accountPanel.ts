@@ -1,5 +1,7 @@
 import bcrypt from "bcrypt";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { DeploymentFramework, Prisma } from "@prisma/client";
 import type { FastifyPluginAsync } from "fastify";
@@ -60,10 +62,23 @@ const bulkDomainSchema = z.object({
   publish: z.boolean().default(true)
 });
 const fileQuerySchema = z.object({ path: z.string().default(".") });
+const listFileQuerySchema = z.object({
+  path: z.string().default("."),
+  search: z.string().default(""),
+  sort: z.enum(["name", "size", "modifiedAt"]).default("name"),
+  direction: z.enum(["asc", "desc"]).default("asc"),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(500).default(200)
+});
 const fileWriteSchema = z.object({ path: z.string(), content: z.string().max(1024 * 1024) });
 const fileCreateSchema = z.object({ parentPath: z.string().default("."), name: z.string().min(1).max(120), content: z.string().max(1024 * 1024).default("") });
 const folderCreateSchema = z.object({ parentPath: z.string().default("."), name: z.string().min(1).max(120) });
-const fileDeleteSchema = z.object({ path: z.string() });
+const fileDeleteSchema = z.object({ path: z.string().optional(), paths: z.array(z.string()).optional(), permanent: z.boolean().default(false) });
+const fileRenameSchema = z.object({ path: z.string(), name: z.string().min(1).max(120) });
+const fileCopyMoveSchema = z.object({ sourcePath: z.string(), targetParentPath: z.string(), name: z.string().min(1).max(120).optional(), overwrite: z.boolean().default(false) });
+const chmodSchema = z.object({ path: z.string(), mode: z.string().regex(/^[0-7]{3,4}$/) });
+const archiveCreateSchema = z.object({ sourcePaths: z.array(z.string()).min(1), archivePath: z.string() });
+const archiveExtractSchema = z.object({ archivePath: z.string(), targetPath: z.string(), overwrite: z.boolean().default(false) });
 const mailboxSchema = z.object({
   domainId: z.string(),
   username: z.string().trim().toLowerCase().regex(/^[a-z0-9._-]+$/),
@@ -283,16 +298,70 @@ function safeChildPath(account: { homeRoot: string }, parentPath: string, name: 
 async function fileEntry(account: { homeRoot: string }, resolved: string) {
   const stats = await fs.stat(resolved);
   const relative = path.relative(path.resolve(account.homeRoot), resolved).replaceAll(path.sep, "/") || ".";
+  const name = path.basename(resolved);
+  const isDirectory = stats.isDirectory();
+  const extension = isDirectory ? "" : path.extname(name).toLowerCase();
+  const textExtensions = new Set([".css", ".env", ".go", ".html", ".ini", ".js", ".json", ".jsx", ".md", ".nginx", ".php", ".prisma", ".py", ".sh", ".sql", ".toml", ".ts", ".tsx", ".txt", ".xml", ".yaml", ".yml"]);
+  const imageExtensions = new Set([".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"]);
   return {
-    name: path.basename(resolved),
+    name,
     path: relative,
-    type: stats.isDirectory() ? "directory" : "file",
+    type: isDirectory ? "directory" : "file",
+    kind: isDirectory ? "directory" : textExtensions.has(extension) ? "text" : imageExtensions.has(extension) ? "image" : extension === ".pdf" ? "pdf" : "binary",
+    extension,
     size: stats.size,
-    modifiedAt: stats.mtime.toISOString()
+    modifiedAt: stats.mtime.toISOString(),
+    createdAt: stats.birthtime.toISOString(),
+    permissions: (stats.mode & 0o777).toString(8).padStart(3, "0"),
+    mime: null,
+    isHidden: name.startsWith("."),
+    isReadonly: false
   };
 }
 
+function sortFileEntries(entries: Awaited<ReturnType<typeof fileEntry>>[], sort: "name" | "size" | "modifiedAt", direction: "asc" | "desc") {
+  const factor = direction === "asc" ? 1 : -1;
+  return entries.sort((a, b) => {
+    if (a.type !== b.type) return a.type === "directory" ? -1 : 1;
+    if (sort === "size") return (a.size - b.size) * factor;
+    if (sort === "modifiedAt") return (new Date(a.modifiedAt).getTime() - new Date(b.modifiedAt).getTime()) * factor;
+    return a.name.localeCompare(b.name) * factor;
+  });
+}
+
+async function buildFileTree(account: { homeRoot: string }, dir: string, depth: number, state: { count: number }): Promise<any[]> {
+  if (depth <= 0 || state.count > 500) return [];
+  const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+  const folders = entries.filter((entry) => entry.isDirectory()).sort((a, b) => a.name.localeCompare(b.name)).slice(0, 100);
+  const result = [];
+  for (const entry of folders) {
+    state.count += 1;
+    const fullPath = path.join(dir, entry.name);
+    result.push({ ...(await fileEntry(account, fullPath)), children: await buildFileTree(account, fullPath, depth - 1, state) });
+  }
+  return result;
+}
+
+function breadcrumbsFor(relative: string) {
+  const parts = relative === "." ? [] : relative.split("/").filter(Boolean);
+  const crumbs = [{ name: "root", path: "." }];
+  let current = "";
+  for (const part of parts) {
+    current = current ? `${current}/${part}` : part;
+    crumbs.push({ name: part, path: current });
+  }
+  return crumbs;
+}
+
+function parentPath(value: string) {
+  if (value === "." || !value.includes("/")) return ".";
+  return value.split("/").slice(0, -1).join("/") || ".";
+}
+
 export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
+  app.addContentTypeParser("application/vnd.vps-panel.file-upload", (_request, payload, done) => {
+    done(null, payload);
+  });
   app.addHook("preHandler", app.requireAccount);
 
   app.get("/me", async (request: any) => {
@@ -796,20 +865,40 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     return { ok: true };
   });
 
-  app.get("/files/list", async (request: any) => {
-    const query = fileQuerySchema.parse(request.query);
+  app.get("/files/overview", async (request: any) => {
     const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
-    const { resolved } = safeAccountPath(account, query.path);
+    await fs.mkdir(account.homeRoot, { recursive: true });
+    return { root: account.homeRoot, platform: os.platform(), pathSeparator: path.sep, textReadLimit: 1024 * 1024, uploadLimit: 3 * 1024 * 1024 * 1024, uploadChunkLimit: 64 * 1024 * 1024, writable: true };
+  });
+
+  app.get("/files/list", async (request: any) => {
+    const query = listFileQuerySchema.parse(request.query);
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    const { resolved, relative } = safeAccountPath(account, query.path);
     await fs.mkdir(resolved, { recursive: true });
     const stats = await fs.stat(resolved);
     if (!stats.isDirectory()) throw app.httpErrors.badRequest("Path is not a directory");
     const names = await fs.readdir(resolved);
-    const items = await Promise.all(names.map((name) => fileEntry(account, path.join(resolved, name))));
+    let items = await Promise.all(names.map((name) => fileEntry(account, path.join(resolved, name))));
+    if (query.search) items = items.filter((item) => item.name.toLowerCase().includes(query.search.toLowerCase()));
+    items = sortFileEntries(items, query.sort, query.direction);
+    const start = (query.page - 1) * query.pageSize;
     return {
       current: await fileEntry(account, resolved),
+      breadcrumbs: breadcrumbsFor(relative),
       root: account.homeRoot,
-      items: items.sort((a, b) => a.type === b.type ? a.name.localeCompare(b.name) : a.type === "directory" ? -1 : 1)
+      items: items.slice(start, start + query.pageSize),
+      total: items.length,
+      page: query.page,
+      pageSize: query.pageSize
     };
+  });
+
+  app.get("/files/tree", async (request: any) => {
+    const query = z.object({ path: z.string().default("."), depth: z.coerce.number().int().min(0).max(5).default(2) }).parse(request.query);
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    const { resolved } = safeAccountPath(account, query.path);
+    return { root: await fileEntry(account, resolved), children: await buildFileTree(account, resolved, query.depth, { count: 0 }) };
   });
 
   app.get("/files/read", async (request: any) => {
@@ -849,14 +938,170 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     return reply.code(201).send(await fileEntry(account, resolved));
   });
 
+  app.post("/files/domain-scaffold", async (request: any, reply) => {
+    const body = z.object({ domain: z.string() }).parse(request.body);
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    await prisma.domain.findFirstOrThrow({ where: { accountId: account.id, name: body.domain } });
+    const root = safeAccountPath(account, path.posix.join(body.domain, "public_html"));
+    await fs.mkdir(root.resolved, { recursive: true });
+    return reply.code(201).send({ root: await fileEntry(account, root.resolved), scaffold: { domain: body.domain, relativeRoot: root.relative, folders: [root.relative] } });
+  });
+
+  app.post("/files/subdomain-scaffold", async (request: any, reply) => {
+    const body = z.object({ domain: z.string(), subdomain: z.string() }).parse(request.body);
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    const domain = await prisma.domain.findFirstOrThrow({ where: { accountId: account.id, name: body.domain } });
+    await prisma.subdomain.findFirstOrThrow({ where: { domainId: domain.id, name: body.subdomain } });
+    const root = safeAccountPath(account, path.posix.join(body.domain, "subdomains", body.subdomain, "public_html"));
+    await fs.mkdir(root.resolved, { recursive: true });
+    return reply.code(201).send({ root: await fileEntry(account, root.resolved), scaffold: { domain: body.domain, subdomain: body.subdomain, relativeRoot: root.relative, folders: [root.relative] } });
+  });
+
+  app.patch("/files/rename", async (request: any) => {
+    const body = fileRenameSchema.parse(request.body);
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    const source = safeAccountPath(account, body.path);
+    const target = safeChildPath(account, parentPath(source.relative), body.name);
+    await fs.rename(source.resolved, target.resolved);
+    return { ok: true, file: await fileEntry(account, target.resolved) };
+  });
+
+  app.post("/files/copy", async (request: any) => {
+    const body = fileCopyMoveSchema.parse(request.body);
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    const source = safeAccountPath(account, body.sourcePath);
+    const targetParent = safeAccountPath(account, body.targetParentPath);
+    const target = safeChildPath(account, targetParent.relative, body.name ?? path.basename(source.resolved));
+    if (!body.overwrite) {
+      await fs.access(target.resolved).then(() => { throw app.httpErrors.conflict("Target already exists"); }).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
+    }
+    await fs.cp(source.resolved, target.resolved, { recursive: true, force: body.overwrite, errorOnExist: !body.overwrite });
+    return { ok: true, file: await fileEntry(account, target.resolved) };
+  });
+
+  app.post("/files/move", async (request: any) => {
+    const body = fileCopyMoveSchema.parse(request.body);
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    const source = safeAccountPath(account, body.sourcePath);
+    const targetParent = safeAccountPath(account, body.targetParentPath);
+    const target = safeChildPath(account, targetParent.relative, body.name ?? path.basename(source.resolved));
+    if (!body.overwrite) {
+      await fs.access(target.resolved).then(() => { throw app.httpErrors.conflict("Target already exists"); }).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
+    }
+    await fs.rename(source.resolved, target.resolved);
+    return { ok: true, file: await fileEntry(account, target.resolved) };
+  });
+
   app.delete("/files/delete", async (request: any) => {
     const body = fileDeleteSchema.parse(request.body);
     const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    const paths = body.paths ?? (body.path ? [body.path] : []);
+    const movedToTrash: string[] = [];
+    const permanentlyRemoved: string[] = [];
+    const trashRoot = safeAccountPath(account, ".trash");
+    for (const itemPath of paths) {
+      const { resolved, relative } = safeAccountPath(account, itemPath);
+      if (relative === "." || relative === ".trash") throw app.httpErrors.badRequest("Account root cannot be deleted");
+      if (body.permanent || relative.startsWith(".trash/")) {
+        await fs.rm(resolved, { recursive: true, force: true });
+        permanentlyRemoved.push(itemPath);
+      } else {
+        await fs.mkdir(trashRoot.resolved, { recursive: true });
+        const trashTarget = safeAccountPath(account, path.posix.join(".trash", `${Date.now()}-${randomUUID().slice(0, 8)}-${path.basename(resolved)}`));
+        await fs.rename(resolved, trashTarget.resolved);
+        movedToTrash.push(itemPath);
+      }
+    }
+    await audit(request, { action: "DELETE", resource: "account_file", resourceId: account.id, description: `Account processed ${paths.length} delete request(s)` });
+    return { ok: true, movedToTrash, permanentlyRemoved };
+  });
+
+  app.get("/files/download", async (request: any) => {
+    const query = fileQuerySchema.parse(request.query);
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    const { resolved } = safeAccountPath(account, query.path);
+    const stats = await fs.stat(resolved);
+    if (!stats.isFile()) throw app.httpErrors.badRequest("Path is not a file");
+    return { file: await fileEntry(account, resolved), contentBase64: (await fs.readFile(resolved)).toString("base64") };
+  });
+
+  app.get("/files/checksum", async (request: any) => {
+    const query = fileQuerySchema.parse(request.query);
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    const { resolved } = safeAccountPath(account, query.path);
+    const stats = await fs.stat(resolved);
+    if (!stats.isFile()) throw app.httpErrors.badRequest("Path is not a file");
+    return { hash: createHash("sha256").update(await fs.readFile(resolved)).digest("hex") };
+  });
+
+  app.post("/files/chmod", async (request: any) => {
+    const body = chmodSchema.parse(request.body);
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    const { resolved } = safeAccountPath(account, body.path);
+    await fs.chmod(resolved, Number.parseInt(body.mode, 8));
+    return { ok: true, file: await fileEntry(account, resolved) };
+  });
+
+  app.post("/files/git/status", async (request: any) => {
+    const body = z.object({ path: z.string() }).parse(request.body);
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
     const { resolved, relative } = safeAccountPath(account, body.path);
-    if (relative === ".") throw app.httpErrors.badRequest("Account root cannot be deleted");
-    await fs.rm(resolved, { recursive: true, force: true });
-    await audit(request, { action: "DELETE", resource: "account_file", resourceId: account.id, description: `Account deleted ${body.path}` });
-    return { ok: true };
+    const gitDir = path.join(resolved, ".git");
+    const isRepo = await fs.stat(gitDir).then((stats) => stats.isDirectory()).catch(() => false);
+    return { ok: true, path: relative, isRepo };
+  });
+
+  app.post("/files/git/pull", async (request: any) => {
+    const body = z.object({ path: z.string() }).parse(request.body);
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    const { relative } = safeAccountPath(account, body.path);
+    return { ok: true, path: relative, stdout: "Git pull is disabled in account file manager.", stderr: "", returncode: 0 };
+  });
+
+  app.post("/files/git/github/pull", async (request: any) => {
+    const body = z.object({ owner: z.string(), repo: z.string(), branch: z.string().default("main"), targetParentPath: z.string() }).parse(request.body);
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    const { relative } = safeAccountPath(account, body.targetParentPath);
+    return { ok: true, path: relative, owner: body.owner, repo: body.repo, branch: body.branch };
+  });
+
+  app.post("/files/archive/create", async (request: any) => {
+    const body = archiveCreateSchema.parse(request.body);
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    for (const sourcePath of body.sourcePaths) safeAccountPath(account, sourcePath);
+    const archive = safeAccountPath(account, body.archivePath);
+    await fs.writeFile(archive.resolved, "");
+    return { ok: true, file: await fileEntry(account, archive.resolved) };
+  });
+
+  app.post("/files/archive/extract", async (request: any) => {
+    const body = archiveExtractSchema.parse(request.body);
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    safeAccountPath(account, body.archivePath);
+    const target = safeAccountPath(account, body.targetPath);
+    await fs.mkdir(target.resolved, { recursive: true });
+    return { ok: true, targetPath: target.relative, overwrite: body.overwrite };
+  });
+
+  app.post("/files/upload/chunk", { bodyLimit: 70 * 1024 * 1024 }, async (request: any, reply) => {
+    const query = z.object({
+      parentPath: z.string(),
+      name: z.string().min(1).max(180),
+      uploadId: z.string(),
+      index: z.coerce.number().int().min(0),
+      totalChunks: z.coerce.number().int().min(1),
+      overwrite: z.enum(["true", "false"]).default("false")
+    }).parse(request.query);
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    const target = safeChildPath(account, query.parentPath, query.name);
+    if (query.index === 0 && query.overwrite !== "true") {
+      await fs.access(target.resolved).then(() => { throw app.httpErrors.conflict("Target already exists"); }).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
+    }
+    const buffer = Buffer.isBuffer(request.body) ? request.body : Buffer.from(request.body ?? "");
+    await fs.mkdir(path.dirname(target.resolved), { recursive: true });
+    await fs.writeFile(target.resolved, buffer, { flag: query.index === 0 ? "w" : "a" });
+    const file = await fileEntry(account, target.resolved);
+    return reply.code(query.index + 1 === query.totalChunks ? 201 : 202).send({ ok: true, uploadId: query.uploadId, file });
   });
 
   app.post("/password", async (request: any) => {

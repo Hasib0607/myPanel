@@ -65,7 +65,7 @@ function parentPath(filePath: string) {
   return filePath.split("/").slice(0, -1).join("/") || ".";
 }
 
-export function FileEditorClient({ initialPath }: { initialPath: string }) {
+export function FileEditorClient({ initialPath, apiBase = "/files" }: { initialPath: string; apiBase?: "/files" | "/account/files" }) {
   const router = useRouter();
   const queryClient = useQueryClient();
   const editorHostRef = useRef<HTMLDivElement | null>(null);
@@ -82,8 +82,8 @@ export function FileEditorClient({ initialPath }: { initialPath: string }) {
   const filePath = initialPath.trim();
   const readFile = useQuery({
     enabled: Boolean(filePath),
-    queryKey: ["files-editor-read", filePath],
-    queryFn: () => apiGet<ReadResponse>(`/files/read?${queryString({ path: filePath })}`)
+    queryKey: ["files-editor-read", apiBase, filePath],
+    queryFn: () => apiGet<ReadResponse>(`${apiBase}/read?${queryString({ path: filePath })}`)
   });
 
   const file = readFile.data?.file ?? null;
@@ -145,7 +145,7 @@ export function FileEditorClient({ initialPath }: { initialPath: string }) {
   }, [dirty]);
 
   const saveFile = useMutation({
-    mutationFn: () => apiPut<{ ok: true; file: FileEntry }>("/files/write", { path: filePath, content, expectedModifiedAt: file?.modifiedAt }),
+    mutationFn: () => apiPut<{ ok: true; file: FileEntry }>(`${apiBase}/write`, { path: filePath, content, expectedModifiedAt: file?.modifiedAt }),
     onSuccess: async () => {
       setOriginalContent(content);
       setLastResult("Saved.");
