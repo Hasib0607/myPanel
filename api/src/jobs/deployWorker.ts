@@ -1816,6 +1816,15 @@ async function ensureLaravelDatabaseConnection(
 ) {
   if (!deployment.dbType || !deployment.dbName || !deployment.dbUser) return envVars;
 
+  await runStep(deployment.id, releaseId, "PREFLIGHT", "Prepare Laravel writable paths before database check", () =>
+    sysagent.deploymentRepairLaravelWritablePaths({ rootPath: appPath })
+  ).catch((error) =>
+    writeLog(deployment.id, releaseId, "PREFLIGHT", "Laravel writable path preflight warning", {
+      warning: error instanceof Error ? error.message : String(error),
+      rootPath: appPath
+    }, "warn")
+  );
+
   const clearConfig = await runStep(deployment.id, releaseId, "PREFLIGHT", "Clear Laravel config cache before database check", () =>
     sysagent.deploymentBuild({
       rootPath: appPath,
@@ -1857,6 +1866,12 @@ async function ensureLaravelDatabaseConnection(
       env: databaseConnectionDiagnostics(envVars),
       result: JSON.parse(JSON.stringify(result ?? null))
     }, "error");
+    const repairedWritablePaths = await autoRepairLaravelWritablePaths(deployment.id, releaseId, appPath, message).catch(() => false);
+    if (repairedWritablePaths) {
+      result = await verify();
+      assertCommandTree(result, "Laravel database connection");
+      return envVars;
+    }
     if (!isMysqlAccessDenied(message)) throw error;
     await writeLog(deployment.id, releaseId, "PREFLIGHT", "Laravel database connection failed; repairing credentials", {
       evidence: message.slice(0, 4000)
