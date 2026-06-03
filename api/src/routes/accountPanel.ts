@@ -236,10 +236,10 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const id = accountId(request);
     const [account, domains, deployments, mailAccounts, databases] = await Promise.all([
       prisma.account.findUniqueOrThrow({ where: { id }, include: { _count: { select: { domains: true, deployments: true, mailAccounts: true, databases: true } } } }),
-      prisma.domain.findMany({ where: { accountId: id }, orderBy: { createdAt: "desc" }, take: 10 }),
-      prisma.deployment.findMany({ where: { accountId: id }, orderBy: { createdAt: "desc" }, take: 10 }),
-      prisma.mailAccount.findMany({ where: { accountId: id }, orderBy: { createdAt: "desc" }, take: 10, include: { domain: true } }),
-      prisma.accountDatabase.findMany({ where: { accountId: id }, orderBy: { createdAt: "desc" }, take: 10 })
+      prisma.domain.findMany({ where: { accountId: id }, orderBy: { createdAt: "desc" } }),
+      prisma.deployment.findMany({ where: { accountId: id }, orderBy: { createdAt: "desc" } }),
+      prisma.mailAccount.findMany({ where: { accountId: id }, orderBy: { createdAt: "desc" }, include: { domain: true } }),
+      prisma.accountDatabase.findMany({ where: { accountId: id }, orderBy: { createdAt: "desc" } })
     ]);
     const diskUsedMb = Math.ceil(await directorySizeBytes(account.homeRoot) / 1024 / 1024);
     return {

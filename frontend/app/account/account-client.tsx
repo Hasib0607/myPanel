@@ -5,6 +5,7 @@ import { CheckCircle2, Database, FileText, FolderPlus, Globe2, Inbox, Play, Plus
 import type { ReactNode } from "react";
 import { useState } from "react";
 import { apiDelete, apiDeleteBody, apiGet, apiPatch, apiPost, apiPut } from "@/lib/api";
+import { PageHeader } from "@/components/page-header";
 
 type Domain = { id: string; name: string; status: string; documentRoot: string };
 type Deployment = { id: string; name: string; slug: string; status: string; healthStatus: string; port: number; dbType?: string | null };
@@ -50,6 +51,16 @@ const viewTitles: Record<AccountView, string> = {
   deployments: "Deployments",
   databases: "Databases",
   profile: "Profile"
+};
+
+const viewDescriptions: Record<AccountView, string> = {
+  dashboard: "Account-scoped overview for hosting usage, limits, and active resources.",
+  domains: "Manage this account's domains, SSL queue, and DNS records.",
+  files: "Browse and edit files inside this account's home directory only.",
+  mail: "Create, update, reset, and delete this account's mailboxes.",
+  deployments: "Create and operate deployments assigned to this account.",
+  databases: "Create databases, rotate credentials, and remove account databases.",
+  profile: "Account owner details and password management."
 };
 
 export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
@@ -264,18 +275,18 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
   const showProfile = view === "profile";
 
   return (
-    <section className="space-y-6 p-8">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold">{viewTitles[view]}</h1>
-          <p className="mt-1 text-sm text-panel-muted">{data?.account.username ?? "Loading"} · {data?.account.packageName ?? "No package"}</p>
-        </div>
-        <button className="flex h-10 items-center gap-2 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50" onClick={() => refresh()} type="button">
-          <RefreshCw size={15} />
-          Refresh
-        </button>
-      </div>
-
+    <>
+      <PageHeader
+        title={viewTitles[view]}
+        description={`${viewDescriptions[view]} ${data?.account.username ? `Account: ${data.account.username}.` : ""}`}
+        action={
+          <button className="flex h-10 items-center gap-2 rounded-md border border-panel-line bg-white px-3 text-sm hover:bg-slate-50" onClick={() => refresh()} type="button">
+            <RefreshCw size={15} />
+            Refresh
+          </button>
+        }
+      />
+      <section className="space-y-6 p-8">
       {notice ? <div className="rounded-md border border-panel-line bg-white p-3 text-sm text-slate-700">{notice}</div> : null}
 
       {isDashboard ? <div className="grid grid-cols-5 gap-3">
@@ -295,18 +306,41 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
               Add
             </button>
           </div>
-          <ListEmpty show={!domains.length} label="No domains assigned to this account." />
-          {domains.map((domain) => (
-            <div className="border-t border-panel-line py-2" key={domain.id}>
-              <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="truncate text-sm font-medium">{domain.name}</div>
-                  <div className="text-xs text-panel-muted">{domain.status} · {domain.documentRoot}</div>
-                </div>
-                <button className="rounded-md border border-panel-line px-2 py-1 text-xs hover:bg-slate-50" onClick={() => queueSsl.mutate(domain.id)} type="button">Issue SSL</button>
-              </div>
-            </div>
-          ))}
+          <div className="overflow-hidden rounded-md border border-panel-line">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-left text-xs uppercase text-panel-muted">
+                <tr>
+                  <th className="px-4 py-3">Domain</th>
+                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3">Document Root</th>
+                  <th className="px-4 py-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {domains.map((domain) => (
+                  <tr className="border-t border-panel-line" key={domain.id}>
+                    <td className="px-4 py-3 font-medium">{domain.name}</td>
+                    <td className="px-4 py-3">
+                      <span className={`rounded-md px-2 py-1 text-xs font-semibold ${domain.status === "ACTIVE" ? "bg-emerald-50 text-emerald-700" : domain.status === "SUSPENDED" ? "bg-red-50 text-panel-danger" : "bg-amber-50 text-amber-700"}`}>
+                        {domain.status}
+                      </span>
+                    </td>
+                    <td className="max-w-xl truncate px-4 py-3 font-mono text-xs text-panel-muted">{domain.documentRoot}</td>
+                    <td className="px-4 py-3">
+                      <div className="flex justify-end gap-2">
+                        <button className="rounded-md border border-panel-line px-3 py-2 text-xs hover:bg-slate-50" onClick={() => queueSsl.mutate(domain.id)} type="button">Issue SSL</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {!domains.length ? (
+                  <tr>
+                    <td className="px-4 py-8 text-center text-panel-muted" colSpan={4}>No domains assigned to this account.</td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
           <div className="mt-4 grid grid-cols-[1fr_90px_1fr_auto] gap-2 border-t border-panel-line pt-4">
             <select className="h-10 rounded-md border border-panel-line px-2 text-sm" onChange={(event) => setDnsDraft({ ...dnsDraft, domainId: event.target.value })} value={dnsDraft.domainId}>
               <option value="">DNS domain</option>
@@ -334,27 +368,43 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
               Create Mailbox
             </button>
           </div>
-          <ListEmpty show={!data?.mailAccounts.length} label="No mailboxes yet." />
-          {(data?.mailAccounts ?? []).map((mailbox) => (
-            <div className="border-t border-panel-line py-2" key={mailbox.id}>
-              <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="truncate text-sm font-medium">{mailbox.username}@{mailbox.domain?.name ?? ""}</div>
-                  <div className="text-xs text-panel-muted">{mailbox.enabled ? "enabled" : "disabled"} · {mailbox.quotaMb} MB</div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button className="rounded-md border border-panel-line px-2 py-1 text-xs hover:bg-slate-50" onClick={() => updateMailbox.mutate({ id: mailbox.id, body: { enabled: !mailbox.enabled } })} type="button">
-                    {mailbox.enabled ? "Disable" : "Enable"}
-                  </button>
-                  <button className="rounded-md border border-red-200 px-2 py-1 text-xs text-panel-danger hover:bg-red-50" onClick={() => deleteMailbox.mutate(mailbox.id)} type="button">Delete</button>
-                </div>
-              </div>
-              <div className="mt-2 flex gap-2">
-                <input className="h-9 min-w-0 flex-1 rounded-md border border-panel-line px-3 text-xs" onChange={(event) => setMailReset({ ...mailReset, [mailbox.id]: event.target.value })} placeholder="New password" type="password" value={mailReset[mailbox.id] ?? ""} />
-                <button className="h-9 rounded-md border border-panel-line px-2 text-xs hover:bg-slate-50" disabled={(mailReset[mailbox.id] ?? "").length < 10} onClick={() => updateMailbox.mutate({ id: mailbox.id, body: { password: mailReset[mailbox.id] } })} type="button">Reset</button>
-              </div>
-            </div>
-          ))}
+          <div className="overflow-hidden rounded-md border border-panel-line">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-left text-xs uppercase text-panel-muted">
+                <tr>
+                  <th className="px-4 py-3">Mailbox</th>
+                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3">Quota</th>
+                  <th className="px-4 py-3">Password</th>
+                  <th className="px-4 py-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(data?.mailAccounts ?? []).map((mailbox) => (
+                  <tr className="border-t border-panel-line" key={mailbox.id}>
+                    <td className="px-4 py-3 font-medium">{mailbox.username}@{mailbox.domain?.name ?? ""}</td>
+                    <td className="px-4 py-3">{mailbox.enabled ? "enabled" : "disabled"}</td>
+                    <td className="px-4 py-3">{mailbox.quotaMb} MB</td>
+                    <td className="px-4 py-3">
+                      <input className="h-9 w-full rounded-md border border-panel-line px-3 text-xs" onChange={(event) => setMailReset({ ...mailReset, [mailbox.id]: event.target.value })} placeholder="New password" type="password" value={mailReset[mailbox.id] ?? ""} />
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex justify-end gap-2">
+                        <button className="rounded-md border border-panel-line px-2 py-1 text-xs hover:bg-slate-50" disabled={(mailReset[mailbox.id] ?? "").length < 10} onClick={() => updateMailbox.mutate({ id: mailbox.id, body: { password: mailReset[mailbox.id] } })} type="button">Reset</button>
+                        <button className="rounded-md border border-panel-line px-2 py-1 text-xs hover:bg-slate-50" onClick={() => updateMailbox.mutate({ id: mailbox.id, body: { enabled: !mailbox.enabled } })} type="button">{mailbox.enabled ? "Disable" : "Enable"}</button>
+                        <button className="rounded-md border border-red-200 px-2 py-1 text-xs text-panel-danger hover:bg-red-50" onClick={() => deleteMailbox.mutate(mailbox.id)} type="button">Delete</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {!data?.mailAccounts.length ? (
+                  <tr>
+                    <td className="px-4 py-8 text-center text-panel-muted" colSpan={5}>No mailboxes yet.</td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
         </Panel> : null}
       </div> : null}
 
@@ -374,17 +424,41 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
             </button>
           </div>
           {filePath !== "." ? <button className="mb-2 text-sm text-panel-accent" onClick={() => setFilePath(parentPath(filePath))} type="button">Back</button> : null}
-          {(files.data?.items ?? []).map((item) => (
-            <div className="flex items-center justify-between border-t border-panel-line py-2 text-sm" key={item.path}>
-              <button className="min-w-0 truncate text-left" onClick={() => item.type === "directory" ? setFilePath(item.path) : openFile.mutate(item.path)} type="button">
-                {item.type === "directory" ? "Folder" : "File"} · {item.name}
-              </button>
-              <button className="rounded-md border border-red-200 p-2 text-panel-danger hover:bg-red-50" onClick={() => deleteFile.mutate(item.path)} title="Delete" type="button">
-                <Trash2 size={14} />
-              </button>
-            </div>
-          ))}
-          <ListEmpty show={!files.isLoading && !(files.data?.items ?? []).length} label="No files in this folder." />
+          <div className="overflow-hidden rounded-md border border-panel-line">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-left text-xs uppercase text-panel-muted">
+                <tr>
+                  <th className="px-4 py-3">Name</th>
+                  <th className="px-4 py-3">Type</th>
+                  <th className="px-4 py-3">Size</th>
+                  <th className="px-4 py-3">Modified</th>
+                  <th className="px-4 py-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(files.data?.items ?? []).map((item) => (
+                  <tr className="border-t border-panel-line" key={item.path}>
+                    <td className="px-4 py-3">
+                      <button className="min-w-0 truncate text-left font-medium text-panel-accent hover:underline" onClick={() => item.type === "directory" ? setFilePath(item.path) : openFile.mutate(item.path)} type="button">{item.name}</button>
+                    </td>
+                    <td className="px-4 py-3">{item.type}</td>
+                    <td className="px-4 py-3">{item.size}</td>
+                    <td className="px-4 py-3 text-panel-muted">{new Date(item.modifiedAt).toLocaleString()}</td>
+                    <td className="px-4 py-3">
+                      <div className="flex justify-end">
+                        <button className="rounded-md border border-red-200 p-2 text-panel-danger hover:bg-red-50" onClick={() => deleteFile.mutate(item.path)} title="Delete" type="button"><Trash2 size={14} /></button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {!files.isLoading && !(files.data?.items ?? []).length ? (
+                  <tr>
+                    <td className="px-4 py-8 text-center text-panel-muted" colSpan={5}>No files in this folder.</td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
           {editorPath ? (
             <div className="mt-4 border-t border-panel-line pt-4">
               <div className="mb-2 truncate font-mono text-xs text-panel-muted">{editorPath}</div>
@@ -415,18 +489,44 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
                 Create Deployment
               </button>
             </div>
-            <ListEmpty show={!data?.deployments.length} label="No deployments assigned to this account." />
-            {(data?.deployments ?? []).map((deployment) => (
-              <div className="border-t border-panel-line py-2" key={deployment.id}>
-                <div className="text-sm font-medium">{deployment.name}</div>
-                <div className="text-xs text-panel-muted">{deployment.status} · {deployment.healthStatus} · :{deployment.port}</div>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  <IconButton title="Deploy" onClick={() => deploymentAction.mutate({ id: deployment.id, action: "deploy" })}><Play size={14} /></IconButton>
-                  <IconButton title="Restart" onClick={() => deploymentAction.mutate({ id: deployment.id, action: "restart" })}><RotateCw size={14} /></IconButton>
-                  <IconButton title="Stop" onClick={() => deploymentAction.mutate({ id: deployment.id, action: "stop" })}><Square size={14} /></IconButton>
-                </div>
-              </div>
-            ))}
+            <div className="overflow-hidden rounded-md border border-panel-line">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 text-left text-xs uppercase text-panel-muted">
+                  <tr>
+                    <th className="px-4 py-3">Deployment</th>
+                    <th className="px-4 py-3">Status</th>
+                    <th className="px-4 py-3">Health</th>
+                    <th className="px-4 py-3">Port</th>
+                    <th className="px-4 py-3 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(data?.deployments ?? []).map((deployment) => (
+                    <tr className="border-t border-panel-line" key={deployment.id}>
+                      <td className="px-4 py-3">
+                        <div className="font-medium">{deployment.name}</div>
+                        <div className="text-xs text-panel-muted">{deployment.slug}</div>
+                      </td>
+                      <td className="px-4 py-3">{deployment.status}</td>
+                      <td className="px-4 py-3">{deployment.healthStatus}</td>
+                      <td className="px-4 py-3">:{deployment.port}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex justify-end gap-2">
+                          <IconButton title="Deploy" onClick={() => deploymentAction.mutate({ id: deployment.id, action: "deploy" })}><Play size={14} /></IconButton>
+                          <IconButton title="Restart" onClick={() => deploymentAction.mutate({ id: deployment.id, action: "restart" })}><RotateCw size={14} /></IconButton>
+                          <IconButton title="Stop" onClick={() => deploymentAction.mutate({ id: deployment.id, action: "stop" })}><Square size={14} /></IconButton>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                  {!data?.deployments.length ? (
+                    <tr>
+                      <td className="px-4 py-8 text-center text-panel-muted" colSpan={5}>No deployments assigned to this account.</td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
           </Panel> : null}
           {showDatabases ? <Panel id="databases" title="Databases" icon={<Database size={17} />}>
             <div className="mb-4 grid grid-cols-2 gap-2">
@@ -442,18 +542,37 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
                 Create Database
               </button>
             </div>
-            <ListEmpty show={!data?.databases.length} label="No databases yet." />
-            {(data?.databases ?? []).map((database) => (
-              <div className="flex items-center justify-between border-t border-panel-line py-2 text-sm" key={database.id}>
-                <div>
-                  <div className="font-medium">{database.database}</div>
-                  <div className="text-xs text-panel-muted">{database.engine} · {database.username}</div>
-                </div>
-                <button className="rounded-md border border-red-200 p-2 text-panel-danger hover:bg-red-50" onClick={() => deleteDatabase.mutate(database.id)} type="button" title="Delete">
-                  <Trash2 size={14} />
-                </button>
-              </div>
-            ))}
+            <div className="overflow-hidden rounded-md border border-panel-line">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 text-left text-xs uppercase text-panel-muted">
+                  <tr>
+                    <th className="px-4 py-3">Database</th>
+                    <th className="px-4 py-3">Engine</th>
+                    <th className="px-4 py-3">User</th>
+                    <th className="px-4 py-3 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(data?.databases ?? []).map((database) => (
+                    <tr className="border-t border-panel-line" key={database.id}>
+                      <td className="px-4 py-3 font-medium">{database.database}</td>
+                      <td className="px-4 py-3">{database.engine}</td>
+                      <td className="px-4 py-3">{database.username}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex justify-end">
+                          <button className="rounded-md border border-red-200 p-2 text-panel-danger hover:bg-red-50" onClick={() => deleteDatabase.mutate(database.id)} type="button" title="Delete"><Trash2 size={14} /></button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                  {!data?.databases.length ? (
+                    <tr>
+                      <td className="px-4 py-8 text-center text-panel-muted" colSpan={4}>No databases yet.</td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
           </Panel> : null}
           {showProfile ? <Panel id="profile" title="Profile" icon={<CheckCircle2 size={17} />}>
             <div className="mb-3 text-sm text-panel-muted">{data?.account.email ?? "No email"} · {data?.account.ownerName ?? "No owner"}</div>
@@ -468,7 +587,8 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
           </Panel> : null}
         </div> : null}
       </div> : null}
-    </section>
+      </section>
+    </>
   );
 }
 
