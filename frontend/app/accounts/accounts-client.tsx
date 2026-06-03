@@ -3,7 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import Link from "next/link";
-import { KeyRound, Plus, RefreshCw, Trash2, UserRound } from "lucide-react";
+import { KeyRound, LogIn, Plus, RefreshCw, Trash2, UserRound } from "lucide-react";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { apiDelete, apiGet, apiPatch, apiPost } from "@/lib/api";
 
@@ -97,6 +97,12 @@ export function AccountsClient() {
     mutationFn: (id: string) => apiPost<{ username: string; generatedPassword?: string }>(`/accounts/${id}/password`, {}),
     onSuccess: (result) => setNotice(result.generatedPassword ? `${result.username} password: ${result.generatedPassword}` : "Password reset."),
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not reset password.")
+  });
+
+  const loginAsAccount = useMutation({
+    mutationFn: (id: string) => apiPost<{ redirectTo?: string }>(`/auth/account/${id}/impersonate`, {}),
+    onSuccess: (result) => window.location.assign(result.redirectTo ?? "/account"),
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not login as account.")
   });
 
   const deleteAccount = useMutation({
@@ -194,7 +200,18 @@ export function AccountsClient() {
                     <div className="flex min-w-56 items-center gap-2">
                       <UserRound className="text-panel-muted" size={16} />
                       <div className="min-w-0">
-                        <Link className="block truncate font-semibold text-panel-accent hover:underline" href={`/accounts/${account.id}`}>{account.username}</Link>
+                        <div className="flex min-w-0 items-center gap-2">
+                          <Link className="truncate font-semibold text-panel-accent hover:underline" href={`/accounts/${account.id}`}>{account.username}</Link>
+                          <button
+                            className="shrink-0 rounded-md border border-panel-line p-1.5 text-panel-muted hover:bg-slate-50 hover:text-panel-accent disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={account.status !== "ACTIVE" || loginAsAccount.isPending}
+                            onClick={() => loginAsAccount.mutate(account.id)}
+                            title="Login as account"
+                            type="button"
+                          >
+                            <LogIn size={13} />
+                          </button>
+                        </div>
                         <div className="mt-1 truncate font-mono text-xs text-panel-muted">{account.homeRoot}</div>
                       </div>
                     </div>

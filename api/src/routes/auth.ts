@@ -108,6 +108,40 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     return { ok: true, role: "account" };
   });
 
+  app.post("/account/:accountId/impersonate", { preHandler: app.requireAuth }, async (request, reply) => {
+    const { accountId } = z.object({ accountId: z.string().min(1) }).parse(request.params);
+    const account = await prisma.account.findFirst({
+      where: { OR: [{ id: accountId }, { username: accountId.toLowerCase() }] }
+    });
+
+    if (!account) {
+      return reply.code(404).send({ error: "Account not found" });
+    }
+    if (account.status !== "ACTIVE") {
+      return reply.code(403).send({ error: "Account is suspended or unavailable" });
+    }
+
+    const token = app.jwt.sign({ sub: account.username, role: "account", accountId: account.id }, { expiresIn: env.JWT_EXPIRY });
+    reply.clearCookie("panel_session", { path: "/" });
+    reply.setCookie("account_session", token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+      path: "/",
+      maxAge: env.JWT_EXPIRY
+    });
+    setCsrfCookie(reply);
+    await audit(request, {
+      action: "LOGIN",
+      resource: "account_auth",
+      resourceId: account.id,
+      description: `Superadmin logged in as account ${account.username}`,
+      metadata: { impersonatedBy: env.SUPERADMIN_USERNAME }
+    });
+
+    return { ok: true, role: "account", accountId: account.id, username: account.username, redirectTo: "/account" };
+  });
+
   app.post("/login/2fa", { config: { rateLimit: { max: 5, timeWindow: "15 minutes" } } }, async (request, reply) => {
     const body = twoFactorLoginSchema.parse(request.body);
     let challenge: any;

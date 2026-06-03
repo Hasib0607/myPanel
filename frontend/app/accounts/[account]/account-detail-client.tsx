@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link2, RefreshCw, Save } from "lucide-react";
+import { KeyRound, Link2, RefreshCw, Save } from "lucide-react";
 import { useState } from "react";
 import { apiGet, apiPatch, apiPost } from "@/lib/api";
 
@@ -34,6 +34,7 @@ export function AccountDetailClient({ accountId }: { accountId: string }) {
   const queryClient = useQueryClient();
   const [notice, setNotice] = useState("");
   const [limits, setLimits] = useState({ diskLimitMb: "", domainLimit: "", mailboxLimit: "", databaseLimit: "", deploymentLimit: "" });
+  const [passwordDraft, setPasswordDraft] = useState({ password: "", confirmPassword: "" });
   const account = useQuery({
     queryKey: ["account", accountId],
     queryFn: async () => {
@@ -87,6 +88,15 @@ export function AccountDetailClient({ accountId }: { accountId: string }) {
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not unassign resource.")
   });
+  const passwordMismatch = Boolean(passwordDraft.password || passwordDraft.confirmPassword) && passwordDraft.password !== passwordDraft.confirmPassword;
+  const changePassword = useMutation({
+    mutationFn: () => apiPost<{ username: string }>(`/accounts/${accountId}/password`, { password: passwordDraft.password }),
+    onSuccess: (result) => {
+      setPasswordDraft({ password: "", confirmPassword: "" });
+      setNotice(`Password changed for ${result.username}.`);
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not change password.")
+  });
 
   const data = account.data;
 
@@ -105,19 +115,55 @@ export function AccountDetailClient({ accountId }: { accountId: string }) {
       {notice ? <div className="rounded-md border border-panel-line bg-white p-3 text-sm text-slate-700">{notice}</div> : null}
 
       <div className="grid grid-cols-[360px_1fr] gap-6">
-        <div className="rounded-md border border-panel-line bg-white">
-          <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Package Limits</div>
-          <div className="grid grid-cols-2 gap-3 p-4">
-            {Object.entries(limits).map(([key, value]) => (
-              <label className="space-y-1 text-xs font-medium text-panel-muted" key={key}>
-                <span>{key.replace("Limit", "").replace("Mb", " MB")}</span>
-                <input className="h-10 w-full rounded-md border border-panel-line px-3 text-sm text-panel-ink" onChange={(event) => setLimits({ ...limits, [key]: event.target.value.replace(/\D/g, "") })} value={value} />
+        <div className="space-y-6">
+          <div className="rounded-md border border-panel-line bg-white">
+            <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Package Limits</div>
+            <div className="grid grid-cols-2 gap-3 p-4">
+              {Object.entries(limits).map(([key, value]) => (
+                <label className="space-y-1 text-xs font-medium text-panel-muted" key={key}>
+                  <span>{key.replace("Limit", "").replace("Mb", " MB")}</span>
+                  <input className="h-10 w-full rounded-md border border-panel-line px-3 text-sm text-panel-ink" onChange={(event) => setLimits({ ...limits, [key]: event.target.value.replace(/\D/g, "") })} value={value} />
+                </label>
+              ))}
+              <button className="col-span-2 flex h-10 items-center justify-center gap-2 rounded-md bg-panel-accent text-sm font-semibold text-white" onClick={() => updateLimits.mutate()} type="button">
+                <Save size={15} />
+                Save Limits
+              </button>
+            </div>
+          </div>
+
+          <div className="rounded-md border border-panel-line bg-white">
+            <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Change Password</div>
+            <div className="space-y-3 p-4">
+              <label className="block space-y-1 text-xs font-medium text-panel-muted">
+                <span>New password</span>
+                <input
+                  className="h-10 w-full rounded-md border border-panel-line px-3 text-sm text-panel-ink"
+                  onChange={(event) => setPasswordDraft({ ...passwordDraft, password: event.target.value })}
+                  type="password"
+                  value={passwordDraft.password}
+                />
               </label>
-            ))}
-            <button className="col-span-2 flex h-10 items-center justify-center gap-2 rounded-md bg-panel-accent text-sm font-semibold text-white" onClick={() => updateLimits.mutate()} type="button">
-              <Save size={15} />
-              Save Limits
-            </button>
+              <label className="block space-y-1 text-xs font-medium text-panel-muted">
+                <span>Confirm password</span>
+                <input
+                  className="h-10 w-full rounded-md border border-panel-line px-3 text-sm text-panel-ink"
+                  onChange={(event) => setPasswordDraft({ ...passwordDraft, confirmPassword: event.target.value })}
+                  type="password"
+                  value={passwordDraft.confirmPassword}
+                />
+              </label>
+              {passwordMismatch ? <div className="text-xs font-medium text-panel-danger">Passwords do not match.</div> : null}
+              <button
+                className="flex h-10 w-full items-center justify-center gap-2 rounded-md bg-panel-accent text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={passwordDraft.password.length < 10 || passwordMismatch || changePassword.isPending}
+                onClick={() => changePassword.mutate()}
+                type="button"
+              >
+                <KeyRound size={15} />
+                Change Password
+              </button>
+            </div>
           </div>
         </div>
 
