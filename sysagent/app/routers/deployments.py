@@ -83,6 +83,16 @@ class ProcessRequest(BaseModel):
     logDir: str | None = None
 
 
+class LaravelWorkersRequest(BaseModel):
+    name: str
+    rootPath: str
+    action: str = Field(default="apply", pattern="^(apply|status|stop)$")
+    desiredWorkers: int = Field(default=1, ge=0, le=64)
+    queueCommand: str = "php artisan queue:work --sleep=3 --tries=3 --timeout=90"
+    env: dict[str, str] | None = None
+    logDir: str | None = None
+
+
 def normalize_process_root(body: ProcessRequest) -> ProcessRequest:
     root = Path(body.rootPath).resolve()
     parent = root.parent
@@ -514,6 +524,157 @@ def supervisor_program_config(body: ProcessRequest, wrapper_path: Path, log_dir:
     return "\n".join(lines) + "\n"
 
 
+def supervisor_laravel_worker_config(body: LaravelWorkersRequest, wrapper_path: Path, log_dir: Path) -> str:
+    cwd = deployment_cwd(body.rootPath)
+    lines = [
+        f"[program:{body.name}]",
+        f"directory={cwd}",
+        f"command={wrapper_path}",
+        "user=panel",
+        "autostart=true",
+        "autorestart=true",
+        "startsecs=3",
+        "startretries=3",
+        "stopasgroup=true",
+        "killasgroup=true",
+        f"numprocs={body.desiredWorkers}",
+        "process_name=%(program_name)s_%(process_num)02d",
+        f"stdout_logfile={log_dir / 'worker-out.log'}",
+        f"stderr_logfile={log_dir / 'worker-error.log'}",
+        "redirect_stderr=false",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _supervisor_group_status(name: str) -> dict:
+    status = run_supervisorctl("status", f"{name}:*")
+    text = f"{status.get('stdout') or ''}\n{status.get('stderr') or ''}"
+    processes = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or not stripped.startswith(f"{name}:"):
+            continue
+        parts = stripped.split(None, 2)
+        process_name = parts[0]
+        state = parts[1] if len(parts) > 1 else "UNKNOWN"
+        detail = parts[2] if len(parts) > 2 else ""
+        processes.append({"name": process_name, "state": state, "detail": detail})
+    if not processes and "no such process" in text.lower():
+        status["returncode"] = 0
+    return {
+        **status,
+        "processes": processes,
+        "running": sum(1 for item in processes if item["state"] == "RUNNING"),
+        "configured": len(processes),
+    }
+
+
+def _remove_supervisor_program(name: str) -> dict:
+    config_path = supervisor_program_path(name)
+    stop = run_supervisorctl("stop", f"{name}:*")
+    if "no such process" in (stop.get("stderr") or "").lower() or "not running" in (stop.get("stderr") or "").lower():
+        stop["returncode"] = 0
+    removed = False
+    try:
+        if config_path.exists():
+            config_path.unlink()
+            removed = True
+    except OSError as error:
+        return {"stop": stop, "remove": {"returncode": 1, "stderr": str(error), "configPath": str(config_path)}}
+    reread = run_supervisorctl("reread")
+    update = run_supervisorctl("update") if reread.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because reread failed"}
+    return {"stop": stop, "remove": {"returncode": 0, "removed": removed, "configPath": str(config_path)}, "reread": reread, "update": update}
+
+
+def laravel_worker_status(body: LaravelWorkersRequest) -> dict:
+    info = path_info(body.rootPath)
+    return {
+        "name": body.name,
+        "desiredWorkers": body.desiredWorkers,
+        "path": info,
+        "status": _supervisor_group_status(body.name),
+    }
+
+
+def laravel_workers_apply(body: LaravelWorkersRequest) -> dict:
+    info = path_info(body.rootPath)
+    if not info["allowed"]:
+        return blocked_command("Path escapes configured file manager root", ["supervisorctl", "restart", f"{body.name}:*"], info)
+    try:
+        log_dir = safe_log_dir(body.name, body.logDir)
+    except ValueError as error:
+        return blocked_command(str(error), ["supervisorctl", "restart", f"{body.name}:*"], info)
+
+    if body.desiredWorkers <= 0 or body.action == "stop":
+        removed = _remove_supervisor_program(body.name)
+        return {
+            "dryRun": any(step.get("dryRun") for step in removed.values() if isinstance(step, dict)),
+            "command": ["supervisorctl", "stop", f"{body.name}:*"],
+            "returncode": 1 if any(step.get("returncode", 0) != 0 for step in removed.values() if isinstance(step, dict)) else 0,
+            "path": info,
+            "desiredWorkers": 0,
+            "runningWorkers": 0,
+            **removed,
+        }
+
+    ensure = _ensure_laravel_env(body.rootPath, None, body.env)
+    if ensure.get("returncode") != 0:
+        return ensure
+    writable = repair_laravel_writable_paths(LaravelWritablePathsRequest(rootPath=body.rootPath))
+    if writable.get("returncode") != 0:
+        return writable
+
+    log_dir.mkdir(parents=True, exist_ok=True)
+    make_panel_owned(log_dir)
+    config_dir = supervisor_config_dir()
+    config_path = supervisor_program_path(body.name)
+    config_dir.mkdir(parents=True, exist_ok=True)
+    service = ensure_supervisord_running()
+    write = {"dryRun": False, "command": ["write-file", str(config_path)], "stdout": "", "stderr": "", "returncode": 0}
+    wrapper_path: Path | None = None
+    try:
+        start_command = parse_deployment_command(body.queueCommand)
+        wrapper_path, runtime_env_path, laravel_env_path = prepare_supervisor_runtime(body.rootPath, start_command, None, body.env)
+        make_panel_owned(wrapper_path.parent)
+        remove_stale_supervisor_program_configs(body.name, config_path)
+        config_path.write_text(supervisor_laravel_worker_config(body, wrapper_path, log_dir), encoding="utf-8")
+        write["stdout"] = f"runtimeEnv={runtime_env_path}"
+        if laravel_env_path is not None:
+            write["stdout"] += f", laravelEnv={laravel_env_path}"
+    except (OSError, ValueError) as error:
+        write["stderr"] = str(error)
+        write["returncode"] = 1
+
+    if write["returncode"] == 0 and not service.get("running"):
+        write["returncode"] = 1
+        write["stderr"] = "supervisord is not running and could not be started"
+
+    reread = run_supervisorctl("reread") if write["returncode"] == 0 else {"returncode": 1, "stderr": "Skipped because config write failed"}
+    update = run_supervisorctl("update") if reread.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because reread failed"}
+    restart = run_supervisorctl("restart", f"{body.name}:*") if update.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because update failed"}
+    if "no such process" in (restart.get("stderr") or "").lower():
+        restart = run_supervisorctl("start", f"{body.name}:*")
+    status = _supervisor_group_status(body.name) if restart.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because restart failed", "processes": [], "running": 0, "configured": 0}
+    steps = {"service": service, "write": write, "reread": reread, "update": update, "restart": restart, "status": status}
+    failed = [name for name, step in steps.items() if isinstance(step, dict) and step.get("returncode", 0) != 0]
+    return {
+        "dryRun": any(step.get("dryRun") for step in steps.values() if isinstance(step, dict)),
+        "blocked": any(step.get("blocked") for step in steps.values() if isinstance(step, dict)),
+        "liveCommandsDisabled": any(step.get("liveCommandsDisabled") for step in steps.values() if isinstance(step, dict)),
+        "command": ["supervisorctl", "restart", f"{body.name}:*"],
+        "cwd": deployment_cwd(body.rootPath),
+        "stdout": json.dumps(status.get("processes", []), separators=(",", ":")),
+        "stderr": "; ".join(f"{name}: {format_supervisor_step_error(steps[name])}" for name in failed),
+        "returncode": 1 if failed else 0,
+        "path": info,
+        "configPath": str(config_path),
+        "wrapperPath": str(wrapper_path) if wrapper_path else None,
+        "desiredWorkers": body.desiredWorkers,
+        "runningWorkers": status.get("running", 0),
+        **steps,
+    }
+
+
 def supervisor_start(body: ProcessRequest, start_command: list[str]) -> dict:
     info = path_info(body.rootPath)
     try:
@@ -820,6 +981,16 @@ def process(body: ProcessRequest) -> dict:
     else:
         return guarded_deployment_command(body.rootPath, body.startCommand or "true")
     return guarded_command(body.rootPath, command)
+
+
+@router.post("/laravel-workers")
+def laravel_workers(body: LaravelWorkersRequest) -> dict:
+    body.name = re.sub(r"[^a-zA-Z0-9_.-]+", "-", body.name).strip("-") or "laravel-queue"
+    if body.action == "status":
+        return laravel_worker_status(body)
+    if body.action == "stop":
+        body.desiredWorkers = 0
+    return laravel_workers_apply(body)
 
 
 def _nginx_scan_dirs() -> list[str]:

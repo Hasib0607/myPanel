@@ -29,6 +29,24 @@ const runtimeSchema = z.enum(["NODE", "PHP", "PYTHON", "GO", "STATIC"]).nullable
 const packageManagerSchema = z.enum(["NPM", "PNPM", "YARN", "COMPOSER", "PIP", "UV", "GO", "NONE"]).nullable().optional();
 const processManagerSchema = z.enum(["PM2", "SUPERVISOR", "SYSTEMD", "STATIC", "NONE"]).nullable().optional();
 const deploymentPortSchema = z.number().int().min(1).max(65535);
+const laravelWorkerConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  autoscale: z.boolean().default(false),
+  desiredWorkers: z.number().int().min(0).max(64).default(0),
+  minWorkers: z.number().int().min(0).max(64).default(0),
+  maxWorkers: z.number().int().min(1).max(64).default(8),
+  queueCommand: z.string().trim().min(1).max(500).default("php artisan queue:work --sleep=3 --tries=3 --timeout=90"),
+  currentWorkers: z.number().int().min(0).max(64).optional(),
+  lastScaledAt: z.string().datetime().optional(),
+  lastScaleReason: z.string().max(500).optional()
+}).transform((value) => ({
+  ...value,
+  maxWorkers: Math.max(value.maxWorkers, value.minWorkers, value.desiredWorkers),
+  desiredWorkers: value.enabled ? Math.max(value.minWorkers, Math.min(value.desiredWorkers, Math.max(value.maxWorkers, value.minWorkers))) : 0
+}));
+const processConfigSchema = z.object({
+  laravelWorkers: laravelWorkerConfigSchema.optional()
+}).passthrough().default({});
 
 const baseDeploymentSchema = z.object({
   domainId: z.string().nullable().optional(),
@@ -55,6 +73,7 @@ const baseDeploymentSchema = z.object({
   publicDirectory: z.string().nullable().optional(),
   runtimeVersion: z.string().nullable().optional(),
   processManager: processManagerSchema,
+  processConfig: processConfigSchema.optional(),
   healthUrl: z.string().url().nullable().optional(),
   port: deploymentPortSchema,
   envVars: z.record(z.string()).default({}),
@@ -638,6 +657,64 @@ function logMetadataText(metadata: Prisma.JsonValue | null) {
 
 function deploymentLogDir(slug: string) {
   return path.join(env.DEPLOYMENT_LOG_ROOT, slug);
+}
+
+type LaravelWorkerConfig = z.infer<typeof laravelWorkerConfigSchema>;
+
+function deploymentProcessConfig(value: unknown): Record<string, any> {
+  return value && typeof value === "object" && !Array.isArray(value) ? { ...(value as Record<string, any>) } : {};
+}
+
+function normalizeLaravelWorkerConfig(input: unknown, fallback?: Partial<LaravelWorkerConfig>): LaravelWorkerConfig {
+  const base = {
+    enabled: false,
+    autoscale: false,
+    desiredWorkers: 0,
+    minWorkers: 0,
+    maxWorkers: 8,
+    queueCommand: "php artisan queue:work --sleep=3 --tries=3 --timeout=90",
+    ...(fallback ?? {}),
+    ...(input && typeof input === "object" ? input as Record<string, unknown> : {})
+  };
+  return laravelWorkerConfigSchema.parse(base);
+}
+
+function laravelWorkerProgramName(slug: string) {
+  return `${slug}-queue`;
+}
+
+async function applyLaravelWorkers(deployment: Awaited<ReturnType<typeof findDeployment>>, config: LaravelWorkerConfig, reason: string) {
+  if (deployment.framework !== "LARAVEL") {
+    throw Object.assign(new Error("Laravel workers are only available for Laravel deployments."), { statusCode: 400 });
+  }
+  const desiredWorkers = config.enabled ? config.desiredWorkers : 0;
+  const result = await sysagent.deploymentLaravelWorkers({
+    name: laravelWorkerProgramName(deployment.slug),
+    rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
+    action: desiredWorkers > 0 ? "apply" : "stop",
+    desiredWorkers,
+    queueCommand: config.queueCommand,
+    env: Object.fromEntries(deployment.env.filter((item) => item.value).map((item) => [item.key, item.value as string])),
+    logDir: deploymentLogDir(deployment.slug)
+  });
+  const runningWorkers = result.runningWorkers ?? result.status?.running ?? 0;
+  const current = normalizeLaravelWorkerConfig({
+    ...config,
+    desiredWorkers,
+    currentWorkers: runningWorkers,
+    lastScaledAt: new Date().toISOString(),
+    lastScaleReason: reason
+  });
+  const processConfig = {
+    ...deploymentProcessConfig(deployment.processConfig),
+    laravelWorkers: current
+  };
+  await prisma.deployment.update({
+    where: { id: deployment.id },
+    data: { processConfig: processConfig as Prisma.InputJsonValue }
+  });
+  await addLog(deployment.id, "STARTING", `Laravel queue workers ${desiredWorkers > 0 ? "applied" : "stopped"}`, undefined, { reason, config: current, result } as Prisma.InputJsonObject);
+  return { config: current, result };
 }
 
 function deploymentAppPath(rootPath: string, rootDirectory: string | null | undefined) {
@@ -1568,7 +1645,8 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     const bindingTarget = selectedDomainId ? await resolveBindingTarget(selectedDomainId) : null;
     const deploymentData = {
       ...body,
-      domainId: bindingTarget?.domainId ?? null
+      domainId: bindingTarget?.domainId ?? null,
+      processConfig: (body.processConfig ?? {}) as Prisma.InputJsonValue
     };
 
     const deployment = existingDeployment
@@ -1624,6 +1702,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       data: {
         ...body,
         domainId: bindingTarget?.domainId ?? null,
+        processConfig: (body.processConfig ?? {}) as Prisma.InputJsonValue,
         slug: await uniqueDeploymentSlug(body.slug || body.name),
         status: "STOPPED",
         env: {
@@ -1682,14 +1761,46 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       where: { id: deployment.id },
       data: {
         ...body,
+        ...(body.processConfig !== undefined ? { processConfig: body.processConfig as Prisma.InputJsonValue } : {}),
         ...(selectedDomainId !== undefined ? { domainId: bindingTarget?.domainId ?? null } : {}),
         slug: body.slug ?? undefined
-      }
+      } as Prisma.DeploymentUncheckedUpdateInput
     });
     await syncPrimaryBindingTarget(deployment.id, selectedDomainId);
     await reconcileSelectedDomainRoute(deployment.id, selectedDomainId);
     await audit(request, { action: "UPDATE", resource: "deployment", resourceId: deployment.id, description: `Updated deployment ${updated.slug}` });
     return findDeployment(deployment.id);
+  });
+
+  app.get("/:deploymentId/workers", async (request) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const deployment = await findDeployment(deploymentId);
+    const config = normalizeLaravelWorkerConfig(deploymentProcessConfig(deployment.processConfig).laravelWorkers);
+    let status = null;
+    if (deployment.framework === "LARAVEL") {
+      status = await sysagent.deploymentLaravelWorkers({
+        name: laravelWorkerProgramName(deployment.slug),
+        rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
+        action: "status",
+        desiredWorkers: config.enabled ? config.desiredWorkers : 0,
+        queueCommand: config.queueCommand,
+        logDir: deploymentLogDir(deployment.slug)
+      }).catch((error) => ({ error: error instanceof Error ? error.message : String(error) }));
+    }
+    return { config, status };
+  });
+
+  app.patch("/:deploymentId/workers", async (request, reply) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const body = z.object({ laravelWorkers: laravelWorkerConfigSchema }).parse(request.body ?? {});
+    const deployment = await findDeployment(deploymentId);
+    const result = await applyLaravelWorkers(
+      deployment,
+      body.laravelWorkers,
+      body.laravelWorkers.autoscale ? "manual save with Guardian autoscale enabled" : "manual worker setting"
+    );
+    await audit(request, { action: "UPDATE", resource: "deployment_workers", resourceId: deployment.id, description: `Updated Laravel workers for ${deployment.slug}`, metadata: result as unknown as Prisma.InputJsonObject });
+    return reply.code(202).send(result);
   });
 
   app.delete("/:deploymentId", async (request) => {

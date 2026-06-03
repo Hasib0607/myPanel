@@ -117,6 +117,33 @@ function deploymentLogDir(slug: string) {
   return `${env.DEPLOYMENT_LOG_ROOT.replace(/\/+$/, "")}/${slug}`;
 }
 
+function deploymentProcessConfig(value: unknown): Record<string, any> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {};
+}
+
+function laravelWorkerConfig(value: unknown) {
+  const raw = value && typeof value === "object" ? value as Record<string, any> : {};
+  const enabled = Boolean(raw.enabled);
+  const minWorkers = Math.max(0, Math.min(64, Number(raw.minWorkers ?? 0) || 0));
+  const maxWorkers = Math.max(1, Math.min(64, Number(raw.maxWorkers ?? 8) || 8));
+  const desiredWorkers = enabled ? Math.max(minWorkers, Math.min(maxWorkers, Number(raw.desiredWorkers ?? raw.currentWorkers ?? minWorkers) || 0)) : 0;
+  return {
+    enabled,
+    autoscale: Boolean(raw.autoscale),
+    desiredWorkers,
+    minWorkers,
+    maxWorkers: Math.max(maxWorkers, minWorkers, desiredWorkers),
+    queueCommand: typeof raw.queueCommand === "string" && raw.queueCommand.trim() ? raw.queueCommand.trim() : "php artisan queue:work --sleep=3 --tries=3 --timeout=90",
+    currentWorkers: Math.max(0, Math.min(64, Number(raw.currentWorkers ?? 0) || 0)),
+    lastScaledAt: typeof raw.lastScaledAt === "string" ? raw.lastScaledAt : undefined,
+    lastScaleReason: typeof raw.lastScaleReason === "string" ? raw.lastScaleReason : undefined
+  };
+}
+
+function laravelWorkerProgramName(slug: string) {
+  return `${slug}-queue`;
+}
+
 function deploymentPortRange() {
   const start = env.DEPLOYMENT_PORT_START;
   const end = env.DEPLOYMENT_PORT_END;
@@ -2434,6 +2461,38 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
       }
     );
     assertLiveResult(result, `${action} process`);
+
+    if (deployment.framework === "LARAVEL") {
+      const config = laravelWorkerConfig(deploymentProcessConfig(deployment.processConfig).laravelWorkers);
+      const desiredWorkers = processAction === "stop" || !config.enabled ? 0 : config.desiredWorkers;
+      const workerResult = await runStep(deployment.id, releaseId, "STARTING", `Laravel queue workers ${desiredWorkers > 0 ? "apply" : "stop"}`, () =>
+        sysagent.deploymentLaravelWorkers({
+          name: laravelWorkerProgramName(deployment.slug),
+          rootPath: appPath,
+          action: desiredWorkers > 0 ? "apply" : "stop",
+          desiredWorkers,
+          queueCommand: config.queueCommand,
+          env: runtimeEnvVars,
+          logDir: deploymentLogDir(deployment.slug)
+        })
+      );
+      const runningWorkers = (workerResult as { runningWorkers?: number; status?: { running?: number } }).runningWorkers ?? (workerResult as { status?: { running?: number } }).status?.running ?? 0;
+      await prisma.deployment.update({
+        where: { id: deployment.id },
+        data: {
+          processConfig: {
+            ...deploymentProcessConfig(deployment.processConfig),
+            laravelWorkers: {
+              ...config,
+              desiredWorkers,
+              currentWorkers: runningWorkers,
+              lastScaledAt: new Date().toISOString(),
+              lastScaleReason: `${action} lifecycle`
+            }
+          } as Prisma.InputJsonValue
+        }
+      });
+    }
 
     if (processAction === "stop") {
       await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "STOPPED", healthStatus: "DOWN", lastHealthCheckAt: new Date() } });

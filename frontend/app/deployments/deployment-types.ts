@@ -84,6 +84,7 @@ export type Deployment = {
   outputDirectory: string | null;
   publicDirectory: string | null;
   processManager: string | null;
+  processConfig: Record<string, unknown>;
   healthUrl: string | null;
   port: number;
   status: DeploymentStatus;

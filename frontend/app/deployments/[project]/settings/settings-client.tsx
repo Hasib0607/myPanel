@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, Database, GitBranch, Globe2, KeyRound, Save, ServerCog, Settings2, Trash2 } from "lucide-react";
+import { Copy, Database, GitBranch, Globe2, KeyRound, Save, ServerCog, Settings2, Trash2, Workflow } from "lucide-react";
 import { apiDeleteBody, apiGet, apiPatch, apiPost } from "@/lib/api";
 import type { Deployment, DeploymentFramework, DeploymentSourceProvider } from "../../deployment-types";
 import { ProjectTabs, ResultNotice } from "../../deployment-ui";
@@ -32,6 +32,27 @@ type WebhookStatus = {
 
 type WebhookSecretResponse = WebhookStatus & {
   secret: string;
+};
+
+type LaravelWorkerConfig = {
+  enabled: boolean;
+  autoscale: boolean;
+  desiredWorkers: number;
+  minWorkers: number;
+  maxWorkers: number;
+  queueCommand: string;
+  currentWorkers?: number;
+  lastScaledAt?: string;
+  lastScaleReason?: string;
+};
+
+type WorkerStatusResponse = {
+  config: LaravelWorkerConfig;
+  status: {
+    runningWorkers?: number;
+    status?: { running?: number; configured?: number; processes?: Array<{ name: string; state: string; detail: string }> };
+    error?: string;
+  } | null;
 };
 
 type SettingsForm = {
@@ -64,6 +85,12 @@ type SettingsForm = {
   dbName: string;
   dbUser: string;
   autoDeployEnabled: boolean;
+  workersEnabled: boolean;
+  workersAutoscale: boolean;
+  workersDesired: string;
+  workersMin: string;
+  workersMax: string;
+  workersQueueCommand: string;
 };
 
 const emptyForm: SettingsForm = {
@@ -95,7 +122,13 @@ const emptyForm: SettingsForm = {
   dbType: "",
   dbName: "",
   dbUser: "",
-  autoDeployEnabled: false
+  autoDeployEnabled: false,
+  workersEnabled: false,
+  workersAutoscale: false,
+  workersDesired: "0",
+  workersMin: "0",
+  workersMax: "8",
+  workersQueueCommand: "php artisan queue:work --sleep=3 --tries=3 --timeout=90"
 };
 
 const frameworks: DeploymentFramework[] = ["NEXTJS", "LARAVEL", "NODEJS", "PYTHON", "GO", "STATIC"];
@@ -105,7 +138,25 @@ const packageManagers = ["", "NPM", "PNPM", "YARN", "COMPOSER", "PIP", "UV", "GO
 const processManagers = ["", "PM2", "SUPERVISOR", "SYSTEMD", "STATIC", "NONE"];
 const dbTypes = ["", "POSTGRESQL", "MYSQL"];
 
+function laravelWorkersFromDeployment(deployment: Deployment): LaravelWorkerConfig {
+  const raw = (deployment.processConfig?.laravelWorkers && typeof deployment.processConfig.laravelWorkers === "object")
+    ? deployment.processConfig.laravelWorkers as Partial<LaravelWorkerConfig>
+    : {};
+  return {
+    enabled: Boolean(raw.enabled),
+    autoscale: Boolean(raw.autoscale),
+    desiredWorkers: Number(raw.desiredWorkers ?? raw.currentWorkers ?? 0),
+    minWorkers: Number(raw.minWorkers ?? 0),
+    maxWorkers: Number(raw.maxWorkers ?? 8),
+    queueCommand: raw.queueCommand || "php artisan queue:work --sleep=3 --tries=3 --timeout=90",
+    currentWorkers: raw.currentWorkers,
+    lastScaledAt: raw.lastScaledAt,
+    lastScaleReason: raw.lastScaleReason
+  };
+}
+
 function formFromDeployment(deployment: Deployment): SettingsForm {
+  const workers = laravelWorkersFromDeployment(deployment);
   return {
     name: deployment.name,
     slug: deployment.slug,
@@ -135,13 +186,24 @@ function formFromDeployment(deployment: Deployment): SettingsForm {
     dbType: deployment.dbType ?? "",
     dbName: deployment.dbName ?? "",
     dbUser: deployment.dbUser ?? "",
-    autoDeployEnabled: deployment.autoDeployEnabled
+    autoDeployEnabled: deployment.autoDeployEnabled,
+    workersEnabled: workers.enabled,
+    workersAutoscale: workers.autoscale,
+    workersDesired: String(workers.desiredWorkers),
+    workersMin: String(workers.minWorkers),
+    workersMax: String(workers.maxWorkers),
+    workersQueueCommand: workers.queueCommand
   };
 }
 
 function nullable(value: string) {
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
+}
+
+function numberFromString(value: string) {
+  const parsed = Number(value || 0);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 export function DeploymentSettingsClient({ project }: { project: string }) {
@@ -163,6 +225,11 @@ export function DeploymentSettingsClient({ project }: { project: string }) {
   const webhook = useQuery({
     queryKey: ["deployment", project, "webhook"],
     queryFn: () => apiGet<WebhookStatus>(`/deployments/${project}/webhook`)
+  });
+  const workers = useQuery({
+    queryKey: ["deployment", project, "workers"],
+    queryFn: () => apiGet<WorkerStatusResponse>(`/deployments/${project}/workers`),
+    enabled: detail.data?.framework === "LARAVEL"
   });
 
   useEffect(() => {
@@ -198,8 +265,9 @@ export function DeploymentSettingsClient({ project }: { project: string }) {
     dbType: nullable(form.dbType),
     dbName: nullable(form.dbName),
     dbUser: nullable(form.dbUser),
-    autoDeployEnabled: form.autoDeployEnabled
-  }), [form]);
+    autoDeployEnabled: form.autoDeployEnabled,
+    processConfig: detail.data?.processConfig ?? {}
+  }), [detail.data?.processConfig, form]);
 
   const save = useMutation({
     mutationFn: () => apiPatch<Deployment>(`/deployments/${project}`, payload),
@@ -230,6 +298,25 @@ export function DeploymentSettingsClient({ project }: { project: string }) {
       await queryClient.invalidateQueries({ queryKey: ["deployment", project] });
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not generate webhook secret")
+  });
+
+  const saveWorkers = useMutation({
+    mutationFn: () => apiPatch<{ config: LaravelWorkerConfig }>(`/deployments/${project}/workers`, {
+      laravelWorkers: {
+        enabled: form.workersEnabled,
+        autoscale: form.workersAutoscale,
+        desiredWorkers: numberFromString(form.workersDesired),
+        minWorkers: numberFromString(form.workersMin),
+        maxWorkers: Math.max(1, numberFromString(form.workersMax)),
+        queueCommand: form.workersQueueCommand.trim() || "php artisan queue:work --sleep=3 --tries=3 --timeout=90"
+      }
+    }),
+    onSuccess: async (result) => {
+      setNotice(`Laravel workers saved. Running: ${result.config.currentWorkers ?? result.config.desiredWorkers}.`);
+      await queryClient.invalidateQueries({ queryKey: ["deployment", project] });
+      await queryClient.invalidateQueries({ queryKey: ["deployment", project, "workers"] });
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not save Laravel workers")
   });
 
   function setField<K extends keyof SettingsForm>(key: K, value: SettingsForm[K]) {
@@ -338,6 +425,30 @@ export function DeploymentSettingsClient({ project }: { project: string }) {
             <TextInput label="Start command" onChange={(value) => setField("startCommand", value)} value={form.startCommand} />
           </div>
         </Section>
+
+        {detail.data?.framework === "LARAVEL" ? (
+          <Section icon={<Workflow size={16} />} title="Laravel Queue Workers">
+            <div className="grid grid-cols-4 gap-3">
+              <ToggleInput checked={form.workersEnabled} label="Enable workers" onChange={(value) => setField("workersEnabled", value)} />
+              <ToggleInput checked={form.workersAutoscale} label="Guardian autoscale" onChange={(value) => setField("workersAutoscale", value)} />
+              <ReadOnlyValue label="Running now" value={String(workers.data?.status?.runningWorkers ?? workers.data?.status?.status?.running ?? workers.data?.config.currentWorkers ?? 0)} />
+              <ReadOnlyValue label="Last scale" value={workers.data?.config.lastScaleReason ?? "Not scaled yet"} />
+              <TextInput label="Desired workers" onChange={(value) => setField("workersDesired", value.replace(/\D/g, ""))} value={form.workersDesired} />
+              <TextInput label="Minimum workers" onChange={(value) => setField("workersMin", value.replace(/\D/g, ""))} value={form.workersMin} />
+              <TextInput label="Maximum workers" onChange={(value) => setField("workersMax", value.replace(/\D/g, ""))} value={form.workersMax} />
+              <div className="flex items-end">
+                <button className="flex h-10 w-full items-center justify-center gap-2 rounded-md border border-panel-line px-3 text-sm font-semibold hover:bg-slate-50 disabled:opacity-60" disabled={saveWorkers.isPending} onClick={() => saveWorkers.mutate()} type="button">
+                  <Workflow size={15} />
+                  Apply Workers
+                </button>
+              </div>
+            </div>
+            <div className="mt-3">
+              <TextInput label="Queue command" onChange={(value) => setField("workersQueueCommand", value)} value={form.workersQueueCommand} />
+            </div>
+            {workers.data?.status?.error ? <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">{workers.data.status.error}</div> : null}
+          </Section>
+        ) : null}
 
         <Section icon={<Globe2 size={16} />} title="Paths And Network">
           <div className="grid grid-cols-3 gap-3">

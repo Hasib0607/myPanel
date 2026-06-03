@@ -68,6 +68,33 @@ function deploymentLogDir(slug: string) {
   return `${process.env.DEPLOYMENT_LOG_ROOT ?? "/var/log/vps-panel/deployments"}/${slug}`;
 }
 
+function deploymentProcessConfig(value: unknown): Record<string, any> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {};
+}
+
+function laravelWorkerConfig(value: unknown) {
+  const raw = value && typeof value === "object" ? value as Record<string, any> : {};
+  const enabled = Boolean(raw.enabled);
+  const minWorkers = Math.max(0, Math.min(64, Number(raw.minWorkers ?? 0) || 0));
+  const maxWorkers = Math.max(1, Math.min(64, Number(raw.maxWorkers ?? 8) || 8));
+  const desiredWorkers = enabled ? Math.max(minWorkers, Math.min(maxWorkers, Number(raw.desiredWorkers ?? raw.currentWorkers ?? minWorkers) || 0)) : 0;
+  return {
+    enabled,
+    autoscale: Boolean(raw.autoscale),
+    desiredWorkers,
+    minWorkers,
+    maxWorkers: Math.max(maxWorkers, minWorkers, desiredWorkers),
+    queueCommand: typeof raw.queueCommand === "string" && raw.queueCommand.trim() ? raw.queueCommand.trim() : "php artisan queue:work --sleep=3 --tries=3 --timeout=90",
+    currentWorkers: Math.max(0, Math.min(64, Number(raw.currentWorkers ?? 0) || 0)),
+    lastScaledAt: typeof raw.lastScaledAt === "string" ? raw.lastScaledAt : undefined,
+    lastScaleReason: typeof raw.lastScaleReason === "string" ? raw.lastScaleReason : undefined
+  };
+}
+
+function laravelWorkerProgramName(slug: string) {
+  return `${slug}-queue`;
+}
+
 function metadataText(metadata: unknown) {
   if (!metadata) return "";
   if (typeof metadata === "string") return metadata;
@@ -605,6 +632,100 @@ async function runDeploymentWatch() {
   return { checked: results.length, results };
 }
 
+async function runLaravelWorkerAutoscale() {
+  const deployments = await prisma.deployment.findMany({
+    where: {
+      framework: "LARAVEL",
+      status: { in: ["RUNNING", "DEPLOYING", "BUILDING"] }
+    },
+    include: { env: true },
+    orderBy: { updatedAt: "desc" },
+    take: 50
+  });
+  const results = [];
+  for (const deployment of deployments) {
+    const processConfig = deploymentProcessConfig(deployment.processConfig);
+    const config = laravelWorkerConfig(processConfig.laravelWorkers);
+    if (!config.enabled) continue;
+
+    const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
+    const status = await sysagent.deploymentLaravelWorkers({
+      name: laravelWorkerProgramName(deployment.slug),
+      rootPath: appPath,
+      action: "status",
+      desiredWorkers: config.desiredWorkers,
+      queueCommand: config.queueCommand,
+      logDir: deploymentLogDir(deployment.slug)
+    }).catch((error) => ({ error: error instanceof Error ? error.message : String(error), status: { running: config.currentWorkers } })) as { status?: { running?: number }; runningWorkers?: number; error?: string };
+    const runningWorkers = status.runningWorkers ?? status.status?.running ?? config.currentWorkers;
+    let nextWorkers = config.autoscale ? Math.max(config.minWorkers, runningWorkers || config.desiredWorkers || config.minWorkers) : config.desiredWorkers;
+    let reason = config.autoscale ? "steady" : "manual desired count";
+
+    if (config.autoscale) {
+      const recentLogs = await prisma.deploymentLog.findMany({
+        where: { deploymentId: deployment.id, createdAt: { gte: new Date(Date.now() - 15 * 60_000) } },
+        orderBy: { createdAt: "desc" },
+        take: 40
+      });
+      const text = recentLogs.map((log) => `${log.message}\n${metadataText(log.metadata)}`).join("\n").toLowerCase();
+      const pressure = deployment.healthStatus === "DOWN"
+        || deployment.healthStatus === "DEGRADED"
+        || /timeout|timed out|too many connections|connection refused|queue backlog|queue busy|http 5\d\d|502|503|504|slow|overload/.test(text);
+      const quietHealthy = deployment.healthStatus === "HEALTHY"
+        && !pressure
+        && recentLogs.every((log) => log.level !== "warn" && log.level !== "error");
+      const scaledRecently = config.lastScaledAt ? Date.now() - new Date(config.lastScaledAt).getTime() < 10 * 60_000 : false;
+
+      if (pressure) {
+        nextWorkers = Math.min(config.maxWorkers, Math.max(nextWorkers + 1, config.minWorkers || 1));
+        reason = `traffic/health pressure (${deployment.healthStatus})`;
+      } else if (quietHealthy && !scaledRecently && nextWorkers > config.minWorkers) {
+        nextWorkers = Math.max(config.minWorkers, nextWorkers - 1);
+        reason = "quiet healthy cooldown";
+      }
+    }
+
+    if (nextWorkers === runningWorkers && nextWorkers === config.currentWorkers && nextWorkers === config.desiredWorkers) {
+      results.push({ deploymentId: deployment.id, changed: false, workers: nextWorkers, reason });
+      continue;
+    }
+
+    const envVars = Object.fromEntries(deployment.env.filter((item) => item.value).map((item) => [item.key, item.value as string]));
+    const apply = await sysagent.deploymentLaravelWorkers({
+      name: laravelWorkerProgramName(deployment.slug),
+      rootPath: appPath,
+      action: nextWorkers > 0 ? "apply" : "stop",
+      desiredWorkers: nextWorkers,
+      queueCommand: config.queueCommand,
+      env: envVars,
+      logDir: deploymentLogDir(deployment.slug)
+    });
+    const appliedWorkers = (apply as { runningWorkers?: number; status?: { running?: number } }).runningWorkers ?? (apply as { status?: { running?: number } }).status?.running ?? nextWorkers;
+    const nextConfig = {
+      ...processConfig,
+      laravelWorkers: {
+        ...config,
+        desiredWorkers: nextWorkers,
+        currentWorkers: appliedWorkers,
+        lastScaledAt: new Date().toISOString(),
+        lastScaleReason: reason
+      }
+    };
+    await prisma.deployment.update({ where: { id: deployment.id }, data: { processConfig: nextConfig as any } });
+    await prisma.deploymentLog.create({
+      data: {
+        deploymentId: deployment.id,
+        step: "STARTING",
+        level: "info",
+        message: `Guardian adjusted Laravel queue workers to ${nextWorkers}`,
+        metadata: { reason, previousWorkers: runningWorkers, configuredWorkers: appliedWorkers, apply } as any
+      }
+    });
+    results.push({ deploymentId: deployment.id, changed: true, workers: appliedWorkers, reason });
+  }
+  return { checked: deployments.length, results };
+}
+
 async function runDeploymentGuardWatch() {
   const deployments = await prisma.deployment.findMany({
     where: {
@@ -732,7 +853,11 @@ export const guardianWorker = new Worker(
   async (job) => {
     logger.info("guardian job received", { id: job.id, name: job.name });
     if (job.name === "deployment-watch") {
-      return runDeploymentWatch();
+      const [deploymentWatch, laravelWorkers] = await Promise.all([
+        runDeploymentWatch(),
+        runLaravelWorkerAutoscale()
+      ]);
+      return { deploymentWatch, laravelWorkers };
     }
     if (job.name === "deployment-guard-watch") {
       return runDeploymentGuardWatch();
