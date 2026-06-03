@@ -219,6 +219,15 @@ function slugify(value: string) {
     .slice(0, 64);
 }
 
+function cleanDatabaseIdentifier(value: string) {
+  return value.trim().toLowerCase().replace(/[^a-z0-9_]/g, "_").replace(/^_+|_+$/g, "").replace(/_+/g, "_");
+}
+
+function accountDatabaseIdentifier(prefix: string, value: string) {
+  const clean = cleanDatabaseIdentifier(value);
+  return clean.startsWith(prefix) ? clean : `${prefix}${clean}`.slice(0, 63);
+}
+
 async function uniqueDeploymentSlug(base: string) {
   const root = slugify(base) || "app";
   for (let index = 0; index < 50; index += 1) {
@@ -1379,22 +1388,24 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       include: { _count: { select: { domains: true, deployments: true, mailAccounts: true, databases: true } } }
     });
     assertLimit(account._count.databases, account.databaseLimit, "Database");
-    const prefix = `${account.username}_`.replace(/[^a-zA-Z0-9_]/g, "_").slice(0, 24);
-    if (!body.database.startsWith(prefix) || !body.username.startsWith(prefix)) {
-      throw app.httpErrors.badRequest(`Database and username must start with ${prefix}`);
-    }
-    const result = await sysagent.provisionDatabase(body);
+    const prefix = `${cleanDatabaseIdentifier(account.username)}_`.slice(0, 24);
+    const provision = {
+      ...body,
+      database: accountDatabaseIdentifier(prefix, body.database),
+      username: accountDatabaseIdentifier(prefix, body.username)
+    };
+    const result = await sysagent.provisionDatabase(provision);
     assertDatabaseResult((result as { result?: unknown }).result, "Database create");
     const accountDatabase = await prisma.accountDatabase.create({
       data: {
         accountId: account.id,
-        engine: body.engine,
-        database: body.database,
-        username: body.username
+        engine: provision.engine,
+        database: provision.database,
+        username: provision.username
       }
     });
-    await audit(request, { action: "CREATE", resource: "database", resourceId: accountDatabase.id, description: `Account created ${body.engine} database ${body.database}`, metadata: { result } as any });
-    return reply.code(201).send({ engine: body.engine, database: accountDatabase.database, username: accountDatabase.username, password: (result as { password?: string }).password, result });
+    await audit(request, { action: "CREATE", resource: "database", resourceId: accountDatabase.id, description: `Account created ${provision.engine} database ${provision.database}`, metadata: { result } as any });
+    return reply.code(201).send({ engine: provision.engine, database: accountDatabase.database, username: accountDatabase.username, password: (result as { password?: string }).password, result });
   });
 
   app.post("/databases/password", async (request: any) => {

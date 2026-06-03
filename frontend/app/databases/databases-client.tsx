@@ -70,7 +70,7 @@ type DatabasesClientProps = {
 
 export function DatabasesClient({ apiBase = "/databases" }: DatabasesClientProps = {}) {
   const queryClient = useQueryClient();
-  const [notice, setNotice] = useState("");
+  const [notice, setNoticeState] = useState<{ text: string; tone: "success" | "error" } | null>(null);
   const [form, setForm] = useState(initialForm);
   const [grant, setGrant] = useState(initialForm);
   const [passwordForm, setPasswordForm] = useState({ engine: "POSTGRESQL" as Engine, username: "", password: "" });
@@ -84,6 +84,7 @@ export function DatabasesClient({ apiBase = "/databases" }: DatabasesClientProps
   const [rowImportTarget, setRowImportTarget] = useState<{ engine: Engine; database: string } | null>(null);
   const [importProgress, setImportProgress] = useState<{ database: string; file: string; percent: number; phase: "uploading" | "importing" | "done" } | null>(null);
   const rowImportInputRef = useRef<HTMLInputElement | null>(null);
+  const setNotice = (text: string, tone: "success" | "error" = "success") => setNoticeState({ text, tone });
 
   const overview = useQuery({
     queryKey: ["databases-overview", apiBase],
@@ -98,11 +99,11 @@ export function DatabasesClient({ apiBase = "/databases" }: DatabasesClientProps
     mutationFn: () => apiPost<CredentialResult>(apiBase, { ...form, password: form.password || undefined }),
     onSuccess: async (result) => {
       setLastSecret(result);
-      setNotice(`${form.database} created.`);
+      setNotice(`${result.database ?? form.database} created.`);
       setForm(initialForm);
       await refresh();
     },
-    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not create database")
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not create database", "error")
   });
 
   const changePassword = useMutation({
@@ -113,7 +114,7 @@ export function DatabasesClient({ apiBase = "/databases" }: DatabasesClientProps
       setPasswordForm({ engine: passwordForm.engine, username: "", password: "" });
       await refresh();
     },
-    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not change password")
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not change password", "error")
   });
 
   const grantAccess = useMutation({
@@ -123,7 +124,7 @@ export function DatabasesClient({ apiBase = "/databases" }: DatabasesClientProps
       setGrant({ ...grant, database: "", username: "" });
       await refresh();
     },
-    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not grant access")
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not grant access", "error")
   });
 
   const deleteDatabase = useMutation({
@@ -132,7 +133,7 @@ export function DatabasesClient({ apiBase = "/databases" }: DatabasesClientProps
       setNotice(`${input.database} deleted.`);
       await refresh();
     },
-    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not delete database")
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not delete database", "error")
   });
 
   const exportDatabase = useMutation({
@@ -141,7 +142,7 @@ export function DatabasesClient({ apiBase = "/databases" }: DatabasesClientProps
       downloadText(`${result.database}.sql`, result.dump, "application/sql;charset=utf-8");
       setNotice(`${result.database} exported.`);
     },
-    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not export database")
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not export database", "error")
   });
 
   const importDatabase = useMutation({
@@ -151,7 +152,7 @@ export function DatabasesClient({ apiBase = "/databases" }: DatabasesClientProps
       setTransfer({ ...transfer, sql: "" });
       await refresh();
     },
-    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not import database")
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not import database", "error")
   });
 
   const importDatabaseUpload = useMutation({
@@ -180,7 +181,7 @@ export function DatabasesClient({ apiBase = "/databases" }: DatabasesClientProps
     },
     onError: (error) => {
       setImportProgress(null);
-      setNotice(error instanceof Error ? error.message : "Could not upload SQL file");
+      setNotice(error instanceof Error ? error.message : "Could not upload SQL file", "error");
     }
   });
 
@@ -192,7 +193,7 @@ export function DatabasesClient({ apiBase = "/databases" }: DatabasesClientProps
       setRowPreview("");
       setNotice(`${result.tables.length} tables loaded.`);
     },
-    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not list tables")
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not list tables", "error")
   });
 
   const listColumns = useMutation({
@@ -201,7 +202,7 @@ export function DatabasesClient({ apiBase = "/databases" }: DatabasesClientProps
       setColumns(result.columns);
       setNotice(`${result.table} columns loaded.`);
     },
-    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not list columns")
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not list columns", "error")
   });
 
   const previewRows = useMutation({
@@ -210,7 +211,7 @@ export function DatabasesClient({ apiBase = "/databases" }: DatabasesClientProps
       setRowPreview(result.rows);
       setNotice(`${result.table} row preview loaded.`);
     },
-    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not preview rows")
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not preview rows", "error")
   });
 
   const exportTableSql = useMutation({
@@ -219,7 +220,7 @@ export function DatabasesClient({ apiBase = "/databases" }: DatabasesClientProps
       downloadText(`${result.database}.${result.table}.sql`, result.dump, "application/sql;charset=utf-8");
       setNotice(`${result.table} SQL exported.`);
     },
-    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not export table")
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not export table", "error")
   });
 
   const exportTableCsv = useMutation({
@@ -228,7 +229,7 @@ export function DatabasesClient({ apiBase = "/databases" }: DatabasesClientProps
       downloadText(`${result.database}.${result.table}.${result.format === "CSV" ? "csv" : "tsv"}`, result.content, "text/plain;charset=utf-8");
       setNotice(`${result.table} ${result.format} exported.`);
     },
-    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not export rows")
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not export rows", "error")
   });
 
   const importTable = useMutation({
@@ -238,7 +239,7 @@ export function DatabasesClient({ apiBase = "/databases" }: DatabasesClientProps
       setTableTools({ ...tableTools, content: "" });
       await refresh();
     },
-    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not import table data")
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not import table data", "error")
   });
 
   const engineMap = useMemo(() => new Map((overview.data?.engines ?? []).map((item) => [item.engine, item])), [overview.data]);
@@ -258,7 +259,11 @@ export function DatabasesClient({ apiBase = "/databases" }: DatabasesClientProps
   return (
     <div className="space-y-5 p-6">
       <input accept=".sql,.txt,.dump" className="hidden" onChange={handleRowImportSelection} ref={rowImportInputRef} type="file" />
-      {notice ? <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-700">{notice}</div> : null}
+      {notice ? (
+        <div className={`rounded-md border p-3 text-sm ${notice.tone === "error" ? "border-red-200 bg-red-50 text-red-700" : "border-emerald-200 bg-emerald-50 text-emerald-700"}`}>
+          {notice.text}
+        </div>
+      ) : null}
 
       <div className="grid grid-cols-[1fr_380px] gap-5">
         <div className="space-y-5">
