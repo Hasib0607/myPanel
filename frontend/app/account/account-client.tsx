@@ -17,6 +17,7 @@ type RuntimeReview = {
   installable: RuntimeInstallTarget[];
   blocked: string[];
   needsApproval: boolean;
+  phpVersion?: string | null;
 };
 type RuntimeModalState = {
   deployment: Deployment;
@@ -217,7 +218,7 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
     setNotice("Checking server runtime packages before deployment...");
     try {
       const review = await apiGet<RuntimeReview>(`/account/deployments/${deployment.id}/runtime-review`);
-      if (!review.installable.length) {
+      if (!review.missing.length) {
         deploymentAction.mutate({ id: deployment.id, action });
         return;
       }
@@ -637,6 +638,7 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
               <p className="mt-1 text-sm text-panel-muted">
                 {runtimeModal.deployment.name} needs these missing runtime tools before {runtimeModal.action}. Turn off anything you do not want installed now.
               </p>
+              {runtimeModal.review.phpVersion ? <p className="mt-2 text-xs font-medium text-panel-muted">Current server PHP: {runtimeModal.review.phpVersion}</p> : null}
             </div>
             <div className="space-y-3 p-5">
               {runtimeModal.review.installable.map((item) => (
@@ -667,7 +669,7 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
               <button className="rounded-md border border-panel-line px-4 py-2 text-sm font-medium hover:bg-slate-50" onClick={() => setRuntimeModal(null)} type="button">Cancel</button>
               <button
                 className="rounded-md bg-panel-accent px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
-                disabled={deploymentAction.isPending}
+                disabled={deploymentAction.isPending || runtimeModal.review.installable.length === 0}
                 onClick={() => deploymentAction.mutate({
                   id: runtimeModal.deployment.id,
                   action: runtimeModal.action,

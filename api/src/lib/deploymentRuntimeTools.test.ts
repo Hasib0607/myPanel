@@ -268,6 +268,14 @@ test("failed deploy parser maps missing process/runtime commands to exact repair
   ]);
 });
 
+test("failed deploy parser maps Swoole on old PHP to PHP 8.2 and Swoole repairs", () => {
+  const log = "pecl/swoole requires PHP version >= 8.2.0, installed version is 8.0.30";
+  assert.deepEqual(runtimeTargetsForFailedDeploymentLog(log).map((target) => target.actionKey), [
+    "install-php82",
+    "install-php-extension-swoole"
+  ]);
+});
+
 test("failed deploy parser detects Supervisor spawn repair separately from tool install", () => {
   const log = "start: my-app: ERROR (spawn error); Supervisor status: BACKOFF Exited too quickly";
 

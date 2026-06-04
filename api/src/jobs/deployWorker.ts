@@ -18,7 +18,7 @@ import {
   nodeStartUsesVitePreview
 } from "../lib/deploymentDetection.js";
 import { nginxUpstreamFailure, nodePackageBinaryMissing, supervisorStartStillStarting } from "../lib/deploymentFailureRuntimeRepairs.js";
-import { appendFrontendModuleNotFoundHint, envDrivenRuntimeExecutables, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
+import { appendFrontendModuleNotFoundHint, envDrivenRuntimeExecutables, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables, runtimeInstallTargetsForTools } from "../lib/deploymentRuntimeTools.js";
 import {
   deploymentRecoveryAttempts,
   isRecoverableHealthFailure,
@@ -1790,35 +1790,6 @@ async function assertRuntimeToolsInstalled(deploymentId: string, releaseId: stri
   let missing = toolsResult.items.filter((tool) => !tool.installed).map((tool) => tool.name);
   if (missing.length === 0) return;
 
-  const approvalTargets = runtimeInstallTargetsForMissingExecutables(missing);
-  const autoInstalled: string[] = [];
-  const autoInstallFailures: Array<{ tool: string; error: string }> = [];
-
-  for (const target of approvalTargets) {
-    try {
-      const installResult = await runStep(deploymentId, releaseId, "PREFLIGHT", `Auto-install ${target.tool}`, () =>
-        sysagent.deploymentInstallRuntimeTool({ tool: target.tool })
-      );
-      assertLiveResult(installResult, `Auto-install ${target.tool}`);
-      autoInstalled.push(target.tool);
-    } catch (error) {
-      autoInstallFailures.push({ tool: target.tool, error: error instanceof Error ? error.message : String(error) });
-      await writeLog(deploymentId, releaseId, "PREFLIGHT", `Auto-install ${target.tool} failed; Doctor approval will be queued`, {
-        actionKey: target.actionKey,
-        error: error instanceof Error ? error.message : String(error)
-      }, "warn");
-    }
-  }
-
-  if (autoInstalled.length > 0 || autoInstallFailures.length > 0) {
-    toolsResult = await inspectTools();
-    missing = toolsResult.items.filter((tool) => !tool.installed).map((tool) => tool.name);
-    if (missing.length === 0) {
-      await writeLog(deploymentId, releaseId, "PREFLIGHT", "Runtime tools auto-installed", { tools: autoInstalled });
-      return;
-    }
-  }
-
   const remainingApprovalTargets = runtimeInstallTargetsForMissingExecutables(missing);
   for (const target of remainingApprovalTargets) {
     const existing = await prisma.deploymentDoctorApproval.findFirst({
@@ -1841,7 +1812,7 @@ async function assertRuntimeToolsInstalled(deploymentId: string, releaseId: stri
   }
 
   throw new Error(
-    `Missing runtime tools on the server: ${missing.join(", ")}. Auto-install could not finish everything. Pending repair approvals were created for installable tools. Open Deployment Doctor, approve the remaining installs, then redeploy.${autoInstallFailures.length ? ` Auto-install failures: ${autoInstallFailures.map((item) => `${item.tool}: ${item.error}`).join("; ")}` : ""}`
+    `Missing runtime tools on the server: ${missing.join(", ")}. Installation requires explicit approval. Open the deployment runtime review modal or Deployment Doctor, approve the installs, then redeploy.`
   );
 }
 
@@ -1852,6 +1823,7 @@ function envRuntimeTools(envVars: Record<string, string>) {
 async function assertEnvRuntimeToolsInstalled(deploymentId: string, releaseId: string | undefined, envVars: Record<string, string>) {
   const requiredTools = envRuntimeTools(envVars);
   if (requiredTools.length === 0) return;
+  if (requiredTools.includes("php-ext-swoole") && !requiredTools.includes("php")) requiredTools.unshift("php");
   await writeLog(deploymentId, releaseId, "PREFLIGHT", "Env-driven runtime requirements detected", { tools: requiredTools });
 
   const inspectTools = async () =>
@@ -1859,38 +1831,18 @@ async function assertEnvRuntimeToolsInstalled(deploymentId: string, releaseId: s
       sysagent.deploymentRuntimeTools({ tools: requiredTools })
     );
 
-  let toolsResult = await inspectTools();
-  let missing = toolsResult.items.filter((tool) => !tool.installed).map((tool) => tool.name);
+  const toolsResult = await inspectTools();
+  const missing = toolsResult.items.filter((tool) => !tool.installed).map((tool) => tool.name);
   if (missing.length === 0) return;
 
   const approvalTargets = runtimeInstallTargetsForMissingExecutables(missing);
-  const autoInstalled: string[] = [];
-  const autoInstallFailures: Array<{ tool: string; error: string }> = [];
+  const phpVersion = toolsResult.items.find((tool) => tool.name === "php")?.version ?? "0.0";
+  const [phpMajor = 0, phpMinor = 0] = phpVersion.split(".").map(Number);
+  if (missing.includes("php-ext-swoole") && (phpMajor < 8 || (phpMajor === 8 && phpMinor < 2))) {
+    approvalTargets.unshift(...runtimeInstallTargetsForTools(["php82"]));
+  }
 
   for (const target of approvalTargets) {
-    try {
-      const installResult = await runStep(deploymentId, releaseId, "PREFLIGHT", `Auto-install env runtime ${target.tool}`, () =>
-        sysagent.deploymentInstallRuntimeTool({ tool: target.tool })
-      );
-      assertLiveResult(installResult, `Auto-install env runtime ${target.tool}`);
-      autoInstalled.push(target.tool);
-    } catch (error) {
-      autoInstallFailures.push({ tool: target.tool, error: error instanceof Error ? error.message : String(error) });
-      await writeLog(deploymentId, releaseId, "PREFLIGHT", `Auto-install env runtime ${target.tool} failed; Doctor approval will be queued`, {
-        actionKey: target.actionKey,
-        error: error instanceof Error ? error.message : String(error)
-      }, "warn");
-    }
-  }
-
-  toolsResult = await inspectTools();
-  missing = toolsResult.items.filter((tool) => !tool.installed).map((tool) => tool.name);
-  if (missing.length === 0) {
-    await writeLog(deploymentId, releaseId, "PREFLIGHT", "Env runtime tools auto-installed", { tools: autoInstalled });
-    return;
-  }
-
-  for (const target of runtimeInstallTargetsForMissingExecutables(missing)) {
     await ensureDoctorApprovalExists(deploymentId, {
       actionKey: target.actionKey,
       label: target.label,
@@ -1900,7 +1852,7 @@ async function assertEnvRuntimeToolsInstalled(deploymentId: string, releaseId: s
   }
 
   throw new Error(
-    `Missing env-driven runtime tools on the server: ${missing.join(", ")}. Auto-install could not finish everything. Pending repair approvals were created for installable tools. Open Deployment Doctor, approve the remaining installs, then redeploy.${autoInstallFailures.length ? ` Auto-install failures: ${autoInstallFailures.map((item) => `${item.tool}: ${item.error}`).join("; ")}` : ""}`
+    `Missing env-driven runtime tools on the server: ${missing.join(", ")}. Installation requires explicit approval. Open the deployment runtime review modal or Deployment Doctor, approve the installs, then redeploy.`
   );
 }
 

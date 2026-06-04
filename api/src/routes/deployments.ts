@@ -8,7 +8,7 @@ import { env } from "../config/env.js";
 import { deployQueue } from "../jobs/queues.js";
 import { laravelPublicCwdMissing, nginxProxyMissingDomainFailure, nodePackageBinaryMissing, supervisorStartStillStarting } from "../lib/deploymentFailureRuntimeRepairs.js";
 import { detectComposerPlatformIssue, detectFrontendModuleNotFound, formatFrontendModuleNotFoundMessage, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
-import { deploymentRuntimeReview, installDeploymentRuntimeTools } from "../lib/deploymentRuntimeReview.js";
+import { deploymentRuntimeReview, prepareDeploymentRuntimeTools } from "../lib/deploymentRuntimeReview.js";
 import { audit } from "../lib/audit.js";
 import { githubApiErrorMessage, isGithubWebhookPermissionError } from "../lib/githubApiErrors.js";
 import { deploymentHasLaravelPublicIndex, detectDeploymentFiles, detectDeploymentSource, findDeploymentAppRoot } from "../lib/deploymentDetection.js";
@@ -2643,16 +2643,11 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const body = runtimeInstallSelectionSchema.parse(request.body ?? {});
     const deployment = await findDeployment(deploymentId);
-    if (body.approvedRuntimeTools.length) {
-      const install = await installDeploymentRuntimeTools(body.approvedRuntimeTools);
-      if (install.failed.length) {
-        return reply.code(400).send({
-          error: `Selected runtime install failed: ${install.failed.map((item) => `${item.tool}: ${item.error ?? item.result?.stderr ?? item.result?.stdout ?? "install failed"}`).join("; ")}`,
-          install
-        });
-      }
-      await addLog(deployment.id, "PREFLIGHT", "Approved runtime tools installed before deployment", undefined, install as unknown as Prisma.InputJsonObject);
+    const runtime = await prepareDeploymentRuntimeTools(deployment, body.approvedRuntimeTools);
+    if (!runtime.ready) {
+      return reply.code(409).send({ error: "Required server runtime tools need approval before deployment.", runtimeReview: runtime.review, install: runtime.install });
     }
+    if (runtime.install) await addLog(deployment.id, "PREFLIGHT", "Approved runtime tools installed before deployment", undefined, runtime.install as unknown as Prisma.InputJsonObject);
     const release = await prisma.deploymentRelease.create({
       data: {
         deploymentId: deployment.id,
@@ -2674,16 +2669,11 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const body = runtimeInstallSelectionSchema.parse(request.body ?? {});
     const deployment = await findDeployment(deploymentId);
-    if (body.approvedRuntimeTools.length) {
-      const install = await installDeploymentRuntimeTools(body.approvedRuntimeTools);
-      if (install.failed.length) {
-        return reply.code(400).send({
-          error: `Selected runtime install failed: ${install.failed.map((item) => `${item.tool}: ${item.error ?? item.result?.stderr ?? item.result?.stdout ?? "install failed"}`).join("; ")}`,
-          install
-        });
-      }
-      await addLog(deployment.id, "PREFLIGHT", "Approved runtime tools installed before redeploy", undefined, install as unknown as Prisma.InputJsonObject);
+    const runtime = await prepareDeploymentRuntimeTools(deployment, body.approvedRuntimeTools);
+    if (!runtime.ready) {
+      return reply.code(409).send({ error: "Required server runtime tools need approval before redeploy.", runtimeReview: runtime.review, install: runtime.install });
     }
+    if (runtime.install) await addLog(deployment.id, "PREFLIGHT", "Approved runtime tools installed before redeploy", undefined, runtime.install as unknown as Prisma.InputJsonObject);
     const queue = await enqueueDeployAction(deployment.id, "redeploy");
     return reply.code(202).send(queue);
   });
@@ -2712,15 +2702,12 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
       const body = runtimeInstallSelectionSchema.parse(request.body ?? {});
       const deployment = await findDeployment(deploymentId);
-      if (action !== "stop" && body.approvedRuntimeTools.length) {
-        const install = await installDeploymentRuntimeTools(body.approvedRuntimeTools);
-        if (install.failed.length) {
-          return reply.code(400).send({
-            error: `Selected runtime install failed: ${install.failed.map((item) => `${item.tool}: ${item.error ?? item.result?.stderr ?? item.result?.stdout ?? "install failed"}`).join("; ")}`,
-            install
-          });
+      if (action !== "stop") {
+        const runtime = await prepareDeploymentRuntimeTools(deployment, body.approvedRuntimeTools);
+        if (!runtime.ready) {
+          return reply.code(409).send({ error: `Required server runtime tools need approval before ${action}.`, runtimeReview: runtime.review, install: runtime.install });
         }
-        await addLog(deployment.id, "PREFLIGHT", "Approved runtime tools installed before lifecycle action", undefined, install as unknown as Prisma.InputJsonObject);
+        if (runtime.install) await addLog(deployment.id, "PREFLIGHT", "Approved runtime tools installed before lifecycle action", undefined, runtime.install as unknown as Prisma.InputJsonObject);
       }
       const nextStatus = action === "stop" ? "STOPPED" : "DEPLOYING";
       await prisma.deployment.update({

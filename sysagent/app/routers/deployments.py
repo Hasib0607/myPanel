@@ -1648,7 +1648,11 @@ def inspect_runtime_tool(name: str) -> dict:
         return {"name": name, "installed": installed, "path": path}
 
     path = shutil.which(name)
-    return {"name": name, "installed": bool(path), "path": path}
+    result = {"name": name, "installed": bool(path), "path": path}
+    if name == "php" and path:
+        version = _run_probe(["php", "-r", "echo PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION;"])
+        result["version"] = version.stdout.strip() if version and version.returncode == 0 else None
+    return result
 
 
 def _python_version(root_path: str, executable: str) -> dict:

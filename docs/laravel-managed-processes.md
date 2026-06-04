@@ -20,6 +20,8 @@ Deploy and restart actions issue `php artisan queue:restart` and `php artisan ho
 - `HORIZON_ENABLED=true` enables Horizon.
 - `REVERB_APP_ID`, `REVERB_HOST`, or `BROADCAST_CONNECTION=reverb` enables Reverb.
 - Runtime review still requires approval before installing missing Swoole/OpenSwoole or Redis packages.
+- Deploy/start/restart actions never install missing runtime packages silently. The panel shows a review modal, and the API blocks queueing until all required selected installs succeed.
+- Swoole/OpenSwoole requires PHP 8.2 or newer. When an older PHP CLI is detected, runtime review includes the PHP 8.2 switch before the Swoole extension install.
 
 ## Queue autoscaling
 

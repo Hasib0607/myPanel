@@ -25,6 +25,14 @@ type DatabaseOverview = {
 };
 type AccountInfo = { account?: { homeRoot?: string }; fileRoot?: string; homeRoot?: string };
 type LogType = "build" | "running";
+type RuntimeInstallTarget = { actionKey: string; tool: string; label: string; command: string; reason: string; executables: string[] };
+type RuntimeReview = { required: string[]; installed: string[]; missing: string[]; installable: RuntimeInstallTarget[]; blocked: string[]; needsApproval: boolean; phpVersion?: string | null };
+type RuntimeModalState = {
+  deployment: Deployment;
+  action: "deploy" | "start" | "restart";
+  review: RuntimeReview;
+  selected: Record<string, boolean>;
+};
 
 type Draft = {
   name: string;
@@ -273,6 +281,7 @@ export function DeploymentsClient({
   const [logTitle, setLogTitle] = useState("");
   const [notice, setNotice] = useState("");
   const [revealedEnvValues, setRevealedEnvValues] = useState<Record<string, string>>({});
+  const [runtimeModal, setRuntimeModal] = useState<RuntimeModalState | null>(null);
 
   const deployments = useQuery({
     queryKey: ["deployments", apiBase, search, statusFilter, sourceFilter],
@@ -366,8 +375,9 @@ export function DeploymentsClient({
   });
 
   const action = useMutation({
-    mutationFn: ({ deployment, name }: { deployment: Deployment; name: "deploy" | "start" | "stop" | "restart" }) => apiPost<QueueResponse>(`${apiBase}/${deployment.slug}/${name}`, {}),
+    mutationFn: ({ deployment, name, approvedRuntimeTools = [] }: { deployment: Deployment; name: "deploy" | "start" | "stop" | "restart"; approvedRuntimeTools?: string[] }) => apiPost<QueueResponse>(`${apiBase}/${deployment.slug}/${name}`, { approvedRuntimeTools }),
     onSuccess: async (result, variables) => {
+      setRuntimeModal(null);
       const queued = result.queue?.queued;
       const reason = result.queue?.reason ?? result.reason;
       const dryRun = result.queue?.dryRun ?? result.dryRun;
@@ -384,6 +394,30 @@ export function DeploymentsClient({
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Action failed")
   });
+
+  const startDeploymentAction = async (deployment: Deployment, name: "deploy" | "start" | "stop" | "restart") => {
+    if (name === "stop") {
+      action.mutate({ deployment, name });
+      return;
+    }
+    setNotice("Checking required server runtime packages...");
+    try {
+      const review = await apiGet<RuntimeReview>(`${apiBase}/${deployment.slug}/runtime-review`);
+      if (!review.missing.length) {
+        action.mutate({ deployment, name });
+        return;
+      }
+      setRuntimeModal({
+        deployment,
+        action: name,
+        review,
+        selected: Object.fromEntries(review.installable.map((item) => [item.tool, true]))
+      });
+      setNotice("");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not check runtime packages.");
+    }
+  };
 
   const guardianFix = useMutation({
     mutationFn: (deployment: Deployment) => apiPost<any>(`${apiBase}/${deployment.slug}/doctor/repair`, { action: "auto" }),
@@ -690,7 +724,7 @@ export function DeploymentsClient({
                   </div>
                   <div className="flex flex-wrap justify-end gap-2">
                     {(["deploy", "start", "stop", "restart"] as const).map((name) => (
-                      <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium hover:bg-slate-50 disabled:opacity-50" disabled={action.isPending} key={name} onClick={() => action.mutate({ deployment: selected, name })} type="button">
+                      <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium hover:bg-slate-50 disabled:opacity-50" disabled={action.isPending} key={name} onClick={() => startDeploymentAction(selected, name)} type="button">
                         {name === "deploy" ? <Play size={15} /> : name === "stop" ? <Square size={15} /> : actionIcon(name)}{name}
                       </button>
                     ))}
@@ -731,6 +765,19 @@ export function DeploymentsClient({
       {editingOpen ? <ProjectModal title="Edit Project" draft={editDraft} setDraft={setEditDraft} domains={domainOptions(domains.data?.items ?? [])} databaseOverview={databaseOverview.data} notice={notice} onClose={() => setEditingOpen(false)} onDetect={() => detect.mutate("edit")} onSubmit={() => updateDeployment.mutate()} submitLabel="Save changes" busy={updateDeployment.isPending} openGithub={() => enableGithub ? setRepoPickerOpen(true) : undefined} enableGithub={enableGithub} /> : null}
       {enableGithub && repoPickerOpen ? <GithubModal repos={repos.data} loading={repos.isLoading} repoSearch={repoSearch} setRepoSearch={setRepoSearch} connection={githubConnection.data} githubToken={githubToken} setGithubToken={setGithubToken} githubUsername={githubUsername} setGithubUsername={setGithubUsername} saveToken={() => saveGithubToken.mutate()} savingToken={saveGithubToken.isPending} onClose={() => setRepoPickerOpen(false)} onDeploy={(repo) => selectGithubRepo.mutate(repo)} deploying={selectGithubRepo.isPending} /> : null}
       {logModalOpen ? <LogsModal title={logTitle} text={logText} onCopy={copyLogText} onClose={() => setLogModalOpen(false)} /> : null}
+      {runtimeModal ? (
+        <RuntimeInstallModal
+          busy={action.isPending}
+          modal={runtimeModal}
+          onChange={setRuntimeModal}
+          onClose={() => setRuntimeModal(null)}
+          onContinue={() => action.mutate({
+            deployment: runtimeModal.deployment,
+            name: runtimeModal.action,
+            approvedRuntimeTools: Object.entries(runtimeModal.selected).filter(([, enabled]) => enabled).map(([tool]) => tool)
+          })}
+        />
+      ) : null}
     </section>
   );
 }
@@ -1392,6 +1439,62 @@ function SettingsPanel({ deployment, deleteText, setDeleteText, onEdit, onDelete
 
 function GithubModal({ repos, loading, repoSearch, setRepoSearch, connection, githubToken, setGithubToken, githubUsername, setGithubUsername, saveToken, savingToken, onClose, onDeploy, deploying }: { repos?: GithubRepoResponse; loading: boolean; repoSearch: string; setRepoSearch: (value: string) => void; connection?: { connected: boolean; username: string | null }; githubToken: string; setGithubToken: (value: string) => void; githubUsername: string; setGithubUsername: (value: string) => void; saveToken: () => void; savingToken?: boolean; onClose: () => void; onDeploy: (repo: GithubRepo) => void; deploying?: boolean }) {
   return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-6"><div className="flex max-h-[82vh] w-full max-w-3xl flex-col rounded-md border border-panel-line bg-white shadow-xl"><div className="flex items-center justify-between border-b border-panel-line p-4"><div><div className="flex items-center gap-2 text-sm font-semibold"><Github size={17} />GitHub Projects</div><div className="mt-1 text-xs text-panel-muted">Select a repository to auto-detect and deploy.</div></div><button className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line" onClick={onClose} type="button"><X size={16} /></button></div><div className="border-b border-panel-line p-4"><div className="relative"><Search className="absolute left-3 top-2.5 text-panel-muted" size={15} /><input className="h-9 w-full rounded-md border border-panel-line pl-9 pr-3 text-sm" onChange={(event) => setRepoSearch(event.target.value)} placeholder="Search GitHub repositories" value={repoSearch} /></div>{!connection?.connected ? <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3"><div className="text-xs font-semibold text-amber-900">Connect GitHub token</div><div className="mt-3 grid grid-cols-[1fr_2fr_auto] gap-2"><input className="h-9 rounded-md border border-amber-200 bg-white px-3 text-sm" onChange={(event) => setGithubUsername(event.target.value)} placeholder="username" value={githubUsername} /><input className="h-9 rounded-md border border-amber-200 bg-white px-3 text-sm" onChange={(event) => setGithubToken(event.target.value)} placeholder="github_pat_..." type="password" value={githubToken} /><button className="h-9 rounded-md bg-slate-900 px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={!githubToken || savingToken} onClick={saveToken} type="button">Connect</button></div></div> : <div className="mt-2 text-xs text-emerald-700">Connected{connection.username ? ` as ${connection.username}` : ""}.</div>}{repos?.dryRun ? <div className="mt-2 text-xs text-amber-700">GitHub token is not connected; showing dry-run placeholder repositories.</div> : null}</div><div className="min-h-0 flex-1 overflow-auto p-2">{loading ? <div className="p-8 text-center text-sm text-panel-muted">Loading repositories...</div> : null}{(repos?.items ?? []).map((repo) => <button className="flex w-full items-center justify-between gap-4 rounded-md px-3 py-3 text-left hover:bg-slate-50 disabled:opacity-60" disabled={deploying} key={repo.fullName} onClick={() => onDeploy(repo)} type="button"><span className="min-w-0"><span className="block truncate text-sm font-semibold text-panel-ink">{repo.fullName}</span><span className="mt-1 block text-xs text-panel-muted">{repo.private ? "private" : "public"} · {repo.defaultBranch}</span></span><span className="flex h-8 shrink-0 items-center gap-2 rounded-md bg-panel-accent px-3 text-xs font-semibold text-white"><Play size={13} />deploy</span></button>)}{!loading && (repos?.items ?? []).length === 0 ? <div className="p-8 text-center text-sm text-panel-muted">No repositories found.</div> : null}</div></div></div>;
+}
+
+function RuntimeInstallModal({
+  modal,
+  busy,
+  onChange,
+  onClose,
+  onContinue
+}: {
+  modal: RuntimeModalState;
+  busy: boolean;
+  onChange: (modal: RuntimeModalState) => void;
+  onClose: () => void;
+  onContinue: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
+      <div className="max-h-[90vh] w-full max-w-2xl overflow-auto rounded-2xl bg-white shadow-xl">
+        <div className="border-b border-panel-line p-5">
+          <h2 className="text-xl font-bold text-panel-ink">Review required server packages</h2>
+          <p className="mt-1 text-sm text-panel-muted">
+            {modal.deployment.name} is missing runtime tools before {modal.action}. Select the packages you approve, then continue.
+          </p>
+          {modal.review.phpVersion ? <p className="mt-2 text-xs font-medium text-panel-muted">Current server PHP: {modal.review.phpVersion}</p> : null}
+        </div>
+        <div className="space-y-3 p-5">
+          {modal.review.installable.map((item) => (
+            <label className="flex cursor-pointer items-start justify-between gap-4 rounded-lg border border-panel-line p-4 hover:bg-slate-50" key={item.tool}>
+              <div>
+                <div className="font-semibold text-panel-ink">{item.label}</div>
+                <div className="mt-1 text-sm text-panel-muted">{item.reason}</div>
+                <div className="mt-2 font-mono text-xs text-panel-muted">{item.command}</div>
+              </div>
+              <input
+                checked={modal.selected[item.tool] ?? false}
+                className="mt-1 h-5 w-5"
+                onChange={(event) => onChange({ ...modal, selected: { ...modal.selected, [item.tool]: event.target.checked } })}
+                type="checkbox"
+              />
+            </label>
+          ))}
+          {modal.review.blocked.length ? (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+              Not auto-installable: {modal.review.blocked.join(", ")}. Deployment remains blocked until these tools are installed.
+            </div>
+          ) : null}
+        </div>
+        <div className="flex justify-end gap-2 border-t border-panel-line p-5">
+          <button className="rounded-md border border-panel-line px-4 py-2 text-sm font-medium hover:bg-slate-50" onClick={onClose} type="button">Cancel</button>
+          <button className="rounded-md bg-panel-accent px-4 py-2 text-sm font-semibold text-white disabled:opacity-60" disabled={busy || modal.review.installable.length === 0} onClick={onContinue} type="button">
+            Install selected and continue
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function LogsModal({ title, text, onCopy, onClose }: { title: string; text: string; onCopy: () => Promise<void> | void; onClose: () => void }) {

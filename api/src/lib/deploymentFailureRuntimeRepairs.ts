@@ -1,4 +1,4 @@
-import { detectFrontendModuleNotFound, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables, type RuntimeInstallTarget } from "./deploymentRuntimeTools.js";
+import { detectFrontendModuleNotFound, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables, runtimeInstallTargetsForTools, type RuntimeInstallTarget } from "./deploymentRuntimeTools.js";
 
 function uniqueRuntimeTargets(targets: RuntimeInstallTarget[]) {
   const seen = new Set<string>();
@@ -72,6 +72,9 @@ export function runtimeTargetsForFailedDeploymentLog(text: string) {
   const lower = text.toLowerCase();
   const missingTools = new Set<string>();
   const targets: RuntimeInstallTarget[] = [];
+  if ((lower.includes("swoole") || lower.includes("openswoole")) && (lower.includes("requires php") || lower.includes("require php version 8.2 or later"))) {
+    targets.push(...runtimeInstallTargetsForTools(["php82", "php-swoole"]));
+  }
 
   targets.push(...runtimeInstallTargetsForComposerPlatformIssue(text));
 

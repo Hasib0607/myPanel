@@ -70,7 +70,13 @@ RHEL_PHP_REDIS_BUILD_PACKAGES = ("php-pear", "php-devel", "gcc", "make")
 PHP_REDIS_EXTENSION_LOADED_COMMAND = ("sh", "-lc", "php -m 2>/dev/null | grep -qi '^redis$'")
 PHP_REDIS_PECL_INSTALL_COMMAND = ("sh", "-lc", "printf '\\n' | pecl install -f redis && echo 'extension=redis.so' > /etc/php.d/50-redis.ini")
 PHP_SWOOLE_EXTENSION_LOADED_COMMAND = ("sh", "-lc", "php -m 2>/dev/null | grep -Eqi '^(swoole|openswoole)$'")
-PHP_SWOOLE_PECL_INSTALL_COMMAND = ("sh", "-lc", "printf '\\n' | pecl install -f openswoole || printf '\\n' | pecl install -f swoole")
+PHP_SWOOLE_PECL_INSTALL_COMMAND = (
+    "sh",
+    "-lc",
+    "pecl channel-update pecl.php.net >/dev/null 2>&1 || true; "
+    "php -r 'exit(PHP_VERSION_ID >= 80200 ? 0 : 1);' || { echo 'Swoole requires PHP 8.2 or newer'; exit 1; }; "
+    "printf '\\n' | pecl install -f openswoole || printf 'no\\nno\\nno\\nno\\nno\\nno\\nno\\nno\\nno\\nno\\nno\\nno\\nno\\nno\\nno\\nno\\nno\\n' | pecl install -f swoole",
+)
 PHP_SODIUM_EXTENSION_LOADED_COMMAND = ("sh", "-lc", "php -m 2>/dev/null | grep -qi '^sodium$'")
 DEBIAN_DOVECOT_PACKAGES = ("dovecot-core", "dovecot-imapd", "dovecot-lmtpd")
 RHEL_DOVECOT_PACKAGES = ("dovecot",)
@@ -900,7 +906,7 @@ def php_redis_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallP
 
 def php_swoole_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
     family = _resolve_family(info)
-    php_ini_dir = "/etc/php.d" if family is OsFamily.RHEL else "/etc/php/8.2/cli/conf.d"
+    php_ini_dir = "/etc/php.d" if family is OsFamily.RHEL else "$(php --ini | sed -n 's|Scan for additional .ini files in: ||p' | head -n1)"
     return PackageInstallPlan(
         key="php_swoole",
         packages=("php-swoole",),
@@ -920,7 +926,7 @@ def php_swoole_install_plan(info: OsReleaseInfo | None = None) -> PackageInstall
             ),
             InstallStep(
                 "Install OpenSwoole/Swoole extension with PECL",
-                ("sh", "-lc", f"{PHP_SWOOLE_PECL_INSTALL_COMMAND[2]} && mkdir -p {php_ini_dir} && (php -m | grep -qi '^openswoole$' && echo 'extension=openswoole.so' > {php_ini_dir}/50-openswoole.ini || echo 'extension=swoole.so' > {php_ini_dir}/50-swoole.ini)"),
+                ("sh", "-lc", f"{PHP_SWOOLE_PECL_INSTALL_COMMAND[2]} && php_ini_dir={php_ini_dir} && mkdir -p \"$php_ini_dir\" && (php -m | grep -qi '^openswoole$' && echo 'extension=openswoole.so' > \"$php_ini_dir/50-openswoole.ini\" || echo 'extension=swoole.so' > \"$php_ini_dir/50-swoole.ini\")"),
                 skip_if=PHP_SWOOLE_EXTENSION_LOADED_COMMAND,
             ),
             InstallStep(

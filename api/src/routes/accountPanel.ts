@@ -14,7 +14,7 @@ import { audit } from "../lib/audit.js";
 import { githubApiErrorMessage, isGithubWebhookPermissionError } from "../lib/githubApiErrors.js";
 import { publishDomainDnsZone } from "../lib/domainDnsPublish.js";
 import { detectDeploymentFiles } from "../lib/deploymentDetection.js";
-import { deploymentRuntimeReview, installDeploymentRuntimeTools } from "../lib/deploymentRuntimeReview.js";
+import { deploymentRuntimeReview, prepareDeploymentRuntimeTools } from "../lib/deploymentRuntimeReview.js";
 import { prisma } from "../lib/prisma.js";
 import { resolvePublicA } from "../lib/publicDns.js";
 import { deleteSecret, getSecret, putSecret } from "../lib/secrets.js";
@@ -1920,22 +1920,21 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     }).parse(request.params);
     const body = runtimeInstallSelectionSchema.parse(request.body ?? {});
     const deployment = await findAccountDeployment(request, params.deploymentId);
-    if (["deploy", "redeploy", "start", "restart"].includes(params.action) && body.approvedRuntimeTools.length) {
-      const install = await installDeploymentRuntimeTools(body.approvedRuntimeTools);
-      if (install.failed.length) {
-        return reply.code(400).send({
-          error: `Selected runtime install failed: ${install.failed.map((item) => `${item.tool}: ${item.error ?? item.result?.stderr ?? item.result?.stdout ?? "install failed"}`).join("; ")}`,
-          install
+    if (["deploy", "redeploy", "start", "restart"].includes(params.action)) {
+      const runtime = await prepareDeploymentRuntimeTools(deployment, body.approvedRuntimeTools);
+      if (!runtime.ready) {
+        return reply.code(409).send({ error: `Required server runtime tools need approval before ${params.action}.`, runtimeReview: runtime.review, install: runtime.install });
+      }
+      if (runtime.install) {
+        await prisma.deploymentLog.create({
+          data: {
+            deploymentId: deployment.id,
+            step: "PREFLIGHT",
+            message: "Approved runtime tools installed before deployment",
+            metadata: runtime.install as unknown as Prisma.InputJsonObject
+          }
         });
       }
-      await prisma.deploymentLog.create({
-        data: {
-          deploymentId: deployment.id,
-          step: "PREFLIGHT",
-          message: "Approved runtime tools installed before deployment",
-          metadata: install as unknown as Prisma.InputJsonObject
-        }
-      });
     }
     const release = ["deploy", "redeploy"].includes(params.action)
       ? await prisma.deploymentRelease.create({

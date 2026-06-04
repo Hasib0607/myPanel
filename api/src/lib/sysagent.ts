@@ -114,7 +114,7 @@ export const sysagent = {
   deploymentRuntimeLogs: (body: unknown) =>
     request<{ ok: boolean; logDir?: string; stdout: string; stderr: string; laravel?: string; text: string; error?: string }>("/deployments/runtime-logs", { method: "POST", body: JSON.stringify(body) }),
   deploymentRuntimeTools: (body: unknown) =>
-    request<{ items: Array<{ name: string; installed: boolean; path?: string | null }> }>("/deployments/runtime-tools", { method: "POST", body: JSON.stringify(body) }),
+    request<{ items: Array<{ name: string; installed: boolean; path?: string | null; version?: string | null }> }>("/deployments/runtime-tools", { method: "POST", body: JSON.stringify(body) }),
   deploymentInstallRuntimeTool: (body: unknown) =>
     request<SysagentCommandResult>("/deployments/runtime-tools/install", { method: "POST", body: JSON.stringify(body) }),
   deploymentRepairPermissions: (body: unknown) =>
