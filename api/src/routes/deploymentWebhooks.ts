@@ -300,20 +300,40 @@ export const deploymentWebhookRoutes: FastifyPluginAsync = async (app) => {
     const [owner, repo] = payload.repository.full_name.split("/");
     const branch = githubBranch(payload.ref);
 
-    const deployments = await prisma.deployment.findMany({
+    const candidateDeployments = await prisma.deployment.findMany({
       where: {
         autoDeployEnabled: true,
         sourceProvider: "GITHUB",
         githubOwner: { equals: owner, mode: "insensitive" },
-        githubRepo: { equals: repo, mode: "insensitive" },
-        branch
+        githubRepo: { equals: repo, mode: "insensitive" }
       }
     });
+    const deployments = candidateDeployments.filter((deployment) => deployment.branch === branch);
 
     const results = [];
+    for (const deployment of candidateDeployments.filter((candidate) => candidate.branch !== branch)) {
+      await addWebhookLog(deployment.id, `Ignored GitHub push for ${payload.repository.full_name}@${branch} because deployment listens to ${deployment.branch}`, {
+        receivedBranch: branch,
+        configuredBranch: deployment.branch,
+        repository: payload.repository.full_name,
+        commitSha: payload.after ?? null
+      });
+      results.push({
+        deployment: deployment.slug,
+        queued: false,
+        ignored: true,
+        reason: `Branch mismatch: received ${branch}, configured ${deployment.branch}`
+      });
+    }
+
     for (const deployment of deployments) {
       const secret = await getSecret(webhookSecretRef(deployment.slug));
       if (!secret || !deployment.webhookSecretHash) {
+        await addWebhookLog(deployment.id, "Rejected GitHub push webhook because webhook secret is not configured", {
+          branch,
+          repository: payload.repository.full_name,
+          commitSha: payload.after ?? null
+        });
         results.push({ deployment: deployment.slug, queued: false, ignored: true, reason: "Webhook secret is not configured" });
         continue;
       }
@@ -369,6 +389,7 @@ export const deploymentWebhookRoutes: FastifyPluginAsync = async (app) => {
       repository: payload.repository.full_name,
       branch,
       matched: deployments.length,
+      candidates: candidateDeployments.length,
       results
     });
   });
