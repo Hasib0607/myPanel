@@ -641,7 +641,7 @@ async function ensureGithubWebhook(deployment: { id: string; slug: string; githu
   } catch (error) {
     if (isGithubWebhookPermissionError(error)) {
       return {
-        configured: false,
+        configured: true,
         webhookUrl,
         manualSetupRequired: true,
         reason: error instanceof Error ? error.message : "GitHub token cannot manage repository webhooks"
