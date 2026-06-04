@@ -75,6 +75,7 @@ From Deployment Doctor or runtime-tools install:
 - [ ] Laravel zip uploads where the parent has `artisan` but only the nested app has `public/index.php` choose the nested public web root, not backend-only idle mode
 - [ ] Backend-only Laravel deployments without `public/index.php` start as idle Supervisor jobs, report healthy backend-only health instead of `DEGRADED`, skip `php artisan storage:link`, and do not raise public route 502 danger warnings
 - [ ] Linked domains/subdomains serve the deployment while it is `RUNNING`, then restore the file-manager `public_html`/subdomain root after stop, unlink, or missing deployment target without stale Nginx 502 proxy configs
+- [ ] Deployments without a linked domain skip Nginx proxy/SSL configuration, continue on their managed internal port, and never fail with a null domain `name` error
 - [ ] Deployment Doctor/Guardian marks public HTTP 502/503/504 as a repairable failure, rewrites the generated Nginx vhost, and queues restart if the deployment upstream is still unreachable
 - [ ] Deployment Doctor/Guardian identifies Laravel MySQL access-denied crashes, including DB/user case mismatch, host-grant mismatch (`localhost` vs `127.0.0.1`), and password/grant repair needs
 - [ ] Wildcard subdomains like `*.example.com` can be added after the parent domain exists, publish a wildcard DNS/vhost, and use the safe file-manager root `example.com/subdomains/_wildcard`

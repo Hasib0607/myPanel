@@ -42,6 +42,13 @@ export function permissionRepairNeeded(text: string) {
     || ((lower.includes("log") || lower.includes("supervisor")) && lower.includes("no such file or directory"));
 }
 
+export function nginxProxyMissingDomainFailure(text: string) {
+  const lower = text.toLowerCase();
+  return lower.includes("configuring_proxy")
+    && lower.includes("cannot read properties of null")
+    && lower.includes("reading 'name'");
+}
+
 export function runtimeTargetsForFailedDeploymentLog(text: string) {
   const lower = text.toLowerCase();
   const missingTools = new Set<string>();

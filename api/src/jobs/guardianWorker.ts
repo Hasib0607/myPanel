@@ -9,7 +9,7 @@ import { sysagent } from "../lib/sysagent.js";
 import { checkPanelRemoteUpdate } from "../lib/panelUpdateMonitor.js";
 import { deployQueue } from "./queues.js";
 import { requiredRuntimeExecutables, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
-import { laravelPublicCwdMissing, permissionRepairNeeded, pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded } from "../lib/deploymentFailureRuntimeRepairs.js";
+import { laravelPublicCwdMissing, nginxProxyMissingDomainFailure, permissionRepairNeeded, pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded } from "../lib/deploymentFailureRuntimeRepairs.js";
 import path from "node:path";
 
 const staleDeploymentMs = Number(process.env.GUARDIAN_STALE_DEPLOYMENT_MS ?? 15 * 60_000);
@@ -136,16 +136,18 @@ async function guardianApplyFailureRepairs(
   let approvalsCreated = 0;
   const runtimeTargets = runtimeTargetsForFailedDeploymentLog(failureText);
   const publicCwdMissing = laravelPublicCwdMissing(failureText);
+  const proxyMissingDomain = nginxProxyMissingDomainFailure(failureText);
 
   await prisma.deploymentLog.create({
     data: {
       deploymentId: deployment.id,
       step: "PREFLIGHT",
-      level: runtimeTargets.length || publicCwdMissing || supervisorRepairNeeded(failureText) || permissionRepairNeeded(failureText) || pythonRuntimeRepairNeeded(failureText) ? "warn" : "info",
+      level: runtimeTargets.length || publicCwdMissing || proxyMissingDomain || supervisorRepairNeeded(failureText) || permissionRepairNeeded(failureText) || pythonRuntimeRepairNeeded(failureText) ? "warn" : "info",
       message: "Guardian parsed failed deployment logs",
       metadata: {
         runtimeTargets: runtimeTargets.map((target) => target.actionKey),
         laravelPublicCwdMissing: publicCwdMissing,
+        nginxProxyMissingDomain: proxyMissingDomain,
         supervisorRepair: supervisorRepairNeeded(failureText),
         permissionRepair: permissionRepairNeeded(failureText),
         pythonRuntimeRepair: pythonRuntimeRepairNeeded(failureText),
@@ -317,7 +319,7 @@ async function guardianApplyFailureRepairs(
     }
   }
 
-  return { identified: runtimeTargets.length > 0 || publicCwdMissing || supervisorRepairNeeded(failureText) || permissionRepairNeeded(failureText) || pythonRuntimeRepairNeeded(failureText), applied, approvalsCreated };
+  return { identified: runtimeTargets.length > 0 || publicCwdMissing || proxyMissingDomain || supervisorRepairNeeded(failureText) || permissionRepairNeeded(failureText) || pythonRuntimeRepairNeeded(failureText), applied, approvalsCreated };
 }
 
 async function queueGuardianDeployRepair(deployment: Awaited<ReturnType<typeof prisma.deployment.findMany>>[number], action: "restart" | "deploy", reason: string) {

@@ -3230,36 +3230,41 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       releaseId,
       "before nginx proxy and SSL"
     ).catch(() => undefined);
-    const serverName = deploymentServerName(domain);
     let proxyHttpsReady = false;
     if (domain) {
       const tlsSync = await syncDeploymentTlsWithCertificate(domain);
       domain = tlsSync.domain;
       proxyHttpsReady = tlsSync.httpsReady;
+      const serverName = deploymentServerName(domain);
+      const nginxResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config", async () =>
+        sysagent.deploymentNginx(
+          buildDeploymentNginxRequest({
+            deploymentId: deployment.id,
+            fqdn: serverName ?? domain!.name,
+            upstreamPort: deployment.port,
+            rootPath: appPath,
+            framework: deployment.framework,
+            startCommand: deployment.startCommand,
+            publicDirectory: deployment.publicDirectory,
+            outputDirectory: deployment.outputDirectory,
+            fallbackRootPath: deploymentFallbackRootPath(domain),
+            forceSsl: proxyHttpsReady,
+            ...(await deploymentSslCertificatePathsWhenReady(domain))
+          })
+        )
+      );
+      assertLiveResult((nginxResult as { write?: unknown }).write, "Nginx proxy config write");
+      assertLiveResult((nginxResult as { enable?: unknown }).enable, "Nginx proxy config enable");
+      assertLiveResult((nginxResult as { test?: unknown }).test, "Nginx config test");
+      assertLiveResult((nginxResult as { reload?: unknown }).reload, "Nginx reload");
+    } else {
+      await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config skipped", {
+        reason: "No linked domain; deployment will remain reachable through its managed internal port."
+      });
     }
-    const nginxResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config", async () =>
-      sysagent.deploymentNginx(
-        buildDeploymentNginxRequest({
-          deploymentId: deployment.id,
-          fqdn: serverName ?? domain!.name,
-          upstreamPort: deployment.port,
-          rootPath: appPath,
-          framework: deployment.framework,
-          startCommand: deployment.startCommand,
-          publicDirectory: deployment.publicDirectory,
-          outputDirectory: deployment.outputDirectory,
-          fallbackRootPath: deploymentFallbackRootPath(domain),
-          forceSsl: proxyHttpsReady,
-          ...(await deploymentSslCertificatePathsWhenReady(domain))
-        })
-      )
-    );
-    assertLiveResult((nginxResult as { write?: unknown }).write, "Nginx proxy config write");
-    assertLiveResult((nginxResult as { enable?: unknown }).enable, "Nginx proxy config enable");
-    assertLiveResult((nginxResult as { test?: unknown }).test, "Nginx config test");
-    assertLiveResult((nginxResult as { reload?: unknown }).reload, "Nginx reload");
 
     if (domain && !proxyHttpsReady) {
+      const serverName = deploymentServerName(domain);
       await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Prepare ACME webroot", () => ensureAcmeWebroot(domain));
       const includeWww = await wwwPointsToThisVps(domain);
       const sslJob = await sslQueue.add("issue", {
@@ -3327,6 +3332,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     }
 
     if (domain) {
+      const serverName = deploymentServerName(domain);
       const tlsSync = await syncDeploymentTlsWithCertificate(domain);
       const activeDomain = tlsSync.domain ?? domain;
       domain = activeDomain;
