@@ -89,6 +89,7 @@ From Deployment Doctor or runtime-tools install:
 - [ ] Laravel apps with Vite/Mix/package frontend markers deploy with compiled CSS/JS assets under `public`, and Doctor/Guardian flags missing built assets before declaring the public site healthy
 - [ ] Laravel Mix/Vite `Module not found` / `Can't resolve` errors are reported as missing app source or import-case issues, not server runtime repairs; deploy continues only if built public assets already exist
 - [ ] Laravel public route health parses the rendered HTML and checks first-party CSS/JS/image/font URLs through Nginx, marking the deployment degraded when linked static files 404
+- [ ] Laravel legacy asset URLs beginning with `/public/` serve from the real Laravel `public/` directory; stale sibling-domain `APP_URL`/`ASSET_URL` values are normalized to the linked domain and sibling-domain asset references are included in health checks
 - [ ] Composer lockfiles that reject PHP 8.3 because dependencies allow only `~8.1.0 || ~8.2.0` trigger PHP 8.2 runtime repair instead of a generic composer-update loop
 - [ ] PHP 8.2/8.3 runtime repair does not skip when a newer PHP minor is active; AlmaLinux module packages are distro-synced and the exact requested CLI minor is verified before Composer retries
 - [ ] Install Composer (EPEL or fallback)

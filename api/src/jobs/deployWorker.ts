@@ -838,6 +838,19 @@ function isSameDomainPublicUrl(value: string | null | undefined, domain: BoundDo
   }
 }
 
+function isSiblingDomainPublicUrl(value: string | null | undefined, domain: BoundDomain | null) {
+  if (!value || !domain?.name) return false;
+  try {
+    const parsed = new URL(value);
+    const currentLabels = domain.name.toLowerCase().split(".").filter(Boolean);
+    const valueLabels = parsed.hostname.toLowerCase().split(".").filter(Boolean);
+    if (currentLabels.length < 2 || valueLabels.length < 2) return false;
+    return currentLabels.slice(-2).join(".") === valueLabels.slice(-2).join(".");
+  } catch {
+    return false;
+  }
+}
+
 function deploymentEnvWithPublicUrl(envVars: Record<string, string>, domain: BoundDomain | null, httpsReady = false) {
   const publicEnv: Record<string, string> = deploymentPublicEnv(domain, httpsReady);
   const merged: Record<string, string> = { ...publicEnv, ...envVars };
@@ -846,7 +859,7 @@ function deploymentEnvWithPublicUrl(envVars: Record<string, string>, domain: Bou
 
   for (const [key, publicValue] of Object.entries(publicEnv)) {
     const currentValue = merged[key];
-    if (!currentValue || isLocalhostValue(currentValue) || isSameDomainPublicUrl(currentValue, domain)) {
+    if (!currentValue || isLocalhostValue(currentValue) || isSameDomainPublicUrl(currentValue, domain) || isSiblingDomainPublicUrl(currentValue, domain)) {
       merged[key] = publicValue;
     }
   }
@@ -855,7 +868,7 @@ function deploymentEnvWithPublicUrl(envVars: Record<string, string>, domain: Bou
     const httpsUrl = `https://${domain.name}`;
     for (const key of ["APP_URL", "ASSET_URL", "APP_ORIGIN", "AUTH_URL", "BASE_URL", "PUBLIC_URL", "SITE_URL", "URL"]) {
       const current = merged[key];
-      if (!current || isLocalhostValue(current) || isSameDomainPublicUrl(current, domain)) {
+      if (!current || isLocalhostValue(current) || isSameDomainPublicUrl(current, domain) || isSiblingDomainPublicUrl(current, domain)) {
         merged[key] = httpsUrl;
       }
     }
@@ -1257,6 +1270,9 @@ function stripAnsi(text: string) {
 function extractFirstPartyAssetPaths(html: string | undefined, domainName: string | null | undefined) {
   if (!html || !domainName) return [];
   const paths = new Set<string>();
+  const domainFamily = domainName.toLowerCase().split(".").filter(Boolean).slice(-2).join(".");
+  const belongsToDomainFamily = (hostname: string) =>
+    hostname === domainName || (domainFamily.length > 0 && hostname.toLowerCase().split(".").filter(Boolean).slice(-2).join(".") === domainFamily);
   const assetPattern = /\.(?:css|js|mjs|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|eot|otf)(?:[?#][^"'\s<>]*)?$/i;
   const attrPattern = /\b(?:href|src)=["']([^"']+)["']/gi;
   let match: RegExpExecArray | null;
@@ -1267,14 +1283,14 @@ function extractFirstPartyAssetPaths(html: string | undefined, domainName: strin
     if (raw.startsWith("//")) {
       try {
         const parsed = new URL(`https:${raw}`);
-        if (parsed.hostname === domainName) pathValue = `${parsed.pathname}${parsed.search}`;
+        if (belongsToDomainFamily(parsed.hostname)) pathValue = `${parsed.pathname}${parsed.search}`;
       } catch {
         pathValue = null;
       }
     } else if (/^https?:\/\//i.test(raw)) {
       try {
         const parsed = new URL(raw);
-        if (parsed.hostname === domainName) pathValue = `${parsed.pathname}${parsed.search}`;
+        if (belongsToDomainFamily(parsed.hostname)) pathValue = `${parsed.pathname}${parsed.search}`;
       } catch {
         pathValue = null;
       }

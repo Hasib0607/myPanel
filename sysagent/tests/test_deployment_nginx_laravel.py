@@ -14,6 +14,16 @@ class DeploymentNginxLaravelTests(unittest.TestCase):
         self.assertIn("    location / {\n        try_files $uri @deployment_upstream;", block)
         self.assertNotIn("try_files $uri $uri/", block)
 
+    def test_legacy_public_prefixed_assets_map_to_laravel_public_root(self) -> None:
+        block = nginx_laravel_app_locations(
+            public_root="/var/www/deployments/example/public",
+            upstream_port=10002,
+            fallback_error_page="",
+            fallback_location="",
+        )
+        self.assertIn("location ~* ^/public/", block)
+        self.assertIn("alias /var/www/deployments/example/public/$1;", block)
+
     def test_nodejs_uses_upstream_proxy_only(self) -> None:
         block = nginx_app_locations(
             framework="NODEJS",

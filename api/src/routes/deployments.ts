@@ -934,6 +934,9 @@ async function inspectLaravelFrontendAssets(appPath: string, publicDirectory: st
 function extractFirstPartyAssetPaths(html: string | undefined, domainName: string | null | undefined) {
   if (!html || !domainName) return [];
   const paths = new Set<string>();
+  const domainFamily = domainName.toLowerCase().split(".").filter(Boolean).slice(-2).join(".");
+  const belongsToDomainFamily = (hostname: string) =>
+    hostname === domainName || (domainFamily.length > 0 && hostname.toLowerCase().split(".").filter(Boolean).slice(-2).join(".") === domainFamily);
   const assetPattern = /\.(?:css|js|mjs|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|eot|otf)(?:[?#][^"'\s<>]*)?$/i;
   const attrPattern = /\b(?:href|src)=["']([^"']+)["']/gi;
   let match: RegExpExecArray | null;
@@ -944,14 +947,14 @@ function extractFirstPartyAssetPaths(html: string | undefined, domainName: strin
     if (raw.startsWith("//")) {
       try {
         const parsed = new URL(`https:${raw}`);
-        if (parsed.hostname === domainName) pathValue = `${parsed.pathname}${parsed.search}`;
+        if (belongsToDomainFamily(parsed.hostname)) pathValue = `${parsed.pathname}${parsed.search}`;
       } catch {
         pathValue = null;
       }
     } else if (/^https?:\/\//i.test(raw)) {
       try {
         const parsed = new URL(raw);
-        if (parsed.hostname === domainName) pathValue = `${parsed.pathname}${parsed.search}`;
+        if (belongsToDomainFamily(parsed.hostname)) pathValue = `${parsed.pathname}${parsed.search}`;
       } catch {
         pathValue = null;
       }
