@@ -152,16 +152,30 @@ async function laravelRedisQueueBacklog(envVars: Record<string, string>, queueNa
   }
 }
 
+function isGuardianFailureRepairLog(message: string) {
+  return message.startsWith("Guardian parsed failed deployment logs")
+    || message.startsWith("Guardian assigned failed-deploy auto-repair")
+    || message.startsWith("Guardian could not auto-apply")
+    || message.startsWith("Guardian queued runtime repair approval")
+    || message.startsWith("Guardian runtime repair approval already pending")
+    || message.startsWith("Guardian Python runtime repair needs approval")
+    || message.startsWith("Guardian permission repair needs approval")
+    || message.startsWith("Guardian Supervisor repair needs approval");
+}
+
 function deploymentFailureText(logs: Array<{ message: string; stdout: string | null; stderr: string | null; metadata: unknown }>) {
-  return logs.map((log) => [log.message, log.stderr, log.stdout, metadataText(log.metadata)].filter(Boolean).join("\n")).join("\n");
+  return logs
+    .filter((log) => !isGuardianFailureRepairLog(log.message))
+    .map((log) => [log.message, log.stderr, log.stdout, metadataText(log.metadata)].filter(Boolean).join("\n"))
+    .join("\n");
 }
 
 async function ensureDoctorApprovalExists(deploymentId: string, target: { actionKey: string; label: string; command: string; reason: string }) {
   const existing = await prisma.deploymentDoctorApproval.findFirst({
     where: { deploymentId, actionKey: target.actionKey, status: { in: ["PENDING", "APPROVED"] } }
   });
-  if (existing) return existing;
-  return prisma.deploymentDoctorApproval.create({
+  if (existing) return { approval: existing, created: false };
+  const approval = await prisma.deploymentDoctorApproval.create({
     data: {
       deploymentId,
       actionKey: target.actionKey,
@@ -170,6 +184,7 @@ async function ensureDoctorApprovalExists(deploymentId: string, target: { action
       reason: target.reason
     }
   });
+  return { approval, created: true };
 }
 
 async function guardianApplyFailureRepairs(
@@ -268,23 +283,20 @@ async function guardianApplyFailureRepairs(
   }
 
   for (const target of runtimeTargets) {
-    try {
-      const install = await sysagent.deploymentInstallRuntimeTool({ tool: target.tool });
-      const failed = install.dryRun || (typeof install.returncode === "number" && install.returncode !== 0);
-      if (failed) throw new Error(install.stderr || install.stdout || `exit ${install.returncode ?? "unknown"}`);
-      applied.push(target.actionKey);
-    } catch (error) {
-      await ensureDoctorApprovalExists(deployment.id, target);
+    const approval = await ensureDoctorApprovalExists(deployment.id, target);
+    if (approval.created) {
       approvalsCreated += 1;
       await prisma.deploymentLog.create({
         data: {
           deploymentId: deployment.id,
           step: "PREFLIGHT",
           level: "warn",
-          message: `Guardian could not auto-apply ${target.actionKey}; approval queued`,
-          metadata: { error: error instanceof Error ? error.message : String(error), target } as any
+          message: "Guardian queued runtime repair approval",
+          metadata: { target, approvalId: approval.approval.id } as any
         }
       });
+    } else {
+      applied.push(`${target.actionKey}:approval-pending`);
     }
   }
 
@@ -295,22 +307,24 @@ async function guardianApplyFailureRepairs(
       if (failed) throw new Error(repair.stderr || repair.stdout || `exit ${repair.returncode ?? "unknown"}`);
       applied.push("repair-python-venv-runtime");
     } catch (error) {
-      await ensureDoctorApprovalExists(deployment.id, {
+      const approval = await ensureDoctorApprovalExists(deployment.id, {
         actionKey: "install-python311",
         label: "Install Python 3.10+ runtime",
         command: "Install Python 3.10+/3.11 via panel runtime-tools, rebuild .venv, and redeploy",
         reason: "The app uses Python 3.10+ syntax but the VPS started it with Python 3.9."
       });
-      approvalsCreated += 1;
-      await prisma.deploymentLog.create({
-        data: {
-          deploymentId: deployment.id,
-          step: "PREFLIGHT",
-          level: "warn",
-          message: "Guardian Python runtime repair needs approval",
-          metadata: { error: error instanceof Error ? error.message : String(error) } as any
-        }
-      });
+      if (approval.created) {
+        approvalsCreated += 1;
+        await prisma.deploymentLog.create({
+          data: {
+            deploymentId: deployment.id,
+            step: "PREFLIGHT",
+            level: "warn",
+            message: "Guardian Python runtime repair needs approval",
+            metadata: { error: error instanceof Error ? error.message : String(error), approvalId: approval.approval.id } as any
+          }
+        });
+      }
     }
   }
 
@@ -321,22 +335,24 @@ async function guardianApplyFailureRepairs(
       if (failed) throw new Error(repair.stderr || repair.stdout || `exit ${repair.returncode ?? "unknown"}`);
       applied.push("repair-permissions");
     } catch (error) {
-      await ensureDoctorApprovalExists(deployment.id, {
+      const approval = await ensureDoctorApprovalExists(deployment.id, {
         actionKey: "repair-permissions",
         label: "Repair deployment ownership",
         command: `chown -R panel:panel ${appPath} ${deploymentLogDir(deployment.slug)}`,
         reason: "Ownership/permission repairs affect deployment files and logs."
       });
-      approvalsCreated += 1;
-      await prisma.deploymentLog.create({
-        data: {
-          deploymentId: deployment.id,
-          step: "PREFLIGHT",
-          level: "warn",
-          message: "Guardian permission repair needs approval",
-          metadata: { error: error instanceof Error ? error.message : String(error) } as any
-        }
-      });
+      if (approval.created) {
+        approvalsCreated += 1;
+        await prisma.deploymentLog.create({
+          data: {
+            deploymentId: deployment.id,
+            step: "PREFLIGHT",
+            level: "warn",
+            message: "Guardian permission repair needs approval",
+            metadata: { error: error instanceof Error ? error.message : String(error), approvalId: approval.approval.id } as any
+          }
+        });
+      }
     }
   }
 
@@ -347,22 +363,24 @@ async function guardianApplyFailureRepairs(
       if (failed) throw new Error(repair.stderr || repair.stdout || `exit ${repair.returncode ?? "unknown"}`);
       applied.push("supervisor-config");
     } catch (error) {
-      await ensureDoctorApprovalExists(deployment.id, {
+      const approval = await ensureDoctorApprovalExists(deployment.id, {
         actionKey: "supervisor-config",
         label: "Rewrite Supervisor config",
         command: `supervisorctl reread && supervisorctl update && supervisorctl restart ${deployment.slug}`,
         reason: "Supervisor spawn/backoff errors may need a regenerated process config."
       });
-      approvalsCreated += 1;
-      await prisma.deploymentLog.create({
-        data: {
-          deploymentId: deployment.id,
-          step: "PREFLIGHT",
-          level: "warn",
-          message: "Guardian Supervisor repair needs approval",
-          metadata: { error: error instanceof Error ? error.message : String(error) } as any
-        }
-      });
+      if (approval.created) {
+        approvalsCreated += 1;
+        await prisma.deploymentLog.create({
+          data: {
+            deploymentId: deployment.id,
+            step: "PREFLIGHT",
+            level: "warn",
+            message: "Guardian Supervisor repair needs approval",
+            metadata: { error: error instanceof Error ? error.message : String(error), approvalId: approval.approval.id } as any
+          }
+        });
+      }
     }
   }
 
