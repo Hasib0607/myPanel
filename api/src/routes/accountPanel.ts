@@ -11,7 +11,7 @@ import { z } from "zod";
 import { env } from "../config/env.js";
 import { deployQueue, sslQueue } from "../jobs/queues.js";
 import { audit } from "../lib/audit.js";
-import { githubApiErrorMessage } from "../lib/githubApiErrors.js";
+import { githubApiErrorMessage, isGithubWebhookPermissionError } from "../lib/githubApiErrors.js";
 import { publishDomainDnsZone } from "../lib/domainDnsPublish.js";
 import { detectDeploymentFiles } from "../lib/deploymentDetection.js";
 import { prisma } from "../lib/prisma.js";
@@ -351,6 +351,14 @@ async function ensureAccountGithubWebhook(
     });
     return { configured: true, webhookUrl };
   } catch (error) {
+    if (isGithubWebhookPermissionError(error)) {
+      return {
+        configured: true,
+        webhookUrl,
+        manualSetupRequired: true,
+        reason: error instanceof Error ? error.message : "GitHub token cannot manage repository webhooks"
+      };
+    }
     try {
       const hooks = await githubRequest<Array<{ id: number; config?: { url?: string } }>>(
         `/repos/${encodeURIComponent(deployment.githubOwner)}/${encodeURIComponent(deployment.githubRepo)}/hooks?per_page=100`,
@@ -1540,7 +1548,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
           data: {
             deploymentId: deployment.id,
             step: "QUEUED",
-            message: "Auto deploy GitHub webhook configured",
+            message: webhook.manualSetupRequired ? "Auto deploy enabled; manual GitHub webhook setup required" : "Auto deploy GitHub webhook configured",
             metadata: webhook as Prisma.InputJsonObject
           }
         });
@@ -1579,7 +1587,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
         data: {
           deploymentId: existing.id,
           step: "QUEUED",
-          message: "Auto deploy GitHub webhook configured",
+          message: webhook.manualSetupRequired ? "Auto deploy enabled; manual GitHub webhook setup required" : "Auto deploy GitHub webhook configured",
           metadata: webhook as Prisma.InputJsonObject
         }
       });

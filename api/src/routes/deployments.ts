@@ -9,7 +9,7 @@ import { deployQueue } from "../jobs/queues.js";
 import { laravelPublicCwdMissing, nginxProxyMissingDomainFailure, nodePackageBinaryMissing, supervisorStartStillStarting } from "../lib/deploymentFailureRuntimeRepairs.js";
 import { detectComposerPlatformIssue, detectFrontendModuleNotFound, formatFrontendModuleNotFoundMessage, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import { audit } from "../lib/audit.js";
-import { githubApiErrorMessage } from "../lib/githubApiErrors.js";
+import { githubApiErrorMessage, isGithubWebhookPermissionError } from "../lib/githubApiErrors.js";
 import { deploymentHasLaravelPublicIndex, detectDeploymentFiles, detectDeploymentSource, findDeploymentAppRoot } from "../lib/deploymentDetection.js";
 import {
   boundDomainFromBinding,
@@ -627,6 +627,14 @@ async function ensureGithubWebhook(deployment: { id: string; slug: string; githu
     });
     return { configured: true, webhookUrl };
   } catch (error) {
+    if (isGithubWebhookPermissionError(error)) {
+      return {
+        configured: true,
+        webhookUrl,
+        manualSetupRequired: true,
+        reason: error instanceof Error ? error.message : "GitHub token cannot manage repository webhooks"
+      };
+    }
     try {
       const hooks = await githubRequest<Array<{ id: number; config?: { url?: string } }>>(
         `/repos/${encodeURIComponent(deployment.githubOwner)}/${encodeURIComponent(deployment.githubRepo)}/hooks?per_page=100`,
@@ -1893,7 +1901,15 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       if (!webhook.configured) {
         await prisma.deployment.update({ where: { id: deployment.id }, data: { autoDeployEnabled: false } });
       }
-      await addLog(deployment.id, "QUEUED", webhook.configured ? "Auto deploy GitHub webhook configured" : "Auto deploy disabled because GitHub webhook could not be configured", undefined, webhook as Prisma.InputJsonObject);
+    await addLog(
+      deployment.id,
+      "QUEUED",
+      webhook.configured
+        ? webhook.manualSetupRequired ? "Auto deploy enabled; manual GitHub webhook setup required" : "Auto deploy GitHub webhook configured"
+        : "Auto deploy disabled because GitHub webhook could not be configured",
+      undefined,
+      webhook as Prisma.InputJsonObject
+    );
     }
     await addLog(deployment.id, "QUEUED", "Project created");
     await audit(request, { action: "CREATE", resource: "deployment", resourceId: deployment.id, description: `Created deployment ${deployment.name}` });
@@ -1929,7 +1945,13 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       if (!webhook.configured) {
         throw app.httpErrors.badRequest(`Auto deploy could not be enabled: ${webhook.reason ?? "GitHub webhook could not be configured"}`);
       }
-      await addLog(deployment.id, "QUEUED", "Auto deploy GitHub webhook configured", undefined, webhook as Prisma.InputJsonObject);
+      await addLog(
+        deployment.id,
+        "QUEUED",
+        webhook.manualSetupRequired ? "Auto deploy enabled; manual GitHub webhook setup required" : "Auto deploy GitHub webhook configured",
+        undefined,
+        webhook as Prisma.InputJsonObject
+      );
     }
     const updated = await prisma.deployment.update({
       where: { id: deployment.id },
