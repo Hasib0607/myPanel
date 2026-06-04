@@ -389,8 +389,8 @@ async function candidatePaths(rootPath: string, rootDirectory = ".") {
   ]);
   const queue: Array<{ directory: string; depth: number }> = [{ directory: root, depth: 0 }];
   const visited = new Set<string>();
-  const maxDepth = 4;
-  const maxDirectories = 250;
+  const maxDepth = 8;
+  const maxDirectories = 1500;
 
   if (path.basename(sourceRoot).toLowerCase() === "public") {
     candidates.push(path.dirname(sourceRoot));
@@ -411,6 +411,15 @@ async function candidatePaths(rootPath: string, rootDirectory = ".") {
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       if (entry.name.startsWith(".")) continue;
+      if (entry.name.toLowerCase() === "public") {
+        try {
+          await fs.access(path.join(current.directory, entry.name, "index.php"));
+          candidates.push(current.directory);
+        } catch {
+          // A public directory without index.php is not enough to make a Laravel web root.
+        }
+        continue;
+      }
       if (skippedDirectories.has(entry.name.toLowerCase())) continue;
       const candidate = path.join(current.directory, entry.name);
       candidates.push(candidate);

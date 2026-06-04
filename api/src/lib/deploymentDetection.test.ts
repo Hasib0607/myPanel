@@ -149,6 +149,22 @@ test("findLaravelAppRoot recursively detects deeply nested Laravel public web ro
   }
 });
 
+test("findLaravelAppRoot follows public/index.php markers in repeated nested uploads", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "deployment-detection-"));
+  try {
+    await fs.writeFile(path.join(root, "artisan"), "#!/usr/bin/env php\n");
+    const app = path.join(root, "a", "b", "c", "d", "e", "f", "eBitans_Admin_Final");
+    await fs.mkdir(path.join(app, "public"), { recursive: true });
+    await fs.writeFile(path.join(app, "artisan"), "#!/usr/bin/env php\n");
+    await fs.writeFile(path.join(app, "public", "index.php"), "<?php\n");
+
+    assert.equal(await findLaravelAppRoot(root, "."), app);
+    assert.equal((await findDeploymentAppRoot(root, ".", "LARAVEL"))?.appPath, app);
+  } finally {
+    await fs.rm(root, { force: true, recursive: true });
+  }
+});
+
 test("findDeploymentAppRoot detects nested React and Node app folders", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "deployment-detection-"));
   try {

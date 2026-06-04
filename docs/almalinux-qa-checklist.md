@@ -73,7 +73,7 @@ From Deployment Doctor or runtime-tools install:
 - [ ] PHP Redis extension repair removes old `php-pecl-redis*` ABI blockers and rebuilds `ext-redis` with PECL for the active PHP runtime
 - [ ] Zip uploads with one nested app folder auto-correct `rootDirectory` before runtime detection, Nginx/start/health checks for Laravel, React/Node, Next.js, Python, and Go projects
 - [ ] Laravel zip uploads where the parent has `artisan` but only the nested app has `public/index.php` choose the nested public web root, not backend-only idle mode
-- [ ] Parent Laravel folders containing `artisan` do not hide a web root containing `public/index.php` nested up to four folder levels deep; true backend-only Laravel deployments start as idle Supervisor jobs and publish neither a dead upstream nor an empty/index-less `public_html` fallback
+- [ ] Parent Laravel folders containing `artisan` do not hide a web root containing `public/index.php` nested up to eight folder levels deep; true backend-only Laravel deployments start as idle Supervisor jobs and publish neither a dead upstream nor an empty/index-less `public_html` fallback
 - [ ] Deployment Doctor detects Nginx 403 from an index-less/wrong root, recommends redeploy, and reports the corrected nested Laravel public web root
 - [ ] Linked domains/subdomains serve the deployment while it is `RUNNING`, then restore the file-manager `public_html`/subdomain root after stop, unlink, or missing deployment target without stale Nginx 502 proxy configs
 - [ ] Deployments without a linked domain skip Nginx proxy/SSL configuration, continue on their managed internal port, and never fail with a null domain `name` error
