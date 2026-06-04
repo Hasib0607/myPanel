@@ -76,6 +76,7 @@ From Deployment Doctor or runtime-tools install:
 - [ ] Parent Laravel folders containing `artisan` do not hide a web root containing `public/index.php` nested up to eight folder levels deep; true backend-only Laravel deployments start as idle Supervisor jobs and publish neither a dead upstream nor an empty/index-less `public_html` fallback
 - [ ] Backend-only Laravel deployments without `public/index.php` and without indexed `public_html` complete as `RUNNING/HEALTHY` when Supervisor health passes; scheduled watch must not keep them `FAILED`
 - [ ] Supervisor start returning `ERROR (abnormal termination)` while `supervisorctl status` still shows `STARTING` waits for health polling before marking the deployment failed
+- [ ] Backend-only Laravel deployments without an indexed public fallback retire any stale Nginx vhost claiming the linked domain so old static `public_html` configs cannot keep serving Nginx 403
 - [ ] Deployment Doctor detects Nginx 403 from an index-less/wrong root, recommends redeploy, and reports the corrected nested Laravel public web root
 - [ ] Linked domains/subdomains serve the deployment while it is `RUNNING`, then restore the file-manager `public_html`/subdomain root after stop, unlink, or missing deployment target without stale Nginx 502 proxy configs
 - [ ] Deployments without a linked domain skip Nginx proxy/SSL configuration, continue on their managed internal port, and never fail with a null domain `name` error

@@ -48,6 +48,7 @@ import {
   buildDeploymentNginxRequest,
   publishDeploymentProxyNginx,
   publishPublicHtmlNginxVhost,
+  retireDeploymentNginxRoute,
   waitForQueueJob
 } from "../lib/deploymentDomainSsl.js";
 
@@ -2920,9 +2921,15 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
         publishPublicHtmlNginxVhost(domain)
       );
     } else if (processAction !== "stop" && domain && lifecycleBackendOnlyLaravel) {
+      const retireResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Retire stale public route for backend-only Laravel deployment", () =>
+        retireDeploymentNginxRoute(deployment.id, domain)
+      );
+      assertLiveResult((retireResult as { test?: unknown } | null)?.test, "Retire stale public route nginx test");
+      assertLiveResult((retireResult as { reload?: unknown } | null)?.reload, "Retire stale public route nginx reload");
       await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "Skipped public route for backend-only Laravel deployment", {
         domain: domain.name,
         appPath,
+        retire: retireResult as Prisma.InputJsonValue,
         reason: "No public/index.php exists and public_html has no index file. The Laravel process can still run as backend-only/worker-safe."
       }, "warn");
     }
@@ -3310,6 +3317,12 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Backend-only Laravel public fallback config", () =>
           publishPublicHtmlNginxVhost(domain)
         );
+      } else {
+        const retireResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Retire stale public route for backend-only Laravel deployment", () =>
+          retireDeploymentNginxRoute(deployment.id, domain)
+        );
+        assertLiveResult((retireResult as { test?: unknown } | null)?.test, "Retire stale public route nginx test");
+        assertLiveResult((retireResult as { reload?: unknown } | null)?.reload, "Retire stale public route nginx reload");
       }
       await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", hasFallbackIndex ? "Published indexed public_html fallback for backend-only Laravel deployment" : "Skipped public route for backend-only Laravel deployment", {
         domain: domain.name,
@@ -3364,7 +3377,9 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       assertLiveResult((nginxResult as { reload?: unknown }).reload, "Nginx reload");
     } else {
       await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config skipped", {
-        reason: "No linked domain; deployment will remain reachable through its managed internal port."
+        reason: backendOnlyLaravel
+          ? "Backend-only Laravel deployment has no public web process; stale public route was retired."
+          : "No linked domain; deployment will remain reachable through its managed internal port."
       });
     }
 

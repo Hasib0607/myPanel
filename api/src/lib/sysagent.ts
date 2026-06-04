@@ -100,6 +100,8 @@ export const sysagent = {
     request<SysagentCommandResult & { desiredWorkers?: number; runningWorkers?: number; status?: { running?: number; configured?: number; processes?: unknown[] } }>("/deployments/laravel-workers", { method: "POST", body: JSON.stringify(body) }),
   deploymentNginx: (body: unknown) =>
     request<{ write: SysagentCommandResult; enable: SysagentCommandResult; test: SysagentCommandResult; reload: SysagentCommandResult; configPath: string; enabledPath?: string; serverName?: string }>("/deployments/nginx", { method: "POST", body: JSON.stringify(body) }),
+  deploymentRetireNginxRoute: (body: unknown) =>
+    request<{ dryRun?: boolean; serverName?: string | null; configName?: string; removedManaged?: string[]; scrubbed?: unknown; test?: SysagentCommandResult; reload?: SysagentCommandResult }>("/deployments/nginx-retire", { method: "POST", body: JSON.stringify(body) }),
   deploymentHealth: (body: unknown) =>
     request("/deployments/health", { method: "POST", body: JSON.stringify(body) }),
   deploymentGuardianRepair: (body: { rootPath: string; framework?: string; env?: Record<string, string> }) =>

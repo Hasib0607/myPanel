@@ -129,6 +129,15 @@ export async function publishPublicHtmlNginxVhost(domain: BoundDomain | null) {
   });
 }
 
+export async function retireDeploymentNginxRoute(deploymentId: string, domain: BoundDomain | null) {
+  const serverName = deploymentServerName(domain);
+  if (!domain?.name || !serverName) return null;
+  return sysagent.deploymentRetireNginxRoute({
+    deploymentId,
+    serverName
+  });
+}
+
 export async function ensureParentDomainDeploymentProxy(deploymentId: string, domain: BoundDomain | null) {
   if (!domain) return;
   const domainId = domain.id.startsWith("subdomain:") ? domain.parentDomainId : domain.id;

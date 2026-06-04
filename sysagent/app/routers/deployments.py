@@ -38,6 +38,7 @@ from app.nginx_manager import (
     remove_conflicting_configs,
     remove_insecure_port443_configs,
     safe_letsencrypt_path,
+    safe_nginx_path,
     safe_web_root,
     server_name_tokens,
     _config_has_insecure_port443,
@@ -117,6 +118,11 @@ class NginxRequest(BaseModel):
     sslCertificate: str | None = None
     sslCertificateKey: str | None = None
     requireSsl: bool = False
+
+
+class RetireNginxRouteRequest(BaseModel):
+    deploymentId: str
+    serverName: str | None = None
 
 
 class HealthRequest(BaseModel):
@@ -1027,6 +1033,60 @@ def _scrub_hostname_nginx_configs(config_name: str, server_name: str) -> dict:
     return {
         "removedConflicts": remove_conflicting_configs(config_name, server_name, *scan_dirs),
         "removedInsecurePort443": remove_insecure_port443_configs(config_name, server_name, *scan_dirs),
+    }
+
+
+def _remove_managed_nginx_config(config_name: str) -> list[str]:
+    removed: list[str] = []
+    for root in [nginx_sites_enabled(), nginx_sites_available()]:
+        try:
+            target = safe_nginx_path(root, config_name)
+            if target.exists() or target.is_symlink():
+                target.unlink()
+                removed.append(str(target))
+        except OSError:
+            pass
+    return removed
+
+
+@router.post("/nginx-retire")
+def nginx_retire(body: RetireNginxRouteRequest) -> dict:
+    if not body.serverName:
+        return {
+            "skipped": True,
+            "reason": "No domain/serverName linked to deployment",
+            "serverName": None,
+        }
+
+    server_name = body.serverName
+    config_name = nginx_config_name(body.deploymentId, server_name)
+    if not settings.allow_live_nginx:
+        return {
+            "dryRun": True,
+            "serverName": server_name,
+            "configName": config_name,
+            "removedManaged": [],
+            "scrubbed": {"removedConflicts": [], "removedInsecurePort443": []},
+            "test": run_command(["nginx", "-t"], allow_live=False),
+            "reload": run_command(["systemctl", "reload", "nginx"], allow_live=False),
+        }
+
+    removed_managed = run_live_step("remove retired deployment nginx config", lambda: _remove_managed_nginx_config(config_name))
+    scrubbed = run_live_step("remove retired hostname nginx conflicts", lambda: _scrub_hostname_nginx_configs(config_name, server_name))
+    test = run_command(["nginx", "-t"], allow_live=True)
+    reload_result = (
+        run_command(["systemctl", "reload", "nginx"], allow_live=True)
+        if test.get("returncode") == 0
+        else {"dryRun": False, "command": ["systemctl", "reload", "nginx"], "stdout": "", "stderr": "Skipped because nginx -t failed", "returncode": 1}
+    )
+    return {
+        "dryRun": False,
+        "serverName": server_name,
+        "configName": config_name,
+        "removedManaged": removed_managed,
+        "scrubbed": scrubbed,
+        "test": test,
+        "reload": reload_result,
     }
 
 
