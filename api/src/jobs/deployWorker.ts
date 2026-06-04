@@ -1172,6 +1172,91 @@ function stripAnsi(text: string) {
   return text.replace(/\u001b\[[0-9;]*m/g, "");
 }
 
+function extractFirstPartyAssetPaths(html: string | undefined, domainName: string | null | undefined) {
+  if (!html || !domainName) return [];
+  const paths = new Set<string>();
+  const assetPattern = /\.(?:css|js|mjs|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|eot|otf)(?:[?#][^"'\s<>]*)?$/i;
+  const attrPattern = /\b(?:href|src)=["']([^"']+)["']/gi;
+  let match: RegExpExecArray | null;
+  while ((match = attrPattern.exec(html))) {
+    const raw = match[1]?.trim();
+    if (!raw || raw.startsWith("#") || raw.startsWith("data:") || raw.startsWith("mailto:") || raw.startsWith("tel:")) continue;
+    let pathValue: string | null = null;
+    if (raw.startsWith("//")) {
+      try {
+        const parsed = new URL(`https:${raw}`);
+        if (parsed.hostname === domainName) pathValue = `${parsed.pathname}${parsed.search}`;
+      } catch {
+        pathValue = null;
+      }
+    } else if (/^https?:\/\//i.test(raw)) {
+      try {
+        const parsed = new URL(raw);
+        if (parsed.hostname === domainName) pathValue = `${parsed.pathname}${parsed.search}`;
+      } catch {
+        pathValue = null;
+      }
+    } else if (raw.startsWith("/")) {
+      pathValue = raw;
+    }
+    if (!pathValue || !assetPattern.test(pathValue)) continue;
+    paths.add(pathValue);
+  }
+  return [...paths].sort((a, b) => {
+    const score = (value: string) => value.endsWith(".css") || value.includes(".css?") ? 0 : value.endsWith(".js") || value.includes(".js?") ? 1 : 2;
+    return score(a) - score(b);
+  }).slice(0, 16);
+}
+
+async function validatePublicStaticAssets(
+  deploymentId: string,
+  releaseId: string | undefined,
+  label: string,
+  deployment: { slug: string; framework: DeploymentFramework; domain?: BoundDomain | null },
+  appPath: string,
+  publicRoute: unknown,
+  requireHttps: boolean
+) {
+  if (!(await deploymentRunsLaravel(deployment.framework, appPath))) return null;
+  const domainName = deployment.domain?.name;
+  const serverName = deploymentServerName(deployment.domain);
+  if (!domainName || !serverName) return null;
+  const html = (publicRoute as { stdout?: string })?.stdout ?? "";
+  const assetPaths = extractFirstPartyAssetPaths(html, domainName);
+  if (!assetPaths.length) return null;
+
+  const missing: Array<{ path: string; httpCode?: number; detail: string }> = [];
+  for (const assetPath of assetPaths) {
+    const result = await runStep(deploymentId, releaseId, "HEALTH_CHECK", `Static asset check ${assetPath}`, () =>
+      sysagent.deploymentPublicRoute({
+        serverName,
+        path: assetPath,
+        rootPath: appPath,
+        framework: deployment.framework,
+        requireHttps
+      })
+    );
+    const failed = liveResultFailureMessage(result, `Static asset check ${assetPath}`)
+      ?? ((result as { degraded?: boolean; stderr?: string }).degraded ? ((result as { stderr?: string }).stderr ?? "Asset returned HTTP error") : null);
+    if (failed) {
+      missing.push({
+        path: assetPath,
+        httpCode: (result as { httpCode?: number }).httpCode,
+        detail: failed
+      });
+    }
+  }
+
+  if (!missing.length) return null;
+  const preview = missing.slice(0, 8).map((item) => `${item.path}${item.httpCode ? ` (${item.httpCode})` : ""}`).join(", ");
+  const warning = `Laravel public page loaded, but first-party static assets are missing through Nginx: ${preview}. Ensure these files exist under ${path.join(appPath, "public")} or fix the app asset paths/source repo, then redeploy.`;
+  await writeLog(deploymentId, releaseId, "HEALTH_CHECK", `${label} static asset warning`, {
+    missing,
+    publicRoot: path.join(appPath, "public")
+  }, "warn");
+  return warning;
+}
+
 async function optionalPublicRouteWarning(
   deploymentId: string,
   releaseId: string | undefined,
@@ -1391,6 +1476,10 @@ async function optionalPublicRouteWarning(
       );
       warning = await assertPublicRouteResult(publicRoute, label, deployment, appPath);
     }
+    if (!warning) {
+      const staticAssetWarning = await validatePublicStaticAssets(deploymentId, releaseId, label, deployment, appPath, publicRoute, await deploymentHttpsReady(domain));
+      if (staticAssetWarning) return staticAssetWarning;
+    }
     return warning;
   } catch (error) {
     const firstMessage = error instanceof Error ? error.message : "Public route check failed";
@@ -1440,6 +1529,8 @@ async function optionalPublicRouteWarning(
     const warning = await assertPublicRouteResult(publicRoute, label, deployment, appPath);
     if (!warning) {
       await writeLog(deploymentId, releaseId, "HEALTH_CHECK", `${label} recovered after Guardian repair`);
+      const staticAssetWarning = await validatePublicStaticAssets(deploymentId, releaseId, label, deployment, appPath, publicRoute, await deploymentHttpsReady(domain));
+      if (staticAssetWarning) return staticAssetWarning;
     }
     return warning;
   } catch (error) {
@@ -2588,8 +2679,9 @@ async function inspectLaravelFrontendAssets(appPath: string, publicDirectory: st
   );
   const hasBuiltAssets = await pathExists(path.join(publicRoot, "build", "manifest.json"))
     || await pathExists(path.join(publicRoot, "mix-manifest.json"))
+    || await pathExists(path.join(publicRoot, "admin", "assets", "css"))
     || await pathExists(path.join(publicRoot, "css"))
-    || await pathExists(path.join(publicRoot, "assets"));
+    || await pathExists(path.join(publicRoot, "js"));
   const buildScript = scripts.build ? "build" : scripts.production ? "production" : scripts.prod ? "prod" : null;
   return {
     hasPackageJson: true,

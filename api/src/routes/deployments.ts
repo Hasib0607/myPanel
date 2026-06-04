@@ -904,8 +904,9 @@ async function inspectLaravelFrontendAssets(appPath: string, publicDirectory: st
   const candidates = [
     path.join(publicRoot, "build", "manifest.json"),
     path.join(publicRoot, "mix-manifest.json"),
+    path.join(publicRoot, "admin", "assets", "css"),
     path.join(publicRoot, "css"),
-    path.join(publicRoot, "assets")
+    path.join(publicRoot, "js")
   ];
   const hasBuiltAssets = await Promise.all(
     candidates.map((candidate) => fs.access(candidate).then(() => true).catch(() => false))
@@ -918,6 +919,41 @@ async function inspectLaravelFrontendAssets(appPath: string, publicDirectory: st
       ? `Laravel frontend assets exist under ${publicRoot}.`
       : `Laravel frontend markers exist but no built assets were found under ${publicRoot}.`
   };
+}
+
+function extractFirstPartyAssetPaths(html: string | undefined, domainName: string | null | undefined) {
+  if (!html || !domainName) return [];
+  const paths = new Set<string>();
+  const assetPattern = /\.(?:css|js|mjs|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|eot|otf)(?:[?#][^"'\s<>]*)?$/i;
+  const attrPattern = /\b(?:href|src)=["']([^"']+)["']/gi;
+  let match: RegExpExecArray | null;
+  while ((match = attrPattern.exec(html))) {
+    const raw = match[1]?.trim();
+    if (!raw || raw.startsWith("#") || raw.startsWith("data:") || raw.startsWith("mailto:") || raw.startsWith("tel:")) continue;
+    let pathValue: string | null = null;
+    if (raw.startsWith("//")) {
+      try {
+        const parsed = new URL(`https:${raw}`);
+        if (parsed.hostname === domainName) pathValue = `${parsed.pathname}${parsed.search}`;
+      } catch {
+        pathValue = null;
+      }
+    } else if (/^https?:\/\//i.test(raw)) {
+      try {
+        const parsed = new URL(raw);
+        if (parsed.hostname === domainName) pathValue = `${parsed.pathname}${parsed.search}`;
+      } catch {
+        pathValue = null;
+      }
+    } else if (raw.startsWith("/")) {
+      pathValue = raw;
+    }
+    if (pathValue && assetPattern.test(pathValue)) paths.add(pathValue);
+  }
+  return [...paths].sort((a, b) => {
+    const score = (value: string) => value.endsWith(".css") || value.includes(".css?") ? 0 : value.endsWith(".js") || value.includes(".js?") ? 1 : 2;
+    return score(a) - score(b);
+  }).slice(0, 16);
 }
 
 function evidenceLines(text: string) {
@@ -1447,6 +1483,35 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
       fix: publicFailed ? "Rewrite the generated Nginx vhost, scrub stale server_name configs, then restart the process if the route still returns 502/503/504." : undefined,
       repairAction: publicFailed ? "rewrite-nginx" : undefined
     });
+    if (!publicFailed && (detection?.detected ?? deployment.framework) === "LARAVEL" && domain?.name) {
+      const assetPaths = extractFirstPartyAssetPaths((publicRoute as { stdout?: string }).stdout, domain.name);
+      const missingAssets: string[] = [];
+      for (const assetPath of assetPaths) {
+        let assetResult: unknown = null;
+        try {
+          assetResult = await sysagent.deploymentPublicRoute({
+            serverName,
+            path: assetPath,
+            rootPath: appPath,
+            framework: deployment.framework
+          });
+        } catch (error) {
+          assetResult = { returncode: 1, stderr: error instanceof Error ? error.message : "Asset check failed" };
+        }
+        if (commandFailed(assetResult)) {
+          const code = (assetResult as { httpCode?: number }).httpCode;
+          missingAssets.push(`${assetPath}${code ? ` (${code})` : ""}`);
+        }
+      }
+      checks.push({
+        key: "public_static_assets",
+        label: "Public static assets",
+        status: missingAssets.length ? "warn" : "pass",
+        detail: missingAssets.length ? `Missing through Nginx: ${missingAssets.slice(0, 8).join(", ")}` : assetPaths.length ? `Checked ${assetPaths.length} first-party asset URL(s).` : "No first-party static assets found in the public page.",
+        fix: missingAssets.length ? `Ensure the files exist under ${path.join(appPath, deployment.publicDirectory || "public")} or fix the app asset paths/source repo, then redeploy.` : undefined,
+        repairAction: missingAssets.length ? "redeploy" : undefined
+      });
+    }
     let nginxInspect: unknown = null;
     try {
       nginxInspect = await sysagent.deploymentNginxInspect({ deploymentId: deployment.id, serverName, upstreamPort: deployment.port, rootPath: deployment.rootPath });
