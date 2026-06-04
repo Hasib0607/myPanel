@@ -1376,7 +1376,7 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
         ? `Current root ${appPath} has no public/index.php; web root detected at ${betterLaravelRoot}.`
         : hasCurrentPublicIndex
           ? `Found ${path.join(appPath, "public", "index.php")}`
-          : "No Laravel public/index.php exists. This is backend-only unless an indexed public_html site is linked.",
+          : "No Laravel public/index.php exists. Deployment can still run as backend-only/worker-safe; public web routing is skipped unless an indexed public_html site is linked.",
       fix: betterLaravelRoot ? "Redeploy so Deployment Doctor corrects rootDirectory before publishing Nginx." : undefined,
       repairAction: betterLaravelRoot ? "redeploy" : undefined
     });

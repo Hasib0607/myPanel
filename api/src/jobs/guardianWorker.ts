@@ -523,7 +523,7 @@ async function runDeploymentWatch() {
         }
       }
       const stalePending = ["DEPLOYING", "BUILDING", "QUEUED"].includes(deployment.status) && Date.now() - deployment.updatedAt.getTime() >= staleDeploymentMs;
-      const keepFailedStatus = deployment.status === "FAILED" && healthy;
+      const keepFailedStatus = deployment.status === "FAILED" && healthy && !(result as { backendOnly?: boolean }).backendOnly;
       await prisma.deployment.update({
         where: { id: deployment.id },
         data: {

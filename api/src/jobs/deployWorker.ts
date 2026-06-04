@@ -2872,13 +2872,16 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
       && await deploymentRunsLaravel(deployment.framework, appPath)
       && !(await deploymentHasLaravelPublicIndex(appPath))
     );
-    if (lifecycleBackendOnlyLaravel && !(await staticRootHasIndex(deploymentFallbackRootPath(domain)))) {
-      throw new Error(`Laravel deployment ${deployment.slug} has no public/index.php, and ${domain?.name ?? "the linked domain"} public_html has no index file. Deployment Doctor will not publish a dead deployment proxy or an empty public_html root.`);
-    }
-    if (processAction !== "stop" && domain && lifecycleBackendOnlyLaravel) {
+    if (processAction !== "stop" && domain && lifecycleBackendOnlyLaravel && await staticRootHasIndex(deploymentFallbackRootPath(domain))) {
       await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Backend-only Laravel indexed public fallback config", () =>
         publishPublicHtmlNginxVhost(domain)
       );
+    } else if (processAction !== "stop" && domain && lifecycleBackendOnlyLaravel) {
+      await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "Skipped public route for backend-only Laravel deployment", {
+        domain: domain.name,
+        appPath,
+        reason: "No public/index.php exists and public_html has no index file. The Laravel process can still run as backend-only/worker-safe."
+      }, "warn");
     }
     if (processAction !== "stop" && domain && !lifecycleBackendOnlyLaravel) {
       await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Link deployment domain", () =>
@@ -3258,17 +3261,19 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     );
     if (domain && backendOnlyLaravel) {
       const fallbackRootPath = deploymentFallbackRootPath(domain);
-      if (!(await staticRootHasIndex(fallbackRootPath))) {
-        throw new Error(`Laravel deployment ${deployment.slug} has no public/index.php, and ${domain.name} public_html has no index file. Deployment Doctor will not publish a dead deployment proxy or an empty public_html root. Add the Laravel public entrypoint, correct the project root, or add an indexed public_html site.`);
+      const hasFallbackIndex = await staticRootHasIndex(fallbackRootPath);
+      if (hasFallbackIndex) {
+        await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Backend-only Laravel public fallback config", () =>
+          publishPublicHtmlNginxVhost(domain)
+        );
       }
-      await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Backend-only Laravel public fallback config", () =>
-        publishPublicHtmlNginxVhost(domain)
-      );
-      await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "Skipped dead upstream proxy for backend-only Laravel deployment", {
+      await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", hasFallbackIndex ? "Published indexed public_html fallback for backend-only Laravel deployment" : "Skipped public route for backend-only Laravel deployment", {
         domain: domain.name,
         appPath,
         fallbackRootPath,
-        reason: "No public/index.php exists, so the idle worker-safe process does not listen on the managed web port. The indexed public_html site was published instead."
+        reason: hasFallbackIndex
+          ? "No public/index.php exists, so the idle worker-safe process does not listen on the managed web port. The indexed public_html site was published instead."
+          : "No public/index.php exists and public_html has no index file. The Laravel process can still run as backend-only/worker-safe."
       }, "warn");
     }
     if (domain && !backendOnlyLaravel) {
