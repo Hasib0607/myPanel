@@ -44,6 +44,8 @@ RHEL_PHP_RUNTIME_PACKAGES = (
     "php-zip",
     "php-gd",
     "php-soap",
+    "php-bcmath",
+    "php-intl",
     "unzip",
 )
 RHEL_PHP82_PACKAGES = RHEL_PHP_RUNTIME_PACKAGES
@@ -67,6 +69,8 @@ RHEL_PHP82_CONFLICT_CLEANUP_COMMAND = (
 RHEL_PHP_REDIS_BUILD_PACKAGES = ("php-pear", "php-devel", "gcc", "make")
 PHP_REDIS_EXTENSION_LOADED_COMMAND = ("sh", "-lc", "php -m 2>/dev/null | grep -qi '^redis$'")
 PHP_REDIS_PECL_INSTALL_COMMAND = ("sh", "-lc", "printf '\\n' | pecl install -f redis && echo 'extension=redis.so' > /etc/php.d/50-redis.ini")
+PHP_SWOOLE_EXTENSION_LOADED_COMMAND = ("sh", "-lc", "php -m 2>/dev/null | grep -Eqi '^(swoole|openswoole)$'")
+PHP_SWOOLE_PECL_INSTALL_COMMAND = ("sh", "-lc", "printf '\\n' | pecl install -f openswoole || printf '\\n' | pecl install -f swoole")
 PHP_SODIUM_EXTENSION_LOADED_COMMAND = ("sh", "-lc", "php -m 2>/dev/null | grep -qi '^sodium$'")
 DEBIAN_DOVECOT_PACKAGES = ("dovecot-core", "dovecot-imapd", "dovecot-lmtpd")
 RHEL_DOVECOT_PACKAGES = ("dovecot",)
@@ -157,6 +161,8 @@ DEBIAN_PHP82_PACKAGES = (
     "php8.2-gd",
     "php8.2-redis",
     "php8.2-soap",
+    "php8.2-bcmath",
+    "php8.2-intl",
 )
 DEBIAN_PHP83_PACKAGES = tuple(package.replace("8.2", "8.3") for package in DEBIAN_PHP82_PACKAGES)
 DEBIAN_PHP82_REPO_PACKAGES = ("software-properties-common", "ca-certificates", "apt-transport-https")
@@ -334,6 +340,8 @@ PACKAGE_SETS: dict[OsFamily, dict[str, tuple[str, ...]]] = {
             "php-gd",
             "php-redis",
             "php-soap",
+            "php-bcmath",
+            "php-intl",
         ),
         "php82_runtime": DEBIAN_PHP82_PACKAGES,
         "php83_runtime": DEBIAN_PHP83_PACKAGES,
@@ -345,6 +353,9 @@ PACKAGE_SETS: dict[OsFamily, dict[str, tuple[str, ...]]] = {
         "php_redis": ("php-redis",),
         "php_sodium": ("php-common",),
         "php_soap": ("php-soap",),
+        "php_bcmath": ("php-bcmath",),
+        "php_intl": ("php-intl",),
+        "php_swoole": ("php-swoole",),
         "php_mysql": ("php-mysql",),
         "php_pgsql": ("php-pgsql",),
         "python_runtime": ("python3", "python3-venv", "python3-pip"),
@@ -401,6 +412,9 @@ PACKAGE_SETS: dict[OsFamily, dict[str, tuple[str, ...]]] = {
         "php_redis": ("php-redis",),
         "php_sodium": ("php-sodium",),
         "php_soap": ("php-soap",),
+        "php_bcmath": ("php-bcmath",),
+        "php_intl": ("php-intl",),
+        "php_swoole": ("php-swoole",),
         "php_mysql": ("php-mysqlnd",),
         "php_pgsql": ("php-pgsql",),
         "python_runtime": ("python3", "python3-pip"),
@@ -884,6 +898,41 @@ def php_redis_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallP
     return install_plan_for("php_redis", info)
 
 
+def php_swoole_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
+    family = _resolve_family(info)
+    php_ini_dir = "/etc/php.d" if family is OsFamily.RHEL else "/etc/php/8.2/cli/conf.d"
+    return PackageInstallPlan(
+        key="php_swoole",
+        packages=("php-swoole",),
+        steps=(
+            InstallStep(
+                "Install PHP Swoole package if available",
+                tuple(package_install_command(["php-swoole"], info)),
+                env=package_install_env(info),
+                on_failure="continue",
+                skip_if=PHP_SWOOLE_EXTENSION_LOADED_COMMAND,
+            ),
+            InstallStep(
+                "Install PECL build tools for Swoole/OpenSwoole",
+                tuple(package_install_command(["php-pear", "php-dev", "gcc", "make"] if family is OsFamily.DEBIAN else ["php-pear", "php-devel", "gcc", "make"], info)),
+                env=package_install_env(info),
+                skip_if=PHP_SWOOLE_EXTENSION_LOADED_COMMAND,
+            ),
+            InstallStep(
+                "Install OpenSwoole/Swoole extension with PECL",
+                ("sh", "-lc", f"{PHP_SWOOLE_PECL_INSTALL_COMMAND[2]} && mkdir -p {php_ini_dir} && (php -m | grep -qi '^openswoole$' && echo 'extension=openswoole.so' > {php_ini_dir}/50-openswoole.ini || echo 'extension=swoole.so' > {php_ini_dir}/50-swoole.ini)"),
+                skip_if=PHP_SWOOLE_EXTENSION_LOADED_COMMAND,
+            ),
+            InstallStep(
+                "Restart PHP-FPM after Swoole/OpenSwoole install",
+                ("sh", "-lc", "systemctl restart php-fpm 2>/dev/null || systemctl restart php8.2-fpm 2>/dev/null || true"),
+                on_failure="continue",
+            ),
+        ),
+        notes="Installs Swoole/OpenSwoole for Laravel Octane. Uses distro package when available, then PECL fallback.",
+    )
+
+
 def mysql_database_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
     packages = tuple(packages_for("mysql_database", info))
     service = service_spec("mysql_database", info)
@@ -1017,6 +1066,8 @@ def runtime_tool_install_plan(tool: str, info: OsReleaseInfo | None = None) -> P
         return php83_install_plan(info)
     if tool == "php-redis":
         return php_redis_install_plan(info)
+    if tool == "php-swoole":
+        return php_swoole_install_plan(info)
     if tool == "php-sodium":
         return php_sodium_install_plan(info)
 
@@ -1030,6 +1081,9 @@ def runtime_tool_install_plan(tool: str, info: OsReleaseInfo | None = None) -> P
         "php-redis": "php_redis",
         "php-sodium": "php_sodium",
         "php-soap": "php_soap",
+        "php-bcmath": "php_bcmath",
+        "php-intl": "php_intl",
+        "php-swoole": "php_swoole",
         "php-mysql": "php_mysql",
         "php-pgsql": "php_pgsql",
         "python": "python_runtime",

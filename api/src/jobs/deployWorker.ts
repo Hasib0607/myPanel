@@ -1758,6 +1758,97 @@ async function assertRuntimeToolsInstalled(deploymentId: string, releaseId: stri
   );
 }
 
+function envRuntimeTools(envVars: Record<string, string>) {
+  const tools = new Set<string>();
+  const normalized = Object.fromEntries(Object.entries(envVars).map(([key, value]) => [key.toUpperCase(), String(value ?? "").trim().toLowerCase()]));
+  const redisKeys = ["CACHE_DRIVER", "CACHE_STORE", "SESSION_DRIVER", "QUEUE_CONNECTION", "BROADCAST_DRIVER", "REDIS_CLIENT"];
+  if (redisKeys.some((key) => ["redis", "phpredis"].includes(normalized[key] ?? "")) || normalized.REDIS_HOST || normalized.REDIS_URL) {
+    tools.add("redis-server");
+    tools.add("redis-cli");
+    tools.add("php-ext-redis");
+  }
+  if (normalized.OCTANE_SERVER === "swoole" || normalized.OCTANE_SERVER === "openswoole") {
+    tools.add("php-ext-swoole");
+    tools.add("supervisorctl");
+  }
+  if (normalized.MAIL_MAILER === "sendmail") {
+    tools.add("sendmail");
+  }
+  if (hasGoogleDriveEnv(envVars)) {
+    tools.add("php-ext-curl");
+    tools.add("php-ext-zip");
+    tools.add("php-ext-mbstring");
+    tools.add("php-ext-sodium");
+  }
+  if (["mysql", "mariadb"].includes(normalized.DB_CONNECTION ?? "")) {
+    tools.add("php-ext-mysql");
+  }
+  if (["pgsql", "postgres", "postgresql"].includes(normalized.DB_CONNECTION ?? "")) {
+    tools.add("php-ext-pgsql");
+  }
+  if (Object.keys(normalized).some((key) => key.includes("PAY") || key.includes("BKASH") || key.includes("NAGAD") || key.includes("AMARPAY") || key.includes("SSLCZ") || key.includes("PAYPAL"))) {
+    tools.add("php-ext-bcmath");
+    tools.add("php-ext-curl");
+    tools.add("php-ext-intl");
+  }
+  return [...tools];
+}
+
+async function assertEnvRuntimeToolsInstalled(deploymentId: string, releaseId: string | undefined, envVars: Record<string, string>) {
+  const requiredTools = envRuntimeTools(envVars);
+  if (requiredTools.length === 0) return;
+  await writeLog(deploymentId, releaseId, "PREFLIGHT", "Env-driven runtime requirements detected", { tools: requiredTools });
+
+  const inspectTools = async () =>
+    runStep(deploymentId, releaseId, "PREFLIGHT", "Env runtime tools check", () =>
+      sysagent.deploymentRuntimeTools({ tools: requiredTools })
+    );
+
+  let toolsResult = await inspectTools();
+  let missing = toolsResult.items.filter((tool) => !tool.installed).map((tool) => tool.name);
+  if (missing.length === 0) return;
+
+  const approvalTargets = runtimeInstallTargetsForMissingExecutables(missing);
+  const autoInstalled: string[] = [];
+  const autoInstallFailures: Array<{ tool: string; error: string }> = [];
+
+  for (const target of approvalTargets) {
+    try {
+      const installResult = await runStep(deploymentId, releaseId, "PREFLIGHT", `Auto-install env runtime ${target.tool}`, () =>
+        sysagent.deploymentInstallRuntimeTool({ tool: target.tool })
+      );
+      assertLiveResult(installResult, `Auto-install env runtime ${target.tool}`);
+      autoInstalled.push(target.tool);
+    } catch (error) {
+      autoInstallFailures.push({ tool: target.tool, error: error instanceof Error ? error.message : String(error) });
+      await writeLog(deploymentId, releaseId, "PREFLIGHT", `Auto-install env runtime ${target.tool} failed; Doctor approval will be queued`, {
+        actionKey: target.actionKey,
+        error: error instanceof Error ? error.message : String(error)
+      }, "warn");
+    }
+  }
+
+  toolsResult = await inspectTools();
+  missing = toolsResult.items.filter((tool) => !tool.installed).map((tool) => tool.name);
+  if (missing.length === 0) {
+    await writeLog(deploymentId, releaseId, "PREFLIGHT", "Env runtime tools auto-installed", { tools: autoInstalled });
+    return;
+  }
+
+  for (const target of runtimeInstallTargetsForMissingExecutables(missing)) {
+    await ensureDoctorApprovalExists(deploymentId, {
+      actionKey: target.actionKey,
+      label: target.label,
+      command: target.command,
+      reason: target.reason
+    });
+  }
+
+  throw new Error(
+    `Missing env-driven runtime tools on the server: ${missing.join(", ")}. Auto-install could not finish everything. Pending repair approvals were created for installable tools. Open Deployment Doctor, approve the remaining installs, then redeploy.${autoInstallFailures.length ? ` Auto-install failures: ${autoInstallFailures.map((item) => `${item.tool}: ${item.error}`).join("; ")}` : ""}`
+  );
+}
+
 async function ensureDoctorApprovalExists(deploymentId: string, target: { actionKey: string; label: string; command: string; reason: string }) {
   const existing = await prisma.deploymentDoctorApproval.findFirst({
     where: {
@@ -1971,6 +2062,9 @@ async function ensureComposerDeclaredPlatformExtensions(deploymentId: string, re
   const targets = [];
   if (requiredKeys.has("ext-soap")) targets.push({ tool: "php-soap" as const, label: "PHP SOAP extension" });
   if (requiredKeys.has("ext-gd")) targets.push({ tool: "php-gd" as const, label: "PHP GD extension" });
+  if (requiredKeys.has("ext-bcmath")) targets.push({ tool: "php-bcmath" as const, label: "PHP BCMath extension" });
+  if (requiredKeys.has("ext-intl")) targets.push({ tool: "php-intl" as const, label: "PHP Intl extension" });
+  if (requiredKeys.has("ext-swoole") || requiredKeys.has("ext-openswoole")) targets.push({ tool: "php-swoole" as const, label: "PHP Swoole/OpenSwoole extension" });
   if (targets.length === 0) return false;
 
   await writeLog(deploymentId, releaseId, "PREFLIGHT", "Composer declared PHP extensions detected", {
@@ -3267,6 +3361,10 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           DB_COLLATION: envVars.DB_COLLATION
         }, "warn");
       }
+    }
+
+    if (await deploymentRunsLaravel(deployment.framework, appPath)) {
+      await assertEnvRuntimeToolsInstalled(deployment.id, releaseId, envVars);
     }
 
     if (deployment.installCommand || deployment.packageManager) {

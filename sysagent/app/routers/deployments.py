@@ -175,7 +175,7 @@ class NginxInspectRequest(BaseModel):
 
 
 class RuntimeInstallRequest(BaseModel):
-    tool: str = Field(pattern="^(pnpm|yarn|composer|uv|go|php|php82|php83|php-mbstring|php-xml|php-curl|php-zip|php-gd|php-redis|php-sodium|php-soap|php-mysql|php-pgsql|python|python311|nodejs|supervisor|pm2)$")
+    tool: str = Field(pattern="^(pnpm|yarn|composer|uv|go|php|php82|php83|php-mbstring|php-xml|php-curl|php-zip|php-gd|php-redis|php-sodium|php-soap|php-bcmath|php-intl|php-swoole|php-mysql|php-pgsql|python|python311|nodejs|supervisor|pm2|redis|postfix)$")
 
 
 class PermissionRepairRequest(BaseModel):
@@ -1579,6 +1579,7 @@ def _php_extension_installed(extension: str) -> bool:
         "mysql": {"mysqli", "pdo_mysql", "mysqlnd"},
         "pgsql": {"pgsql", "pdo_pgsql"},
         "xml": {"xml", "libxml", "simplexml", "xmlreader", "xmlwriter"},
+        "swoole": {"swoole", "openswoole"},
     }
     expected = aliases.get(extension, {extension})
     return any(item.lower() in modules for item in expected)

@@ -19,6 +19,9 @@ export type RuntimeInstallTarget = {
     | "php83"
     | "php-gd"
     | "php-soap"
+    | "php-bcmath"
+    | "php-intl"
+    | "php-swoole"
     | "php-redis"
     | "php-sodium"
     | "php-mbstring"
@@ -35,7 +38,9 @@ export type RuntimeInstallTarget = {
     | "uv"
     | "go"
     | "supervisor"
-    | "pm2";
+    | "pm2"
+    | "redis"
+    | "postfix";
   label: string;
   command: string;
   reason: string;
@@ -62,6 +67,9 @@ const phpRuntimeTools = [
   "php-ext-gd",
   "php-ext-redis",
   "php-ext-soap",
+  "php-ext-bcmath",
+  "php-ext-intl",
+  "php-ext-swoole",
   "php-ext-mysql",
   "php-ext-pgsql"
 ];
@@ -76,7 +84,11 @@ const phpExtensionRepairActions: Record<string, string> = {
   zip: "install-php-extension-zip",
   gd: "install-php-extension-gd",
   redis: "install-php-extension-redis",
+  swoole: "install-php-extension-swoole",
+  openswoole: "install-php-extension-swoole",
   sodium: "install-php-extension-sodium",
+  bcmath: "install-php-extension-bcmath",
+  intl: "install-php-extension-intl",
   soap: "install-php-extension-soap",
   mysql: "install-php-extension-mysql",
   mysqli: "install-php-extension-mysql",
@@ -238,6 +250,30 @@ const installTargetCatalog: RuntimeInstallTarget[] = [
     executables: ["php-ext-soap"]
   },
   {
+    actionKey: "install-php-extension-bcmath",
+    tool: "php-bcmath",
+    label: "Install PHP BCMath extension",
+    command: "Install the PHP BCMath extension via panel runtime-tools",
+    reason: "Payment gateways and financial calculations commonly require PHP BCMath.",
+    executables: ["php-ext-bcmath"]
+  },
+  {
+    actionKey: "install-php-extension-intl",
+    tool: "php-intl",
+    label: "Install PHP Intl extension",
+    command: "Install the PHP Intl extension via panel runtime-tools",
+    reason: "Laravel localization, currency formatting, and some packages require PHP Intl.",
+    executables: ["php-ext-intl"]
+  },
+  {
+    actionKey: "install-php-extension-swoole",
+    tool: "php-swoole",
+    label: "Install PHP Swoole/OpenSwoole extension",
+    command: "Install Swoole/OpenSwoole for Laravel Octane via panel runtime-tools",
+    reason: "OCTANE_SERVER=swoole requires the Swoole or OpenSwoole PHP extension.",
+    executables: ["php-ext-swoole"]
+  },
+  {
     actionKey: "install-php-extension-redis",
     tool: "php-redis",
     label: "Install PHP Redis extension",
@@ -356,6 +392,22 @@ const installTargetCatalog: RuntimeInstallTarget[] = [
     command: "Install Supervisor via panel runtime-tools",
     reason: "Supervisor is required for this deployment process manager.",
     executables: ["supervisorctl"]
+  },
+  {
+    actionKey: "install-redis-server",
+    tool: "redis",
+    label: "Install Redis server",
+    command: "Install Redis server via panel runtime-tools",
+    reason: "The deployment env uses Redis for cache, session, queue, or Redis client settings.",
+    executables: ["redis-server", "redis-cli"]
+  },
+  {
+    actionKey: "install-postfix",
+    tool: "postfix",
+    label: "Install mail transport",
+    command: "Install Postfix/sendmail-compatible transport via panel runtime-tools",
+    reason: "MAIL_MAILER=sendmail requires a sendmail-compatible local mail transport.",
+    executables: ["sendmail", "postfix"]
   },
   {
     actionKey: "install-pm2",
