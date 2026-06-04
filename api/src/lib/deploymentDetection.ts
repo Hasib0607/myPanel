@@ -371,21 +371,51 @@ type DeploymentAppRootCandidate = {
 async function candidatePaths(rootPath: string, rootDirectory = ".") {
   const root = path.resolve(rootPath);
   const sourceRoot = path.resolve(root, rootDirectory || ".");
-  const candidates = [sourceRoot];
+  const candidates = [sourceRoot, root];
+  const skippedDirectories = new Set([
+    ".git",
+    ".github",
+    ".next",
+    ".nuxt",
+    ".output",
+    "bootstrap",
+    "build",
+    "cache",
+    "dist",
+    "node_modules",
+    "public",
+    "storage",
+    "vendor"
+  ]);
+  const queue: Array<{ directory: string; depth: number }> = [{ directory: root, depth: 0 }];
+  const visited = new Set<string>();
+  const maxDepth = 4;
+  const maxDirectories = 250;
 
   if (path.basename(sourceRoot).toLowerCase() === "public") {
     candidates.push(path.dirname(sourceRoot));
   }
 
-  try {
-    const entries = await fs.readdir(root, { withFileTypes: true });
+  while (queue.length && visited.size < maxDirectories) {
+    const current = queue.shift();
+    if (!current || visited.has(current.directory)) continue;
+    visited.add(current.directory);
+    if (current.depth >= maxDepth) continue;
+
+    let entries;
+    try {
+      entries = await fs.readdir(current.directory, { withFileTypes: true });
+    } catch {
+      continue;
+    }
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       if (entry.name.startsWith(".")) continue;
-      candidates.push(path.join(root, entry.name));
+      if (skippedDirectories.has(entry.name.toLowerCase())) continue;
+      const candidate = path.join(current.directory, entry.name);
+      candidates.push(candidate);
+      queue.push({ directory: candidate, depth: current.depth + 1 });
     }
-  } catch {
-    // The direct source root checks above still cover normal deployed directories.
   }
 
   return Array.from(new Set(candidates.map((candidate) => path.resolve(candidate))));
