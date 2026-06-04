@@ -139,6 +139,8 @@ export const sysagent = {
     request<{ domain: string; exists: boolean; certificate: string; privateKey: string }>(`/ssl/certificate-exists/${encodeURIComponent(domain.split(" ")[0] ?? domain)}`),
   certificateStatus: (domain: string) =>
     request<{ domain: string; exists: boolean; expiry: string | null; certificate: string; privateKey: string }>(`/ssl/certificate-status/${encodeURIComponent(domain.split(" ")[0] ?? domain)}`),
+  certificateFindReusable: (domain: string) =>
+    request<{ requested: string; domain: string; exists: boolean; expiry: string | null; certificate: string; privateKey: string; candidates?: unknown[] }>(`/ssl/certificate-reusable/${encodeURIComponent(domain.split(" ")[0] ?? domain)}`),
   ensureAcmeWebroot: (body: { domain: string; webRoot?: string | null }) =>
     request<SysagentCommandResult & { webRoot?: string; challengeDir?: string }>("/ssl/ensure-acme-webroot", { method: "POST", body: JSON.stringify(body) }),
   applyDnsZone: (body: unknown) =>

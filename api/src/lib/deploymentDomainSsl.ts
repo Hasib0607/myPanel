@@ -324,6 +324,8 @@ export async function publishDeploymentProxyNginx(input: {
   fallbackRootPath: string | null;
   forceHttps: boolean;
   requireSsl?: boolean;
+  sslCertificate?: string;
+  sslCertificateKey?: string;
 }) {
   const bound: BoundDomain = {
     id: input.fqdn,
@@ -331,7 +333,8 @@ export async function publishDeploymentProxyNginx(input: {
     forceSsl: input.forceHttps,
     sslEnabled: input.forceHttps
   };
-  const httpsReady = input.forceHttps ? await deploymentHttpsReady(bound) : false;
+  const hasExplicitCertificate = Boolean(input.sslCertificate && input.sslCertificateKey);
+  const httpsReady = hasExplicitCertificate || (input.forceHttps ? await deploymentHttpsReady(bound) : false);
   return sysagent.deploymentNginx(
     buildDeploymentNginxRequest({
       deploymentId: input.deploymentId,
@@ -345,7 +348,9 @@ export async function publishDeploymentProxyNginx(input: {
       fallbackRootPath: input.fallbackRootPath,
       forceSsl: input.forceHttps && httpsReady,
       requireSsl: input.requireSsl ?? false,
-      ...(httpsReady ? deploymentSslCertificatePaths(bound) : {})
+      ...(hasExplicitCertificate
+        ? { sslCertificate: input.sslCertificate, sslCertificateKey: input.sslCertificateKey }
+        : httpsReady ? deploymentSslCertificatePaths(bound) : {})
     })
   );
 }

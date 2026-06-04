@@ -1,11 +1,12 @@
 from __future__ import annotations
+import re
 import secrets
 import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.command import run_command
@@ -14,6 +15,7 @@ from app.routers.dns import effective_dns_paths, safe_zone_path
 from app.nginx_manager import acme_root_for_server_name, letsencrypt_certificate_exists, run_live_step, safe_web_root
 
 router = APIRouter()
+LETSENCRYPT_LIVE_DIR = Path("/etc/letsencrypt/live")
 
 
 def certbot_should_include_www(domain: str, include_www: bool) -> bool:
@@ -53,9 +55,16 @@ class EnsureAcmeWebrootRequest(BaseModel):
     webRoot: str | None = None
 
 
+def safe_cert_lookup_name(value: str) -> str:
+    primary = value.split()[0].strip()
+    if not re.fullmatch(r"[a-zA-Z0-9_.-]+", primary):
+        raise HTTPException(status_code=400, detail="Invalid certificate name")
+    return primary
+
+
 @router.get("/certificate-exists/{domain}")
 def certificate_exists(domain: str) -> dict:
-    primary = domain.split()[0].strip()
+    primary = safe_cert_lookup_name(domain)
     return {
         "domain": primary,
         "exists": letsencrypt_certificate_exists(primary),
@@ -65,7 +74,8 @@ def certificate_exists(domain: str) -> dict:
 
 
 def certificate_expiry(domain: str) -> str | None:
-    cert_path = Path(f"/etc/letsencrypt/live/{domain}/fullchain.pem")
+    cert_name = safe_cert_lookup_name(domain)
+    cert_path = LETSENCRYPT_LIVE_DIR / cert_name / "fullchain.pem"
     if not cert_path.exists():
         return None
     result = subprocess.run(
@@ -85,7 +95,7 @@ def certificate_expiry(domain: str) -> str | None:
 
 @router.get("/certificate-status/{domain}")
 def certificate_status(domain: str) -> dict:
-    primary = domain.split()[0].strip()
+    primary = safe_cert_lookup_name(domain)
     expiry = certificate_expiry(primary)
     return {
         "domain": primary,
@@ -93,6 +103,56 @@ def certificate_status(domain: str) -> dict:
         "expiry": expiry,
         "certificate": f"/etc/letsencrypt/live/{primary}/fullchain.pem",
         "privateKey": f"/etc/letsencrypt/live/{primary}/privkey.pem",
+    }
+
+
+def reusable_certificate_candidates(requested: str) -> list[dict]:
+    base = safe_cert_lookup_name(requested)
+    if not LETSENCRYPT_LIVE_DIR.exists():
+        return []
+
+    duplicate_pattern = re.compile(rf"^{re.escape(base)}-\d+$")
+    candidates: list[dict] = []
+    for item in LETSENCRYPT_LIVE_DIR.iterdir():
+        if not item.is_dir():
+            continue
+        cert_name = item.name
+        if cert_name != base and not duplicate_pattern.fullmatch(cert_name):
+            continue
+        expiry = certificate_expiry(cert_name)
+        exists = letsencrypt_certificate_exists(cert_name)
+        if not exists:
+            continue
+        candidates.append({
+            "domain": cert_name,
+            "exists": exists,
+            "expiry": expiry,
+            "certificate": str(item / "fullchain.pem"),
+            "privateKey": str(item / "privkey.pem"),
+        })
+    return sorted(candidates, key=lambda item: item.get("expiry") or "", reverse=True)
+
+
+@router.get("/certificate-reusable/{domain}")
+def certificate_reusable(domain: str) -> dict:
+    primary = safe_cert_lookup_name(domain)
+    candidates = reusable_certificate_candidates(primary)
+    if candidates:
+        selected = candidates[0]
+        return {
+            "requested": primary,
+            "exists": True,
+            **selected,
+            "candidates": candidates,
+        }
+    return {
+        "requested": primary,
+        "domain": primary,
+        "exists": False,
+        "expiry": None,
+        "certificate": f"/etc/letsencrypt/live/{primary}/fullchain.pem",
+        "privateKey": f"/etc/letsencrypt/live/{primary}/privkey.pem",
+        "candidates": [],
     }
 
 

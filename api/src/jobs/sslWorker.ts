@@ -41,7 +41,22 @@ function rateLimitRetryAfter(result: SysagentCommandResult) {
   return match?.[1] ?? null;
 }
 
-function certificatePaths(domain: string) {
+type ReusableCertificate = {
+  requested?: string;
+  domain: string;
+  exists: boolean;
+  expiry: string | null;
+  certificate: string;
+  privateKey: string;
+};
+
+function certificatePaths(domain: string, certificate?: ReusableCertificate | null) {
+  if (certificate?.exists) {
+    return {
+      sslCertificate: certificate.certificate,
+      sslCertificateKey: certificate.privateKey
+    };
+  }
   const certName = certbotCertificateName(domain);
   return {
     sslCertificate: `/etc/letsencrypt/live/${certName}/fullchain.pem`,
@@ -59,19 +74,27 @@ function sslServerName(domainName: string, includeWww: boolean) {
   return includeWww ? `${domainName} www.${domainName}` : domainName;
 }
 
-async function reusableCertificateResult(certName: string, reason: string): Promise<SysagentCommandResult | null> {
-  const status = await sysagent.certificateStatus(certName);
+type ReusableCertificateLookup = {
+  result: SysagentCommandResult;
+  certificate: ReusableCertificate;
+};
+
+async function reusableCertificateResult(certName: string, reason: string): Promise<ReusableCertificateLookup | null> {
+  const status = await sysagent.certificateFindReusable(certName);
   if (!status.exists) return null;
   return {
-    dryRun: false,
-    command: ["certbot", "reuse-existing", certName],
-    stdout: `${reason}. Existing certificate ${certName} is present and will be reused.`,
-    stderr: "",
-    returncode: 0
-  } satisfies SysagentCommandResult;
+    certificate: status,
+    result: {
+      dryRun: false,
+      command: ["certbot", "reuse-existing", status.domain],
+      stdout: `${reason}. Existing certificate ${status.domain} is present and will be reused for ${certName}.`,
+      stderr: "",
+      returncode: 0
+    } satisfies SysagentCommandResult
+  };
 }
 
-async function writeHttpsVhost(domainName: string, domainId: string | null | undefined, forceHttps: boolean, includeWww: boolean, webRoot?: string | null) {
+async function writeHttpsVhost(domainName: string, domainId: string | null | undefined, forceHttps: boolean, includeWww: boolean, webRoot?: string | null, certificate?: ReusableCertificate | null) {
   const proxyTarget = await findDeploymentProxyTarget(domainName);
   if (proxyTarget) {
     const serverName = deploymentServerName({
@@ -100,7 +123,8 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
       outputDirectory: proxyTarget.deployment.outputDirectory,
       fallbackRootPath: deploymentFallbackRootPath(bound),
       forceHttps,
-      requireSsl: true
+      requireSsl: true,
+      ...certificatePaths(domainName, certificate)
     });
     assertLiveCommandSucceeded("Nginx certificate vhost test", result.test as SysagentCommandResult);
     assertLiveCommandSucceeded("Nginx certificate vhost reload", result.reload as SysagentCommandResult);
@@ -141,7 +165,8 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
           includeWww
         }),
         forceHttps,
-        requireSsl: true
+        requireSsl: true,
+        ...certificatePaths(domainName, certificate)
       }) as NginxPublishResult;
     } else {
       result = await publishPublicHtmlNginxVhost({
@@ -160,7 +185,7 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
       serverName: sslServerName(domainName, includeWww),
       redirectUrl: domain.redirectUrl,
       requireSsl: true,
-      ...certificatePaths(domainName)
+      ...certificatePaths(domainName, certificate)
     });
   } else {
     result = await sysagent.writeStaticNginxVhost({
@@ -169,7 +194,7 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
       rootPath: webRoot ?? `${env.FILE_MANAGER_ROOT}/${domainName}/${domain?.documentRoot || "public_html"}`,
       forceHttps,
       requireSsl: true,
-      ...certificatePaths(domainName)
+      ...certificatePaths(domainName, certificate)
     });
   }
 
@@ -178,7 +203,7 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
   return result;
 }
 
-async function markSslIssued(job: { data: { domain: string; domainId?: string | null; subdomainId?: string | null; forceSsl?: boolean } }) {
+async function markSslIssued(job: { data: { domain: string; domainId?: string | null; subdomainId?: string | null; forceSsl?: boolean } }, certificate?: ReusableCertificate | null) {
   if (job.data.subdomainId) {
     await prisma.subdomain.update({
       where: { id: job.data.subdomainId },
@@ -188,7 +213,7 @@ async function markSslIssued(job: { data: { domain: string; domainId?: string | 
   }
   if (job.data.domainId) {
     const domain = await prisma.domain.findUnique({ where: { id: job.data.domainId }, select: { forceSsl: true } });
-    const status = await sysagent.certificateStatus(certbotCertificateName(job.data.domain));
+    const status = certificate ?? await sysagent.certificateStatus(certbotCertificateName(job.data.domain));
     await prisma.domain.update({
       where: { id: job.data.domainId },
       data: {
@@ -208,7 +233,10 @@ export const sslWorker = new Worker(
     if (job.name === "issue") {
       const includeWww = job.data.includeWww ?? true;
       const certName = job.data.certName ?? certbotCertificateName(job.data.domain);
-      let result: SysagentCommandResult | null = await reusableCertificateResult(certName, "Certbot issue skipped");
+      let reusableCertificate: ReusableCertificate | null = null;
+      const existingCertificate = await reusableCertificateResult(certName, "Certbot issue skipped");
+      let result: SysagentCommandResult | null = existingCertificate?.result ?? null;
+      reusableCertificate = existingCertificate?.certificate ?? null;
       if (!result) {
         result = isWildcardHostname(job.data.domain) || job.data.dnsChallenge
           ? await sysagent.issueDnsCertificate({
@@ -228,10 +256,11 @@ export const sslWorker = new Worker(
       if (letsEncryptExactSetRateLimited(result)) {
         const reusable = await reusableCertificateResult(certName, "Let's Encrypt exact-set rate limit hit");
         if (reusable) {
-          result = reusable;
+          result = reusable.result;
+          reusableCertificate = reusable.certificate;
         } else {
           const retryAfter = rateLimitRetryAfter(result);
-          throw new Error(`Let's Encrypt rate limit hit for ${job.data.domain}. Too many certificates were requested for the same exact identifier set in the last 7 days.${retryAfter ? ` Retry after ${retryAfter}.` : ""} Existing certificate ${certName} was not found on disk, so Nginx cannot be switched to HTTPS yet.`);
+          throw new Error(`Let's Encrypt rate limit hit for ${job.data.domain}. Too many certificates were requested for the same exact identifier set in the last 7 days.${retryAfter ? ` Retry after ${retryAfter}.` : ""} No reusable certificate matching ${certName} or ${certName}-0001 style Certbot lineages was found on disk, so Nginx cannot be switched to HTTPS yet.`);
         }
       }
       if (!result) throw new Error(`Certbot issue did not return a result for ${job.data.domain}`);
@@ -240,8 +269,8 @@ export const sslWorker = new Worker(
       const domain = job.data.domainId
         ? await prisma.domain.findUnique({ where: { id: job.data.domainId }, select: { forceSsl: true } })
         : null;
-      const vhost = await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true, includeWww, job.data.webRoot);
-      await markSslIssued(job);
+      const vhost = await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true, includeWww, job.data.webRoot, reusableCertificate);
+      await markSslIssued(job, reusableCertificate);
 
       await redis.del("domain_list", `ssl_expiry:${job.data.domain}`);
       return { certbot: result, nginx: vhost };
@@ -249,6 +278,7 @@ export const sslWorker = new Worker(
 
     if (job.name === "renew") {
       const certName = job.data.certName ?? certbotCertificateName(job.data.domain);
+      let reusableCertificate: ReusableCertificate | null = null;
       let result = isWildcardHostname(job.data.domain) || job.data.dnsChallenge
         ? await sysagent.issueDnsCertificate({
             domain: job.data.domain,
@@ -260,7 +290,8 @@ export const sslWorker = new Worker(
       if (letsEncryptExactSetRateLimited(result)) {
         const reusable = await reusableCertificateResult(certName, "Let's Encrypt exact-set rate limit hit during renew");
         if (reusable) {
-          result = reusable;
+          result = reusable.result;
+          reusableCertificate = reusable.certificate;
         }
       }
       assertLiveCommandSucceeded("Certbot renew", result);
@@ -268,8 +299,8 @@ export const sslWorker = new Worker(
       const domain = job.data.domainId
         ? await prisma.domain.findUnique({ where: { id: job.data.domainId }, select: { forceSsl: true } })
         : null;
-      const vhost = await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true, job.data.includeWww ?? true, job.data.webRoot);
-      await markSslIssued(job);
+      const vhost = await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true, job.data.includeWww ?? true, job.data.webRoot, reusableCertificate);
+      await markSslIssued(job, reusableCertificate);
 
       await redis.del("domain_list", `ssl_expiry:${job.data.domain}`);
       return { certbot: result, nginx: vhost };
