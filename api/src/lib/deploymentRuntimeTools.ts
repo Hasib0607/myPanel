@@ -44,6 +44,7 @@ export type RuntimeInstallTarget = {
 
 export type ComposerPlatformIssue = {
   requiredPhpVersion: string | null;
+  maxSupportedPhpVersion: string | null;
   currentPhpVersion: string | null;
   missingExtensions: string[];
   composerRootWarning: boolean;
@@ -379,7 +380,28 @@ function compareMajorMinorVersions(left: string, right: string) {
   return Number(leftMinor) - Number(rightMinor);
 }
 
+function exactMinorPhpConstraintMax(text: string, currentPhpVersion: string | null) {
+  if (!currentPhpVersion) return null;
+  const exactMinorConstraints = [...text.matchAll(/requires php(?:-[a-z0-9]+)?\s+(.+?)\s*->\s*your php(?:-[a-z0-9]+)? version/ig)]
+    .map((match) => match[1])
+    .filter(Boolean);
+  let maxSupported: string | null = null;
+  for (const constraint of exactMinorConstraints) {
+    const normalized = constraint.replace(/\s+/g, " ");
+    if (/[<>=^]/.test(normalized) || /~\s*\d+\.\d+(?!\.\d)/.test(normalized)) continue;
+    const minors = [
+      ...normalized.matchAll(/~\s*([0-9]+\.[0-9]+)\.[0-9]+/g),
+      ...normalized.matchAll(/([0-9]+\.[0-9]+)\.\*/g)
+    ].map((match) => match[1]);
+    if (!minors.length) continue;
+    const candidate = minors.reduce((highest, value) => compareMajorMinorVersions(value, highest) > 0 ? value : highest, minors[0]);
+    if (!maxSupported || compareMajorMinorVersions(candidate, maxSupported) > 0) maxSupported = candidate;
+  }
+  return maxSupported && compareMajorMinorVersions(currentPhpVersion, maxSupported) > 0 ? maxSupported : null;
+}
+
 export function detectComposerPlatformIssue(text: string): ComposerPlatformIssue | null {
+  const phpConstraints = [...text.matchAll(/requires php(?:-[a-z0-9]+)?\s+(.+?)\s*->\s*your php(?:-[a-z0-9]+)? version/ig)].map((match) => match[1]);
   const requiredPhpVersions = [...text.matchAll(/requires php(?:-[a-z0-9]+)?\s*(?:\^|>=|>|~)?\s*([0-9]+\.[0-9]+)/ig)].map((match) => match[1]);
   const currentPhpVersion = text.match(/your php(?:-[a-z0-9]+)? version \(([\d.]+)\)/i)?.[1] ?? null;
   const missingExtensions = [...text.matchAll(/requires ext-([a-z0-9_]+)/ig)].map((match) => match[1].toLowerCase());
@@ -390,10 +412,12 @@ export function detectComposerPlatformIssue(text: string): ComposerPlatformIssue
     if (!highest) return candidate;
     return compareMajorMinorVersions(candidate, highest) > 0 ? candidate : highest;
   }, null);
+  const maxSupportedPhpVersion = exactMinorPhpConstraintMax(text, currentPhpVersion);
 
-  if (!requiredPhpVersion && !currentPhpVersion && missingExtensions.length === 0 && !composerRootWarning && !composerLockOutdated) return null;
+  if (!requiredPhpVersion && !maxSupportedPhpVersion && !currentPhpVersion && missingExtensions.length === 0 && !composerRootWarning && !composerLockOutdated) return null;
   return {
     requiredPhpVersion,
+    maxSupportedPhpVersion,
     currentPhpVersion,
     missingExtensions: [...new Set(missingExtensions)],
     composerRootWarning,
@@ -422,6 +446,13 @@ export function runtimeInstallTargetsForComposerPlatformIssue(text: string) {
     if (needsUpgrade && compareMajorMinorVersions(issue.requiredPhpVersion, "8.3") >= 0) {
       addTarget("install-php83");
     } else if (needsUpgrade && compareMajorMinorVersions(issue.requiredPhpVersion, "8.1") >= 0) {
+      addTarget("install-php82");
+    }
+  }
+  if (issue.maxSupportedPhpVersion) {
+    if (compareMajorMinorVersions(issue.maxSupportedPhpVersion, "8.3") >= 0) {
+      addTarget("install-php83");
+    } else if (compareMajorMinorVersions(issue.maxSupportedPhpVersion, "8.1") >= 0) {
       addTarget("install-php82");
     }
   }

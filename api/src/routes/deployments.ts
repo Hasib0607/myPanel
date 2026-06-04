@@ -802,6 +802,13 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
     const currentPhpVersion = composerPlatform?.currentPhpVersion ?? "unknown";
     return { message: `Composer lockfile requires PHP ${requiredPhpVersion}+ but the VPS CLI runtime is ${currentPhpVersion}. Upgrade PHP on the VPS, then redeploy.`, repairAction: "request-approval", category: "php_runtime_version" };
   }
+  if (composerPlatform?.maxSupportedPhpVersion && composerPlatform.currentPhpVersion) {
+    return {
+      message: `Composer lockfile only supports PHP up to ${composerPlatform.maxSupportedPhpVersion}.x, but the VPS CLI runtime is ${composerPlatform.currentPhpVersion}. Switch the deployment runtime back to PHP ${composerPlatform.maxSupportedPhpVersion} or update composer.lock on PHP ${composerPlatform.currentPhpVersion}, then redeploy.`,
+      repairAction: "request-approval",
+      category: "php_runtime_version_too_new"
+    };
+  }
   if (composerPlatform?.composerLockOutdated) {
     return {
       message: "Composer lockfile is out of date with composer.json or incompatible with this PHP runtime. Regenerate composer.lock on a compatible PHP version, commit it, then redeploy.",
@@ -1438,7 +1445,7 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
     });
   }
   const composerRepairTargets = runtimeInstallTargetsForComposerPlatformIssue(recentErrors);
-  if (hint?.category === "php_extension" || hint?.category === "php_extension_gd" || hint?.category === "php_extension_soap" || hint?.category === "php_runtime_version" || hint?.category === "php_pecl_abi_conflict") {
+  if (hint?.category === "php_extension" || hint?.category === "php_extension_gd" || hint?.category === "php_extension_soap" || hint?.category === "php_runtime_version" || hint?.category === "php_runtime_version_too_new" || hint?.category === "php_pecl_abi_conflict") {
     for (const target of composerRepairTargets) {
       riskyActions.push({
         key: target.actionKey,
