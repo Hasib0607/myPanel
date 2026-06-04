@@ -14,6 +14,7 @@ import { audit } from "../lib/audit.js";
 import { githubApiErrorMessage, isGithubWebhookPermissionError } from "../lib/githubApiErrors.js";
 import { publishDomainDnsZone } from "../lib/domainDnsPublish.js";
 import { detectDeploymentFiles } from "../lib/deploymentDetection.js";
+import { deploymentRuntimeReview, installDeploymentRuntimeTools } from "../lib/deploymentRuntimeReview.js";
 import { prisma } from "../lib/prisma.js";
 import { resolvePublicA } from "../lib/publicDns.js";
 import { deleteSecret, getSecret, putSecret } from "../lib/secrets.js";
@@ -129,6 +130,9 @@ const deploymentSchema = z.object({
 const deploymentUpdateSchema = deploymentSchema.partial().extend({
   status: z.enum(["QUEUED", "RUNNING", "STOPPED", "DEPLOYING", "BUILDING", "FAILED"]).optional(),
   healthStatus: z.enum(["UNKNOWN", "HEALTHY", "DEGRADED", "DOWN"]).optional()
+});
+const runtimeInstallSelectionSchema = z.object({
+  approvedRuntimeTools: z.array(z.string().min(1)).max(50).default([])
 });
 const githubConnectionSchema = z.object({
   username: z.string().trim().min(1).nullable().optional(),
@@ -1773,6 +1777,12 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     return { ok: true, status: "queued", summary: "Guardian repair requested for this account deployment." };
   });
 
+  app.get("/deployments/:deploymentId/runtime-review", async (request: any) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const deployment = await findAccountDeployment(request, deploymentId);
+    return deploymentRuntimeReview(deployment);
+  });
+
   app.delete("/deployments/:deploymentId", async (request: any) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const body = z.object({ confirmSlug: z.string() }).parse(request.body ?? {});
@@ -1788,7 +1798,25 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       deploymentId: z.string(),
       action: z.enum(["deploy", "redeploy", "start", "stop", "restart"])
     }).parse(request.params);
+    const body = runtimeInstallSelectionSchema.parse(request.body ?? {});
     const deployment = await findAccountDeployment(request, params.deploymentId);
+    if (["deploy", "redeploy", "start", "restart"].includes(params.action) && body.approvedRuntimeTools.length) {
+      const install = await installDeploymentRuntimeTools(body.approvedRuntimeTools);
+      if (install.failed.length) {
+        return reply.code(400).send({
+          error: `Selected runtime install failed: ${install.failed.map((item) => `${item.tool}: ${item.error ?? item.result?.stderr ?? item.result?.stdout ?? "install failed"}`).join("; ")}`,
+          install
+        });
+      }
+      await prisma.deploymentLog.create({
+        data: {
+          deploymentId: deployment.id,
+          step: "PREFLIGHT",
+          message: "Approved runtime tools installed before deployment",
+          metadata: install as unknown as Prisma.InputJsonObject
+        }
+      });
+    }
     const release = ["deploy", "redeploy"].includes(params.action)
       ? await prisma.deploymentRelease.create({
           data: {

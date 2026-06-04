@@ -9,6 +9,21 @@ import { PageHeader } from "@/components/page-header";
 
 type Domain = { id: string; name: string; status: string; documentRoot: string };
 type Deployment = { id: string; name: string; slug: string; status: string; healthStatus: string; port: number; dbType?: string | null };
+type RuntimeInstallTarget = { actionKey: string; tool: string; label: string; command: string; reason: string; executables: string[] };
+type RuntimeReview = {
+  required: string[];
+  installed: string[];
+  missing: string[];
+  installable: RuntimeInstallTarget[];
+  blocked: string[];
+  needsApproval: boolean;
+};
+type RuntimeModalState = {
+  deployment: Deployment;
+  action: "deploy" | "restart";
+  review: RuntimeReview;
+  selected: Record<string, boolean>;
+};
 type Mailbox = { id: string; username: string; quotaMb: number; enabled: boolean; domain?: { name: string } };
 type AccountDatabase = { id: string; engine: string; database: string; username: string };
 type FileEntry = { name: string; path: string; type: "directory" | "file"; size: number; modifiedAt: string };
@@ -78,6 +93,7 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
   const [folderName, setFolderName] = useState("");
   const [dnsDraft, setDnsDraft] = useState({ domainId: "", type: "A", name: "@", value: "", ttl: "3600" });
   const [passwordDraft, setPasswordDraft] = useState({ currentPassword: "", newPassword: "" });
+  const [runtimeModal, setRuntimeModal] = useState<RuntimeModalState | null>(null);
 
   const dashboard = useQuery({
     queryKey: ["account-dashboard"],
@@ -184,13 +200,38 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
   });
 
   const deploymentAction = useMutation({
-    mutationFn: ({ id, action }: { id: string; action: string }) => apiPost(`/account/deployments/${id}/${action}`, {}),
+    mutationFn: ({ id, action, approvedRuntimeTools = [] }: { id: string; action: string; approvedRuntimeTools?: string[] }) => apiPost(`/account/deployments/${id}/${action}`, { approvedRuntimeTools }),
     onSuccess: async (_result, variables) => {
+      setRuntimeModal(null);
       setNotice(`Deployment ${variables.action} queued.`);
       await refresh();
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Deployment action failed.")
   });
+
+  const startDeploymentAction = async (deployment: Deployment, action: "deploy" | "restart" | "stop") => {
+    if (action === "stop") {
+      deploymentAction.mutate({ id: deployment.id, action });
+      return;
+    }
+    setNotice("Checking server runtime packages before deployment...");
+    try {
+      const review = await apiGet<RuntimeReview>(`/account/deployments/${deployment.id}/runtime-review`);
+      if (!review.installable.length) {
+        deploymentAction.mutate({ id: deployment.id, action });
+        return;
+      }
+      setRuntimeModal({
+        deployment,
+        action,
+        review,
+        selected: Object.fromEntries(review.installable.map((item) => [item.tool, true]))
+      });
+      setNotice("");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not check runtime packages.");
+    }
+  };
 
   const createDatabase = useMutation({
     mutationFn: () => apiPost<AccountDatabase>("/account/databases", {
@@ -512,9 +553,9 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
                       <td className="px-4 py-3">:{deployment.port}</td>
                       <td className="px-4 py-3">
                         <div className="flex justify-end gap-2">
-                          <IconButton title="Deploy" onClick={() => deploymentAction.mutate({ id: deployment.id, action: "deploy" })}><Play size={14} /></IconButton>
-                          <IconButton title="Restart" onClick={() => deploymentAction.mutate({ id: deployment.id, action: "restart" })}><RotateCw size={14} /></IconButton>
-                          <IconButton title="Stop" onClick={() => deploymentAction.mutate({ id: deployment.id, action: "stop" })}><Square size={14} /></IconButton>
+                          <IconButton title="Deploy" onClick={() => startDeploymentAction(deployment, "deploy")}><Play size={14} /></IconButton>
+                          <IconButton title="Restart" onClick={() => startDeploymentAction(deployment, "restart")}><RotateCw size={14} /></IconButton>
+                          <IconButton title="Stop" onClick={() => startDeploymentAction(deployment, "stop")}><Square size={14} /></IconButton>
                         </div>
                       </td>
                     </tr>
@@ -588,6 +629,58 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
         </div> : null}
       </div> : null}
       </section>
+      {runtimeModal ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
+          <div className="max-h-[90vh] w-full max-w-2xl overflow-auto rounded-2xl bg-white shadow-xl">
+            <div className="border-b border-panel-line p-5">
+              <h2 className="text-xl font-bold text-panel-text">Install required server packages?</h2>
+              <p className="mt-1 text-sm text-panel-muted">
+                {runtimeModal.deployment.name} needs these missing runtime tools before {runtimeModal.action}. Turn off anything you do not want installed now.
+              </p>
+            </div>
+            <div className="space-y-3 p-5">
+              {runtimeModal.review.installable.map((item) => (
+                <label className="flex cursor-pointer items-start justify-between gap-4 rounded-lg border border-panel-line p-4 hover:bg-slate-50" key={item.tool}>
+                  <div>
+                    <div className="font-semibold text-panel-text">{item.label}</div>
+                    <div className="mt-1 text-sm text-panel-muted">{item.reason}</div>
+                    <div className="mt-2 font-mono text-xs text-panel-muted">{item.command}</div>
+                  </div>
+                  <input
+                    checked={runtimeModal.selected[item.tool] ?? false}
+                    className="mt-1 h-5 w-5"
+                    onChange={(event) => setRuntimeModal({
+                      ...runtimeModal,
+                      selected: { ...runtimeModal.selected, [item.tool]: event.target.checked }
+                    })}
+                    type="checkbox"
+                  />
+                </label>
+              ))}
+              {runtimeModal.review.blocked.length ? (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                  Not auto-installable: {runtimeModal.review.blocked.join(", ")}. These may still need manual server setup.
+                </div>
+              ) : null}
+            </div>
+            <div className="flex justify-end gap-2 border-t border-panel-line p-5">
+              <button className="rounded-md border border-panel-line px-4 py-2 text-sm font-medium hover:bg-slate-50" onClick={() => setRuntimeModal(null)} type="button">Cancel</button>
+              <button
+                className="rounded-md bg-panel-accent px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+                disabled={deploymentAction.isPending}
+                onClick={() => deploymentAction.mutate({
+                  id: runtimeModal.deployment.id,
+                  action: runtimeModal.action,
+                  approvedRuntimeTools: Object.entries(runtimeModal.selected).filter(([, enabled]) => enabled).map(([tool]) => tool)
+                })}
+                type="button"
+              >
+                Continue deployment
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </>
   );
 }

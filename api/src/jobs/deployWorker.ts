@@ -18,7 +18,7 @@ import {
   nodeStartUsesVitePreview
 } from "../lib/deploymentDetection.js";
 import { nginxUpstreamFailure, nodePackageBinaryMissing, supervisorStartStillStarting } from "../lib/deploymentFailureRuntimeRepairs.js";
-import { appendFrontendModuleNotFoundHint, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
+import { appendFrontendModuleNotFoundHint, envDrivenRuntimeExecutables, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import {
   deploymentRecoveryAttempts,
   isRecoverableHealthFailure,
@@ -1759,39 +1759,7 @@ async function assertRuntimeToolsInstalled(deploymentId: string, releaseId: stri
 }
 
 function envRuntimeTools(envVars: Record<string, string>) {
-  const tools = new Set<string>();
-  const normalized = Object.fromEntries(Object.entries(envVars).map(([key, value]) => [key.toUpperCase(), String(value ?? "").trim().toLowerCase()]));
-  const redisKeys = ["CACHE_DRIVER", "CACHE_STORE", "SESSION_DRIVER", "QUEUE_CONNECTION", "BROADCAST_DRIVER", "REDIS_CLIENT"];
-  if (redisKeys.some((key) => ["redis", "phpredis"].includes(normalized[key] ?? "")) || normalized.REDIS_HOST || normalized.REDIS_URL) {
-    tools.add("redis-server");
-    tools.add("redis-cli");
-    tools.add("php-ext-redis");
-  }
-  if (normalized.OCTANE_SERVER === "swoole" || normalized.OCTANE_SERVER === "openswoole") {
-    tools.add("php-ext-swoole");
-    tools.add("supervisorctl");
-  }
-  if (normalized.MAIL_MAILER === "sendmail") {
-    tools.add("sendmail");
-  }
-  if (hasGoogleDriveEnv(envVars)) {
-    tools.add("php-ext-curl");
-    tools.add("php-ext-zip");
-    tools.add("php-ext-mbstring");
-    tools.add("php-ext-sodium");
-  }
-  if (["mysql", "mariadb"].includes(normalized.DB_CONNECTION ?? "")) {
-    tools.add("php-ext-mysql");
-  }
-  if (["pgsql", "postgres", "postgresql"].includes(normalized.DB_CONNECTION ?? "")) {
-    tools.add("php-ext-pgsql");
-  }
-  if (Object.keys(normalized).some((key) => key.includes("PAY") || key.includes("BKASH") || key.includes("NAGAD") || key.includes("AMARPAY") || key.includes("SSLCZ") || key.includes("PAYPAL"))) {
-    tools.add("php-ext-bcmath");
-    tools.add("php-ext-curl");
-    tools.add("php-ext-intl");
-  }
-  return [...tools];
+  return envDrivenRuntimeExecutables(envVars);
 }
 
 async function assertEnvRuntimeToolsInstalled(deploymentId: string, releaseId: string | undefined, envVars: Record<string, string>) {

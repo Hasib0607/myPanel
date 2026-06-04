@@ -424,6 +424,47 @@ export function runtimeInstallTargetsForMissingExecutables(missingExecutables: s
   return installTargetCatalog.filter((target) => target.executables.some((executable) => missing.has(executable)));
 }
 
+export function runtimeInstallTargetsForTools(tools: string[]) {
+  const requested = new Set(tools);
+  return installTargetCatalog.filter((target) => requested.has(target.tool) || requested.has(target.actionKey));
+}
+
+export function envDrivenRuntimeExecutables(envVars: Record<string, string>) {
+  const tools = new Set<string>();
+  const normalized = Object.fromEntries(Object.entries(envVars).map(([key, value]) => [key.toUpperCase(), String(value ?? "").trim().toLowerCase()]));
+  const redisKeys = ["CACHE_DRIVER", "CACHE_STORE", "SESSION_DRIVER", "QUEUE_CONNECTION", "BROADCAST_DRIVER", "REDIS_CLIENT"];
+  if (redisKeys.some((key) => ["redis", "phpredis"].includes(normalized[key] ?? "")) || normalized.REDIS_HOST || normalized.REDIS_URL) {
+    tools.add("redis-server");
+    tools.add("redis-cli");
+    tools.add("php-ext-redis");
+  }
+  if (normalized.OCTANE_SERVER === "swoole" || normalized.OCTANE_SERVER === "openswoole") {
+    tools.add("php-ext-swoole");
+    tools.add("supervisorctl");
+  }
+  if (normalized.MAIL_MAILER === "sendmail") {
+    tools.add("sendmail");
+  }
+  if (Object.keys(normalized).some((key) => key.startsWith("GOOGLE_DRIVE_") || ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT", "GOOGLE_REDIRECT_URI"].includes(key))) {
+    tools.add("php-ext-curl");
+    tools.add("php-ext-zip");
+    tools.add("php-ext-mbstring");
+    tools.add("php-ext-sodium");
+  }
+  if (["mysql", "mariadb"].includes(normalized.DB_CONNECTION ?? "")) {
+    tools.add("php-ext-mysql");
+  }
+  if (["pgsql", "postgres", "postgresql"].includes(normalized.DB_CONNECTION ?? "")) {
+    tools.add("php-ext-pgsql");
+  }
+  if (Object.keys(normalized).some((key) => key.includes("PAY") || key.includes("BKASH") || key.includes("NAGAD") || key.includes("AMARPAY") || key.includes("SSLCZ") || key.includes("PAYPAL"))) {
+    tools.add("php-ext-bcmath");
+    tools.add("php-ext-curl");
+    tools.add("php-ext-intl");
+  }
+  return [...tools];
+}
+
 function compareMajorMinorVersions(left: string, right: string) {
   const [leftMajor = "0", leftMinor = "0"] = left.split(".");
   const [rightMajor = "0", rightMinor = "0"] = right.split(".");
