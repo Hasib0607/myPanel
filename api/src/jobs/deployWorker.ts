@@ -748,6 +748,28 @@ async function staticRootHasIndex(rootPath: string | null) {
   return false;
 }
 
+async function retireStaleBackendOnlyPublicRoute(deploymentId: string, releaseId: string | undefined, domain: BoundDomain | null) {
+  try {
+    const retireResult = await runStep(deploymentId, releaseId, "CONFIGURING_PROXY", "Retire stale public route for backend-only Laravel deployment", () =>
+      retireDeploymentNginxRoute(deploymentId, domain)
+    );
+    const testError = liveResultFailureMessage((retireResult as { test?: unknown } | null)?.test, "Retire stale public route nginx test");
+    const reloadError = liveResultFailureMessage((retireResult as { reload?: unknown } | null)?.reload, "Retire stale public route nginx reload");
+    if (testError || reloadError || liveResultFailureMessage(retireResult, "Retire stale public route")) {
+      await writeLog(deploymentId, releaseId, "CONFIGURING_PROXY", "Stale public route retire warning", {
+        warning: testError ?? reloadError ?? liveResultFailureMessage(retireResult, "Retire stale public route"),
+        result: retireResult as Prisma.InputJsonValue
+      }, "warn");
+    }
+    return retireResult;
+  } catch (error) {
+    await writeLog(deploymentId, releaseId, "CONFIGURING_PROXY", "Stale public route retire skipped after sysagent error", {
+      warning: error instanceof Error ? error.message : String(error)
+    }, "warn");
+    return null;
+  }
+}
+
 function deploymentDomain(deployment: { domain?: BoundDomain | null; domainBindings?: Array<{ role: string; domain?: BoundDomain | null; subdomain?: { id: string; name: string; sslEnabled: boolean; domainId: string; domain: { name: string; documentRoot?: string | null } } | null }> }) {
   const primary = deployment.domainBindings?.find((binding) => binding.role === "primary");
   return (primary ? boundDomainFromBinding(primary) : null)
@@ -2921,11 +2943,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
         publishPublicHtmlNginxVhost(domain)
       );
     } else if (processAction !== "stop" && domain && lifecycleBackendOnlyLaravel) {
-      const retireResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Retire stale public route for backend-only Laravel deployment", () =>
-        retireDeploymentNginxRoute(deployment.id, domain)
-      );
-      assertLiveResult((retireResult as { test?: unknown } | null)?.test, "Retire stale public route nginx test");
-      assertLiveResult((retireResult as { reload?: unknown } | null)?.reload, "Retire stale public route nginx reload");
+      const retireResult = await retireStaleBackendOnlyPublicRoute(deployment.id, releaseId, domain);
       await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "Skipped public route for backend-only Laravel deployment", {
         domain: domain.name,
         appPath,
@@ -3318,11 +3336,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           publishPublicHtmlNginxVhost(domain)
         );
       } else {
-        const retireResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Retire stale public route for backend-only Laravel deployment", () =>
-          retireDeploymentNginxRoute(deployment.id, domain)
-        );
-        assertLiveResult((retireResult as { test?: unknown } | null)?.test, "Retire stale public route nginx test");
-        assertLiveResult((retireResult as { reload?: unknown } | null)?.reload, "Retire stale public route nginx reload");
+        await retireStaleBackendOnlyPublicRoute(deployment.id, releaseId, domain);
       }
       await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", hasFallbackIndex ? "Published indexed public_html fallback for backend-only Laravel deployment" : "Skipped public route for backend-only Laravel deployment", {
         domain: domain.name,
