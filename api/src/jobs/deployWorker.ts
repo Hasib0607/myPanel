@@ -1991,6 +1991,61 @@ async function ensureComposerDeclaredPlatformExtensions(deploymentId: string, re
   return installed.length > 0;
 }
 
+function hasGoogleDriveEnv(envVars: Record<string, string>) {
+  const keys = Object.keys(envVars).map((key) => key.toUpperCase());
+  return keys.some((key) => key.startsWith("GOOGLE_DRIVE_"))
+    || keys.includes("GOOGLE_CLIENT_ID")
+    || keys.includes("GOOGLE_CLIENT_SECRET")
+    || keys.includes("GOOGLE_REDIRECT")
+    || keys.includes("GOOGLE_REDIRECT_URI");
+}
+
+function composerTextHasGoogleDriveSupport(text: string | null) {
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  return lower.includes("google/apiclient")
+    || lower.includes("google/apiclient-services")
+    || lower.includes("flysystem-google-drive")
+    || lower.includes("google-drive-adapter")
+    || lower.includes("google-drive");
+}
+
+async function ensureLaravelGoogleDriveSupport(
+  deploymentId: string,
+  releaseId: string | undefined,
+  appPath: string,
+  envVars: Record<string, string>
+) {
+  if (!hasGoogleDriveEnv(envVars)) return false;
+
+  const composerJsonPath = path.join(appPath, "composer.json");
+  const composerLockPath = path.join(appPath, "composer.lock");
+  const composerJson = await fs.readFile(composerJsonPath, "utf8").catch(() => null);
+  const composerLock = await fs.readFile(composerLockPath, "utf8").catch(() => null);
+  const alreadyInstalled = composerTextHasGoogleDriveSupport(composerJson) || composerTextHasGoogleDriveSupport(composerLock);
+
+  await writeLog(deploymentId, releaseId, "PREFLIGHT", "Google Drive env detected for Laravel deployment", {
+    envKeys: Object.keys(envVars).filter((key) => key.toUpperCase().startsWith("GOOGLE_")).sort(),
+    composerHasGoogleDriveSupport: alreadyInstalled,
+    docs: "docs/deployment-google-drive.md"
+  }, alreadyInstalled ? "info" : "warn");
+
+  if (alreadyInstalled) return false;
+
+  const result = await runStep(deploymentId, releaseId, "INSTALLING", "Install Laravel Google Drive client dependency", () =>
+    sysagent.deploymentBuild({
+      rootPath: appPath,
+      command: "composer require google/apiclient:^2.15 --no-interaction --no-scripts",
+      env: {
+        ...envVars,
+        COMPOSER_ALLOW_SUPERUSER: "1"
+      }
+    })
+  );
+  assertCommandTree(result, "Install Laravel Google Drive client dependency");
+  return true;
+}
+
 function isLaravelWritablePathIssue(text: string) {
   const lower = text.toLowerCase();
   return lower.includes("please provide a valid cache path")
@@ -3267,6 +3322,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     if (await deploymentRunsLaravel(deployment.framework, appPath)) {
       envVars = await ensureLaravelAppKey(deployment.id, releaseId, appPath, deployment.port, envVars);
       envVars = await ensureLaravelDatabaseConnection(deployment, releaseId, appPath, deployment.port, envVars);
+      const installedGoogleDriveSupport = await ensureLaravelGoogleDriveSupport(deployment.id, releaseId, appPath, envVars);
 
       const optimizeClearResult = await runStep(deployment.id, releaseId, "INSTALLING", "Laravel cache clear", () =>
         sysagent.deploymentBuild({
@@ -3281,6 +3337,23 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         await writeLog(deployment.id, releaseId, "INSTALLING", "Laravel cache clear warning", {
           warning: error instanceof Error ? error.message : String(error)
         }, "warn");
+      }
+
+      if (installedGoogleDriveSupport) {
+        const googleCacheClearResult = await runStep(deployment.id, releaseId, "INSTALLING", "Laravel cache clear after Google Drive dependency install", () =>
+          sysagent.deploymentBuild({
+            rootPath: appPath,
+            command: "php artisan optimize:clear",
+            env: envVars
+          })
+        );
+        try {
+          assertCommandTree(googleCacheClearResult, "Laravel cache clear after Google Drive dependency install");
+        } catch (error) {
+          await writeLog(deployment.id, releaseId, "INSTALLING", "Laravel Google Drive cache clear warning", {
+            warning: error instanceof Error ? error.message : String(error)
+          }, "warn");
+        }
       }
 
       const runLaravelPackageDiscovery = () => runStep(deployment.id, releaseId, "INSTALLING", "Laravel package discovery", () =>
