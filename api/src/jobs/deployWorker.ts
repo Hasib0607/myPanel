@@ -1315,7 +1315,7 @@ async function validatePublicStaticAssets(
   deploymentId: string,
   releaseId: string | undefined,
   label: string,
-  deployment: { slug: string; framework: DeploymentFramework; domain?: BoundDomain | null },
+  deployment: { slug: string; rootPath?: string; publicDirectory?: string | null; framework: DeploymentFramework; domain?: BoundDomain | null },
   appPath: string,
   publicRoute: unknown,
   requireHttps: boolean
@@ -1328,8 +1328,12 @@ async function validatePublicStaticAssets(
   const assetPaths = extractFirstPartyAssetPaths(html, domainName);
   if (!assetPaths.length) return null;
 
-  const missing: Array<{ path: string; httpCode?: number; detail: string }> = [];
+  const publicRoot = path.join(appPath, deployment.publicDirectory || "public");
+  const missing: Array<{ path: string; httpCode?: number; detail: string; diskPath: string; existsOnDisk: boolean }> = [];
   for (const assetPath of assetPaths) {
+    const urlPath = new URL(assetPath, "http://deployment.local").pathname;
+    const relativePath = decodeURIComponent(urlPath).replace(/^\/+/, "").replace(/^public\//, "");
+    const diskPath = path.join(publicRoot, relativePath);
     const result = await runStep(deploymentId, releaseId, "HEALTH_CHECK", `Static asset check ${assetPath}`, () =>
       sysagent.deploymentPublicRoute({
         serverName,
@@ -1345,18 +1349,26 @@ async function validatePublicStaticAssets(
       missing.push({
         path: assetPath,
         httpCode: (result as { httpCode?: number }).httpCode,
-        detail: failed
+        detail: failed,
+        diskPath,
+        existsOnDisk: await pathExists(diskPath)
       });
     }
   }
 
   if (!missing.length) return null;
   const preview = missing.slice(0, 8).map((item) => `${item.path}${item.httpCode ? ` (${item.httpCode})` : ""}`).join(", ");
-  const publicRoot = path.join(appPath, "public");
-  const failure = `Laravel public page references missing first-party static assets: ${preview}. These files are not present under ${publicRoot}. Commit the Laravel public assets to the source repository (do not ignore the whole /public directory), or add a build command that generates them, then redeploy.`;
+  const existingOnDisk = missing.filter((item) => item.existsOnDisk).map((item) => item.diskPath);
+  const absentOnDisk = missing.filter((item) => !item.existsOnDisk).map((item) => item.diskPath);
+  const diskHint = existingOnDisk.length
+    ? ` Some missing URLs do exist on disk (${existingOnDisk.slice(0, 3).join(", ")}), so check Nginx public root, permissions, and Laravel asset routing.`
+    : ` The checked files are absent under the current public root (${absentOnDisk.slice(0, 3).join(", ")}), so the deployment is using the wrong app/public root or the source/build did not provide those assets.`;
+  const failure = `Laravel public page references first-party static assets that are not reachable through Nginx: ${preview}. Current app root: ${appPath}. Current public root: ${publicRoot}.${diskHint}`;
   await writeLog(deploymentId, releaseId, "HEALTH_CHECK", `${label} static asset check failed`, {
     missing,
-    publicRoot
+    appPath,
+    publicRoot,
+    sourceRoot: deployment.rootPath ?? null
   }, "error");
   throw new Error(failure);
 }

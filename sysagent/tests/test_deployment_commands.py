@@ -63,7 +63,16 @@ class DeploymentCommandTests(unittest.TestCase):
             public = root / "public"
             public.mkdir()
             (public / "css").mkdir()
+            (public / "index.php").write_text("<?php\n", encoding="utf-8")
             self.assertEqual(Path(resolve_laravel_public_root(str(root), "public")).resolve(), public.resolve())
+
+    def test_resolve_laravel_public_root_ignores_public_without_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            public = root / "public"
+            public.mkdir()
+            (public / "css").mkdir()
+            self.assertEqual(Path(resolve_laravel_public_root(str(root), "public")).resolve(), root.resolve())
 
     def test_laravel_public_permissions_allow_nginx_read_and_root_traversal(self) -> None:
         root = str(Path("/srv/deployments/example").resolve())

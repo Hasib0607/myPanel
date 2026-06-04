@@ -1506,7 +1506,9 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
     repairAction: hint?.repairAction
   });
 
-  if (serverName) {
+  const doctorFramework = detection?.detected ?? deployment.framework;
+  const doctorLaravelHasPublicIndex = doctorFramework === "LARAVEL" ? await deploymentHasLaravelPublicIndex(appPath) : true;
+  if (serverName && doctorLaravelHasPublicIndex) {
     let publicRoute: unknown = null;
     try {
       publicRoute = await sysagent.deploymentPublicRoute({ serverName });
@@ -1522,7 +1524,7 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
       fix: publicFailed ? "Rewrite the generated Nginx vhost, scrub stale server_name configs, then restart the process if the route still returns 502/503/504." : undefined,
       repairAction: publicFailed ? "rewrite-nginx" : undefined
     });
-    if (!publicFailed && (detection?.detected ?? deployment.framework) === "LARAVEL" && domain?.name) {
+    if (!publicFailed && doctorFramework === "LARAVEL" && domain?.name) {
       const assetPaths = extractFirstPartyAssetPaths((publicRoute as { stdout?: string }).stdout, domain.name);
       const missingAssets: string[] = [];
       for (const assetPath of assetPaths) {
@@ -1575,6 +1577,13 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
         approvalRequired: true
       });
     }
+  } else if (serverName && doctorFramework === "LARAVEL") {
+    checks.push({
+      key: "public_route",
+      label: "Public website",
+      status: "pass",
+      detail: `Skipped public website probe because ${appPath} has no public/index.php. This Laravel deployment is treated as backend-only.`
+    });
   } else {
     checks.push({ key: "public_route", label: "Public website", status: "warn", detail: "No domain is linked yet.", fix: "Bind a domain to enable public route checks." });
   }

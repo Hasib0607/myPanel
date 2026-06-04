@@ -70,10 +70,10 @@ def resolve_laravel_public_root(root_path: str, public_directory: str | None = "
     if pub in {"", "."}:
         return str(root)
     candidate = root / pub
-    if candidate.is_dir():
+    if candidate.is_dir() and (candidate / "index.php").is_file():
         return str(candidate)
     default_public = root / "public"
-    return str(default_public if default_public.is_dir() else root)
+    return str(default_public if (default_public / "index.php").is_file() else root)
 
 
 def laravel_public_permission_commands(root_path: str) -> tuple[list[str], list[str]]:
