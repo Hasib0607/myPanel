@@ -402,14 +402,11 @@ export function DeploymentsClient({
       if (error instanceof ApiError && error.status === 409) {
         const data = error.data as RuntimeReviewError | null;
         if (data?.runtimeReview) {
-          setRuntimeModal({
-            deployment: runtimeModal?.deployment ?? variables.deployment,
-            action: variables.name === "start" ? "start" : variables.name === "restart" ? "restart" : "deploy",
-            review: data.runtimeReview,
-            selected: Object.fromEntries(data.runtimeReview.installable.map((item) => [item.tool, true]))
-          });
           const failed = data.install?.failed?.map((item) => item.tool).filter(Boolean).join(", ");
-          setNotice(failed ? `Install did not finish for: ${failed}. Review the remaining packages and try again.` : error.message);
+          const remaining = data.runtimeReview.missing.join(", ");
+          setNotice(failed
+            ? `Install did not finish for: ${failed}. Remaining missing tools: ${remaining || "unknown"}.`
+            : `Deployment was not queued because required tools are still missing: ${remaining || "unknown"}. Click deploy again to review.`);
           return;
         }
       }
@@ -439,6 +436,17 @@ export function DeploymentsClient({
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Could not check runtime packages.");
     }
+  };
+
+  const continueRuntimeInstall = (modal: RuntimeModalState) => {
+    const approvedRuntimeTools = Object.entries(modal.selected).filter(([, enabled]) => enabled).map(([tool]) => tool);
+    setRuntimeModal(null);
+    setNotice(`Installing selected packages for ${modal.deployment.name}, then starting ${modal.action}...`);
+    action.mutate({
+      deployment: modal.deployment,
+      name: modal.action,
+      approvedRuntimeTools
+    });
   };
 
   const guardianFix = useMutation({
@@ -793,11 +801,7 @@ export function DeploymentsClient({
           modal={runtimeModal}
           onChange={setRuntimeModal}
           onClose={() => setRuntimeModal(null)}
-          onContinue={() => action.mutate({
-            deployment: runtimeModal.deployment,
-            name: runtimeModal.action,
-            approvedRuntimeTools: Object.entries(runtimeModal.selected).filter(([, enabled]) => enabled).map(([tool]) => tool)
-          })}
+          onContinue={() => continueRuntimeInstall(runtimeModal)}
         />
       ) : null}
     </section>

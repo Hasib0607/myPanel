@@ -217,15 +217,11 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
       if (error instanceof ApiError && error.status === 409) {
         const data = error.data as RuntimeReviewError | null;
         if (data?.runtimeReview) {
-          const deployment = runtimeModal?.deployment ?? dashboard.data?.deployments.find((item) => item.id === variables.id);
-          setRuntimeModal({
-            deployment: deployment ?? { id: variables.id, name: "Deployment", slug: variables.id, status: "", healthStatus: "", port: 0 },
-            action: variables.action as RuntimeModalState["action"],
-            review: data.runtimeReview,
-            selected: Object.fromEntries(data.runtimeReview.installable.map((item) => [item.tool, true]))
-          });
           const failed = data.install?.failed?.map((item) => item.tool).filter(Boolean).join(", ");
-          setNotice(failed ? `Install did not finish for: ${failed}. Review the remaining packages and try again.` : error.message);
+          const remaining = data.runtimeReview.missing.join(", ");
+          setNotice(failed
+            ? `Install did not finish for: ${failed}. Remaining missing tools: ${remaining || "unknown"}.`
+            : `Deployment was not queued because required tools are still missing: ${remaining || "unknown"}. Click deploy again to review.`);
           return;
         }
       }
@@ -255,6 +251,17 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Could not check runtime packages.");
     }
+  };
+
+  const continueRuntimeInstall = (modal: RuntimeModalState) => {
+    const approvedRuntimeTools = Object.entries(modal.selected).filter(([, enabled]) => enabled).map(([tool]) => tool);
+    setRuntimeModal(null);
+    setNotice(`Installing selected packages for ${modal.deployment.name}, then starting ${modal.action}...`);
+    deploymentAction.mutate({
+      id: modal.deployment.id,
+      action: modal.action,
+      approvedRuntimeTools
+    });
   };
 
   const createDatabase = useMutation({
@@ -693,11 +700,7 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
               <button
                 className="rounded-md bg-panel-accent px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
                 disabled={deploymentAction.isPending || !Object.values(runtimeModal.selected).some(Boolean)}
-                onClick={() => deploymentAction.mutate({
-                  id: runtimeModal.deployment.id,
-                  action: runtimeModal.action,
-                  approvedRuntimeTools: Object.entries(runtimeModal.selected).filter(([, enabled]) => enabled).map(([tool]) => tool)
-                })}
+                onClick={() => continueRuntimeInstall(runtimeModal)}
                 type="button"
               >
                 {deploymentAction.isPending ? "Installing..." : "Install selected and continue"}
