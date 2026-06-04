@@ -20,6 +20,13 @@ export function supervisorRepairNeeded(text: string) {
     && (lower.includes("spawn error") || lower.includes("can't spawn") || lower.includes("cannot spawn") || lower.includes("backoff") || lower.includes("exited too quickly"));
 }
 
+export function supervisorStartStillStarting(text: string) {
+  const lower = text.toLowerCase();
+  return (lower.includes("supervisor") || lower.includes("supervisorctl"))
+    && lower.includes("abnormal termination")
+    && lower.includes("starting");
+}
+
 export function laravelPublicCwdMissing(text: string) {
   return /provided cwd\s+["'][^"']+\/public["']\s+does not exist/i.test(text);
 }

@@ -17,7 +17,7 @@ import {
   findLaravelAppRoot,
   nodeStartUsesVitePreview
 } from "../lib/deploymentDetection.js";
-import { nginxUpstreamFailure, nodePackageBinaryMissing } from "../lib/deploymentFailureRuntimeRepairs.js";
+import { nginxUpstreamFailure, nodePackageBinaryMissing, supervisorStartStillStarting } from "../lib/deploymentFailureRuntimeRepairs.js";
 import { appendFrontendModuleNotFoundHint, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import {
   deploymentRecoveryAttempts,
@@ -313,6 +313,11 @@ function isSupervisorSpawnError(result: unknown) {
   return text.includes("spawn error") || text.includes("can't spawn") || text.includes("cannot spawn");
 }
 
+function isSupervisorStartStillStarting(result: unknown) {
+  if (!result || typeof result !== "object") return false;
+  return supervisorStartStillStarting(JSON.stringify(result));
+}
+
 function isLaravelVendorAutoloadMissing(result: unknown) {
   if (!result || typeof result !== "object") return false;
   const text = JSON.stringify(result).toLowerCase();
@@ -345,6 +350,7 @@ type DeploymentProcessBody = {
   port: number;
   env: Record<string, string>;
   logDir: string;
+  framework?: DeploymentFramework;
 };
 
 function sysagentLiveCommandsDisabled(diagnosis: SysagentLiveDiagnosis) {
@@ -562,6 +568,43 @@ async function runLiveDeploymentProcess(
         error: error instanceof Error ? error.message : String(error)
       }, "error");
     }
+  }
+
+  if (isSupervisorStartStillStarting(result)) {
+    await writeLog(deploymentId, releaseId, "STARTING", `${label} returned Supervisor abnormal termination while status is STARTING; waiting for health before failing`, {
+      result: result as Prisma.InputJsonValue
+    }, "warn");
+    let lastHealth: unknown = null;
+    for (let attempt = 1; attempt <= 8; attempt += 1) {
+      await sleep(3000);
+      lastHealth = await runStep(deploymentId, releaseId, "HEALTH_CHECK", `${label} Supervisor STARTING health poll ${attempt}`, () =>
+        sysagent.deploymentHealth({
+          deploymentId: body.deploymentId,
+          port: body.port,
+          processName: body.name,
+          processManager: body.processManager,
+          rootPath: body.rootPath,
+          framework: body.framework
+        })
+      );
+      const healthError = liveResultFailureMessage(lastHealth, `${label} Supervisor STARTING health poll ${attempt}`);
+      if (!healthError) {
+        await writeLog(deploymentId, releaseId, "STARTING", `${label} recovered after Supervisor STARTING health poll`, {
+          attempt,
+          health: lastHealth as Prisma.InputJsonValue
+        });
+        return {
+          ...(result as Record<string, unknown>),
+          returncode: 0,
+          stderr: "",
+          recoveredFromSupervisorStarting: true,
+          health: lastHealth
+        };
+      }
+    }
+    await writeLog(deploymentId, releaseId, "STARTING", `${label} stayed unhealthy after Supervisor STARTING health polling`, {
+      health: lastHealth as Prisma.InputJsonValue
+    }, "warn");
   }
 
   return result;
@@ -2928,7 +2971,8 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
         startCommand: renderStartCommand(deployment),
         port: deployment.port,
         env: runtimeEnvVars,
-        logDir: deploymentLogDir(deployment.slug)
+        logDir: deploymentLogDir(deployment.slug),
+        framework: deployment.framework
       }
     );
     assertLiveResult(result, `${action} process`);
@@ -3454,7 +3498,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         startCommand: renderStartCommand(deployment),
         port: deployment.port,
         env: envVars,
-        logDir: deploymentLogDir(deployment.slug)
+        logDir: deploymentLogDir(deployment.slug),
+        framework: deployment.framework
       }
     );
     assertLiveResult(startResult, "Process start");

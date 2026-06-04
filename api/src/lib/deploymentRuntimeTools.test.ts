@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { appendFrontendModuleNotFoundHint, detectComposerPlatformIssue, detectFrontendModuleNotFound, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "./deploymentRuntimeTools.js";
-import { frontendModuleNotFound, laravelPublicCwdMissing, nodePackageBinaryMissing, pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded } from "./deploymentFailureRuntimeRepairs.js";
+import { frontendModuleNotFound, laravelPublicCwdMissing, nodePackageBinaryMissing, pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded, supervisorStartStillStarting } from "./deploymentFailureRuntimeRepairs.js";
 
 test("composer PHP 8.1 requirement on PHP 8.0 queues PHP 8.2 runtime repair", () => {
   const targets = runtimeInstallTargetsForComposerPlatformIssue(`
@@ -268,6 +268,12 @@ test("failed deploy parser detects Supervisor spawn repair separately from tool 
 
   assert.equal(supervisorRepairNeeded(log), true);
   assert.deepEqual(runtimeTargetsForFailedDeploymentLog(log).map((target) => target.actionKey), ["install-supervisor"]);
+});
+
+test("failed deploy parser detects transient Supervisor STARTING race", () => {
+  const log = "Process start failed with exit code 1: start: ecommercex-admin: ERROR (abnormal termination); Supervisor status: ecommercex-admin STARTING";
+
+  assert.equal(supervisorStartStillStarting(log), true);
 });
 
 test("failed deploy parser detects Laravel public cwd missing", () => {

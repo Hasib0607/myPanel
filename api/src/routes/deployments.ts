@@ -6,7 +6,7 @@ import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { env } from "../config/env.js";
 import { deployQueue } from "../jobs/queues.js";
-import { laravelPublicCwdMissing, nginxProxyMissingDomainFailure, nodePackageBinaryMissing } from "../lib/deploymentFailureRuntimeRepairs.js";
+import { laravelPublicCwdMissing, nginxProxyMissingDomainFailure, nodePackageBinaryMissing, supervisorStartStillStarting } from "../lib/deploymentFailureRuntimeRepairs.js";
 import { detectComposerPlatformIssue, detectFrontendModuleNotFound, formatFrontendModuleNotFoundMessage, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import { audit } from "../lib/audit.js";
 import { deploymentHasLaravelPublicIndex, detectDeploymentFiles, detectDeploymentSource, findDeploymentAppRoot } from "../lib/deploymentDetection.js";
@@ -761,6 +761,7 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
   if (lower.includes("package-lock.json") && lower.includes("yarn.lock")) return { message: "Multiple lockfiles detected. Keep one package manager lockfile to avoid inconsistent installs.", repairAction: "redeploy", category: "lockfile_conflict" };
   if (lower.includes("unsupported engine") || lower.includes("node version") || lower.includes("requires node")) return { message: "Node version mismatch. Set a compatible runtime version or update the app engines field.", repairAction: "redeploy", category: "node_version" };
   if (lower.includes("prisma") && (lower.includes("migration") || lower.includes("p100") || lower.includes("database"))) return { message: "Prisma/database migration failed. Check DATABASE_URL, database grants, and migration state.", repairAction: "redeploy", category: "prisma_migration" };
+  if (supervisorStartStillStarting(text)) return { message: "Supervisor returned an abnormal start result while the program was still STARTING. Deployment Doctor now waits for health before marking the deploy failed.", repairAction: "restart", category: "supervisor_starting_race" };
   if (nginxProxyMissingDomainFailure(text)) return { message: "The deployment has no linked domain, so Nginx proxy publishing must be skipped. Deployment Doctor now keeps no-domain deployments running on their managed internal port; redeploy to apply the corrected flow.", repairAction: "redeploy", category: "nginx_proxy_missing_domain" };
   if (lower.includes("403 forbidden") && lower.includes("nginx")) return { message: "Nginx published a directory without a valid index or the wrong Laravel web root. Deployment Doctor will prefer a nested Laravel root containing public/index.php and will not publish an empty public_html fallback.", repairAction: "redeploy", category: "nginx_static_root_403" };
   if (lower.includes("502 bad gateway") || lower.includes("http 502") || lower.includes("connect() failed") || lower.includes("upstream")) return { message: "Nginx cannot reach the deployment upstream. Guardian will rewrite the deployment vhost, scrub stale server_name configs, and restart the process if the route still returns 502.", repairAction: "rewrite-nginx", category: "nginx_upstream_502" };

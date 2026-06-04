@@ -81,6 +81,7 @@ class ProcessRequest(BaseModel):
     port: int | None = Field(default=None, ge=1, le=65535)
     env: dict[str, str] | None = None
     logDir: str | None = None
+    framework: str | None = None
 
 
 class LaravelWorkersRequest(BaseModel):
