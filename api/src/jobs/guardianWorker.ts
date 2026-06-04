@@ -588,28 +588,43 @@ async function runDeploymentWatch() {
         }
       }
       const stalePending = ["DEPLOYING", "BUILDING", "QUEUED"].includes(deployment.status) && Date.now() - deployment.updatedAt.getTime() >= staleDeploymentMs;
-      const keepFailedStatus = deployment.status === "FAILED" && healthy && !(result as { backendOnly?: boolean }).backendOnly;
+      const recoveredFailedDeployment = deployment.status === "FAILED" && healthy;
       await prisma.deployment.update({
         where: { id: deployment.id },
         data: {
-          status: keepFailedStatus ? "FAILED" : healthy ? "RUNNING" : stalePending ? "FAILED" : deployment.status,
+          status: healthy ? "RUNNING" : stalePending ? "FAILED" : deployment.status,
           healthStatus: healthy ? (result.degraded ? "DEGRADED" : "HEALTHY") : "DOWN",
           lastHealthCheckAt: new Date()
         }
       });
+      if (recoveredFailedDeployment) {
+        const release = await prisma.deploymentRelease.findFirst({
+          where: { deploymentId: deployment.id, status: "FAILED" },
+          orderBy: { createdAt: "desc" }
+        });
+        if (release) {
+          await prisma.deploymentRelease.update({
+            where: { id: release.id },
+            data: {
+              status: "SUCCEEDED",
+              finishedAt: new Date()
+            }
+          });
+        }
+      }
       await prisma.deploymentLog.create({
         data: {
           deploymentId: deployment.id,
           step: "HEALTH_CHECK",
           level: healthy ? "info" : "warn",
           message: healthy
-            ? keepFailedStatus
-              ? "Scheduled deployment watch passed but kept failed deploy status"
+            ? recoveredFailedDeployment
+              ? "Scheduled deployment watch recovered failed deployment"
               : "Scheduled deployment watch passed"
             : stalePending
               ? "Scheduled deployment watch marked stale deployment as failed"
               : "Scheduled deployment watch failed",
-          metadata: { result, stalePending, keptFailedStatus: keepFailedStatus } as any
+          metadata: { result, stalePending, recoveredFailedDeployment } as any
         }
       });
       let autoRepair = null;

@@ -449,7 +449,6 @@ export function envDrivenRuntimeExecutables(envVars: Record<string, string>) {
     tools.add("php-ext-curl");
     tools.add("php-ext-zip");
     tools.add("php-ext-mbstring");
-    tools.add("php-ext-sodium");
   }
   if (["mysql", "mariadb"].includes(normalized.DB_CONNECTION ?? "")) {
     tools.add("php-ext-mysql");

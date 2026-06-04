@@ -229,6 +229,11 @@ test("Horizon environment requires Redis runtime tools", () => {
   assert.deepEqual(tools, ["redis-server", "redis-cli", "php-ext-redis"]);
 });
 
+test("Google Drive environment only requires common PHP transport extensions", () => {
+  const tools = envDrivenRuntimeExecutables({ GOOGLE_DRIVE_CLIENT_ID: "client", GOOGLE_DRIVE_REFRESH_TOKEN: "token" });
+  assert.deepEqual(tools, ["php-ext-curl", "php-ext-zip", "php-ext-mbstring"]);
+});
+
 test("composer missing extensions queue extension-specific repairs", () => {
   const targets = runtimeInstallTargetsForComposerPlatformIssue(`
     intervention/image requires ext-gd * -> it is missing from your system.
