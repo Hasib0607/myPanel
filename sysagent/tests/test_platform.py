@@ -320,9 +320,13 @@ class AlmaPackagePlanTests(unittest.TestCase):
         self.assertEqual(plan.steps[0].command, ("dnf", "module", "reset", "-y", "php"))
         self.assertEqual(plan.steps[1].command, RHEL_PHP82_CONFLICT_CLEANUP_COMMAND)
         self.assertEqual(plan.steps[2].command, ("dnf", "module", "enable", "-y", "php:8.2"))
-        self.assertEqual(plan.steps[3].command[0:3], ("dnf", "install", "-y"))
-        self.assertIn("php-fpm", plan.steps[3].command)
-        self.assertTrue(all(step.skip_if for step in plan.steps[:4]))
+        self.assertEqual(plan.steps[3].command, ("dnf", "distro-sync", "-y", "--allowerasing", "php*"))
+        self.assertEqual(plan.steps[4].command[0:3], ("dnf", "install", "-y"))
+        self.assertIn("php-fpm", plan.steps[4].command)
+        self.assertTrue(all(step.skip_if for step in plan.steps[:5]))
+        self.assertIn("PHP_MINOR_VERSION === 2", plan.steps[0].skip_if[-1])
+        self.assertNotIn("PHP_MINOR_VERSION >= 2", plan.steps[0].skip_if[-1])
+        self.assertIn("PHP_MINOR_VERSION === 2", plan.steps[-1].command[-1])
 
     def test_rhel_php82_install_plan_removes_old_pecl_abi_conflicts(self) -> None:
         plan = runtime_tool_install_plan("php82", self.alma)
@@ -332,6 +336,14 @@ class AlmaPackagePlanTests(unittest.TestCase):
         self.assertIn("php-pecl-msgpack*", cleanup.command[-1])
         self.assertIn("php-pecl-igbinary*", cleanup.command[-1])
         self.assertIn("dnf remove -y", cleanup.command[-1])
+
+    def test_rhel_php83_install_plan_switches_exact_runtime(self) -> None:
+        plan = runtime_tool_install_plan("php83", self.alma)
+        self.assertEqual(plan.steps[3].command, ("dnf", "module", "enable", "-y", "php:remi-8.3"))
+        self.assertEqual(plan.steps[4].command, ("dnf", "distro-sync", "-y", "--allowerasing", "php*"))
+        self.assertIn("PHP_MINOR_VERSION === 3", plan.steps[1].skip_if[-1])
+        self.assertNotIn("PHP_MINOR_VERSION >= 3", plan.steps[1].skip_if[-1])
+        self.assertIn("PHP_MINOR_VERSION === 3", plan.steps[-1].command[-1])
 
     def test_dovecot_install_plan(self) -> None:
         plan = dovecot_install_plan(self.alma)

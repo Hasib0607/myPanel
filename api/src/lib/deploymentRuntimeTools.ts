@@ -200,17 +200,17 @@ const installTargetCatalog: RuntimeInstallTarget[] = [
   {
     actionKey: "install-php82",
     tool: "php82",
-    label: "Upgrade PHP runtime to 8.2",
-    command: "Install PHP 8.2 runtime, common Laravel extensions, and switch the CLI default to php8.2",
-    reason: "Composer reported that the project lockfile requires PHP 8.2 or newer.",
+    label: "Switch PHP runtime to 8.2",
+    command: "Install/synchronize PHP 8.2 runtime, common Laravel extensions, and switch the CLI default to php8.2",
+    reason: "Composer reported that the project lockfile requires or caps compatibility at PHP 8.2.",
     executables: []
   },
   {
     actionKey: "install-php83",
     tool: "php83",
-    label: "Upgrade PHP runtime to 8.3",
-    command: "Install PHP 8.3 runtime, common Laravel extensions, and switch the CLI default to php8.3",
-    reason: "Composer reported that the project lockfile requires PHP 8.3 or newer.",
+    label: "Switch PHP runtime to 8.3",
+    command: "Install/synchronize PHP 8.3 runtime, common Laravel extensions, and switch the CLI default to php8.3",
+    reason: "Composer reported that the project lockfile requires or caps compatibility at PHP 8.3.",
     executables: []
   },
   {

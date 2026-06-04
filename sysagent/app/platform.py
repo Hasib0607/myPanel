@@ -179,14 +179,16 @@ DEBIAN_PHP82_REPO_STEPS = (
     ),
 )
 DEBIAN_PHP82_SWITCH_STEPS = (
-    InstallStep("Switch the CLI php binary to php8.2", ("update-alternatives", "--set", "php", "/usr/bin/php8.2"), skip_if=("sh", "-lc", "php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION >= 2 ? 0 : 1);'")),
+    InstallStep("Switch the CLI php binary to php8.2", ("update-alternatives", "--set", "php", "/usr/bin/php8.2"), skip_if=("sh", "-lc", "php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION === 2 ? 0 : 1);'")),
     InstallStep("Switch the phar binary to php8.2", ("update-alternatives", "--set", "phar", "/usr/bin/phar8.2"), on_failure="continue"),
     InstallStep("Switch the phar.phar binary to php8.2", ("update-alternatives", "--set", "phar.phar", "/usr/bin/phar.phar8.2"), on_failure="continue"),
+    InstallStep("Verify the CLI PHP runtime is exactly 8.2", ("php", "-r", "exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION === 2 ? 0 : 1);")),
 )
 DEBIAN_PHP83_SWITCH_STEPS = (
-    InstallStep("Switch the CLI php binary to php8.3", ("update-alternatives", "--set", "php", "/usr/bin/php8.3"), skip_if=("sh", "-lc", "php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION >= 3 ? 0 : 1);'")),
+    InstallStep("Switch the CLI php binary to php8.3", ("update-alternatives", "--set", "php", "/usr/bin/php8.3"), skip_if=("sh", "-lc", "php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION === 3 ? 0 : 1);'")),
     InstallStep("Switch the phar binary to php8.3", ("update-alternatives", "--set", "phar", "/usr/bin/phar8.3"), on_failure="continue"),
     InstallStep("Switch the phar.phar binary to php8.3", ("update-alternatives", "--set", "phar.phar", "/usr/bin/phar.phar8.3"), on_failure="continue"),
+    InstallStep("Verify the CLI PHP runtime is exactly 8.3", ("php", "-r", "exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION === 3 ? 0 : 1);")),
 )
 
 
@@ -605,6 +607,7 @@ def composer_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPl
 def php82_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
     family = _resolve_family(info)
     if family is OsFamily.RHEL:
+        php82_active = ("sh", "-lc", "php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION === 2 ? 0 : 1);'")
         return PackageInstallPlan(
             key="php82_runtime",
             packages=RHEL_PHP82_PACKAGES,
@@ -613,31 +616,41 @@ def php82_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
                     "Reset existing PHP module stream",
                     ("dnf", "module", "reset", "-y", "php"),
                     on_failure="continue",
-                    skip_if=("sh", "-lc", "php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION >= 2 ? 0 : 1);'"),
+                    skip_if=php82_active,
                 ),
                 InstallStep(
                     "Remove PHP 8.0 PECL packages that block PHP 8.2 module switch",
                     RHEL_PHP82_CONFLICT_CLEANUP_COMMAND,
-                    skip_if=("sh", "-lc", "php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION >= 2 ? 0 : 1);'"),
+                    skip_if=php82_active,
                 ),
                 InstallStep(
                     "Enable PHP 8.2 module stream",
                     ("dnf", "module", "enable", "-y", "php:8.2"),
-                    skip_if=("sh", "-lc", "php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION >= 2 ? 0 : 1);'"),
+                    skip_if=php82_active,
+                ),
+                InstallStep(
+                    "Synchronize installed PHP packages to the PHP 8.2 module stream",
+                    ("dnf", "distro-sync", "-y", "--allowerasing", "php*"),
+                    env=package_install_env(info),
+                    skip_if=php82_active,
                 ),
                 InstallStep(
                     "Install PHP 8.2 runtime, FPM, and common Laravel extensions",
                     tuple(package_install_command(list(RHEL_PHP82_PACKAGES), info)),
                     env=package_install_env(info),
-                    skip_if=("sh", "-lc", "php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION >= 2 ? 0 : 1);'"),
+                    skip_if=php82_active,
                 ),
                 InstallStep(
                     "Enable and restart PHP-FPM after PHP 8.2 install",
                     ("systemctl", "enable", "--now", "php-fpm"),
                     on_failure="continue",
                 ),
+                InstallStep(
+                    "Verify the CLI PHP runtime is exactly 8.2",
+                    ("php", "-r", "exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION === 2 ? 0 : 1);"),
+                ),
             ),
-            notes="AlmaLinux/RHEL PHP 8.2 runtime for Composer lockfiles that require PHP 8.1/8.2+.",
+            notes="AlmaLinux/RHEL PHP 8.2 runtime switch for Composer lockfiles that require or cap compatibility at PHP 8.2.",
         )
     if family is not OsFamily.DEBIAN:
         raise KeyError("PHP 8.2 auto-upgrade is currently supported on Debian/Ubuntu hosts only")
@@ -684,6 +697,7 @@ def php_sodium_install_plan(info: OsReleaseInfo | None = None) -> PackageInstall
 def php83_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
     family = _resolve_family(info)
     if family is OsFamily.RHEL:
+        php83_active = ("sh", "-lc", "php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION === 3 ? 0 : 1);'")
         return PackageInstallPlan(
             key="php83_runtime",
             packages=RHEL_PHP83_PACKAGES,
@@ -698,31 +712,41 @@ def php83_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
                     "Reset existing PHP module stream",
                     ("dnf", "module", "reset", "-y", "php"),
                     on_failure="continue",
-                    skip_if=("sh", "-lc", "php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION >= 3 ? 0 : 1);'"),
+                    skip_if=php83_active,
                 ),
                 InstallStep(
                     "Remove PHP PECL packages that block PHP 8.3 module switch",
                     RHEL_PHP82_CONFLICT_CLEANUP_COMMAND,
-                    skip_if=("sh", "-lc", "php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION >= 3 ? 0 : 1);'"),
+                    skip_if=php83_active,
                 ),
                 InstallStep(
                     "Enable PHP 8.3 module stream",
                     ("dnf", "module", "enable", "-y", "php:remi-8.3"),
-                    skip_if=("sh", "-lc", "php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION >= 3 ? 0 : 1);'"),
+                    skip_if=php83_active,
+                ),
+                InstallStep(
+                    "Synchronize installed PHP packages to the PHP 8.3 module stream",
+                    ("dnf", "distro-sync", "-y", "--allowerasing", "php*"),
+                    env=package_install_env(info),
+                    skip_if=php83_active,
                 ),
                 InstallStep(
                     "Install PHP 8.3 runtime, FPM, and common Laravel extensions",
                     tuple(package_install_command(list(RHEL_PHP83_PACKAGES), info)),
                     env=package_install_env(info),
-                    skip_if=("sh", "-lc", "php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION >= 3 ? 0 : 1);'"),
+                    skip_if=php83_active,
                 ),
                 InstallStep(
                     "Enable and restart PHP-FPM after PHP 8.3 install",
                     ("systemctl", "enable", "--now", "php-fpm"),
                     on_failure="continue",
                 ),
+                InstallStep(
+                    "Verify the CLI PHP runtime is exactly 8.3",
+                    ("php", "-r", "exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION === 3 ? 0 : 1);"),
+                ),
             ),
-            notes="AlmaLinux/RHEL PHP 8.3 runtime via Remi for Composer lockfiles that require PHP 8.3+.",
+            notes="AlmaLinux/RHEL PHP 8.3 runtime switch via Remi for Composer lockfiles that require or cap compatibility at PHP 8.3.",
         )
     if family is not OsFamily.DEBIAN:
         raise KeyError("PHP 8.3 auto-upgrade is currently supported on Debian/Ubuntu and AlmaLinux/RHEL hosts only")
