@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appendFrontendModuleNotFoundHint, detectComposerPlatformIssue, detectFrontendModuleNotFound, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "./deploymentRuntimeTools.js";
+import { appendFrontendModuleNotFoundHint, detectComposerPlatformIssue, detectFrontendModuleNotFound, envDrivenRuntimeExecutables, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "./deploymentRuntimeTools.js";
 import { frontendModuleNotFound, laravelPublicCwdMissing, nodePackageBinaryMissing, pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded, supervisorStartStillStarting } from "./deploymentFailureRuntimeRepairs.js";
 
 test("composer PHP 8.1 requirement on PHP 8.0 queues PHP 8.2 runtime repair", () => {
@@ -221,6 +221,11 @@ test("missing runtime matrix entries map to small install targets", () => {
     "install-supervisor",
     "install-pm2"
   ]);
+});
+
+test("Horizon environment requires Redis runtime tools", () => {
+  const tools = envDrivenRuntimeExecutables({ HORIZON_ENABLED: "true" });
+  assert.deepEqual(tools, ["redis-server", "redis-cli", "php-ext-redis"]);
 });
 
 test("composer missing extensions queue extension-specific repairs", () => {

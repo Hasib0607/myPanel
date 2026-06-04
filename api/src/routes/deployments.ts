@@ -23,6 +23,13 @@ import {
 import { prisma } from "../lib/prisma.js";
 import { deleteSecret, getSecret, putSecret } from "../lib/secrets.js";
 import { sysagent } from "../lib/sysagent.js";
+import {
+  inferredLaravelManagedProcesses,
+  laravelManagedProcessesSchema,
+  laravelManagedProgramName,
+  queueGroupCommand,
+  renderLaravelProcessCommand
+} from "../lib/laravelProcesses.js";
 
 const frameworkSchema = z.enum(["LARAVEL", "NEXTJS", "NODEJS", "PYTHON", "GO", "STATIC"]);
 const statusSchema = z.enum(["QUEUED", "RUNNING", "STOPPED", "DEPLOYING", "BUILDING", "FAILED"]);
@@ -47,7 +54,8 @@ const laravelWorkerConfigSchema = z.object({
   desiredWorkers: value.enabled ? Math.max(value.minWorkers, Math.min(value.desiredWorkers, Math.max(value.maxWorkers, value.minWorkers))) : 0
 }));
 const processConfigSchema = z.object({
-  laravelWorkers: laravelWorkerConfigSchema.optional()
+  laravelWorkers: laravelWorkerConfigSchema.optional(),
+  laravelManagedProcesses: laravelManagedProcessesSchema.optional()
 }).passthrough().default({});
 
 const baseDeploymentSchema = z.object({
@@ -728,6 +736,39 @@ async function applyLaravelWorkers(deployment: Awaited<ReturnType<typeof findDep
   });
   await addLog(deployment.id, "STARTING", `Laravel queue workers ${desiredWorkers > 0 ? "applied" : "stopped"}`, undefined, { reason, config: current, result } as Prisma.InputJsonObject);
   return { config: current, result };
+}
+
+async function applyLaravelManagedProcesses(deployment: Awaited<ReturnType<typeof findDeployment>>, input: unknown) {
+  if (deployment.framework !== "LARAVEL") {
+    throw Object.assign(new Error("Laravel managed processes are only available for Laravel deployments."), { statusCode: 400 });
+  }
+  const envVars = Object.fromEntries(deployment.env.filter((item) => item.value).map((item) => [item.key, item.value as string]));
+  const config = inferredLaravelManagedProcesses(envVars, input);
+  const previous = inferredLaravelManagedProcesses(envVars, deploymentProcessConfig(deployment.processConfig).laravelManagedProcesses);
+  const currentGroupIds = new Set(config.queueGroups.map((group) => group.id));
+  const definitions = [
+    { key: "scheduler", ...config.scheduler },
+    { key: "horizon", ...config.horizon },
+    { key: "reverb", ...config.reverb },
+    ...config.queueGroups.map((group) => ({ key: `queue-${group.id}`, enabled: group.enabled, instances: group.desiredWorkers, command: queueGroupCommand(group) })),
+    ...previous.queueGroups.filter((group) => !currentGroupIds.has(group.id)).map((group) => ({ key: `queue-${group.id}`, enabled: false, instances: 0, command: queueGroupCommand(group) }))
+  ];
+  const results: Record<string, unknown> = {};
+  for (const definition of definitions) {
+    results[definition.key] = await sysagent.deploymentLaravelWorkers({
+      name: laravelManagedProgramName(deployment.slug, definition.key),
+      rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
+      action: definition.enabled && definition.instances > 0 ? "apply" : "stop",
+      desiredWorkers: definition.enabled ? definition.instances : 0,
+      queueCommand: renderLaravelProcessCommand(definition.command, deployment.port),
+      env: envVars,
+      logDir: deploymentLogDir(deployment.slug),
+      logPrefix: definition.key
+    });
+  }
+  const processConfig = { ...deploymentProcessConfig(deployment.processConfig), laravelManagedProcesses: config };
+  await prisma.deployment.update({ where: { id: deployment.id }, data: { processConfig: processConfig as Prisma.InputJsonValue } });
+  return { config, results };
 }
 
 function deploymentAppPath(rootPath: string, rootDirectory: string | null | undefined) {
@@ -2009,6 +2050,22 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       body.laravelWorkers.autoscale ? "manual save with Guardian autoscale enabled" : "manual worker setting"
     );
     await audit(request, { action: "UPDATE", resource: "deployment_workers", resourceId: deployment.id, description: `Updated Laravel workers for ${deployment.slug}`, metadata: result as unknown as Prisma.InputJsonObject });
+    return reply.code(202).send(result);
+  });
+
+  app.get("/:deploymentId/laravel-processes", async (request) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const deployment = await findDeployment(deploymentId);
+    const envVars = Object.fromEntries(deployment.env.filter((item) => item.value).map((item) => [item.key, item.value as string]));
+    return inferredLaravelManagedProcesses(envVars, deploymentProcessConfig(deployment.processConfig).laravelManagedProcesses);
+  });
+
+  app.patch("/:deploymentId/laravel-processes", async (request, reply) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const body = z.object({ laravelManagedProcesses: laravelManagedProcessesSchema }).parse(request.body ?? {});
+    const deployment = await findDeployment(deploymentId);
+    const result = await applyLaravelManagedProcesses(deployment, body.laravelManagedProcesses);
+    await audit(request, { action: "UPDATE", resource: "deployment_laravel_processes", resourceId: deployment.id, description: `Updated Laravel managed processes for ${deployment.slug}` });
     return reply.code(202).send(result);
   });
 

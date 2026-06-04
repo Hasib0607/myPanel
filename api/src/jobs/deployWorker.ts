@@ -30,6 +30,12 @@ import { env } from "../config/env.js";
 import { prisma } from "../lib/prisma.js";
 import { deleteSecret, getSecret, putSecret } from "../lib/secrets.js";
 import { sysagent } from "../lib/sysagent.js";
+import {
+  inferredLaravelManagedProcesses,
+  laravelManagedProgramName,
+  queueGroupCommand,
+  renderLaravelProcessCommand
+} from "../lib/laravelProcesses.js";
 import { sslQueue } from "./queues.js";
 import {
   type BoundDomain,
@@ -149,6 +155,87 @@ function laravelWorkerConfig(value: unknown) {
 
 function laravelWorkerProgramName(slug: string) {
   return `${slug}-queue`;
+}
+
+async function applyLaravelManagedProcesses(
+  deployment: { id: string; slug: string; port: number; processConfig: unknown },
+  releaseId: string | undefined,
+  appPath: string,
+  envVars: Record<string, string>,
+  action: "apply" | "stop"
+) {
+  const processConfig = deploymentProcessConfig(deployment.processConfig);
+  const managed = inferredLaravelManagedProcesses(envVars, processConfig.laravelManagedProcesses);
+  const definitions = [
+    { key: "scheduler", ...managed.scheduler },
+    { key: "horizon", ...managed.horizon },
+    { key: "reverb", ...managed.reverb },
+    ...managed.queueGroups.map((group) => ({
+      key: `queue-${group.id}`,
+      enabled: group.enabled,
+      instances: group.desiredWorkers,
+      command: queueGroupCommand(group)
+    }))
+  ];
+
+  const status: Record<string, unknown> = {};
+  for (const definition of definitions) {
+    const desiredWorkers = action === "stop" || !definition.enabled ? 0 : definition.instances;
+    status[definition.key] = await runStep(
+      deployment.id,
+      releaseId,
+      "STARTING",
+      `Laravel ${definition.key} ${desiredWorkers > 0 ? "apply" : "stop"}`,
+      () => sysagent.deploymentLaravelWorkers({
+        name: laravelManagedProgramName(deployment.slug, definition.key),
+        rootPath: appPath,
+        action: desiredWorkers > 0 ? "apply" : "stop",
+        desiredWorkers,
+        queueCommand: renderLaravelProcessCommand(definition.command, deployment.port),
+        env: envVars,
+        logDir: deploymentLogDir(deployment.slug),
+        logPrefix: definition.key
+      })
+    );
+  }
+  const latest = await prisma.deployment.findUnique({ where: { id: deployment.id }, select: { processConfig: true } });
+  await prisma.deployment.update({
+    where: { id: deployment.id },
+    data: {
+      processConfig: {
+        ...deploymentProcessConfig(latest?.processConfig ?? processConfig),
+        laravelManagedProcesses: managed
+      } as Prisma.InputJsonValue
+    }
+  });
+  return status;
+}
+
+function laravelMainStartCommand(deployment: { port: number; processConfig: unknown }, envVars: Record<string, string>, fallback: string | null) {
+  const managed = inferredLaravelManagedProcesses(envVars, deploymentProcessConfig(deployment.processConfig).laravelManagedProcesses);
+  return managed.octane.enabled ? renderLaravelProcessCommand(managed.octane.command, deployment.port) : fallback;
+}
+
+async function gracefulLaravelWorkerReload(
+  deployment: { id: string; processConfig: unknown },
+  releaseId: string | undefined,
+  appPath: string,
+  envVars: Record<string, string>
+) {
+  const managed = inferredLaravelManagedProcesses(envVars, deploymentProcessConfig(deployment.processConfig).laravelManagedProcesses);
+  const commands = ["php artisan queue:restart", ...(managed.horizon.enabled ? ["php artisan horizon:terminate"] : [])];
+  for (const command of commands) {
+    const result = await runStep(deployment.id, releaseId, "STARTING", `Graceful ${command}`, () =>
+      sysagent.deploymentBuild({ rootPath: appPath, command, env: envVars })
+    );
+    try {
+      assertCommandTree(result, command);
+    } catch (error) {
+      await writeLog(deployment.id, releaseId, "STARTING", `${command} warning`, {
+        warning: error instanceof Error ? error.message : String(error)
+      }, "warn");
+    }
+  }
 }
 
 function deploymentPortRange() {
@@ -3148,6 +3235,9 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
       assertLiveResult((nginxResult as { reload?: unknown }).reload, "Nginx reload");
     }
 
+    if (deployment.framework === "LARAVEL" && processAction !== "stop") {
+      await gracefulLaravelWorkerReload(deployment, releaseId, appPath, runtimeEnvVars);
+    }
     const result = await runLiveDeploymentProcess(
       deployment.id,
       releaseId,
@@ -3158,7 +3248,9 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
         rootPath: appPath,
         action: processAction,
         processManager,
-        startCommand: renderStartCommand(deployment),
+        startCommand: deployment.framework === "LARAVEL"
+          ? laravelMainStartCommand(deployment, runtimeEnvVars, renderStartCommand(deployment))
+          : renderStartCommand(deployment),
         port: deployment.port,
         env: runtimeEnvVars,
         logDir: deploymentLogDir(deployment.slug),
@@ -3197,6 +3289,13 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
           } as Prisma.InputJsonValue
         }
       });
+      await applyLaravelManagedProcesses(
+        deployment,
+        releaseId,
+        appPath,
+        runtimeEnvVars,
+        processAction === "stop" ? "stop" : "apply"
+      );
     }
 
     if (processAction === "stop") {
@@ -3706,6 +3805,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     if (await deploymentRunsLaravel(deployment.framework, appPath)) {
       envVars = await ensureLaravelAppKey(deployment.id, releaseId, appPath, deployment.port, envVars);
       await prepareLaravelForStart(deployment.id, releaseId, appPath, deployment.port, envVars);
+      await gracefulLaravelWorkerReload(deployment, releaseId, appPath, envVars);
     }
     const startResult = await runLiveDeploymentProcess(
       deployment.id,
@@ -3717,7 +3817,9 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         rootPath: appPath,
         action: "start",
         processManager,
-        startCommand: renderStartCommand(deployment),
+        startCommand: await deploymentRunsLaravel(deployment.framework, appPath)
+          ? laravelMainStartCommand(deployment, envVars, renderStartCommand(deployment))
+          : renderStartCommand(deployment),
         port: deployment.port,
         env: envVars,
         logDir: deploymentLogDir(deployment.slug),
@@ -3725,6 +3827,20 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       }
     );
     assertLiveResult(startResult, "Process start");
+
+    if (await deploymentRunsLaravel(deployment.framework, appPath)) {
+      const queueConfig = laravelWorkerConfig(deploymentProcessConfig(deployment.processConfig).laravelWorkers);
+      await sysagent.deploymentLaravelWorkers({
+        name: laravelWorkerProgramName(deployment.slug),
+        rootPath: appPath,
+        action: queueConfig.enabled && queueConfig.desiredWorkers > 0 ? "apply" : "stop",
+        desiredWorkers: queueConfig.enabled ? queueConfig.desiredWorkers : 0,
+        queueCommand: queueConfig.queueCommand,
+        env: envVars,
+        logDir: deploymentLogDir(deployment.slug)
+      });
+      await applyLaravelManagedProcesses(deployment, releaseId, appPath, envVars, "apply");
+    }
 
     const { outcome: healthOutcome } = await runHealthCheckWithGuardianRecovery(
       deployment,

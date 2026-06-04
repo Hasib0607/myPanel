@@ -12,6 +12,12 @@ import { deployQueue } from "./queues.js";
 import { requiredRuntimeExecutables, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import { laravelPublicCwdMissing, nginxProxyMissingDomainFailure, permissionRepairNeeded, pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded } from "../lib/deploymentFailureRuntimeRepairs.js";
 import path from "node:path";
+import { Redis as AppRedis } from "ioredis";
+import {
+  laravelManagedProgramName,
+  normalizeLaravelManagedProcesses,
+  queueGroupCommand
+} from "../lib/laravelProcesses.js";
 
 const staleDeploymentMs = Number(process.env.GUARDIAN_STALE_DEPLOYMENT_MS ?? 15 * 60_000);
 const autoDeployRepairEnabled = process.env.GUARDIAN_AUTO_DEPLOY_REPAIR !== "false";
@@ -103,6 +109,46 @@ function metadataText(metadata: unknown) {
     return JSON.stringify(metadata);
   } catch {
     return "";
+  }
+}
+
+function queueNamesFromCommand(command: string) {
+  const match = command.match(/(?:--queue(?:=|\s+))([^\s]+)/i);
+  return (match?.[1] ?? "default").split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+async function laravelRedisQueueBacklog(envVars: Record<string, string>, queueNames: string[]) {
+  const connection = (envVars.QUEUE_CONNECTION || envVars.QUEUE_DRIVER || "").toLowerCase();
+  if (connection !== "redis") return null;
+  const client = new AppRedis({
+    host: envVars.REDIS_HOST || "127.0.0.1",
+    port: Number(envVars.REDIS_PORT || 6379),
+    username: envVars.REDIS_USERNAME || undefined,
+    password: envVars.REDIS_PASSWORD || undefined,
+    db: Number(envVars.REDIS_DB || 0),
+    connectTimeout: 2500,
+    maxRetriesPerRequest: 1,
+    lazyConnect: true
+  });
+  try {
+    await client.connect();
+    let backlog = 0;
+    const appPrefix = envVars.APP_NAME
+      ? `${envVars.APP_NAME.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "")}_database_`
+      : "";
+    const prefixes = [...new Set([envVars.REDIS_PREFIX || "", appPrefix, ""])];
+    for (const queue of queueNames) {
+      for (const prefix of prefixes) {
+        backlog += await client.llen(`${prefix}queues:${queue}`);
+        backlog += await client.zcard(`${prefix}queues:${queue}:delayed`);
+        backlog += await client.zcard(`${prefix}queues:${queue}:reserved`);
+      }
+    }
+    return backlog;
+  } catch {
+    return null;
+  } finally {
+    client.disconnect();
   }
 }
 
@@ -655,6 +701,8 @@ async function runLaravelWorkerAutoscale() {
     if (!config.enabled) continue;
 
     const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
+    const envVars = Object.fromEntries(deployment.env.filter((item) => item.value).map((item) => [item.key, item.value as string]));
+    const queueBacklog = await laravelRedisQueueBacklog(envVars, queueNamesFromCommand(config.queueCommand));
     const status = await sysagent.deploymentLaravelWorkers({
       name: laravelWorkerProgramName(deployment.slug),
       rootPath: appPath,
@@ -676,6 +724,7 @@ async function runLaravelWorkerAutoscale() {
       const text = recentLogs.map((log) => `${log.message}\n${metadataText(log.metadata)}`).join("\n").toLowerCase();
       const pressure = deployment.healthStatus === "DOWN"
         || deployment.healthStatus === "DEGRADED"
+        || (queueBacklog !== null && queueBacklog > Math.max(10, runningWorkers * 10))
         || /timeout|timed out|too many connections|connection refused|queue backlog|queue busy|http 5\d\d|502|503|504|slow|overload/.test(text);
       const quietHealthy = deployment.healthStatus === "HEALTHY"
         && !pressure
@@ -684,7 +733,9 @@ async function runLaravelWorkerAutoscale() {
 
       if (pressure) {
         nextWorkers = Math.min(config.maxWorkers, Math.max(nextWorkers + 1, config.minWorkers || 1));
-        reason = `traffic/health pressure (${deployment.healthStatus})`;
+        reason = queueBacklog !== null && queueBacklog > Math.max(10, runningWorkers * 10)
+          ? `Redis queue backlog ${queueBacklog}`
+          : `traffic/health pressure (${deployment.healthStatus})`;
       } else if (quietHealthy && !scaledRecently && nextWorkers > config.minWorkers) {
         nextWorkers = Math.max(config.minWorkers, nextWorkers - 1);
         reason = "quiet healthy cooldown";
@@ -696,7 +747,6 @@ async function runLaravelWorkerAutoscale() {
       continue;
     }
 
-    const envVars = Object.fromEntries(deployment.env.filter((item) => item.value).map((item) => [item.key, item.value as string]));
     const apply = await sysagent.deploymentLaravelWorkers({
       name: laravelWorkerProgramName(deployment.slug),
       rootPath: appPath,
@@ -728,6 +778,66 @@ async function runLaravelWorkerAutoscale() {
       }
     });
     results.push({ deploymentId: deployment.id, changed: true, workers: appliedWorkers, reason });
+  }
+  return { checked: deployments.length, results };
+}
+
+async function runLaravelQueueGroupAutoscale() {
+  const deployments = await prisma.deployment.findMany({
+    where: { framework: "LARAVEL", status: { in: ["RUNNING", "DEPLOYING", "BUILDING"] } },
+    include: { env: true },
+    take: 50
+  });
+  const results = [];
+  for (const deployment of deployments) {
+    const processConfig = deploymentProcessConfig(deployment.processConfig);
+    const managed = normalizeLaravelManagedProcesses(processConfig.laravelManagedProcesses);
+    const envVars = Object.fromEntries(deployment.env.filter((item) => item.value).map((item) => [item.key, item.value as string]));
+    let changed = false;
+    for (const group of managed.queueGroups) {
+      if (!group.enabled || !group.autoscale) continue;
+      const name = laravelManagedProgramName(deployment.slug, `queue-${group.id}`);
+      const status = await sysagent.deploymentLaravelWorkers({
+        name,
+        rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
+        action: "status",
+        desiredWorkers: group.desiredWorkers,
+        queueCommand: queueGroupCommand(group),
+        logDir: deploymentLogDir(deployment.slug),
+        logPrefix: `queue-${group.id}`
+      }).catch(() => ({ status: { running: group.desiredWorkers } })) as { runningWorkers?: number; status?: { running?: number } };
+      const running = status.runningWorkers ?? status.status?.running ?? group.desiredWorkers;
+      const backlog = await laravelRedisQueueBacklog(envVars, group.queueNames);
+      let desired = running || group.minWorkers;
+      let reason = "steady";
+      if (backlog !== null && backlog > Math.max(10, running * 10)) {
+        desired = Math.min(group.maxWorkers, Math.max(running + 1, group.minWorkers || 1));
+        reason = `Redis queue backlog ${backlog}`;
+      } else if (backlog === 0 && desired > group.minWorkers) {
+        desired = Math.max(group.minWorkers, desired - 1);
+        reason = "Redis queue empty";
+      }
+      if (desired === group.desiredWorkers && desired === running) continue;
+      await sysagent.deploymentLaravelWorkers({
+        name,
+        rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
+        action: desired > 0 ? "apply" : "stop",
+        desiredWorkers: desired,
+        queueCommand: queueGroupCommand(group),
+        env: envVars,
+        logDir: deploymentLogDir(deployment.slug),
+        logPrefix: `queue-${group.id}`
+      });
+      group.desiredWorkers = desired;
+      changed = true;
+      results.push({ deploymentId: deployment.id, group: group.id, desired, backlog, reason });
+    }
+    if (changed) {
+      await prisma.deployment.update({
+        where: { id: deployment.id },
+        data: { processConfig: { ...processConfig, laravelManagedProcesses: managed } as any }
+      });
+    }
   }
   return { checked: deployments.length, results };
 }
@@ -859,11 +969,12 @@ export const guardianWorker = new Worker(
   async (job) => {
     logger.info("guardian job received", { id: job.id, name: job.name });
     if (job.name === "deployment-watch") {
-      const [deploymentWatch, laravelWorkers] = await Promise.all([
+      const [deploymentWatch, laravelWorkers, laravelQueueGroups] = await Promise.all([
         runDeploymentWatch(),
-        runLaravelWorkerAutoscale()
+        runLaravelWorkerAutoscale(),
+        runLaravelQueueGroupAutoscale()
       ]);
-      return { deploymentWatch, laravelWorkers };
+      return { deploymentWatch, laravelWorkers, laravelQueueGroups };
     }
     if (job.name === "deployment-guard-watch") {
       return runDeploymentGuardWatch();

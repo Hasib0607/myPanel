@@ -20,6 +20,13 @@ import { resolvePublicA } from "../lib/publicDns.js";
 import { deleteSecret, getSecret, putSecret } from "../lib/secrets.js";
 import { sysagent } from "../lib/sysagent.js";
 import { nginxResourceName } from "../lib/nginxNames.js";
+import {
+  inferredLaravelManagedProcesses,
+  laravelManagedProcessesSchema,
+  laravelManagedProgramName,
+  queueGroupCommand,
+  renderLaravelProcessCommand
+} from "../lib/laravelProcesses.js";
 import { defaultRecords } from "./domains.js";
 import { renderZone } from "./dns.js";
 
@@ -133,6 +140,14 @@ const deploymentUpdateSchema = deploymentSchema.partial().extend({
 });
 const runtimeInstallSelectionSchema = z.object({
   approvedRuntimeTools: z.array(z.string().min(1)).max(50).default([])
+});
+const accountLaravelWorkersSchema = z.object({
+  enabled: z.boolean().default(false),
+  autoscale: z.boolean().default(false),
+  desiredWorkers: z.number().int().min(0).max(64).default(0),
+  minWorkers: z.number().int().min(0).max(64).default(0),
+  maxWorkers: z.number().int().min(1).max(64).default(8),
+  queueCommand: z.string().trim().min(1).max(500).default("php artisan queue:work --sleep=3 --tries=3 --timeout=90")
 });
 const githubConnectionSchema = z.object({
   username: z.string().trim().min(1).nullable().optional(),
@@ -811,6 +826,14 @@ function accountDeploymentRootPath(account: { homeRoot: string }, requestedPath:
     return path.join(account.homeRoot, "deployments", path.basename(cleanRequested));
   }
   return safeAccountPath(account, cleanRequested).resolved;
+}
+
+function accountDeploymentAppPath(deployment: { rootPath: string; rootDirectory: string }) {
+  return path.resolve(deployment.rootPath, deployment.rootDirectory === "." ? "" : deployment.rootDirectory);
+}
+
+function accountDeploymentLogDir(slug: string) {
+  return `${env.DEPLOYMENT_LOG_ROOT.replace(/\/+$/, "")}/${slug}`;
 }
 
 function safeChildPath(account: { homeRoot: string }, parentPath: string, name: string) {
@@ -1631,6 +1654,103 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const deployment = await findAccountDeployment(request, deploymentId);
     return prisma.deploymentRelease.findMany({ where: { deploymentId: deployment.id }, orderBy: { createdAt: "desc" }, take: 50 });
+  });
+
+  app.get("/deployments/:deploymentId/workers", async (request: any) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const deployment = await findAccountDeployment(request, deploymentId);
+    const processConfig = deployment.processConfig && typeof deployment.processConfig === "object" && !Array.isArray(deployment.processConfig)
+      ? deployment.processConfig as Record<string, unknown>
+      : {};
+    const config = accountLaravelWorkersSchema.parse(processConfig.laravelWorkers ?? {});
+    const status = deployment.framework === "LARAVEL"
+      ? await sysagent.deploymentLaravelWorkers({
+          name: `${deployment.slug}-queue`,
+          rootPath: accountDeploymentAppPath(deployment),
+          action: "status",
+          desiredWorkers: config.enabled ? config.desiredWorkers : 0,
+          queueCommand: config.queueCommand,
+          logDir: accountDeploymentLogDir(deployment.slug)
+        }).catch((error) => ({ error: error instanceof Error ? error.message : String(error) }))
+      : null;
+    return { config, status };
+  });
+
+  app.patch("/deployments/:deploymentId/workers", async (request: any, reply) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const body = z.object({ laravelWorkers: accountLaravelWorkersSchema }).parse(request.body ?? {});
+    const deployment = await findAccountDeployment(request, deploymentId);
+    if (deployment.framework !== "LARAVEL") throw app.httpErrors.badRequest("Laravel workers are only available for Laravel deployments.");
+    const desiredWorkers = body.laravelWorkers.enabled ? body.laravelWorkers.desiredWorkers : 0;
+    const result = await sysagent.deploymentLaravelWorkers({
+      name: `${deployment.slug}-queue`,
+      rootPath: accountDeploymentAppPath(deployment),
+      action: desiredWorkers > 0 ? "apply" : "stop",
+      desiredWorkers,
+      queueCommand: body.laravelWorkers.queueCommand,
+      env: Object.fromEntries(deployment.env.filter((item) => item.value).map((item) => [item.key, item.value as string])),
+      logDir: accountDeploymentLogDir(deployment.slug)
+    });
+    const processConfig = deployment.processConfig && typeof deployment.processConfig === "object" && !Array.isArray(deployment.processConfig)
+      ? deployment.processConfig as Record<string, unknown>
+      : {};
+    await prisma.deployment.update({
+      where: { id: deployment.id },
+      data: { processConfig: { ...processConfig, laravelWorkers: { ...body.laravelWorkers, desiredWorkers } } as Prisma.InputJsonValue }
+    });
+    return reply.code(202).send({ config: { ...body.laravelWorkers, desiredWorkers }, result });
+  });
+
+  app.get("/deployments/:deploymentId/laravel-processes", async (request: any) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const deployment = await findAccountDeployment(request, deploymentId);
+    const processConfig = deployment.processConfig && typeof deployment.processConfig === "object" && !Array.isArray(deployment.processConfig)
+      ? deployment.processConfig as Record<string, unknown>
+      : {};
+    const envVars = Object.fromEntries(deployment.env.filter((item) => item.value).map((item) => [item.key, item.value as string]));
+    return inferredLaravelManagedProcesses(envVars, processConfig.laravelManagedProcesses);
+  });
+
+  app.patch("/deployments/:deploymentId/laravel-processes", async (request: any, reply) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const body = z.object({ laravelManagedProcesses: laravelManagedProcessesSchema }).parse(request.body ?? {});
+    const deployment = await findAccountDeployment(request, deploymentId);
+    if (deployment.framework !== "LARAVEL") throw app.httpErrors.badRequest("Laravel managed processes are only available for Laravel deployments.");
+    const envVars = Object.fromEntries(deployment.env.filter((item) => item.value).map((item) => [item.key, item.value as string]));
+    const config = inferredLaravelManagedProcesses(envVars, body.laravelManagedProcesses);
+    const previousProcessConfig = deployment.processConfig && typeof deployment.processConfig === "object" && !Array.isArray(deployment.processConfig)
+      ? deployment.processConfig as Record<string, unknown>
+      : {};
+    const previous = inferredLaravelManagedProcesses(envVars, previousProcessConfig.laravelManagedProcesses);
+    const currentGroupIds = new Set(config.queueGroups.map((group) => group.id));
+    const definitions = [
+      { key: "scheduler", ...config.scheduler },
+      { key: "horizon", ...config.horizon },
+      { key: "reverb", ...config.reverb },
+      ...config.queueGroups.map((group) => ({ key: `queue-${group.id}`, enabled: group.enabled, instances: group.desiredWorkers, command: queueGroupCommand(group) })),
+      ...previous.queueGroups.filter((group) => !currentGroupIds.has(group.id)).map((group) => ({ key: `queue-${group.id}`, enabled: false, instances: 0, command: queueGroupCommand(group) }))
+    ];
+    const results: Record<string, unknown> = {};
+    for (const definition of definitions) {
+      results[definition.key] = await sysagent.deploymentLaravelWorkers({
+        name: laravelManagedProgramName(deployment.slug, definition.key),
+        rootPath: accountDeploymentAppPath(deployment),
+        action: definition.enabled && definition.instances > 0 ? "apply" : "stop",
+        desiredWorkers: definition.enabled ? definition.instances : 0,
+        queueCommand: renderLaravelProcessCommand(definition.command, deployment.port),
+        env: envVars,
+        logDir: accountDeploymentLogDir(deployment.slug),
+        logPrefix: definition.key
+      });
+    }
+    const processConfig = deployment.processConfig && typeof deployment.processConfig === "object" && !Array.isArray(deployment.processConfig)
+      ? deployment.processConfig as Record<string, unknown>
+      : {};
+    await prisma.deployment.update({
+      where: { id: deployment.id },
+      data: { processConfig: { ...processConfig, laravelManagedProcesses: config } as Prisma.InputJsonValue }
+    });
+    return reply.code(202).send({ config, results });
   });
 
   app.get("/deployments/:deploymentId/logs", async (request: any) => {

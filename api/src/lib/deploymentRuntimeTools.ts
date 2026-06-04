@@ -433,7 +433,8 @@ export function envDrivenRuntimeExecutables(envVars: Record<string, string>) {
   const tools = new Set<string>();
   const normalized = Object.fromEntries(Object.entries(envVars).map(([key, value]) => [key.toUpperCase(), String(value ?? "").trim().toLowerCase()]));
   const redisKeys = ["CACHE_DRIVER", "CACHE_STORE", "SESSION_DRIVER", "QUEUE_CONNECTION", "BROADCAST_DRIVER", "REDIS_CLIENT"];
-  if (redisKeys.some((key) => ["redis", "phpredis"].includes(normalized[key] ?? "")) || normalized.REDIS_HOST || normalized.REDIS_URL) {
+  const horizonEnabled = ["1", "true", "yes", "on"].includes(normalized.HORIZON_ENABLED ?? "");
+  if (horizonEnabled || redisKeys.some((key) => ["redis", "phpredis"].includes(normalized[key] ?? "")) || normalized.REDIS_HOST || normalized.REDIS_URL) {
     tools.add("redis-server");
     tools.add("redis-cli");
     tools.add("php-ext-redis");

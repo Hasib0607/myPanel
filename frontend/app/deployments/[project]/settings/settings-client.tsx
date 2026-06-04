@@ -213,6 +213,7 @@ export function DeploymentSettingsClient({ project }: { project: string }) {
   const [notice, setNotice] = useState("");
   const [deleteText, setDeleteText] = useState("");
   const [newWebhookSecret, setNewWebhookSecret] = useState("");
+  const [laravelProcessesJson, setLaravelProcessesJson] = useState("");
 
   const detail = useQuery({
     queryKey: ["deployment", project],
@@ -231,10 +232,18 @@ export function DeploymentSettingsClient({ project }: { project: string }) {
     queryFn: () => apiGet<WorkerStatusResponse>(`/deployments/${project}/workers`),
     enabled: detail.data?.framework === "LARAVEL"
   });
+  const laravelProcesses = useQuery({
+    queryKey: ["deployment", project, "laravel-processes"],
+    queryFn: () => apiGet<Record<string, unknown>>(`/deployments/${project}/laravel-processes`),
+    enabled: detail.data?.framework === "LARAVEL"
+  });
 
   useEffect(() => {
     if (detail.data) setForm(formFromDeployment(detail.data));
   }, [detail.data]);
+  useEffect(() => {
+    if (laravelProcesses.data) setLaravelProcessesJson(JSON.stringify(laravelProcesses.data, null, 2));
+  }, [laravelProcesses.data]);
 
   const payload = useMemo(() => ({
     name: form.name.trim(),
@@ -317,6 +326,17 @@ export function DeploymentSettingsClient({ project }: { project: string }) {
       await queryClient.invalidateQueries({ queryKey: ["deployment", project, "workers"] });
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not save Laravel workers")
+  });
+  const saveLaravelProcesses = useMutation({
+    mutationFn: () => apiPatch(`/deployments/${project}/laravel-processes`, {
+      laravelManagedProcesses: JSON.parse(laravelProcessesJson)
+    }),
+    onSuccess: async () => {
+      setNotice("Laravel scheduler, Horizon, Reverb, Octane, and queue groups saved.");
+      await queryClient.invalidateQueries({ queryKey: ["deployment", project, "laravel-processes"] });
+      await queryClient.invalidateQueries({ queryKey: ["deployment", project] });
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not save Laravel managed processes")
   });
 
   function setField<K extends keyof SettingsForm>(key: K, value: SettingsForm[K]) {
@@ -447,6 +467,29 @@ export function DeploymentSettingsClient({ project }: { project: string }) {
               <TextInput label="Queue command" onChange={(value) => setField("workersQueueCommand", value)} value={form.workersQueueCommand} />
             </div>
             {workers.data?.status?.error ? <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">{workers.data.status.error}</div> : null}
+          </Section>
+        ) : null}
+
+        {form.framework === "LARAVEL" ? (
+          <Section icon={<ServerCog size={16} />} title="Laravel Managed Processes">
+            <p className="mb-3 text-sm text-panel-muted">
+              Configure Scheduler, Horizon, Reverb, Octane, and independent queue groups. Octane replaces the main Laravel start command; the other enabled processes run under Supervisor.
+            </p>
+            <textarea
+              className="h-80 w-full rounded-md border border-panel-line p-3 font-mono text-xs normal-case text-panel-ink"
+              onChange={(event) => setLaravelProcessesJson(event.target.value)}
+              spellCheck={false}
+              value={laravelProcessesJson}
+            />
+            <button
+              className="mt-3 flex h-10 items-center justify-center gap-2 rounded-md border border-panel-line px-4 text-sm font-semibold hover:bg-slate-50 disabled:opacity-60"
+              disabled={saveLaravelProcesses.isPending || !laravelProcessesJson.trim()}
+              onClick={() => saveLaravelProcesses.mutate()}
+              type="button"
+            >
+              <Workflow size={15} />
+              Apply Managed Processes
+            </button>
           </Section>
         ) : null}
 

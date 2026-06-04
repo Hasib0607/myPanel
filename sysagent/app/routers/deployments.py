@@ -93,6 +93,7 @@ class LaravelWorkersRequest(BaseModel):
     queueCommand: str = "php artisan queue:work --sleep=3 --tries=3 --timeout=90"
     env: dict[str, str] | None = None
     logDir: str | None = None
+    logPrefix: str = Field(default="worker", pattern="^[a-zA-Z0-9_.-]+$")
 
 
 def normalize_process_root(body: ProcessRequest) -> ProcessRequest:
@@ -532,8 +533,8 @@ def supervisor_laravel_worker_config(body: LaravelWorkersRequest, wrapper_path: 
         "killasgroup=true",
         f"numprocs={body.desiredWorkers}",
         "process_name=%(program_name)s_%(process_num)02d",
-        f"stdout_logfile={log_dir / 'worker-out.log'}",
-        f"stderr_logfile={log_dir / 'worker-error.log'}",
+        f"stdout_logfile={log_dir / f'{body.logPrefix}-out.log'}",
+        f"stderr_logfile={log_dir / f'{body.logPrefix}-error.log'}",
         "redirect_stderr=false",
     ]
     return "\n".join(lines) + "\n"
