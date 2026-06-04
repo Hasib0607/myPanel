@@ -289,6 +289,13 @@ test("failed deploy parser treats missing Vite as project dependency repair", ()
   assert.deepEqual(runtimeTargetsForFailedDeploymentLog(log), []);
 });
 
+test("failed deploy parser treats missing Laravel Mix as project dependency repair", () => {
+  const log = "Laravel frontend asset build failed with exit code 127: sh: line 1: mix: command not found";
+
+  assert.equal(nodePackageBinaryMissing(log), true);
+  assert.deepEqual(runtimeTargetsForFailedDeploymentLog(log), []);
+});
+
 test("detects Laravel Mix missing Vue source files", () => {
   const log = `
     Laravel frontend asset build failed with exit code 1:

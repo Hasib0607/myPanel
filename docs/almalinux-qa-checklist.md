@@ -85,7 +85,7 @@ From Deployment Doctor or runtime-tools install:
 - [ ] Deployment Doctor/Guardian identifies Laravel MySQL access-denied crashes, including DB/user case mismatch, host-grant mismatch (`localhost` vs `127.0.0.1`), and password/grant repair needs
 - [ ] Wildcard subdomains like `*.example.com` can be added after the parent domain exists, publish a wildcard DNS/vhost, and use the safe file-manager root `example.com/subdomains/_wildcard`
 - [ ] Wildcard subdomain SSL does not send `domain-*.example.com` as a sysagent vhost name; it uses DNS-01 TXT automation against the panel-managed zone and stores the cert as `wildcard.example.com`
-- [ ] React/Vite build failures like `vite: command not found` are treated as missing project package binaries; Guardian reinstalls Node dependencies with devDependencies and retries the build instead of requesting a global Vite install
+- [ ] Frontend build failures like `vite: command not found` and `mix: command not found` are treated as missing project package binaries; Laravel custom build commands first install devDependencies, and Guardian reinstalls them and retries even when Composer is the deployment package manager
 - [ ] Laravel apps with Vite/Mix/package frontend markers deploy with compiled CSS/JS assets under `public`, and Doctor/Guardian flags missing built assets before declaring the public site healthy
 - [ ] Laravel Mix/Vite `Module not found` / `Can't resolve` errors are reported as missing app source or import-case issues, not server runtime repairs; deploy continues only if built public assets already exist
 - [ ] Laravel public route health parses the rendered HTML and checks first-party CSS/JS/image/font URLs through Nginx, marking the deployment degraded when linked static files 404

@@ -824,7 +824,7 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
   if (lower.includes("composer") && (lower.includes("ext-") || lower.includes("requires php extension"))) return { message: "Composer is missing a required PHP extension. Install the extension on the VPS, then redeploy.", repairAction: "request-approval", category: "php_extension" };
   if (nodePackageBinaryMissing(text)) {
     return {
-      message: "React/Vite build could not find a local package binary such as vite. Guardian will reinstall Node dependencies with devDependencies and retry the build on redeploy.",
+      message: "Frontend build could not find a local package binary such as Mix, Vite, webpack, or Next. Guardian will reinstall Node dependencies with devDependencies and retry the build on redeploy.",
       repairAction: "redeploy",
       category: "node_package_bin_missing"
     };

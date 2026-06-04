@@ -2685,7 +2685,7 @@ function assertCommandTree(result: unknown, label: string) {
 function nodeDependencyRepairCommand(packageManager: DeploymentPackageManager | null) {
   if (packageManager === "PNPM") return "pnpm install --prod=false";
   if (packageManager === "YARN") return "yarn install --production=false";
-  return "npm install --production=false";
+  return "npm install --include=dev --production=false";
 }
 
 function isNodePackageManager(packageManager: DeploymentPackageManager | null) {
@@ -2711,9 +2711,9 @@ function jsPackageManagerForFiles(files: Set<string>): JsPackageManager {
 }
 
 function jsInstallCommand(packageManager: JsPackageManager) {
-  if (packageManager === "PNPM") return "pnpm install";
-  if (packageManager === "YARN") return "yarn install";
-  return "npm install";
+  if (packageManager === "PNPM") return "pnpm install --prod=false";
+  if (packageManager === "YARN") return "yarn install --production=false";
+  return "npm install --include=dev --production=false";
 }
 
 function jsRunCommand(packageManager: JsPackageManager, script: string) {
@@ -2806,15 +2806,9 @@ async function ensureLaravelFrontendAssets(
 ) {
   const assets = await inspectLaravelFrontendAssets(appPath, publicDirectory);
   if (!assets.hasPackageJson || !assets.hasFrontendMarkers) return;
-  if (assets.hasBuiltAssets && !assets.buildCommand) return;
-  if (existingBuildCommand) {
-    await writeLog(deploymentId, releaseId, "BUILDING", "Laravel frontend asset build deferred to deployment build command", {
-      buildCommand: existingBuildCommand,
-      evidence: assets.evidence
-    });
-    return;
-  }
-  if (!assets.buildCommand) {
+  if (assets.hasBuiltAssets && !assets.buildCommand && !existingBuildCommand) return;
+  const deferBuild = Boolean(existingBuildCommand);
+  if (!assets.buildCommand && !deferBuild) {
     await writeLog(deploymentId, releaseId, "BUILDING", "Laravel frontend assets may be missing but no build script exists", {
       evidence: assets.evidence
     }, "warn");
@@ -2840,6 +2834,14 @@ async function ensureLaravelFrontendAssets(
     })
   );
   assertCommandTree(installResult, "Laravel frontend dependency install");
+
+  if (deferBuild) {
+    await writeLog(deploymentId, releaseId, "BUILDING", "Laravel frontend dependencies ready; asset build deferred to deployment build command", {
+      buildCommand: existingBuildCommand,
+      evidence: assets.evidence
+    });
+    return;
+  }
 
   const runFrontendBuild = () => runStep(deploymentId, releaseId, "BUILDING", "Laravel frontend asset build", () =>
     sysagent.deploymentBuild({
@@ -3297,18 +3299,22 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         assertCommandTree(buildResult, "Build");
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
-        if (!nodePackageBinaryMissing(detail) || !isNodePackageManager(deployment.packageManager)) {
+        const frontendAssets = await inspectLaravelFrontendAssets(appPath, deployment.publicDirectory);
+        const repairPackageManager = isNodePackageManager(deployment.packageManager)
+          ? deployment.packageManager
+          : frontendAssets.hasPackageJson ? frontendAssets.packageManager : null;
+        if (!nodePackageBinaryMissing(detail) || !repairPackageManager) {
           throw error;
         }
         await writeLog(deployment.id, releaseId, "BUILDING", "Node build package binary missing; reinstalling dependencies with devDependencies", {
-          packageManager: deployment.packageManager,
+          packageManager: repairPackageManager,
           evidence: detail.slice(0, 2000)
         }, "warn");
         const repairInstall = await runStep(deployment.id, releaseId, "INSTALLING", "Repair Node build dependencies", () =>
           sysagent.deploymentInstall({
             rootPath: appPath,
-            command: nodeDependencyRepairCommand(deployment.packageManager),
-            packageManager: deployment.packageManager,
+            command: nodeDependencyRepairCommand(repairPackageManager),
+            packageManager: repairPackageManager,
             env: envVars
           })
         );
