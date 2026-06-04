@@ -340,7 +340,7 @@ async function queueGuardianDeployRepair(deployment: Awaited<ReturnType<typeof p
       data: {
         deploymentId: deployment.id,
         status: "QUEUED",
-        commitSha: deployment.commitSha,
+        commitSha: null,
         sourcePath: deployment.rootPath,
         envSnapshot: deployment.envVars as any,
         processConfig: { port: deployment.port, processManager: deployment.processManager, startCommand: deployment.startCommand }

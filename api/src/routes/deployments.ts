@@ -2479,7 +2479,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
         data: {
           deploymentId: deployment.id,
           status: "QUEUED",
-          commitSha: deployment.commitSha,
+          commitSha: null,
           sourcePath: deployment.rootPath,
           envSnapshot: deployment.envVars === null ? {} : deployment.envVars as Prisma.InputJsonValue,
           processConfig: { port: deployment.port, processManager: deployment.processManager, startCommand: deployment.startCommand }
@@ -2579,7 +2579,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       data: {
         deploymentId: deployment.id,
         status: "QUEUED",
-        commitSha: deployment.commitSha,
+        commitSha: null,
         sourcePath: deployment.rootPath,
         envSnapshot: deployment.envVars === null ? {} : deployment.envVars as Prisma.InputJsonValue,
         processConfig: { port: deployment.port, processManager: deployment.processManager, startCommand: deployment.startCommand }

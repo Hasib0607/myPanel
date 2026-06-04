@@ -707,6 +707,16 @@ async function syncReleaseCommitInfo(deploymentId: string, releaseId: string | u
   }
 }
 
+function sourceSyncCommitSha(
+  action: string,
+  release: { commitSha: string | null } | null,
+  deployment: { commitSha: string | null }
+) {
+  if (action === "rollback") return release?.commitSha ?? null;
+  if (!release?.commitSha) return null;
+  return release.commitSha !== deployment.commitSha ? release.commitSha : null;
+}
+
 function renderDeploymentCommand(command: string | null | undefined, port: number) {
   return command?.replaceAll("{PORT}", String(port)).replaceAll("$PORT", String(port)) ?? null;
 }
@@ -3112,6 +3122,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
 async function processDeploy(action: string, deploymentId: string, releaseId: string | undefined) {
   const startedAt = new Date();
   let deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: deploymentWorkerInclude });
+  const release = releaseId ? await prisma.deploymentRelease.findUnique({ where: { id: releaseId } }) : null;
   await resetBuildLogs(deployment.id);
   await markRelease(releaseId, "RUNNING", startedAt);
   await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "DEPLOYING" } });
@@ -3130,12 +3141,13 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
 
     if (deployment.gitUrl || action === "pull") {
       const gitToken = await githubCloneToken(deployment.sourceProvider, deployment.gitUrl, deployment.accountId);
+      const commitSha = sourceSyncCommitSha(action, release, deployment);
       const syncResult = await runStep(deployment.id, releaseId, "CLONING", "Source sync", () =>
         sysagent.deploymentGitSync({
           rootPath: deployment.rootPath,
           gitUrl: action === "pull" ? null : deployment.gitUrl,
           branch: deployment.branch,
-          commitSha: deployment.commitSha,
+          commitSha,
           gitToken
         })
       );
