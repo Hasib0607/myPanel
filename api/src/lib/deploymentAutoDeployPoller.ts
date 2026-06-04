@@ -16,7 +16,7 @@ type GithubCommitResponse = {
 
 type PollableDeployment = Awaited<ReturnType<typeof loadPollableDeployments>>[number];
 
-const activeDeploymentStatuses = ["QUEUED", "DEPLOYING", "BUILDING", "RUNNING"] as const;
+const blockingDeploymentStatuses = ["QUEUED", "DEPLOYING", "BUILDING"] as const;
 const activeReleaseStatuses = ["QUEUED", "RUNNING"] as const;
 const skipLogCooldownMs = Number(process.env.GUARDIAN_AUTO_DEPLOY_SKIP_LOG_COOLDOWN_MS ?? 30 * 60_000);
 
@@ -110,7 +110,7 @@ async function shouldQueueRemoteHead(deployment: PollableDeployment, remoteSha: 
     return { queue: false, reason: "deployment already points at remote head" };
   }
 
-  if (activeDeploymentStatuses.includes(deployment.status as any)) {
+  if (blockingDeploymentStatuses.includes(deployment.status as any)) {
     return { queue: false, reason: `deployment is already ${deployment.status.toLowerCase()}` };
   }
 

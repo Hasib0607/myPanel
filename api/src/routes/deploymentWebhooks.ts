@@ -364,10 +364,7 @@ export const deploymentWebhookRoutes: FastifyPluginAsync = async (app) => {
       });
       await prisma.deployment.update({
         where: { id: deployment.id },
-        data: {
-          status: "QUEUED",
-          commitSha: payload.after ?? deployment.commitSha
-        }
+        data: { status: "QUEUED" }
       });
       await addWebhookLog(deployment.id, `GitHub push queued auto deploy for ${payload.repository.full_name}@${branch}`, {
         releaseId: release.id,
