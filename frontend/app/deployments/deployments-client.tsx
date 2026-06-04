@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Clipboard, Eye, FolderGit2, GitBranch, Github, History, KeyRound, List, Pencil, Play, Plus, Rocket, Save, Search, Settings2, ShieldCheck, Square, ToggleLeft, ToggleRight, Trash2, Wand2, X } from "lucide-react";
+import { CheckCircle2, Clipboard, Eye, EyeOff, FolderGit2, GitBranch, Github, History, KeyRound, List, Pencil, Play, Plus, Rocket, Save, Search, Settings2, ShieldCheck, Square, ToggleLeft, ToggleRight, Trash2, Wand2, X } from "lucide-react";
 import { apiDelete, apiDeleteBody, apiGet, apiGetText, apiPatch, apiPost, apiPut } from "@/lib/api";
 import type { Deployment, DeploymentDomainBinding, DeploymentEnvVar, DeploymentFramework, DeploymentListResponse, DeploymentRelease, DetectionResponse, PreflightResponse, QueueResponse, DeploymentSourceProvider } from "./deployment-types";
 import { frameworkOptions, sourceOptions } from "./deployment-types";
@@ -533,6 +533,13 @@ export function DeploymentsClient({
     onSuccess: (result) => setRevealedEnvValues((current) => ({ ...current, [result.key]: result.value })),
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not reveal env value")
   });
+  const hideEnv = (key: string) => {
+    setRevealedEnvValues((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  };
 
   const saveEnvLine = useMutation({
     mutationFn: ({ item, value }: { item: DeploymentEnvVar; value: string }) =>
@@ -584,9 +591,9 @@ export function DeploymentsClient({
   });
 
   const saveBulkEnv = useMutation({
-    mutationFn: () => {
+    mutationFn: (textOverride?: string) => {
       if (!selected) throw new Error("Select a project first");
-      const env = parseBulkEnvItems(bulkEnvText, bulkEnvSecret);
+      const env = parseBulkEnvItems(textOverride ?? bulkEnvText, bulkEnvSecret);
       if (!env.length) throw new Error("Paste a JS object or KEY=value lines first");
       return apiPost<{ ok: true; items: DeploymentEnvVar[] }>(`${apiBase}/${selected.slug}/env/bulk`, { env });
     },
@@ -712,7 +719,7 @@ export function DeploymentsClient({
                 {activeTab === "overview" ? <OverviewPanel deployment={selected} /> : null}
                 {activeTab === "domains" ? <DomainsPanel deployment={selected} domains={domainOptions(domains.data?.items ?? [])} domainToAdd={domainToAdd} setDomainToAdd={setDomainToAdd} addDomain={() => addDomain.mutate()} setPrimary={(binding) => setPrimaryDomain.mutate(binding)} removeDomain={(binding) => removeDomain.mutate(binding)} /> : null}
                 {activeTab === "history" ? <HistoryPanel deployment={selected} releases={releases.data ?? selected.releases ?? []} loading={releases.isLoading} onRefresh={() => releases.refetch()} onJump={(release) => rollbackRelease.mutate({ deployment: selected, releaseId: release.id })} jumping={rollbackRelease.isPending} /> : null}
-                {activeTab === "env" ? <EnvPanel deployment={selected} envKey={envKey} envValue={envValue} envSecret={envSecret} bulkEnvText={bulkEnvText} bulkEnvSecret={bulkEnvSecret} revealedValues={revealedEnvValues} revealingKey={revealEnv.variables} savingLineKey={saveEnvLine.variables?.item.key} setEnvKey={setEnvKey} setEnvValue={setEnvValue} setEnvSecret={setEnvSecret} setBulkEnvText={setBulkEnvText} setBulkEnvSecret={setBulkEnvSecret} saveEnv={(onSuccess) => saveEnv.mutate(undefined, { onSuccess })} saveBulkEnv={(onSuccess) => saveBulkEnv.mutate(undefined, { onSuccess })} savingEnv={saveEnv.isPending} savingBulkEnv={saveBulkEnv.isPending} revealEnv={(key) => revealEnv.mutate(key)} saveEnvLine={(item, value) => saveEnvLine.mutate({ item, value })} removeEnv={(key) => removeEnv.mutate(key)} removeBulkEnv={(keys) => removeBulkEnv.mutate(keys)} removingBulkEnv={removeBulkEnv.isPending} clearDatabaseEnvOverrides={() => clearDatabaseEnvOverrides.mutate()} clearingDatabaseEnvOverrides={clearDatabaseEnvOverrides.isPending} /> : null}
+                {activeTab === "env" ? <EnvPanel deployment={selected} envKey={envKey} envValue={envValue} envSecret={envSecret} bulkEnvText={bulkEnvText} bulkEnvSecret={bulkEnvSecret} revealedValues={revealedEnvValues} revealingKey={revealEnv.variables} savingLineKey={saveEnvLine.variables?.item.key} setEnvKey={setEnvKey} setEnvValue={setEnvValue} setEnvSecret={setEnvSecret} setBulkEnvText={setBulkEnvText} setBulkEnvSecret={setBulkEnvSecret} saveEnv={(onSuccess) => saveEnv.mutate(undefined, { onSuccess })} saveBulkEnv={(onSuccess) => saveBulkEnv.mutate(undefined, { onSuccess })} saveRawEnv={(text, onSuccess) => saveBulkEnv.mutate(text, { onSuccess })} savingEnv={saveEnv.isPending} savingBulkEnv={saveBulkEnv.isPending} revealEnv={(key) => revealEnv.mutate(key)} hideEnv={hideEnv} saveEnvLine={(item, value) => saveEnvLine.mutate({ item, value })} removeEnv={(key) => removeEnv.mutate(key)} removeBulkEnv={(keys) => removeBulkEnv.mutate(keys)} removingBulkEnv={removeBulkEnv.isPending} clearDatabaseEnvOverrides={() => clearDatabaseEnvOverrides.mutate()} clearingDatabaseEnvOverrides={clearDatabaseEnvOverrides.isPending} /> : null}
                 {activeTab === "settings" ? <SettingsPanel deployment={selected} deleteText={deleteText} setDeleteText={setDeleteText} onEdit={openEdit} onDelete={() => deleteProject.mutate()} deleting={deleteProject.isPending} /> : null}
               </div>
             </div>
@@ -890,7 +897,9 @@ function EnvPanel({
   setBulkEnvSecret,
   saveEnv,
   saveBulkEnv,
+  saveRawEnv,
   revealEnv,
+  hideEnv,
   saveEnvLine,
   savingEnv,
   savingBulkEnv,
@@ -916,7 +925,9 @@ function EnvPanel({
   setBulkEnvSecret: (value: boolean) => void;
   saveEnv: (onSuccess?: () => void) => void;
   saveBulkEnv: (onSuccess?: () => void) => void;
+  saveRawEnv: (text: string, onSuccess?: () => void) => void;
   revealEnv: (key: string) => void;
+  hideEnv: (key: string) => void;
   saveEnvLine: (item: DeploymentEnvVar, value: string) => void;
   savingEnv?: boolean;
   savingBulkEnv?: boolean;
@@ -963,8 +974,11 @@ function EnvPanel({
           removeEnv={removeEnv}
           removeBulkEnv={removeBulkEnv}
           removingBulkEnv={removingBulkEnv}
+          saveRawEnv={saveRawEnv}
+          savingBulkEnv={savingBulkEnv}
           saveEnvLine={saveEnvLine}
           savingLineKey={savingLineKey}
+          hideEnv={hideEnv}
           revealEnv={revealEnv}
         />
       ) : null}
@@ -998,7 +1012,10 @@ function EnvListModal({
   removeEnv,
   removeBulkEnv,
   removingBulkEnv,
+  saveRawEnv,
+  savingBulkEnv,
   revealEnv,
+  hideEnv,
   saveEnvLine,
   revealedValues,
   revealingKey,
@@ -1011,7 +1028,10 @@ function EnvListModal({
   removeEnv: (key: string) => void;
   removeBulkEnv: (keys: string[]) => void;
   removingBulkEnv?: boolean;
+  saveRawEnv: (text: string, onSuccess?: () => void) => void;
+  savingBulkEnv?: boolean;
   revealEnv: (key: string) => void;
+  hideEnv: (key: string) => void;
   saveEnvLine: (item: DeploymentEnvVar, value: string) => void;
   revealedValues: Record<string, string>;
   revealingKey?: string;
@@ -1021,16 +1041,32 @@ function EnvListModal({
 }) {
   const [draftValues, setDraftValues] = useState<Record<string, string>>({});
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  const [query, setQuery] = useState("");
+  const [viewMode, setViewMode] = useState<"form" | "raw">("form");
+  const [rawText, setRawText] = useState("");
+  const [rawDirty, setRawDirty] = useState(false);
   const envItems = deployment.env ?? [];
+  const hiddenSecretMarker = "__HIDDEN_SECRET_VALUE__";
+  const envValueFor = (item: DeploymentEnvVar) => draftValues[item.key] ?? revealedValues[item.key] ?? item.value ?? "";
+  const rawValueFor = (item: DeploymentEnvVar) => item.isSecret && revealedValues[item.key] === undefined && item.value === null ? hiddenSecretMarker : envValueFor(item);
+  const envToText = (items: DeploymentEnvVar[]) => items.map((item) => `${item.key}=${rawValueFor(item)}`).join("\n");
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredEnvItems = normalizedQuery
+    ? envItems.filter((item) => item.key.toLowerCase().includes(normalizedQuery) || envValueFor(item).toLowerCase().includes(normalizedQuery))
+    : envItems;
   const hasDatabaseOverrides = envItems.some(
     (item) => item.key === "DB_PASSWORD" || item.key === "DATABASE_URL"
   );
-  const allSelected = envItems.length > 0 && selectedKeys.size === envItems.length;
+  const allSelected = filteredEnvItems.length > 0 && filteredEnvItems.every((item) => selectedKeys.has(item.key));
   const someSelected = selectedKeys.size > 0;
 
   useEffect(() => {
     setSelectedKeys(new Set());
   }, [deployment.id, envItems.length]);
+
+  useEffect(() => {
+    if (!rawDirty) setRawText(envToText(envItems));
+  }, [deployment.id, envItems, revealedValues, rawDirty]);
 
   const toggleKey = (key: string, checked: boolean) => {
     setSelectedKeys((current) => {
@@ -1042,7 +1078,14 @@ function EnvListModal({
   };
 
   const toggleAll = (checked: boolean) => {
-    setSelectedKeys(checked ? new Set(envItems.map((item) => item.key)) : new Set());
+    setSelectedKeys((current) => {
+      const next = new Set(current);
+      for (const item of filteredEnvItems) {
+        if (checked) next.add(item.key);
+        else next.delete(item.key);
+      }
+      return next;
+    });
   };
 
   const deleteSelected = () => {
@@ -1055,6 +1098,14 @@ function EnvListModal({
     removeBulkEnv(keys);
   };
 
+  const saveRawText = () => {
+    if (rawText.includes(hiddenSecretMarker)) {
+      window.alert("Raw text contains hidden secret placeholders. Reveal those secret values first, or save them individually in form view.");
+      return;
+    }
+    saveRawEnv(rawText, () => setRawDirty(false));
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-6">
       <div className="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-md border border-panel-line bg-white shadow-xl">
@@ -1064,6 +1115,30 @@ function EnvListModal({
             Environment variables
           </div>
           <div className="flex flex-wrap items-center gap-3">
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-panel-muted" size={14} />
+              <input
+                className="h-8 w-56 rounded-md border border-panel-line pl-8 pr-2 text-xs"
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Search env"
+                value={query}
+              />
+            </div>
+            <button
+              className="inline-flex h-8 items-center gap-1 rounded-md border border-panel-line px-3 text-xs font-semibold hover:bg-slate-50"
+              onClick={() => {
+                if (viewMode === "form") {
+                  setRawText(envToText(envItems));
+                  setRawDirty(false);
+                  setViewMode("raw");
+                } else {
+                  setViewMode("form");
+                }
+              }}
+              type="button"
+            >
+              {viewMode === "form" ? "Text view" : "Form view"}
+            </button>
             {envItems.length > 0 ? (
               <>
                 <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-panel-muted">
@@ -1108,8 +1183,34 @@ function EnvListModal({
               </button>
             </div>
           ) : null}
+          {viewMode === "raw" ? (
+            <div className="space-y-3">
+              <textarea
+                className="min-h-[420px] w-full rounded-md border border-panel-line p-3 font-mono text-sm text-panel-ink"
+                onChange={(event) => {
+                  setRawDirty(true);
+                  setRawText(event.target.value);
+                }}
+                value={rawText}
+              />
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="text-xs text-panel-muted">Edit as KEY=value lines. Hidden secret placeholders cannot be saved.</div>
+                <button
+                  className="inline-flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-semibold hover:bg-slate-50 disabled:opacity-50"
+                  disabled={savingBulkEnv || !rawText.trim()}
+                  onClick={saveRawText}
+                  type="button"
+                >
+                  <Save size={14} />
+                  {savingBulkEnv ? "Saving..." : "Save text env"}
+                </button>
+              </div>
+            </div>
+          ) : (
           <div className="overflow-hidden rounded-md border border-panel-line">
-            {envItems.map((item) => (
+            {filteredEnvItems.map((item) => {
+              const revealed = revealedValues[item.key] !== undefined;
+              return (
               <div className={`flex items-start gap-3 border-b border-panel-line p-3 last:border-b-0 ${selectedKeys.has(item.key) ? "bg-emerald-50/50" : ""}`} key={item.key}>
                 <div className="pt-1">
                   <input
@@ -1127,22 +1228,22 @@ function EnvListModal({
                     onChange={(event) => setDraftValues((current) => ({ ...current, [item.key]: event.target.value }))}
                     placeholder={item.isSecret ? item.secretRef ?? "[secret]" : "value"}
                     type={item.isSecret && revealedValues[item.key] === undefined ? "password" : "text"}
-                    value={draftValues[item.key] ?? revealedValues[item.key] ?? item.value ?? ""}
+                    value={envValueFor(item)}
                   />
                 </div>
                 <button
                   className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md border border-panel-line px-2 text-xs hover:bg-slate-50 disabled:opacity-50"
-                  disabled={revealingKey === item.key}
-                  onClick={() => revealEnv(item.key)}
+                  disabled={revealingKey === item.key || !item.isSecret}
+                  onClick={() => item.isSecret && revealed ? hideEnv(item.key) : revealEnv(item.key)}
                   type="button"
                 >
-                  <Eye size={13} />
-                  {revealingKey === item.key ? "..." : "View"}
+                  {item.isSecret && revealed ? <EyeOff size={13} /> : <Eye size={13} />}
+                  {revealingKey === item.key ? "..." : item.isSecret && revealed ? "Hide" : item.isSecret ? "View" : "Visible"}
                 </button>
                 <button
                   className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md border border-panel-line px-2 text-xs hover:bg-slate-50 disabled:opacity-50"
                   disabled={savingLineKey === item.key}
-                  onClick={() => saveEnvLine(item, draftValues[item.key] ?? revealedValues[item.key] ?? item.value ?? "")}
+                  onClick={() => saveEnvLine(item, envValueFor(item))}
                   type="button"
                 >
                   <Save size={13} />
@@ -1157,11 +1258,12 @@ function EnvListModal({
                   Delete
                 </button>
               </div>
-            ))}
-            {envItems.length === 0 ? (
-              <div className="p-8 text-center text-sm text-panel-muted">No environment variables.</div>
+            );})}
+            {filteredEnvItems.length === 0 ? (
+              <div className="p-8 text-center text-sm text-panel-muted">{envItems.length === 0 ? "No environment variables." : "No environment variables match your search."}</div>
             ) : null}
           </div>
+          )}
         </div>
         <div className="flex justify-end border-t border-panel-line p-4">
           <button className="h-9 rounded-md bg-panel-accent px-4 text-sm font-semibold text-white" onClick={onClose} type="button">
