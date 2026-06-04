@@ -11,6 +11,8 @@ def nginx_proxy_headers(upstream_port: int, *, loopback_host: bool = False) -> s
         "        proxy_set_header X-Real-IP $remote_addr;\n"
         "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
         "        proxy_set_header X-Forwarded-Proto $scheme;\n"
+        "        proxy_set_header X-Forwarded-Ssl $https;\n"
+        "        proxy_set_header HTTPS $https;\n"
         "        proxy_set_header Upgrade $http_upgrade;\n"
         "        proxy_set_header Connection \"upgrade\";\n"
         "        proxy_connect_timeout 10s;\n"

@@ -1148,6 +1148,8 @@ server {{
     ssl_certificate_key {ssl_certificate_key};
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_prefer_server_ciphers off;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header Content-Security-Policy "upgrade-insecure-requests" always;
 
 {acme_location(server_name, public_root)}{app_locations}
 }}
