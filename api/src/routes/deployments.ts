@@ -9,7 +9,7 @@ import { deployQueue } from "../jobs/queues.js";
 import { laravelPublicCwdMissing, nginxProxyMissingDomainFailure, nodePackageBinaryMissing } from "../lib/deploymentFailureRuntimeRepairs.js";
 import { detectComposerPlatformIssue, detectFrontendModuleNotFound, formatFrontendModuleNotFoundMessage, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import { audit } from "../lib/audit.js";
-import { detectDeploymentFiles, detectDeploymentSource } from "../lib/deploymentDetection.js";
+import { deploymentHasLaravelPublicIndex, detectDeploymentFiles, detectDeploymentSource, findDeploymentAppRoot } from "../lib/deploymentDetection.js";
 import {
   boundDomainFromBinding,
   buildDeploymentNginxRequest,
@@ -762,6 +762,7 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
   if (lower.includes("unsupported engine") || lower.includes("node version") || lower.includes("requires node")) return { message: "Node version mismatch. Set a compatible runtime version or update the app engines field.", repairAction: "redeploy", category: "node_version" };
   if (lower.includes("prisma") && (lower.includes("migration") || lower.includes("p100") || lower.includes("database"))) return { message: "Prisma/database migration failed. Check DATABASE_URL, database grants, and migration state.", repairAction: "redeploy", category: "prisma_migration" };
   if (nginxProxyMissingDomainFailure(text)) return { message: "The deployment has no linked domain, so Nginx proxy publishing must be skipped. Deployment Doctor now keeps no-domain deployments running on their managed internal port; redeploy to apply the corrected flow.", repairAction: "redeploy", category: "nginx_proxy_missing_domain" };
+  if (lower.includes("403 forbidden") && lower.includes("nginx")) return { message: "Nginx published a directory without a valid index or the wrong Laravel web root. Deployment Doctor will prefer a nested Laravel root containing public/index.php and will not publish an empty public_html fallback.", repairAction: "redeploy", category: "nginx_static_root_403" };
   if (lower.includes("502 bad gateway") || lower.includes("http 502") || lower.includes("connect() failed") || lower.includes("upstream")) return { message: "Nginx cannot reach the deployment upstream. Guardian will rewrite the deployment vhost, scrub stale server_name configs, and restart the process if the route still returns 502.", repairAction: "rewrite-nginx", category: "nginx_upstream_502" };
   if (
     lower.includes("sqlstate[hy000]")
@@ -1362,6 +1363,23 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
   const hint = knownErrorHint(recentErrors);
 
   if ((detection?.detected ?? deployment.framework) === "LARAVEL" && rootExists) {
+    const hasCurrentPublicIndex = await deploymentHasLaravelPublicIndex(appPath);
+    const detectedLaravelRoot = await findDeploymentAppRoot(deployment.rootPath, deployment.rootDirectory, "LARAVEL");
+    const betterLaravelRoot = !hasCurrentPublicIndex && detectedLaravelRoot?.hasLaravelPublicIndex
+      ? detectedLaravelRoot.appPath
+      : null;
+    checks.push({
+      key: "laravel_public_root",
+      label: "Laravel public web root",
+      status: betterLaravelRoot ? "fail" : hasCurrentPublicIndex ? "pass" : "warn",
+      detail: betterLaravelRoot
+        ? `Current root ${appPath} has no public/index.php; web root detected at ${betterLaravelRoot}.`
+        : hasCurrentPublicIndex
+          ? `Found ${path.join(appPath, "public", "index.php")}`
+          : "No Laravel public/index.php exists. This is backend-only unless an indexed public_html site is linked.",
+      fix: betterLaravelRoot ? "Redeploy so Deployment Doctor corrects rootDirectory before publishing Nginx." : undefined,
+      repairAction: betterLaravelRoot ? "redeploy" : undefined
+    });
     const frontendAssets = await inspectLaravelFrontendAssets(appPath, deployment.publicDirectory);
     const frontendModuleIssue = detectFrontendModuleNotFound(recentErrors);
     if (frontendAssets) {

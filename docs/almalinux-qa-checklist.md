@@ -73,7 +73,8 @@ From Deployment Doctor or runtime-tools install:
 - [ ] PHP Redis extension repair removes old `php-pecl-redis*` ABI blockers and rebuilds `ext-redis` with PECL for the active PHP runtime
 - [ ] Zip uploads with one nested app folder auto-correct `rootDirectory` before runtime detection, Nginx/start/health checks for Laravel, React/Node, Next.js, Python, and Go projects
 - [ ] Laravel zip uploads where the parent has `artisan` but only the nested app has `public/index.php` choose the nested public web root, not backend-only idle mode
-- [ ] Backend-only Laravel deployments without `public/index.php` start as idle Supervisor jobs, report healthy backend-only health instead of `DEGRADED`, skip `php artisan storage:link`, and serve the account `public_html` fallback instead of publishing a dead Nginx upstream
+- [ ] Parent Laravel folders containing `artisan` do not hide a nested web root containing `public/index.php`; true backend-only Laravel deployments start as idle Supervisor jobs and publish neither a dead upstream nor an empty/index-less `public_html` fallback
+- [ ] Deployment Doctor detects Nginx 403 from an index-less/wrong root, recommends redeploy, and reports the corrected nested Laravel public web root
 - [ ] Linked domains/subdomains serve the deployment while it is `RUNNING`, then restore the file-manager `public_html`/subdomain root after stop, unlink, or missing deployment target without stale Nginx 502 proxy configs
 - [ ] Deployments without a linked domain skip Nginx proxy/SSL configuration, continue on their managed internal port, and never fail with a null domain `name` error
 - [ ] Deployment Doctor/Guardian marks public HTTP 502/503/504 as a repairable failure, rewrites the generated Nginx vhost, queues restart, probes again, and does not mark the deployment running if the upstream is still unreachable

@@ -691,6 +691,19 @@ function deploymentAppPath(rootPath: string, rootDirectory: string | null | unde
   return cleanRootDirectory && cleanRootDirectory !== "." ? path.join(rootPath, cleanRootDirectory) : rootPath;
 }
 
+async function staticRootHasIndex(rootPath: string | null) {
+  if (!rootPath) return false;
+  for (const filename of ["index.html", "index.htm", "index.php"]) {
+    try {
+      await fs.access(path.join(rootPath, filename));
+      return true;
+    } catch {
+      // Keep looking for another supported index file.
+    }
+  }
+  return false;
+}
+
 function deploymentDomain(deployment: { domain?: BoundDomain | null; domainBindings?: Array<{ role: string; domain?: BoundDomain | null; subdomain?: { id: string; name: string; sslEnabled: boolean; domainId: string; domain: { name: string; documentRoot?: string | null } } | null }> }) {
   const primary = deployment.domainBindings?.find((binding) => binding.role === "primary");
   return (primary ? boundDomainFromBinding(primary) : null)
@@ -2210,7 +2223,7 @@ async function reconcileLaravelRootDirectory(
   if (deployment.framework !== "LARAVEL") {
     return { deployment, appPath };
   }
-  if (await deploymentHasLaravelArtisan(appPath)) {
+  if (await deploymentHasLaravelArtisan(appPath) && await deploymentHasLaravelPublicIndex(appPath)) {
     return { deployment, appPath };
   }
 
@@ -2853,7 +2866,21 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
     const domain = deploymentDomain(deployment);
     const runtimeEnvVars = deploymentEnvWithPublicUrl(envVars, domain);
 
-    if (processAction !== "stop" && domain) {
+    const lifecycleBackendOnlyLaravel = Boolean(
+      processAction !== "stop"
+      && domain
+      && await deploymentRunsLaravel(deployment.framework, appPath)
+      && !(await deploymentHasLaravelPublicIndex(appPath))
+    );
+    if (lifecycleBackendOnlyLaravel && !(await staticRootHasIndex(deploymentFallbackRootPath(domain)))) {
+      throw new Error(`Laravel deployment ${deployment.slug} has no public/index.php, and ${domain?.name ?? "the linked domain"} public_html has no index file. Deployment Doctor will not publish a dead deployment proxy or an empty public_html root.`);
+    }
+    if (processAction !== "stop" && domain && lifecycleBackendOnlyLaravel) {
+      await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Backend-only Laravel indexed public fallback config", () =>
+        publishPublicHtmlNginxVhost(domain)
+      );
+    }
+    if (processAction !== "stop" && domain && !lifecycleBackendOnlyLaravel) {
       await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Link deployment domain", () =>
         ensureParentDomainDeploymentProxy(deployment.id, domain).then(() => ({
           domain: domain.name,
@@ -3230,14 +3257,18 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       && !(await deploymentHasLaravelPublicIndex(appPath))
     );
     if (domain && backendOnlyLaravel) {
+      const fallbackRootPath = deploymentFallbackRootPath(domain);
+      if (!(await staticRootHasIndex(fallbackRootPath))) {
+        throw new Error(`Laravel deployment ${deployment.slug} has no public/index.php, and ${domain.name} public_html has no index file. Deployment Doctor will not publish a dead deployment proxy or an empty public_html root. Add the Laravel public entrypoint, correct the project root, or add an indexed public_html site.`);
+      }
       await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Backend-only Laravel public fallback config", () =>
         publishPublicHtmlNginxVhost(domain)
       );
       await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "Skipped dead upstream proxy for backend-only Laravel deployment", {
         domain: domain.name,
         appPath,
-        fallbackRootPath: deploymentFallbackRootPath(domain),
-        reason: "No public/index.php exists, so the idle worker-safe process does not listen on the managed web port."
+        fallbackRootPath,
+        reason: "No public/index.php exists, so the idle worker-safe process does not listen on the managed web port. The indexed public_html site was published instead."
       }, "warn");
     }
     if (domain && !backendOnlyLaravel) {
