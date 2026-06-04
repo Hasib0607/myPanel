@@ -26,7 +26,7 @@ from app.deployment_env import (
     write_env_file,
     write_laravel_env_bundle,
 )
-from app.deployment_commands import laravel_has_public_web_root, normalize_laravel_start_command, parse_deployment_command, resolve_laravel_public_root
+from app.deployment_commands import laravel_has_public_web_root, laravel_public_permission_commands, normalize_laravel_start_command, parse_deployment_command, resolve_laravel_public_root
 from app.laravel_nginx import nginx_app_locations
 from app.deployment_health import backend_only_laravel_health, curl_health_probe
 from app.platform import runtime_tool_install_plan
@@ -1982,12 +1982,22 @@ def repair_laravel_writable_paths(body: LaravelWritablePathsRequest) -> dict:
     chmod_paths = [f"{root}/storage", f"{root}/bootstrap/cache"]
     if should_repair_public:
         chown_paths.append(f"{root}/public")
-        chmod_paths.append(f"{root}/public")
     chown = run_command(["chown", "-R", "panel:panel", *chown_paths], timeout=120, allow_live=DEPLOYMENT_COMMANDS_LIVE) if mkdir.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because directory creation failed"}
     chmod = run_command(["chmod", "-R", "ug+rwX", *chmod_paths], timeout=120, allow_live=DEPLOYMENT_COMMANDS_LIVE) if mkdir.get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because directory creation failed"}
-    failed = any(step.get("returncode") != 0 for step in [mkdir, public_index, chown, chmod])
+    public_chmod_command, root_chmod_command = laravel_public_permission_commands(root)
+    public_chmod = (
+        run_command(public_chmod_command, timeout=120, allow_live=DEPLOYMENT_COMMANDS_LIVE)
+        if mkdir.get("returncode") == 0 and should_repair_public
+        else {"returncode": 0, "stderr": "", "skipped": True}
+    )
+    root_chmod = (
+        run_command(root_chmod_command, timeout=120, allow_live=DEPLOYMENT_COMMANDS_LIVE)
+        if mkdir.get("returncode") == 0 and should_repair_public
+        else {"returncode": 0, "stderr": "", "skipped": True}
+    )
+    failed = any(step.get("returncode") != 0 for step in [mkdir, public_index, chown, chmod, public_chmod, root_chmod])
     return {
-        "dryRun": any(step.get("dryRun") for step in [mkdir, public_index, chown, chmod]),
+        "dryRun": any(step.get("dryRun") for step in [mkdir, public_index, chown, chmod, public_chmod, root_chmod]),
         "returncode": 1 if failed else 0,
         "paths": paths,
         "publicRootRepair": should_repair_public,
@@ -1995,6 +2005,8 @@ def repair_laravel_writable_paths(body: LaravelWritablePathsRequest) -> dict:
         "publicIndex": public_index,
         "chown": chown,
         "chmod": chmod,
+        "publicChmod": public_chmod,
+        "rootChmod": root_chmod,
     }
 
 

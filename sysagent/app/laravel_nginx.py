@@ -99,7 +99,7 @@ def nginx_laravel_app_locations(
         "    }\n"
         "\n"
         "    location ~* \\.(?:css|js|mjs|map|ico|gif|jpe?g|png|svg|webp|woff2?|ttf|eot|otf)$ {\n"
-        "        try_files $uri =404;\n"
+        "        try_files $uri @deployment_upstream;\n"
         "        expires 7d;\n"
         "        access_log off;\n"
         "        add_header Cache-Control \"public\";\n"

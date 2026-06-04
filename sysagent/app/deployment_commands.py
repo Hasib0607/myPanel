@@ -76,6 +76,11 @@ def resolve_laravel_public_root(root_path: str, public_directory: str | None = "
     return str(default_public if default_public.is_dir() else root)
 
 
+def laravel_public_permission_commands(root_path: str) -> tuple[list[str], list[str]]:
+    root = str(Path(root_path).resolve())
+    return ["chmod", "-R", "a+rX", f"{root}/public"], ["chmod", "o+x", root]
+
+
 def deployment_path_allowed(root_path: str, file_manager_root: str) -> bool:
     root = Path(file_manager_root).resolve()
     target = Path(root_path).resolve()

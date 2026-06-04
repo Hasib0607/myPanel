@@ -24,6 +24,19 @@ class DeploymentNginxLaravelTests(unittest.TestCase):
         self.assertIn("location ~* ^/public/", block)
         self.assertIn("alias /var/www/deployments/example/public/$1;", block)
 
+    def test_static_asset_miss_falls_back_to_laravel_upstream(self) -> None:
+        block = nginx_laravel_app_locations(
+            public_root="/var/www/deployments/example/public",
+            upstream_port=10002,
+            fallback_error_page="",
+            fallback_location="",
+        )
+        self.assertIn(
+            "location ~* \\.(?:css|js|mjs|map|ico|gif|jpe?g|png|svg|webp|woff2?|ttf|eot|otf)$ {\n"
+            "        try_files $uri @deployment_upstream;",
+            block,
+        )
+
     def test_nodejs_uses_upstream_proxy_only(self) -> None:
         block = nginx_app_locations(
             framework="NODEJS",

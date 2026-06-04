@@ -6,6 +6,7 @@ from app.deployment_commands import (
     deployment_path_allowed,
     is_allowed_deploy_executable,
     laravel_has_public_web_root,
+    laravel_public_permission_commands,
     normalize_laravel_start_command,
     parse_deployment_command,
     resolve_laravel_public_root,
@@ -63,6 +64,12 @@ class DeploymentCommandTests(unittest.TestCase):
             public.mkdir()
             (public / "css").mkdir()
             self.assertEqual(Path(resolve_laravel_public_root(str(root), "public")).resolve(), public.resolve())
+
+    def test_laravel_public_permissions_allow_nginx_read_and_root_traversal(self) -> None:
+        root = str(Path("/srv/deployments/example").resolve())
+        public_command, root_command = laravel_public_permission_commands(root)
+        self.assertEqual(public_command, ["chmod", "-R", "a+rX", f"{root}/public"])
+        self.assertEqual(root_command, ["chmod", "o+x", root])
 
 
 if __name__ == "__main__":
