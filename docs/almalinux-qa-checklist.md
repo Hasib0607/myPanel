@@ -78,6 +78,7 @@ From Deployment Doctor or runtime-tools install:
 - [ ] Supervisor start returning `ERROR (abnormal termination)` while `supervisorctl status` still shows `STARTING` waits for health polling before marking the deployment failed
 - [ ] Backend-only Laravel deployments without an indexed public fallback retire any stale Nginx vhost claiming the linked domain so old static `public_html` configs cannot keep serving Nginx 403
 - [ ] Deployment Doctor detects Nginx 403 from an index-less/wrong root, recommends redeploy, and reports the corrected nested Laravel public web root
+- [ ] SSL issue jobs reuse an existing `/etc/letsencrypt/live/<cert-name>` certificate before calling Certbot and recover from exact-set rate-limit errors when the reusable certificate exists
 - [ ] Linked domains/subdomains serve the deployment while it is `RUNNING`, then restore the file-manager `public_html`/subdomain root after stop, unlink, or missing deployment target without stale Nginx 502 proxy configs
 - [ ] Deployments without a linked domain skip Nginx proxy/SSL configuration, continue on their managed internal port, and never fail with a null domain `name` error
 - [ ] Deployment Doctor/Guardian marks public HTTP 502/503/504 as a repairable failure, rewrites the generated Nginx vhost, queues restart, probes again, and does not mark the deployment running if the upstream is still unreachable

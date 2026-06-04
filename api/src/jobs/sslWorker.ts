@@ -25,6 +25,22 @@ function assertLiveCommandSucceeded(action: string, result: SysagentCommandResul
   }
 }
 
+function commandDetail(result: SysagentCommandResult) {
+  return [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
+}
+
+function letsEncryptExactSetRateLimited(result: SysagentCommandResult) {
+  const text = commandDetail(result).toLowerCase();
+  return text.includes("too many certificates")
+    && text.includes("exact set of identifiers")
+    && text.includes("last 168h");
+}
+
+function rateLimitRetryAfter(result: SysagentCommandResult) {
+  const match = commandDetail(result).match(/retry after\s+([^:\n]+?\s+UTC)/i);
+  return match?.[1] ?? null;
+}
+
 function certificatePaths(domain: string) {
   const certName = certbotCertificateName(domain);
   return {
@@ -41,6 +57,18 @@ type NginxPublishResult = {
 
 function sslServerName(domainName: string, includeWww: boolean) {
   return includeWww ? `${domainName} www.${domainName}` : domainName;
+}
+
+async function reusableCertificateResult(certName: string, reason: string): Promise<SysagentCommandResult | null> {
+  const status = await sysagent.certificateStatus(certName);
+  if (!status.exists) return null;
+  return {
+    dryRun: false,
+    command: ["certbot", "reuse-existing", certName],
+    stdout: `${reason}. Existing certificate ${certName} is present and will be reused.`,
+    stderr: "",
+    returncode: 0
+  } satisfies SysagentCommandResult;
 }
 
 async function writeHttpsVhost(domainName: string, domainId: string | null | undefined, forceHttps: boolean, includeWww: boolean, webRoot?: string | null) {
@@ -160,7 +188,7 @@ async function markSslIssued(job: { data: { domain: string; domainId?: string | 
   }
   if (job.data.domainId) {
     const domain = await prisma.domain.findUnique({ where: { id: job.data.domainId }, select: { forceSsl: true } });
-    const status = await sysagent.certificateStatus(job.data.domain);
+    const status = await sysagent.certificateStatus(certbotCertificateName(job.data.domain));
     await prisma.domain.update({
       where: { id: job.data.domainId },
       data: {
@@ -179,20 +207,34 @@ export const sslWorker = new Worker(
 
     if (job.name === "issue") {
       const includeWww = job.data.includeWww ?? true;
-      const result = isWildcardHostname(job.data.domain) || job.data.dnsChallenge
-        ? await sysagent.issueDnsCertificate({
+      const certName = job.data.certName ?? certbotCertificateName(job.data.domain);
+      let result: SysagentCommandResult | null = await reusableCertificateResult(certName, "Certbot issue skipped");
+      if (!result) {
+        result = isWildcardHostname(job.data.domain) || job.data.dnsChallenge
+          ? await sysagent.issueDnsCertificate({
             domain: job.data.domain,
             parentDomain: job.data.parentDomain ?? job.data.domain.replace(/^\*\./, ""),
             email: job.data.email,
-            certName: job.data.certName ?? certbotCertificateName(job.data.domain)
+            certName
           })
-        : await sysagent.issueCertificate({
+          : await sysagent.issueCertificate({
             domain: job.data.domain,
             email: job.data.email,
             webRoot: job.data.webRoot ?? `${env.FILE_MANAGER_ROOT}/${job.data.domain}/public_html`,
             includeWww,
-            certName: certbotCertificateName(job.data.domain)
+            certName
           });
+      }
+      if (letsEncryptExactSetRateLimited(result)) {
+        const reusable = await reusableCertificateResult(certName, "Let's Encrypt exact-set rate limit hit");
+        if (reusable) {
+          result = reusable;
+        } else {
+          const retryAfter = rateLimitRetryAfter(result);
+          throw new Error(`Let's Encrypt rate limit hit for ${job.data.domain}. Too many certificates were requested for the same exact identifier set in the last 7 days.${retryAfter ? ` Retry after ${retryAfter}.` : ""} Existing certificate ${certName} was not found on disk, so Nginx cannot be switched to HTTPS yet.`);
+        }
+      }
+      if (!result) throw new Error(`Certbot issue did not return a result for ${job.data.domain}`);
       assertLiveCommandSucceeded("Certbot issue", result);
 
       const domain = job.data.domainId
@@ -206,14 +248,21 @@ export const sslWorker = new Worker(
     }
 
     if (job.name === "renew") {
-      const result = isWildcardHostname(job.data.domain) || job.data.dnsChallenge
+      const certName = job.data.certName ?? certbotCertificateName(job.data.domain);
+      let result = isWildcardHostname(job.data.domain) || job.data.dnsChallenge
         ? await sysagent.issueDnsCertificate({
             domain: job.data.domain,
             parentDomain: job.data.parentDomain ?? job.data.domain.replace(/^\*\./, ""),
             email: job.data.email ?? `admin@${job.data.parentDomain ?? job.data.domain.replace(/^\*\./, "")}`,
-            certName: job.data.certName ?? certbotCertificateName(job.data.domain)
+            certName
           })
-        : await sysagent.renewCertificate(certbotCertificateName(job.data.domain));
+        : await sysagent.renewCertificate(certName);
+      if (letsEncryptExactSetRateLimited(result)) {
+        const reusable = await reusableCertificateResult(certName, "Let's Encrypt exact-set rate limit hit during renew");
+        if (reusable) {
+          result = reusable;
+        }
+      }
       assertLiveCommandSucceeded("Certbot renew", result);
 
       const domain = job.data.domainId
