@@ -224,6 +224,8 @@ class PlatformMappingTests(unittest.TestCase):
         self.assertEqual(runtime_tool_install_plan("php-mysql", self.alma).packages, ("php-mysqlnd",))
         self.assertEqual(runtime_tool_install_command("php-curl", self.ubuntu), ["apt-get", "install", "-y", "php-curl"])
         self.assertIsNotNone(runtime_tool_install_plan("php-gd", self.ubuntu).steps[0].skip_if)
+        sodium_plan = runtime_tool_install_plan("php-sodium", self.alma)
+        self.assertEqual(sodium_plan.steps[-1].description, "Verify PHP Sodium extension is loaded")
 
     def test_rhel_php_redis_install_plan_builds_against_active_php(self) -> None:
         plan = runtime_tool_install_plan("php-redis", self.alma)

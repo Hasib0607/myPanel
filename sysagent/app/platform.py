@@ -709,6 +709,10 @@ def php_sodium_install_plan(info: OsReleaseInfo | None = None) -> PackageInstall
                 on_failure="continue",
                 skip_if=PHP_SODIUM_EXTENSION_LOADED_COMMAND,
             ),
+            InstallStep(
+                "Verify PHP Sodium extension is loaded",
+                PHP_SODIUM_EXTENSION_LOADED_COMMAND,
+            ),
         ),
         notes="PHP Sodium may be bundled with php-common on Debian/Ubuntu and available as php-sodium on RHEL/Remi.",
     )

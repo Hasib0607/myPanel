@@ -65,13 +65,36 @@ export async function deploymentRuntimeReview(deployment: DeploymentRuntimeInput
   };
 }
 
+export function runtimeApprovalReadiness(afterMissing: string[], envDrivenTools: string[], approvedTools: string[], failedCount = 0) {
+  const envDriven = new Set(envDrivenTools);
+  const approvedTargets = runtimeInstallTargetsForTools(approvedTools);
+  const approvedExecutables = new Set(approvedTargets.flatMap((target) => target.executables));
+  const skippedMissing = afterMissing.filter((tool) => envDriven.has(tool) && !approvedExecutables.has(tool));
+  const blockingMissing = afterMissing.filter((tool) => !skippedMissing.includes(tool));
+  return {
+    ready: failedCount === 0 && blockingMissing.length === 0,
+    skippedMissing,
+    blockingMissing
+  };
+}
+
 export async function prepareDeploymentRuntimeTools(deployment: DeploymentRuntimeInput, approvedTools: string[] = []) {
   const before = await deploymentRuntimeReview(deployment);
   if (!before.missing.length) return { ready: true, review: before, install: null };
   if (!approvedTools.length) return { ready: false, review: before, install: null };
   const install = await installDeploymentRuntimeTools(approvedTools);
   const after = await deploymentRuntimeReview(deployment);
-  return { ready: install.failed.length === 0 && after.missing.length === 0, review: after, before, install };
+  const envVars = await resolveDeploymentEnvVars(deployment.env);
+  const envDrivenTools = deployment.framework === "LARAVEL" ? envDrivenRuntimeExecutables(envVars) : [];
+  const readiness = runtimeApprovalReadiness(after.missing, envDrivenTools, approvedTools, install.failed.length);
+  return {
+    ready: readiness.ready,
+    review: after,
+    before,
+    install,
+    skippedMissing: readiness.skippedMissing,
+    blockingMissing: readiness.blockingMissing
+  };
 }
 
 export async function installDeploymentRuntimeTools(tools: string[] = []) {

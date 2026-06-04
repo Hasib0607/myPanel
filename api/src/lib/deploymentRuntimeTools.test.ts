@@ -105,6 +105,7 @@ test("runtime matrix includes Laravel/PHP server requirements", () => {
   ]) {
     assert.ok(tools.includes(tool), `${tool} missing`);
   }
+  assert.equal(tools.includes("php-ext-swoole"), false);
 });
 
 test("runtime matrix includes Node/Next process manager requirements", () => {

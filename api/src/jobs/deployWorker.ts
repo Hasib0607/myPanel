@@ -1851,9 +1851,10 @@ async function assertEnvRuntimeToolsInstalled(deploymentId: string, releaseId: s
     });
   }
 
-  throw new Error(
-    `Missing env-driven runtime tools on the server: ${missing.join(", ")}. Installation requires explicit approval. Open the deployment runtime review modal or Deployment Doctor, approve the installs, then redeploy.`
-  );
+  await writeLog(deploymentId, releaseId, "PREFLIGHT", "Env-driven runtime tools are missing; continuing with approval hints", {
+    missing,
+    approvalTargets: approvalTargets.map((target) => target.actionKey)
+  });
 }
 
 async function ensureDoctorApprovalExists(deploymentId: string, target: { actionKey: string; label: string; command: string; reason: string }) {

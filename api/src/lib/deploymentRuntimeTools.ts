@@ -69,7 +69,6 @@ const phpRuntimeTools = [
   "php-ext-soap",
   "php-ext-bcmath",
   "php-ext-intl",
-  "php-ext-swoole",
   "php-ext-mysql",
   "php-ext-pgsql"
 ];
