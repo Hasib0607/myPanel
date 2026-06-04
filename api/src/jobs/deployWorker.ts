@@ -1306,6 +1306,11 @@ function extractFirstPartyAssetPaths(html: string | undefined, domainName: strin
   }).slice(0, 16);
 }
 
+function isMissingPublicStaticAssetsFailure(value: unknown) {
+  const message = value instanceof Error ? value.message : String(value ?? "");
+  return message.includes("Laravel public page references missing first-party static assets:");
+}
+
 async function validatePublicStaticAssets(
   deploymentId: string,
   releaseId: string | undefined,
@@ -1347,12 +1352,13 @@ async function validatePublicStaticAssets(
 
   if (!missing.length) return null;
   const preview = missing.slice(0, 8).map((item) => `${item.path}${item.httpCode ? ` (${item.httpCode})` : ""}`).join(", ");
-  const warning = `Laravel public page loaded, but first-party static assets are missing through Nginx: ${preview}. Ensure these files exist under ${path.join(appPath, "public")} or fix the app asset paths/source repo, then redeploy.`;
-  await writeLog(deploymentId, releaseId, "HEALTH_CHECK", `${label} static asset warning`, {
+  const publicRoot = path.join(appPath, "public");
+  const failure = `Laravel public page references missing first-party static assets: ${preview}. These files are not present under ${publicRoot}. Commit the Laravel public assets to the source repository (do not ignore the whole /public directory), or add a build command that generates them, then redeploy.`;
+  await writeLog(deploymentId, releaseId, "HEALTH_CHECK", `${label} static asset check failed`, {
     missing,
-    publicRoot: path.join(appPath, "public")
-  }, "warn");
-  return warning;
+    publicRoot
+  }, "error");
+  throw new Error(failure);
 }
 
 async function optionalPublicRouteWarning(
@@ -1581,6 +1587,7 @@ async function optionalPublicRouteWarning(
     return warning;
   } catch (error) {
     const firstMessage = error instanceof Error ? error.message : "Public route check failed";
+    if (isMissingPublicStaticAssetsFailure(error)) throw error;
     await writeLog(deploymentId, releaseId, "HEALTH_CHECK", `${label} failed; running Guardian public-route repair`, { warning: firstMessage }, "warn");
 
     envVars = await ensureLaravelAppKey(deploymentId, releaseId, appPath, deployment.port, envVars);
@@ -1635,6 +1642,7 @@ async function optionalPublicRouteWarning(
     }
     return warning;
   } catch (error) {
+    if (isMissingPublicStaticAssetsFailure(error)) throw error;
     const message = error instanceof Error ? error.message : "Public route check failed";
     await writeLog(deploymentId, releaseId, "HEALTH_CHECK", `${label} warning`, { warning: message }, "warn");
     if (nginxUpstreamFailure(publicRoute, message)) {

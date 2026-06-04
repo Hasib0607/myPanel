@@ -9,6 +9,7 @@ import { deployQueue } from "../jobs/queues.js";
 import { laravelPublicCwdMissing, nginxProxyMissingDomainFailure, nodePackageBinaryMissing, supervisorStartStillStarting } from "../lib/deploymentFailureRuntimeRepairs.js";
 import { detectComposerPlatformIssue, detectFrontendModuleNotFound, formatFrontendModuleNotFoundMessage, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import { audit } from "../lib/audit.js";
+import { githubApiErrorMessage } from "../lib/githubApiErrors.js";
 import { deploymentHasLaravelPublicIndex, detectDeploymentFiles, detectDeploymentSource, findDeploymentAppRoot } from "../lib/deploymentDetection.js";
 import {
   boundDomainFromBinding,
@@ -577,7 +578,7 @@ async function githubRequest<T>(path: string, token: string, init?: RequestInit)
   });
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
-    throw new Error(`GitHub API failed with ${response.status}${detail ? `: ${detail.slice(0, 200)}` : ""}`);
+    throw new Error(githubApiErrorMessage(response.status, detail));
   }
   const text = await response.text();
   return {

@@ -11,6 +11,7 @@ import { z } from "zod";
 import { env } from "../config/env.js";
 import { deployQueue, sslQueue } from "../jobs/queues.js";
 import { audit } from "../lib/audit.js";
+import { githubApiErrorMessage } from "../lib/githubApiErrors.js";
 import { publishDomainDnsZone } from "../lib/domainDnsPublish.js";
 import { detectDeploymentFiles } from "../lib/deploymentDetection.js";
 import { prisma } from "../lib/prisma.js";
@@ -290,7 +291,7 @@ async function githubRequest<T>(githubPath: string, token: string, init?: Reques
   });
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
-    throw new Error(`GitHub API failed with ${response.status}${detail ? `: ${detail.slice(0, 200)}` : ""}`);
+    throw new Error(githubApiErrorMessage(response.status, detail));
   }
   const text = await response.text();
   return {
