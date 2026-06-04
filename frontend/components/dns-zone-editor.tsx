@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Download, Plus, Save, Trash2 } from "lucide-react";
 import { apiDelete, apiGet, apiPatch, apiPost } from "@/lib/api";
@@ -25,7 +25,7 @@ type ZoneExport = {
 
 const recordTypes: DnsRecordType[] = ["A", "AAAA", "CNAME", "MX", "TXT", "NS", "SRV", "CAA"];
 
-export function DnsZoneEditor({ domainId }: { domainId: string }) {
+export function DnsZoneEditor({ domainId, initialType = "A" }: { domainId: string; initialType?: DnsRecordType }) {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState({
     type: "A" as DnsRecordType,
@@ -36,6 +36,10 @@ export function DnsZoneEditor({ domainId }: { domainId: string }) {
   });
   const [editing, setEditing] = useState<Record<string, Partial<DnsRecord>>>({});
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    setDraft((current) => ({ ...current, type: initialType }));
+  }, [initialType]);
 
   const records = useQuery({
     queryKey: ["dns-records", domainId],
