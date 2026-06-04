@@ -21,3 +21,14 @@ Runtime packages/extensions installed or queued:
 - Payments: PHP `bcmath`, `curl`, and `intl`
 
 If auto-install cannot finish, Deployment Doctor creates a pending approval with the exact package/tool that needs installation. Approve it, then redeploy.
+
+## GitHub Auto Deploy Safety Poller
+
+Auto deploy does not depend only on GitHub webhook delivery. Guardian also runs a polling fallback for deployments where `autoDeployEnabled=true`, `sourceProvider=GITHUB`, and a GitHub owner/repo/branch are configured.
+
+- Default interval: `GUARDIAN_AUTO_DEPLOY_POLL_INTERVAL_MS=60000`.
+- Disable only if needed: `GUARDIAN_AUTO_DEPLOY_POLL_ENABLED=false`.
+- Account deployments use `github:account:<accountId>:token`; superadmin deployments use `github:superadmin:token`.
+- If the GitHub webhook is missing, blocked by token permissions, or GitHub delivery is delayed, the poller compares the remote branch head SHA with the latest deployed/queued release and queues a deploy when the branch moved.
+- Duplicate deploys are avoided while a deployment or release is already queued/running/building.
+- Private repositories still need a connected GitHub token with repository read access.

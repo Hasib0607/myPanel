@@ -7,6 +7,7 @@ import { detectDeploymentSource, findDeploymentAppRoot, findLaravelAppRoot } fro
 import { prisma } from "../lib/prisma.js";
 import { sysagent } from "../lib/sysagent.js";
 import { checkPanelRemoteUpdate } from "../lib/panelUpdateMonitor.js";
+import { runDeploymentAutoDeployPoll } from "../lib/deploymentAutoDeployPoller.js";
 import { deployQueue } from "./queues.js";
 import { requiredRuntimeExecutables, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import { laravelPublicCwdMissing, nginxProxyMissingDomainFailure, permissionRepairNeeded, pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded } from "../lib/deploymentFailureRuntimeRepairs.js";
@@ -866,6 +867,9 @@ export const guardianWorker = new Worker(
     }
     if (job.name === "deployment-guard-watch") {
       return runDeploymentGuardWatch();
+    }
+    if (job.name === "deployment-auto-deploy-watch") {
+      return runDeploymentAutoDeployPoll();
     }
     if (job.name === "panel-update-watch") {
       return checkPanelRemoteUpdate();

@@ -4,9 +4,11 @@ import { guardianQueue } from "./jobs/queues.js";
 const intervalMs = Number(process.env.GUARDIAN_INTERVAL_MS ?? 60_000);
 const deploymentDoctorIntervalMs = Number(process.env.GUARDIAN_DEPLOYMENT_DOCTOR_INTERVAL_MS ?? 5 * 60_000);
 const deploymentGuardIntervalMs = Number(process.env.GUARDIAN_DEPLOYMENT_GUARD_INTERVAL_MS ?? 10 * 60_000);
+const autoDeployPollIntervalMs = Number(process.env.GUARDIAN_AUTO_DEPLOY_POLL_INTERVAL_MS ?? 60_000);
 const panelUpdatePollIntervalMs = Number(process.env.PANEL_UPDATE_POLL_INTERVAL_MS ?? 60_000);
 const sslRenewIntervalMs = Number(process.env.GUARDIAN_SSL_RENEW_INTERVAL_MS ?? 12 * 60 * 60_000);
 const autoHealEnabled = process.env.GUARDIAN_AUTO_HEAL === "true";
+const autoDeployPollEnabled = process.env.GUARDIAN_AUTO_DEPLOY_POLL_ENABLED !== "false";
 const panelUpdatePollEnabled = process.env.PANEL_UPDATE_POLL_ENABLED !== "false";
 const sslRenewEnabled = process.env.GUARDIAN_SSL_RENEW_ENABLED !== "false";
 
@@ -31,6 +33,14 @@ async function scheduleGuardian() {
       removeOnComplete: 100,
       removeOnFail: 100
     });
+    if (autoDeployPollEnabled) {
+      await guardianQueue.add("deployment-auto-deploy-watch", {}, {
+        jobId: "guardian-deployment-auto-deploy-watch",
+        repeat: { every: autoDeployPollIntervalMs },
+        removeOnComplete: 100,
+        removeOnFail: 100
+      });
+    }
     if (panelUpdatePollEnabled) {
       await guardianQueue.add("panel-update-watch", {}, {
         jobId: "guardian-panel-update-watch",
@@ -52,6 +62,8 @@ async function scheduleGuardian() {
       autoHealEnabled,
       intervalMs,
       deploymentDoctorIntervalMs,
+      autoDeployPollEnabled,
+      autoDeployPollIntervalMs,
       panelUpdatePollEnabled,
       panelUpdatePollIntervalMs,
       sslRenewEnabled,

@@ -44,6 +44,8 @@ const envSchema = z.object({
   FILE_MANAGER_UPLOAD_LIMIT_BYTES: z.coerce.number().int().positive().default(1024 * 1024 * 1024 * 1024),
   FILE_MANAGER_UPLOAD_CHUNK_BYTES: z.coerce.number().int().positive().default(64 * 1024 * 1024),
   GUARDIAN_TRUSTED_CIDRS: z.string().default(""),
+  GUARDIAN_AUTO_DEPLOY_POLL_ENABLED: z.coerce.boolean().default(true),
+  GUARDIAN_AUTO_DEPLOY_POLL_INTERVAL_MS: z.coerce.number().default(60_000),
   ALLOW_LIVE_WHM_MIGRATION: z.coerce.boolean().default(false)
 });
 
