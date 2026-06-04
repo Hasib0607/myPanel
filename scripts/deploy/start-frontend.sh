@@ -31,6 +31,14 @@ build_frontend() {
   "$NPM_BIN" run build 2>&1 | tee -a "$LOG_FILE"
 }
 
+frontend_build_complete() {
+  [[ -s .next/BUILD_ID && -s .next/routes-manifest.json && -d .next/server ]] || return 1
+
+  local css_count=0
+  css_count="$(find .next/static/css -maxdepth 1 -type f -name '*.css' -size +0c 2>/dev/null | wc -l | tr -d '[:space:]')"
+  [[ "${css_count:-0}" -gt 0 ]] || return 1
+}
+
 cd "$FRONTEND_DIR"
 
 if [[ ! -x node_modules/.bin/next ]]; then
@@ -38,7 +46,7 @@ if [[ ! -x node_modules/.bin/next ]]; then
   "$NPM_BIN" install 2>&1 | tee -a "$LOG_FILE"
 fi
 
-if [[ ! -s .next/BUILD_ID || ! -s .next/routes-manifest.json || ! -d .next/server ]]; then
+if ! frontend_build_complete; then
   log "frontend production build is missing or incomplete"
   build_frontend
 fi

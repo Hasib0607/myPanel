@@ -384,6 +384,60 @@ frontend_build_with_recovery() {
   fi
 }
 
+clean_frontend_build_artifacts() {
+  rm -rf "$APP_DIR/frontend/.next" "$APP_DIR/frontend/.next.tmp" "$APP_DIR/frontend/node_modules/.cache" 2>&1 | tee -a "$LOG_FILE" || true
+  find "$APP_DIR/frontend" -maxdepth 2 -type d -name ".*-*" -print -exec rm -rf {} + 2>&1 | tee -a "$LOG_FILE" || true
+}
+
+frontend_static_assets_present() {
+  local css_count=""
+  css_count="$(find "$APP_DIR/frontend/.next/static/css" -maxdepth 1 -type f -name '*.css' -size +0c 2>/dev/null | wc -l | tr -d '[:space:]')"
+  [[ "${css_count:-0}" -gt 0 ]]
+}
+
+frontend_css_smoke_check() {
+  local base_url="${1%/}"
+  local html_file css_path css_code
+  html_file="$(mktemp)"
+
+  if ! curl -fsS --connect-timeout 5 --max-time 20 "$base_url/login" -o "$html_file" 2>&1 | tee -a "$LOG_FILE"; then
+    rm -f "$html_file"
+    return 1
+  fi
+
+  css_path="$(sed -n 's/.*href="\([^"]*\/_next\/static\/css\/[^"]*\.css\)".*/\1/p' "$html_file" | head -1)"
+  rm -f "$html_file"
+  if [[ -z "$css_path" ]]; then
+    log "frontend CSS smoke check failed: no Next CSS asset link found in $base_url/login"
+    return 1
+  fi
+
+  css_code="$(curl -sS --connect-timeout 5 --max-time 20 -o /dev/null -w '%{http_code}' "$base_url$css_path" 2>>"$LOG_FILE" || true)"
+  if [[ "$css_code" != "200" ]]; then
+    log "frontend CSS smoke check failed: $base_url$css_path returned HTTP $css_code"
+    return 1
+  fi
+
+  log "frontend CSS smoke check passed for $css_path"
+}
+
+recover_frontend_static_assets() {
+  local base_url="${1%/}"
+
+  if frontend_static_assets_present && frontend_css_smoke_check "$base_url"; then
+    return 0
+  fi
+
+  log "frontend static assets are missing or not served; cleaning .next, rebuilding, and restarting frontend"
+  write_status "running" "repairing frontend static assets" "$NEW_COMMIT" "$NEW_COMMIT_SUBJECT"
+  clean_frontend_build_artifacts
+  frontend_build_with_recovery
+  run_systemctl restart vps-panel-frontend
+  wait_service_active vps-panel-frontend
+  wait_http_ready "frontend" "$FRONTEND_HEALTH_URL" 30
+  frontend_css_smoke_check "$base_url"
+}
+
 set_env_value() {
   local key="$1"
   local value="$2"
@@ -734,6 +788,7 @@ done
 
 wait_http_ready "API health" "$HEALTH_URL" 30
 wait_http_ready "frontend" "$FRONTEND_HEALTH_URL" 30
+recover_frontend_static_assets "http://127.0.0.1:$FRONTEND_PORT"
 
 write_status "succeeded" "panel self-update completed" "$NEW_COMMIT" "$NEW_COMMIT_SUBJECT"
 log "panel self-update completed"
