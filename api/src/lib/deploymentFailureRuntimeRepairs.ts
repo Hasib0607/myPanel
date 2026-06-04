@@ -49,6 +49,18 @@ export function nginxProxyMissingDomainFailure(text: string) {
     && lower.includes("reading 'name'");
 }
 
+export function nginxUpstreamFailure(result: unknown, text = "") {
+  const value = result as { httpCode?: number; stderr?: string; stdout?: string };
+  const detail = `${text} ${value?.stderr ?? ""} ${value?.stdout ?? ""}`.toLowerCase();
+  return [502, 503, 504].includes(value?.httpCode ?? 0)
+    || detail.includes("http 502")
+    || detail.includes("http 503")
+    || detail.includes("http 504")
+    || detail.includes("bad gateway")
+    || detail.includes("connect() failed")
+    || detail.includes("upstream");
+}
+
 export function runtimeTargetsForFailedDeploymentLog(text: string) {
   const lower = text.toLowerCase();
   const missingTools = new Set<string>();

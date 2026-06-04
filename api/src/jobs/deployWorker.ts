@@ -17,7 +17,7 @@ import {
   findLaravelAppRoot,
   nodeStartUsesVitePreview
 } from "../lib/deploymentDetection.js";
-import { nodePackageBinaryMissing } from "../lib/deploymentFailureRuntimeRepairs.js";
+import { nginxUpstreamFailure, nodePackageBinaryMissing } from "../lib/deploymentFailureRuntimeRepairs.js";
 import { appendFrontendModuleNotFoundHint, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import {
   deploymentRecoveryAttempts,
@@ -1150,6 +1150,9 @@ async function assertPublicRouteResult(result: unknown, label: string, deploymen
   if (value?.degraded) {
     const runtimeText = await deploymentRuntimeLogTail(deployment, appPath);
     const base = value.stderr ?? `${label} returned HTTP ${value.httpCode ?? "error"}`;
+    if (nginxUpstreamFailure(result, base)) {
+      throw new Error(`${base}. Nginx cannot reach the deployment process on its configured upstream port.${runtimeText}`);
+    }
     return `${base}${runtimeText}`;
   }
 
@@ -1503,6 +1506,9 @@ async function optionalPublicRouteWarning(
       envVars = repairedRedis;
     }
 
+    if (nginxUpstreamFailure(publicRoute, firstMessage)) {
+      await republishDeploymentNginxVhost(deploymentId, releaseId, { ...deployment, rootPath: appPath }, domain);
+    }
     await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Guardian public-route repair", () =>
       runGuardianDeploymentRepair({ rootPath: appPath, framework: deployment.framework, envVars })
     );
@@ -1536,6 +1542,9 @@ async function optionalPublicRouteWarning(
   } catch (error) {
     const message = error instanceof Error ? error.message : "Public route check failed";
     await writeLog(deploymentId, releaseId, "HEALTH_CHECK", `${label} warning`, { warning: message }, "warn");
+    if (nginxUpstreamFailure(publicRoute, message)) {
+      throw new Error(`${message}\n\nGuardian rewrote the Nginx vhost and restarted the deployment process, but the upstream still returns 502/503/504.`);
+    }
     return message;
   }
 }
@@ -3215,7 +3224,23 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       }
     }
 
-    if (domain) {
+    const backendOnlyLaravel = Boolean(
+      domain
+      && await deploymentRunsLaravel(deployment.framework, appPath)
+      && !(await deploymentHasLaravelPublicIndex(appPath))
+    );
+    if (domain && backendOnlyLaravel) {
+      await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Backend-only Laravel public fallback config", () =>
+        publishPublicHtmlNginxVhost(domain)
+      );
+      await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "Skipped dead upstream proxy for backend-only Laravel deployment", {
+        domain: domain.name,
+        appPath,
+        fallbackRootPath: deploymentFallbackRootPath(domain),
+        reason: "No public/index.php exists, so the idle worker-safe process does not listen on the managed web port."
+      }, "warn");
+    }
+    if (domain && !backendOnlyLaravel) {
       const linkedDomain = domain;
       await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Link deployment domain", () =>
         ensureParentDomainDeploymentProxy(deployment.id, linkedDomain).then(() => ({
@@ -3231,7 +3256,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       "before nginx proxy and SSL"
     ).catch(() => undefined);
     let proxyHttpsReady = false;
-    if (domain) {
+    if (domain && !backendOnlyLaravel) {
       const tlsSync = await syncDeploymentTlsWithCertificate(domain);
       domain = tlsSync.domain;
       proxyHttpsReady = tlsSync.httpsReady;
@@ -3263,7 +3288,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       });
     }
 
-    if (domain && !proxyHttpsReady) {
+    if (domain && !backendOnlyLaravel && !proxyHttpsReady) {
       const serverName = deploymentServerName(domain);
       await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Prepare ACME webroot", () => ensureAcmeWebroot(domain));
       const includeWww = await wwwPointsToThisVps(domain);
@@ -3328,10 +3353,12 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         );
       }
     } else {
-      await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "SSL request skipped", { reason: domain ? "No domain linked" : "No linked domain" });
+      await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "SSL request skipped", {
+        reason: backendOnlyLaravel ? "Backend-only Laravel deployment has no public web process" : domain ? "Certificate already active" : "No linked domain"
+      });
     }
 
-    if (domain) {
+    if (domain && !backendOnlyLaravel) {
       const serverName = deploymentServerName(domain);
       const tlsSync = await syncDeploymentTlsWithCertificate(domain);
       const activeDomain = tlsSync.domain ?? domain;
