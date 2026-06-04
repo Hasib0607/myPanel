@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Database, FileText, FolderPlus, Globe2, Inbox, Play, Plus, RefreshCw, RotateCw, Save, Square, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useState } from "react";
-import { apiDelete, apiDeleteBody, apiGet, apiPatch, apiPost, apiPut } from "@/lib/api";
+import { ApiError, apiDelete, apiDeleteBody, apiGet, apiPatch, apiPost, apiPut } from "@/lib/api";
 import { PageHeader } from "@/components/page-header";
 
 type Domain = { id: string; name: string; status: string; documentRoot: string };
@@ -24,6 +24,12 @@ type RuntimeModalState = {
   action: "deploy" | "restart";
   review: RuntimeReview;
   selected: Record<string, boolean>;
+};
+type RuntimeReviewError = {
+  runtimeReview?: RuntimeReview;
+  install?: {
+    failed?: Array<{ tool?: string; error?: string }>;
+  } | null;
 };
 type Mailbox = { id: string; username: string; quotaMb: number; enabled: boolean; domain?: { name: string } };
 type AccountDatabase = { id: string; engine: string; database: string; username: string };
@@ -207,7 +213,24 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
       setNotice(`Deployment ${variables.action} queued.`);
       await refresh();
     },
-    onError: (error) => setNotice(error instanceof Error ? error.message : "Deployment action failed.")
+    onError: (error, variables) => {
+      if (error instanceof ApiError && error.status === 409) {
+        const data = error.data as RuntimeReviewError | null;
+        if (data?.runtimeReview) {
+          const deployment = runtimeModal?.deployment ?? dashboard.data?.deployments.find((item) => item.id === variables.id);
+          setRuntimeModal({
+            deployment: deployment ?? { id: variables.id, name: "Deployment", slug: variables.id, status: "", healthStatus: "", port: 0 },
+            action: variables.action as RuntimeModalState["action"],
+            review: data.runtimeReview,
+            selected: Object.fromEntries(data.runtimeReview.installable.map((item) => [item.tool, true]))
+          });
+          const failed = data.install?.failed?.map((item) => item.tool).filter(Boolean).join(", ");
+          setNotice(failed ? `Install did not finish for: ${failed}. Review the remaining packages and try again.` : error.message);
+          return;
+        }
+      }
+      setNotice(error instanceof Error ? error.message : "Deployment action failed.");
+    }
   });
 
   const startDeploymentAction = async (deployment: Deployment, action: "deploy" | "restart" | "stop") => {
@@ -669,7 +692,7 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
               <button className="rounded-md border border-panel-line px-4 py-2 text-sm font-medium hover:bg-slate-50" onClick={() => setRuntimeModal(null)} type="button">Cancel</button>
               <button
                 className="rounded-md bg-panel-accent px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
-                disabled={deploymentAction.isPending || runtimeModal.review.installable.length === 0}
+                disabled={deploymentAction.isPending || !Object.values(runtimeModal.selected).some(Boolean)}
                 onClick={() => deploymentAction.mutate({
                   id: runtimeModal.deployment.id,
                   action: runtimeModal.action,
@@ -677,7 +700,7 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
                 })}
                 type="button"
               >
-                Continue deployment
+                {deploymentAction.isPending ? "Installing..." : "Install selected and continue"}
               </button>
             </div>
           </div>

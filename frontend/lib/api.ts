@@ -22,6 +22,18 @@ function apiUrl(path: string) {
   return `${apiBase}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
+export class ApiError extends Error {
+  status: number;
+  data: unknown;
+
+  constructor(message: string, status: number, data: unknown) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.data = data;
+  }
+}
+
 async function fetchJson<T>(path: string, init: RequestInit): Promise<T> {
   const url = apiUrl(path);
   let response: Response;
@@ -43,7 +55,7 @@ async function fetchJson<T>(path: string, init: RequestInit): Promise<T> {
           .filter(Boolean)
           .join("; ")
       : "";
-    throw new Error(issueText || data?.error || `API request failed: ${response.status}`);
+    throw new ApiError(issueText || data?.error || `API request failed: ${response.status}`, response.status, data);
   }
   return data as T;
 }

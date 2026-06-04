@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Clipboard, Eye, EyeOff, FolderGit2, GitBranch, Github, History, KeyRound, List, Pencil, Play, Plus, Rocket, Save, Search, Settings2, ShieldCheck, Square, ToggleLeft, ToggleRight, Trash2, Wand2, X } from "lucide-react";
-import { apiDelete, apiDeleteBody, apiGet, apiGetText, apiPatch, apiPost, apiPut } from "@/lib/api";
+import { ApiError, apiDelete, apiDeleteBody, apiGet, apiGetText, apiPatch, apiPost, apiPut } from "@/lib/api";
 import type { Deployment, DeploymentDomainBinding, DeploymentEnvVar, DeploymentFramework, DeploymentListResponse, DeploymentRelease, DetectionResponse, PreflightResponse, QueueResponse, DeploymentSourceProvider } from "./deployment-types";
 import { frameworkOptions, sourceOptions } from "./deployment-types";
 import { ResultNotice, actionIcon, formatDate, healthBadge, queryString, statusBadge } from "./deployment-ui";
@@ -32,6 +32,12 @@ type RuntimeModalState = {
   action: "deploy" | "start" | "restart";
   review: RuntimeReview;
   selected: Record<string, boolean>;
+};
+type RuntimeReviewError = {
+  runtimeReview?: RuntimeReview;
+  install?: {
+    failed?: Array<{ tool?: string; error?: string }>;
+  } | null;
 };
 
 type Draft = {
@@ -392,7 +398,23 @@ export function DeploymentsClient({
       await invalidateDeployments();
       if (variables.name === "deploy") setActiveTab("overview");
     },
-    onError: (error) => setNotice(error instanceof Error ? error.message : "Action failed")
+    onError: (error, variables) => {
+      if (error instanceof ApiError && error.status === 409) {
+        const data = error.data as RuntimeReviewError | null;
+        if (data?.runtimeReview) {
+          setRuntimeModal({
+            deployment: runtimeModal?.deployment ?? variables.deployment,
+            action: variables.name === "start" ? "start" : variables.name === "restart" ? "restart" : "deploy",
+            review: data.runtimeReview,
+            selected: Object.fromEntries(data.runtimeReview.installable.map((item) => [item.tool, true]))
+          });
+          const failed = data.install?.failed?.map((item) => item.tool).filter(Boolean).join(", ");
+          setNotice(failed ? `Install did not finish for: ${failed}. Review the remaining packages and try again.` : error.message);
+          return;
+        }
+      }
+      setNotice(error instanceof Error ? error.message : "Action failed");
+    }
   });
 
   const startDeploymentAction = async (deployment: Deployment, name: "deploy" | "start" | "stop" | "restart") => {
@@ -1488,8 +1510,13 @@ function RuntimeInstallModal({
         </div>
         <div className="flex justify-end gap-2 border-t border-panel-line p-5">
           <button className="rounded-md border border-panel-line px-4 py-2 text-sm font-medium hover:bg-slate-50" onClick={onClose} type="button">Cancel</button>
-          <button className="rounded-md bg-panel-accent px-4 py-2 text-sm font-semibold text-white disabled:opacity-60" disabled={busy || modal.review.installable.length === 0} onClick={onContinue} type="button">
-            Install selected and continue
+          <button
+            className="rounded-md bg-panel-accent px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+            disabled={busy || !Object.values(modal.selected).some(Boolean)}
+            onClick={onContinue}
+            type="button"
+          >
+            {busy ? "Installing..." : "Install selected and continue"}
           </button>
         </div>
       </div>
