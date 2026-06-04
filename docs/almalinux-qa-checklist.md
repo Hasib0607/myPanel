@@ -81,6 +81,7 @@ From Deployment Doctor or runtime-tools install:
 - [ ] Wildcard subdomain SSL does not send `domain-*.example.com` as a sysagent vhost name; it uses DNS-01 TXT automation against the panel-managed zone and stores the cert as `wildcard.example.com`
 - [ ] React/Vite build failures like `vite: command not found` are treated as missing project package binaries; Guardian reinstalls Node dependencies with devDependencies and retries the build instead of requesting a global Vite install
 - [ ] Laravel apps with Vite/Mix/package frontend markers deploy with compiled CSS/JS assets under `public`, and Doctor/Guardian flags missing built assets before declaring the public site healthy
+- [ ] Laravel Mix/Vite `Module not found` / `Can't resolve` errors are reported as missing app source or import-case issues, not server runtime repairs; deploy continues only if built public assets already exist
 - [ ] Install Composer (EPEL or fallback)
 - [ ] Install Go if needed
 

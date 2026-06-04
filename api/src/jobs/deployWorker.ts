@@ -2608,6 +2608,14 @@ async function inspectLaravelFrontendAssets(appPath: string, publicDirectory: st
   };
 }
 
+function laravelFrontendMissingSourceHint(text: string, appPath: string) {
+  const match = text.match(/Can't resolve ['"]([^'"]+)['"] in ['"]([^'"]+)['"]/i);
+  if (!match && !/module not found/i.test(text)) return null;
+  const importPath = match?.[1] ?? "a referenced frontend source file";
+  const fromDirectory = match?.[2] ? path.relative(appPath, match[2]) || "." : "the frontend source tree";
+  return `Laravel Mix/Vite/webpack cannot find source file ${importPath} under ${fromDirectory}. Add the missing file to Git, fix the import path/case, or commit pre-built public assets (mix-manifest.json / public/build) and redeploy. The VPS cannot create missing application source files automatically.`;
+}
+
 async function ensureLaravelFrontendAssets(
   deploymentId: string,
   releaseId: string | undefined,
@@ -2665,6 +2673,16 @@ async function ensureLaravelFrontendAssets(
     assertCommandTree(buildResult, "Laravel frontend asset build");
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
+    const afterFailure = await inspectLaravelFrontendAssets(appPath, publicDirectory);
+    if (afterFailure.hasBuiltAssets) {
+      await writeLog(deploymentId, releaseId, "BUILDING", "Laravel frontend build reported errors but public assets exist; continuing deploy", {
+        warning: detail.slice(0, 2000),
+        evidence: afterFailure.evidence
+      }, "warn");
+      return;
+    }
+    const missingSourceHint = laravelFrontendMissingSourceHint(detail, appPath);
+    if (missingSourceHint) throw new Error(`${detail}\n\n${missingSourceHint}`);
     if (!nodePackageBinaryMissing(detail)) throw error;
     await writeLog(deploymentId, releaseId, "BUILDING", "Laravel frontend build binary missing; reinstalling dev dependencies", {
       packageManager: assets.packageManager,
@@ -2680,7 +2698,22 @@ async function ensureLaravelFrontendAssets(
     );
     assertCommandTree(repairInstall, "Repair Laravel frontend dependencies");
     buildResult = await runFrontendBuild();
-    assertCommandTree(buildResult, "Laravel frontend asset build retry");
+    try {
+      assertCommandTree(buildResult, "Laravel frontend asset build retry");
+    } catch (retryError) {
+      const retryDetail = retryError instanceof Error ? retryError.message : String(retryError);
+      const afterRetry = await inspectLaravelFrontendAssets(appPath, publicDirectory);
+      if (afterRetry.hasBuiltAssets) {
+        await writeLog(deploymentId, releaseId, "BUILDING", "Laravel frontend build retry reported errors but public assets exist; continuing deploy", {
+          warning: retryDetail.slice(0, 2000),
+          evidence: afterRetry.evidence
+        }, "warn");
+        return;
+      }
+      const retryMissingSourceHint = laravelFrontendMissingSourceHint(retryDetail, appPath);
+      if (retryMissingSourceHint) throw new Error(`${retryDetail}\n\n${retryMissingSourceHint}`);
+      throw retryError;
+    }
   }
 
   const after = await inspectLaravelFrontendAssets(appPath, publicDirectory);
