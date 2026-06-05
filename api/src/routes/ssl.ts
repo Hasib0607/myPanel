@@ -96,7 +96,34 @@ async function optionalARecordPointsToVps(hostname: string, domainId: string, do
 
 async function runSslPreflight(domain: { id: string; name: string }, includeWww: boolean) {
   await publishDomainDnsZone(domain.id);
-  const apexCheck = { host: domain.name, records: await assertARecordPointsToVps(domain.name, domain.id, domain.name), ok: true, skipped: false };
+  let apexRecords: string[];
+  try {
+    apexRecords = await assertARecordPointsToVps(domain.name, domain.id, domain.name);
+  } catch (error) {
+    const certbot = await sysagent.certbotStatus();
+    if (!commandSucceeded(certbot)) {
+      const detail = commandFailureDetail(certbot);
+      throw Object.assign(new Error(`Certbot is not ready. Install certbot and enable ALLOW_LIVE_SSL. ${detail}`.trim()), { statusCode: 400 });
+    }
+    const webRoot = path.join(env.FILE_MANAGER_ROOT, domain.name, "public_html");
+    return {
+      dnsChecks: [{
+        host: `_acme-challenge.${domain.name}`,
+        records: [] as string[],
+        ok: true,
+        skipped: false,
+        dns01: true,
+        reason: error instanceof Error ? error.message : "HTTP A record is not ready"
+      }],
+      preflight: { certbot, write: certbot, checks: [] as SysagentCommandResult[], webRoot },
+      webRoot,
+      includeWww: false,
+      dnsChallenge: true,
+      parentDomain: domain.name,
+      certName: certbotCertificateName(domain.name)
+    };
+  }
+  const apexCheck = { host: domain.name, records: apexRecords, ok: true, skipped: false };
   const wwwCheck = includeWww ? await optionalARecordPointsToVps(`www.${domain.name}`, domain.id, domain.name) : null;
   const effectiveIncludeWww = Boolean(wwwCheck?.ok);
   const dnsChecks = [apexCheck, ...(wwwCheck ? [wwwCheck] : [])];
@@ -255,6 +282,9 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
       email: body.email ?? `admin@${domain.name}`,
       webRoot: preflight.webRoot,
       includeWww: preflight.includeWww,
+      dnsChallenge: preflight.dnsChallenge ?? false,
+      parentDomain: preflight.parentDomain,
+      certName: preflight.certName,
       forceSsl: domain.forceSsl
     });
 
@@ -304,7 +334,11 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
     const job = await sslQueue.add("renew", {
       domainId,
       domain: domain.name,
+      webRoot: preflight.webRoot,
       includeWww: preflight.includeWww,
+      dnsChallenge: preflight.dnsChallenge ?? false,
+      parentDomain: preflight.parentDomain,
+      certName: preflight.certName,
       forceSsl: domain.forceSsl
     });
 

@@ -19,7 +19,7 @@ import { prisma } from "../lib/prisma.js";
 import { resolvePublicA } from "../lib/publicDns.js";
 import { deleteSecret, getSecret, putSecret } from "../lib/secrets.js";
 import { sysagent } from "../lib/sysagent.js";
-import { nginxResourceName } from "../lib/nginxNames.js";
+import { certbotCertificateName, nginxResourceName } from "../lib/nginxNames.js";
 import { currentVpsIp } from "../lib/serverIp.js";
 import {
   inferredLaravelManagedProcesses,
@@ -714,7 +714,37 @@ async function waitForPublicA(hostname: string, expectedIp: string, timeoutMs = 
 async function accountSslPreflight(request: any, domain: { id: string; name: string; documentRoot?: string | null }, includeWww: boolean) {
   await ensureAccountDomainDns(request, domain);
   const vpsIp = await currentVpsIp();
-  const records = await waitForPublicA(domain.name, vpsIp);
+  let records: string[];
+  try {
+    records = await waitForPublicA(domain.name, vpsIp);
+  } catch (error) {
+    const certbot = await sysagent.certbotStatus();
+    const certbotFailure = failedCommand(certbot);
+    if (certbotFailure) {
+      throw Object.assign(new Error(`Certbot is not ready for ${domain.name}. ${certbotFailure}`), { statusCode: 400 });
+    }
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    const webRoot = path.join(account.homeRoot, normalizeDocumentRoot(domain.documentRoot));
+    await fs.mkdir(path.join(webRoot, ".well-known", "acme-challenge"), { recursive: true });
+    return {
+      webRoot,
+      includeWww: false,
+      dnsChallenge: true,
+      parentDomain: domain.name,
+      certName: certbotCertificateName(domain.name),
+      dnsChecks: [
+        {
+          host: `_acme-challenge.${domain.name}`,
+          records: [],
+          ok: true,
+          skipped: false,
+          dns01: true,
+          reason: error instanceof Error ? error.message : "HTTP A record is not ready"
+        }
+      ],
+      preflight: { certbot, write: certbot, checks: [] }
+    };
+  }
   const wwwCheck = includeWww ? await optionalPublicA(`www.${domain.name}`) : null;
   const effectiveIncludeWww = Boolean(wwwCheck?.ok);
   const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
@@ -1356,6 +1386,9 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       email: body.email ?? `admin@${domain.name}`,
       webRoot: preflight.webRoot,
       includeWww: preflight.includeWww,
+      dnsChallenge: preflight.dnsChallenge ?? false,
+      parentDomain: preflight.parentDomain,
+      certName: preflight.certName,
       forceSsl: domain.forceSsl,
       source: "account"
     });

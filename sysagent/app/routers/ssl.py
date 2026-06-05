@@ -34,7 +34,7 @@ class CertificateRequest(BaseModel):
 
 
 class DnsCertificateRequest(BaseModel):
-    domain: str = Field(pattern=r"^\*\.[a-zA-Z0-9.-]+$")
+    domain: str = Field(pattern=r"^(\*\.)?[a-zA-Z0-9.-]+$")
     parentDomain: str = Field(pattern=r"^[a-zA-Z0-9.-]+$")
     email: str
     certName: str = Field(pattern=r"^[a-zA-Z0-9_.-]+$")
