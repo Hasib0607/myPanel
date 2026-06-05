@@ -637,7 +637,10 @@ repair_sysagent_runtime() {
   fi
   run "$venv_python" -m pip install --upgrade pip
   run "$venv_python" -m pip install -r "$sysagent_dir/requirements.txt"
-  run "$venv_python" -m py_compile "$sysagent_dir/app/main.py"
+  local compile_target
+  compile_target="$(mktemp)"
+  run "$venv_python" -c 'import py_compile, sys; py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True)' "$sysagent_dir/app/main.py" "$compile_target"
+  rm -f "$compile_target"
 }
 
 sudo_systemctl_output() {
