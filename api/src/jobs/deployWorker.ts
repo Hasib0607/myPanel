@@ -30,6 +30,7 @@ import { env } from "../config/env.js";
 import { prisma } from "../lib/prisma.js";
 import { deleteSecret, getSecret, putSecret } from "../lib/secrets.js";
 import { sysagent } from "../lib/sysagent.js";
+import { currentVpsIp } from "../lib/serverIp.js";
 import {
   inferredLaravelManagedProcesses,
   laravelManagedProgramName,
@@ -276,8 +277,9 @@ function deploymentPortPolicyError(port: number) {
 async function wwwPointsToThisVps(domain: BoundDomain) {
   if (!deploymentCertbotIncludeWww(domain)) return false;
   try {
+    const vpsIp = await currentVpsIp();
     const records = await dns.resolve4(`www.${domain.name}`);
-    return records.includes(env.VPS_IP);
+    return records.includes(vpsIp);
   } catch {
     return false;
   }

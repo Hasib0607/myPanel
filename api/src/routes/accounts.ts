@@ -9,6 +9,7 @@ import { audit } from "../lib/audit.js";
 import { nginxResourceName } from "../lib/nginxNames.js";
 import { prisma } from "../lib/prisma.js";
 import { sysagent } from "../lib/sysagent.js";
+import { currentVpsIp } from "../lib/serverIp.js";
 import { renderZone } from "./dns.js";
 import { defaultRecords, normalizeDomainName } from "./domains.js";
 
@@ -139,6 +140,7 @@ export const accountRoutes: FastifyPluginAsync = async (app) => {
     const password = body.password ?? generatedPassword();
     const passwordHash = await bcrypt.hash(password, 12);
     const nameServers = body.domainName ? await activeNameServers() : [];
+    const vpsIp = body.domainName ? await currentVpsIp() : env.VPS_IP;
     let account;
     let createdDomainId: string | undefined;
     try {
@@ -170,7 +172,7 @@ export const accountRoutes: FastifyPluginAsync = async (app) => {
               documentRoot: accountDocumentRoot(body.username)
             }
           });
-          await tx.dnsRecord.createMany({ data: defaultRecords(domain.id, domain.name, nameServers), skipDuplicates: true });
+          await tx.dnsRecord.createMany({ data: defaultRecords(domain.id, domain.name, nameServers, vpsIp), skipDuplicates: true });
           createdDomainId = domain.id;
         }
         return tx.account.findUniqueOrThrow({

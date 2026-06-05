@@ -20,6 +20,7 @@ import { resolvePublicA } from "../lib/publicDns.js";
 import { deleteSecret, getSecret, putSecret } from "../lib/secrets.js";
 import { sysagent } from "../lib/sysagent.js";
 import { nginxResourceName } from "../lib/nginxNames.js";
+import { currentVpsIp } from "../lib/serverIp.js";
 import {
   inferredLaravelManagedProcesses,
   laravelManagedProcessesSchema,
@@ -610,12 +611,13 @@ function domainLabelInsideParent(domainName: string, parentName: string) {
 }
 
 async function upsertAccountARecord(domainId: string, name: string) {
+  const vpsIp = await currentVpsIp();
   const existing = await prisma.dnsRecord.findFirst({ where: { domainId, type: "A", name } });
   if (existing) {
-    if (existing.value === env.VPS_IP && existing.ttl <= 3600) return existing;
-    return prisma.dnsRecord.update({ where: { id: existing.id }, data: { value: env.VPS_IP, ttl: 300 } });
+    if (existing.value === vpsIp && existing.ttl <= 3600) return existing;
+    return prisma.dnsRecord.update({ where: { id: existing.id }, data: { value: vpsIp, ttl: 300 } });
   }
-  return prisma.dnsRecord.create({ data: { domainId, type: "A", name, value: env.VPS_IP, ttl: 300 } });
+  return prisma.dnsRecord.create({ data: { domainId, type: "A", name, value: vpsIp, ttl: 300 } });
 }
 
 async function ensureAccountDomainDns(request: any, domain: { id: string; name: string }) {
@@ -682,8 +684,9 @@ function groupAccountDomainRows(items: any[]) {
 
 async function optionalPublicA(hostname: string) {
   try {
+    const vpsIp = await currentVpsIp();
     const records = await resolvePublicA(hostname);
-    return { host: hostname, records, ok: records.includes(env.VPS_IP), skipped: !records.includes(env.VPS_IP) };
+    return { host: hostname, records, ok: records.includes(vpsIp), skipped: !records.includes(vpsIp) };
   } catch {
     return { host: hostname, records: [] as string[], ok: false, skipped: true };
   }
@@ -710,7 +713,8 @@ async function waitForPublicA(hostname: string, expectedIp: string, timeoutMs = 
 
 async function accountSslPreflight(request: any, domain: { id: string; name: string; documentRoot?: string | null }, includeWww: boolean) {
   await ensureAccountDomainDns(request, domain);
-  const records = await waitForPublicA(domain.name, env.VPS_IP);
+  const vpsIp = await currentVpsIp();
+  const records = await waitForPublicA(domain.name, vpsIp);
   const wwwCheck = includeWww ? await optionalPublicA(`www.${domain.name}`) : null;
   const effectiveIncludeWww = Boolean(wwwCheck?.ok);
   const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
@@ -1051,6 +1055,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const documentRoot = normalizeDocumentRoot(body.documentRoot || "public_html");
     const redirectUrl = normalizeRedirectUrl(body.redirectUrl);
     await validateAccountHostingSettings(account.id, { ...body, redirectUrl });
+    const vpsIp = await currentVpsIp();
     try {
       const domain = await prisma.$transaction(async (tx) => {
         const created = await tx.domain.create({
@@ -1065,7 +1070,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
             hostingDeploymentId: body.hostingDeploymentId ?? null
           }
         });
-        await tx.dnsRecord.createMany({ data: defaultRecords(created.id, created.name), skipDuplicates: true });
+        await tx.dnsRecord.createMany({ data: defaultRecords(created.id, created.name, [], vpsIp), skipDuplicates: true });
         return tx.domain.findUniqueOrThrow({ where: { id: created.id }, include: domainInclude() });
       });
       await audit(request, { action: "CREATE", resource: "domain", resourceId: domain.id, description: `Account created domain ${domain.name}` });
@@ -1090,6 +1095,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
 
     for (const name of uniqueDomains) {
       try {
+        const vpsIp = await currentVpsIp();
         const existing = await prisma.domain.findUnique({ where: { name } });
         if (existing && body.skipExisting) {
           results.push({ input: name, name, status: "skipped", error: "Domain already exists" });
@@ -1107,7 +1113,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
               documentRoot: "public_html"
             }
           });
-          await tx.dnsRecord.createMany({ data: defaultRecords(created.id, created.name), skipDuplicates: true });
+          await tx.dnsRecord.createMany({ data: defaultRecords(created.id, created.name, [], vpsIp), skipDuplicates: true });
           return tx.domain.findUniqueOrThrow({ where: { id: created.id }, include: domainInclude() });
         });
         currentDomainCount += 1;

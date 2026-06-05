@@ -12,6 +12,7 @@ import { redis } from "../lib/redis.js";
 import { sysagent } from "../lib/sysagent.js";
 import { nginxResourceName } from "../lib/nginxNames.js";
 import { renderZone } from "./dns.js";
+import { currentVpsIp } from "../lib/serverIp.js";
 
 export function normalizeDomainName(value: string) {
   return value
@@ -241,13 +242,13 @@ async function domainNameserverPendingReason(domain: string, nameServers: Active
   }
 }
 
-export function defaultRecords(domainId: string, domain: string, nameServers: ActiveNameServer[] = []) {
+export function defaultRecords(domainId: string, domain: string, nameServers: ActiveNameServer[] = [], vpsIp = env.VPS_IP) {
   const records: Prisma.DnsRecordCreateManyInput[] = [
-    { domainId, type: "A" as const, name: "@", value: env.VPS_IP },
-    { domainId, type: "A" as const, name: "www", value: env.VPS_IP },
+    { domainId, type: "A" as const, name: "@", value: vpsIp },
+    { domainId, type: "A" as const, name: "www", value: vpsIp },
     { domainId, type: "MX" as const, name: "@", value: `mail.${domain}`, priority: 10 },
-    { domainId, type: "A" as const, name: "mail", value: env.VPS_IP },
-    { domainId, type: "TXT" as const, name: "@", value: `v=spf1 ip4:${env.VPS_IP} ~all` },
+    { domainId, type: "A" as const, name: "mail", value: vpsIp },
+    { domainId, type: "TXT" as const, name: "@", value: `v=spf1 ip4:${vpsIp} ~all` },
     { domainId, type: "TXT" as const, name: "_dmarc", value: `v=DMARC1; p=quarantine; rua=mailto:admin@${domain}` }
   ];
 
@@ -257,8 +258,8 @@ export function defaultRecords(domainId: string, domain: string, nameServers: Ac
 
     if (hostname.endsWith(`.${domain}`)) {
       const label = hostname.slice(0, -(domain.length + 1));
-      if (label && nameServer.ipv4) {
-        records.push({ domainId, type: "A" as const, name: label, value: nameServer.ipv4 });
+      if (label) {
+        records.push({ domainId, type: "A" as const, name: label, value: vpsIp });
       }
       if (label && nameServer.ipv6) {
         records.push({ domainId, type: "AAAA" as const, name: label, value: nameServer.ipv6 });
@@ -338,6 +339,7 @@ function parseBulkCreateDomains(body: unknown) {
 }
 
 async function publishDomainHosting(domainId: string) {
+  const vpsIp = await currentVpsIp();
   const domain = await prisma.domain.findUniqueOrThrow({
     where: { id: domainId },
     include: {
@@ -411,7 +413,7 @@ async function publishDomainHosting(domainId: string) {
   const subdomainVhosts: Array<{ fqdn: string; result: unknown } | { fqdn: string; error: string }> = [];
   for (const subdomain of domain.subdomains) {
     const fqdn = `${subdomain.name}.${domain.name}`;
-    const targetIsLocal = subdomain.target === env.VPS_IP || subdomain.target === domain.name || subdomain.target === fqdn;
+    const targetIsLocal = subdomain.target === vpsIp || subdomain.target === env.VPS_IP || subdomain.target === domain.name || subdomain.target === fqdn;
     if (!targetIsLocal) continue;
     const scaffold = await ensureSubdomainFileStructure(domain.name, subdomain.name);
     try {
@@ -437,6 +439,7 @@ async function createDomainWithDefaults(input: CreateDomainInput, nameServers: A
   const redirectUrl = normalizeRedirectUrl(input.redirectUrl);
   await validateHostingSettings({ ...input, redirectUrl });
   const pendingReason = await domainNameserverPendingReason(input.name, nameServers);
+  const vpsIp = await currentVpsIp();
 
   return prisma.$transaction(async (tx) => {
     const created = await tx.domain.create({
@@ -450,7 +453,7 @@ async function createDomainWithDefaults(input: CreateDomainInput, nameServers: A
         hostingDeploymentId: input.hostingDeploymentId ?? null
       }
     });
-    await tx.dnsRecord.createMany({ data: defaultRecords(created.id, created.name, nameServers), skipDuplicates: true });
+    await tx.dnsRecord.createMany({ data: defaultRecords(created.id, created.name, nameServers, vpsIp), skipDuplicates: true });
     return tx.domain.findUniqueOrThrow({ where: { id: created.id }, include: domainInclude() });
   });
 }
@@ -493,6 +496,7 @@ async function createSubdomainForDomain(input: {
   target: string;
   sslEnabled?: boolean;
 }) {
+  const vpsIp = await currentVpsIp();
   const recordType = dnsRecordTypeForTarget(input.target);
   const subdomain = await prisma.subdomain.create({
     data: {
@@ -527,7 +531,7 @@ async function createSubdomainForDomain(input: {
   let nginxResult = null;
   let nginxWarning: string | undefined;
   try {
-    if (input.target === env.VPS_IP || input.target === parentDomain.name || input.target === `${input.name}.${parentDomain.name}`) {
+    if (input.target === vpsIp || input.target === parentDomain.name || input.target === `${input.name}.${parentDomain.name}`) {
       const fqdn = `${input.name}.${parentDomain.name}`;
       nginxResult = await sysagent.writeStaticNginxVhost({
         name: `domain-${nginxResourceName(fqdn)}`,
@@ -571,7 +575,7 @@ async function createSubdomainShortcut(fqdnName: string) {
   const created = await createSubdomainForDomain({
     domainId: managedParent.parent.id,
     name: managedParent.subdomainName,
-    target: env.VPS_IP,
+    target: await currentVpsIp(),
     sslEnabled: false
   });
 

@@ -1,5 +1,6 @@
 import dns from "node:dns/promises";
 import { env } from "../config/env.js";
+import { currentVpsIp } from "./serverIp.js";
 
 type DnsJsonAnswer = {
   type?: number;
@@ -239,19 +240,20 @@ export async function diagnosePublicDnsFailure(
     return null;
   }
 
+  const vpsIp = await currentVpsIp();
   const localChecks = await Promise.all(
     vanityNameServers.map(async (nameServer) => ({
       nameServer,
-      records: await resolveAuthoritativeA(nameServer, env.VPS_IP)
+      records: await resolveAuthoritativeA(nameServer, vpsIp)
     }))
   );
-  const missingGlue = localChecks.filter((check) => !check.records.includes(env.VPS_IP));
+  const missingGlue = localChecks.filter((check) => !check.records.includes(vpsIp));
   const glueHosts = vanityNameServers.join(", ");
 
   if (missingGlue.length === vanityNameServers.length) {
     return [
       `Public DNS cannot resolve ${domain} because child nameserver glue is missing for ${glueHosts}.`,
-      `At your domain registrar, add glue (register nameserver) records: ${vanityNameServers.map((nameServer) => `${nameServer} -> ${env.VPS_IP}`).join("; ")}.`,
+      `At your domain registrar, add glue (register nameserver) records: ${vanityNameServers.map((nameServer) => `${nameServer} -> ${vpsIp}`).join("; ")}.`,
       "Then in this panel open the domain DNS page, click Publish, and use Nameservers -> Sync records so ns1/ns2 A records exist in the zone.",
       `Resolver checks: ${errors.join("; ")}`
     ].join(" ");
@@ -259,7 +261,7 @@ export async function diagnosePublicDnsFailure(
 
   return [
     `Public DNS returns SERVFAIL for ${hostname}. The zone on this VPS looks correct, but registrar glue for ${glueHosts} may still be missing or propagating.`,
-    `Confirm glue records at your registrar point to ${env.VPS_IP}, then retry Issue Certificate in a few minutes.`,
+    `Confirm glue records at your registrar point to ${vpsIp}, then retry Issue Certificate in a few minutes.`,
     `Resolver checks: ${errors.join("; ")}`
   ].join(" ");
 }

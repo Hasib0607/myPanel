@@ -79,10 +79,10 @@ Implemented Phase 1 foundation:
 
 Status: Incomplete
 
-- Point a real panel domain to `129.121.99.82`.
+- Point a real panel domain to the current VPS public IP.
 - Update production `.env`:
   - `FRONTEND_URL=https://panel.yourdomain.com`
-  - `VPS_IP=129.121.99.82`
+  - `VPS_IP=<current-server-public-ip>`
 - Update Nginx `server_name` from IP-only access to the real panel domain.
 - Run Certbot for the panel domain.
 - Restart API, worker, frontend, and sysagent services after env/domain change.

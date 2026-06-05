@@ -1,10 +1,11 @@
 import { prisma } from "./prisma.js";
 import { sysagent } from "./sysagent.js";
-import { env } from "../config/env.js";
 import { defaultVanityNameServerHostnames } from "./publicDns.js";
 import { renderZone } from "../routes/dns.js";
+import { currentVpsIp } from "./serverIp.js";
 
 async function syncActiveNameserverRecords(domainId: string, domainName: string) {
+  const vpsIp = await currentVpsIp();
   const nameServers = await prisma.nameServer.findMany({
     where: { active: true },
     orderBy: [{ sortOrder: "asc" }, { hostname: "asc" }]
@@ -21,6 +22,10 @@ async function syncActiveNameserverRecords(domainId: string, domainName: string)
 
     if (!nameServer.hostname.endsWith(`.${domainName}`)) continue;
     const label = nameServer.hostname.slice(0, -(domainName.length + 1));
+    if (nameServer.ipv4 !== vpsIp) {
+      nameServer.ipv4 = vpsIp;
+      await prisma.nameServer.update({ where: { id: nameServer.id }, data: { ipv4: vpsIp } });
+    }
 
     if (nameServer.ipv4) {
       const existingA = await prisma.dnsRecord.findFirst({ where: { domainId, type: "A", name: label } });
@@ -45,6 +50,7 @@ async function syncActiveNameserverRecords(domainId: string, domainName: string)
 }
 
 async function ensureDefaultVanityNameserverRecords(domainId: string, domainName: string) {
+  const vpsIp = await currentVpsIp();
   for (const hostname of defaultVanityNameServerHostnames(domainName)) {
     const label = hostname.slice(0, -(domainName.length + 1));
     const nsValue = `${hostname}.`;
@@ -57,9 +63,9 @@ async function ensureDefaultVanityNameserverRecords(domainId: string, domainName
 
     const existingA = await prisma.dnsRecord.findFirst({ where: { domainId, type: "A", name: label } });
     if (existingA) {
-      await prisma.dnsRecord.update({ where: { id: existingA.id }, data: { value: env.VPS_IP, ttl: 3600 } });
+      await prisma.dnsRecord.update({ where: { id: existingA.id }, data: { value: vpsIp, ttl: 3600 } });
     } else {
-      await prisma.dnsRecord.create({ data: { domainId, type: "A", name: label, value: env.VPS_IP, ttl: 3600 } });
+      await prisma.dnsRecord.create({ data: { domainId, type: "A", name: label, value: vpsIp, ttl: 3600 } });
     }
   }
 }
@@ -87,18 +93,19 @@ async function removeUnconfiguredDefaultVanityNameserverRecords(domainId: string
 }
 
 async function ensureDefaultApexRecords(domainId: string) {
+  const vpsIp = await currentVpsIp();
   const apex = await prisma.dnsRecord.findFirst({ where: { domainId, type: "A", name: "@" } });
   if (!apex) {
-    await prisma.dnsRecord.create({ data: { domainId, type: "A", name: "@", value: env.VPS_IP, ttl: 3600 } });
-  } else if (apex.value !== env.VPS_IP) {
-    await prisma.dnsRecord.update({ where: { id: apex.id }, data: { value: env.VPS_IP, ttl: 3600 } });
+    await prisma.dnsRecord.create({ data: { domainId, type: "A", name: "@", value: vpsIp, ttl: 3600 } });
+  } else if (apex.value !== vpsIp) {
+    await prisma.dnsRecord.update({ where: { id: apex.id }, data: { value: vpsIp, ttl: 3600 } });
   }
 
   const www = await prisma.dnsRecord.findFirst({ where: { domainId, type: "A", name: "www" } });
   if (!www) {
-    await prisma.dnsRecord.create({ data: { domainId, type: "A", name: "www", value: env.VPS_IP, ttl: 3600 } });
-  } else if (www.value !== env.VPS_IP) {
-    await prisma.dnsRecord.update({ where: { id: www.id }, data: { value: env.VPS_IP, ttl: 3600 } });
+    await prisma.dnsRecord.create({ data: { domainId, type: "A", name: "www", value: vpsIp, ttl: 3600 } });
+  } else if (www.value !== vpsIp) {
+    await prisma.dnsRecord.update({ where: { id: www.id }, data: { value: vpsIp, ttl: 3600 } });
   }
 }
 

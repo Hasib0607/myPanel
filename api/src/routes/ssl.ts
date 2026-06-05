@@ -10,6 +10,7 @@ import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
 import { sysagent, type SysagentCommandResult } from "../lib/sysagent.js";
 import { certbotCertificateName, isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
+import { currentVpsIp } from "../lib/serverIp.js";
 
 const sslActionSchema = z.object({
   email: z.string().email().optional(),
@@ -79,13 +80,14 @@ async function panelVanityNameServers(domainId: string, domainName: string) {
 
 async function assertARecordPointsToVps(hostname: string, domainId: string, domainName: string) {
   const knownVanityNameServers = await panelVanityNameServers(domainId, domainName);
-  return assertPublicARecordPointsTo(hostname, env.VPS_IP, { knownVanityNameServers });
+  return assertPublicARecordPointsTo(hostname, await currentVpsIp(), { knownVanityNameServers });
 }
 
 async function optionalARecordPointsToVps(hostname: string, domainId: string, domainName: string) {
   try {
+    const vpsIp = await currentVpsIp();
     const records = await resolvePublicA(hostname);
-    const ok = records.includes(env.VPS_IP);
+    const ok = records.includes(vpsIp);
     return { host: hostname, records, ok, skipped: !ok };
   } catch {
     return { host: hostname, records: [] as string[], ok: false, skipped: true };

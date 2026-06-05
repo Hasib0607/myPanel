@@ -459,7 +459,7 @@ export function DashboardClient() {
                   <input
                     className="h-10 rounded-md border border-panel-line px-3 text-sm outline-none focus:border-panel-accent"
                     onChange={(event) => setNameServerForm((current) => ({ ...current, ipv4: event.target.value }))}
-                    placeholder="129.121.99.82"
+                    placeholder="203.0.113.10"
                     value={nameServerForm.ipv4}
                   />
                   <input

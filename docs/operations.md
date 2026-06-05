@@ -132,7 +132,7 @@ sudo systemctl restart vps-panel-api
 
 5. Add a GitHub webhook to the panel repository:
 
-- Payload URL: `http://129.121.99.82:8453/api/v1/webhooks/panel-update`
+- Payload URL: `http://<current-server-public-ip>:8453/api/v1/webhooks/panel-update`
 - Content type: `application/json`
 - Secret: the value from `PANEL_UPDATE_WEBHOOK_SECRET`
 - Event: `push`

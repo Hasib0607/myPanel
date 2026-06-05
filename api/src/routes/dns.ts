@@ -5,6 +5,7 @@ import { redis } from "../lib/redis.js";
 import { audit } from "../lib/audit.js";
 import { sysagent } from "../lib/sysagent.js";
 import { env } from "../config/env.js";
+import { currentVpsIp } from "../lib/serverIp.js";
 
 const ipv4Regex = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
 const ipv6Regex = /^(([0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}|::1|::)$/;
@@ -133,9 +134,10 @@ export const dnsRoutes: FastifyPluginAsync = async (app) => {
   app.post("/nameservers/defaults", async (request, reply) => {
     const domain = await prisma.domain.findFirst({ orderBy: { createdAt: "asc" } });
     const baseDomain = domain?.name ?? "example.com";
+    const vpsIp = await currentVpsIp();
     const defaults = [
-      { hostname: `ns1.${baseDomain}`, ipv4: env.VPS_IP, sortOrder: 10 },
-      { hostname: `ns2.${baseDomain}`, ipv4: env.VPS_IP, sortOrder: 20 }
+      { hostname: `ns1.${baseDomain}`, ipv4: vpsIp, sortOrder: 10 },
+      { hostname: `ns2.${baseDomain}`, ipv4: vpsIp, sortOrder: 20 }
     ];
 
     const records = [];

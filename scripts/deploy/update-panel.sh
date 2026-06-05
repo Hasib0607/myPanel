@@ -465,6 +465,52 @@ set_env_value() {
   fi
 }
 
+detect_vps_ip() {
+  local ip=""
+  if command -v curl >/dev/null 2>&1; then
+    ip="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+    if [[ ! "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+      ip="$(curl -fsS --max-time 5 https://ifconfig.me/ip 2>/dev/null || true)"
+    fi
+  fi
+  if [[ ! "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  fi
+  printf '%s' "$ip"
+}
+
+is_public_ipv4() {
+  local ip="$1"
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  [[ "$ip" =~ ^127\. ]] && return 1
+  [[ "$ip" =~ ^10\. ]] && return 1
+  [[ "$ip" =~ ^192\.168\. ]] && return 1
+  [[ "$ip" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]] && return 1
+  return 0
+}
+
+ensure_current_vps_ip_config() {
+  local file="$APP_DIR/.env"
+  local detected current=""
+  if [[ ! -f "$file" ]]; then
+    log "panel env file not found at $file; skipping VPS_IP normalization"
+    return 0
+  fi
+
+  detected="$(detect_vps_ip)"
+  if ! is_public_ipv4 "$detected"; then
+    log "could not detect a public VPS IP; keeping configured VPS_IP"
+    return 0
+  fi
+
+  current="$(grep -E '^VPS_IP=' "$file" | tail -n 1 | cut -d= -f2- || true)"
+  if [[ "$current" != "$detected" ]]; then
+    log "updating stale VPS_IP from ${current:-unset} to $detected"
+    set_env_value "VPS_IP" "$detected"
+    write_status "running" "normalized VPS_IP to current server IP" "$(current_commit)" "$(current_commit_subject)"
+  fi
+}
+
 ensure_live_sysagent_config() {
   local file="$APP_DIR/.env"
   local changed="false"
@@ -774,6 +820,7 @@ NEW_COMMIT_SUBJECT="$(current_commit_subject)"
 write_status "running" "source updated; building panel" "$NEW_COMMIT" "$NEW_COMMIT_SUBJECT"
 ensure_systemctl_permission
 ensure_node_runtime
+ensure_current_vps_ip_config
 ensure_live_sysagent_config
 ensure_large_upload_config
 repair_frontend_service_unit
