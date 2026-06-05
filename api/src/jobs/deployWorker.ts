@@ -2292,6 +2292,38 @@ async function ensureLaravelDatabaseConnection(
       assertCommandTree(result, "Laravel database connection");
       return envVars;
     }
+    if (isPostgresEncodingMismatch(message) && deployment.dbType === "MYSQL") {
+      await writeLog(deployment.id, releaseId, "PREFLIGHT", "Laravel is using stale PostgreSQL env; forcing selected MySQL env", {
+        evidence: message.slice(0, 4000),
+        selectedDatabase: {
+          dbType: deployment.dbType,
+          dbName: deployment.dbName,
+          dbUser: deployment.dbUser
+        }
+      }, "warn");
+      const repaired = await buildDatabaseRuntimeEnv(deployment, envVars, { releaseId });
+      const nextEnv = await ensureLaravelAppKey(deployment.id, releaseId, appPath, port, repaired.envVars);
+      await runStep(deployment.id, releaseId, "PREFLIGHT", "Clear Laravel config cache after MySQL env repair", () =>
+        sysagent.deploymentBuild({
+          rootPath: appPath,
+          command: "php artisan optimize:clear",
+          env: nextEnv
+        })
+      ).catch((cacheError) =>
+        writeLog(deployment.id, releaseId, "PREFLIGHT", "Laravel cache clear after MySQL env repair warning", {
+          warning: cacheError instanceof Error ? cacheError.message : String(cacheError)
+        }, "warn")
+      );
+      result = await runStep(deployment.id, releaseId, "PREFLIGHT", "Verify Laravel database connection after MySQL env repair", () =>
+        sysagent.deploymentBuild({
+          rootPath: appPath,
+          command: laravelDatabaseVerifyCommand(),
+          env: nextEnv
+        })
+      );
+      assertCommandTree(result, "Laravel database connection");
+      return nextEnv;
+    }
     if (!isMysqlAccessDenied(message)) throw error;
     await writeLog(deployment.id, releaseId, "PREFLIGHT", "Laravel database connection failed; repairing credentials", {
       evidence: message.slice(0, 4000)
