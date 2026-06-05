@@ -216,7 +216,14 @@ install_zone_file() {
 
 reload_zone() {
   local domain="$1"
-  rndc reload "$domain" >/dev/null 2>&1 || rndc reload "$domain" IN >/dev/null 2>&1
+  rndc reload "$domain" 2>&1 || rndc reload "$domain" IN 2>&1
+}
+
+restart_bind() {
+  local service="$1"
+  rndc flush 2>/dev/null || true
+  systemctl restart "$service"
+  rndc flush 2>/dev/null || true
 }
 
 local_zone_matches() {
@@ -225,6 +232,17 @@ local_zone_matches() {
   local_a="$(dig_short @127.0.0.1 "$domain" A)"
   local_www="$(dig_short @127.0.0.1 "www.$domain" CNAME)"
   [[ "$local_a" == *"$APEX_IP"* && "$local_www" == *"$WWW_CNAME"* ]]
+}
+
+print_zone_diagnostics() {
+  local domain="$1"
+  local file="$2"
+  echo "DIAG $domain: file=$file" >&2
+  grep -nE '(^|[[:space:]])(@|www)([[:space:]]|$)|216\.150\.1\.1|c2e5a009d99b9e9a' "$file" >&2 || true
+  rndc zonestatus "$domain" >&2 || true
+  dig @127.0.0.1 "$domain" SOA +noall +answer >&2 || true
+  dig @127.0.0.1 "$domain" A +noall +answer >&2 || true
+  dig @127.0.0.1 "www.$domain" CNAME +noall +answer >&2 || true
 }
 
 main() {
@@ -236,6 +254,7 @@ main() {
   local service
   local failed_domains=()
   local reload_domains=()
+  local domain_files=()
   local live_failed_domains=()
 
   if [[ "${#files[@]}" -eq 0 ]]; then
@@ -265,6 +284,7 @@ main() {
       failed_domains+=("$domain")
       continue
     fi
+    domain_files+=("$domain=$file")
     if cmp -s "$file" "$tmp"; then
       echo "OK unchanged $domain"
       rm -f "$tmp"
@@ -284,16 +304,30 @@ main() {
   rndc reconfig || systemctl restart "$service"
   rndc reload || systemctl reload "$service" || systemctl restart "$service"
   for domain in "${reload_domains[@]}"; do
-    reload_zone "$domain" || {
-      echo "WARN $domain: per-zone reload failed" >&2
+    if ! reload_output="$(reload_zone "$domain")"; then
+      echo "WARN $domain: per-zone reload failed: $reload_output" >&2
       live_failed_domains+=("$domain")
       continue
-    }
+    fi
     if ! local_zone_matches "$domain"; then
       echo "WARN $domain: local BIND still does not serve @ A $APEX_IP and www CNAME $WWW_CNAME" >&2
       live_failed_domains+=("$domain")
     fi
   done
+
+  if [[ "${#live_failed_domains[@]}" -gt 0 ]]; then
+    echo "Live verification failed after rndc reload; restarting $service and rechecking..." >&2
+    restart_bind "$service"
+    local retry_failed_domains=()
+    for domain in "${live_failed_domains[@]}"; do
+      if local_zone_matches "$domain"; then
+        echo "RECOVERED $domain after $service restart"
+      else
+        retry_failed_domains+=("$domain")
+      fi
+    done
+    live_failed_domains=("${retry_failed_domains[@]}")
+  fi
   systemctl is-active "$service"
 
   echo "Done. Checked $checked zones, updated $changed, failed $failed, live_failed ${#live_failed_domains[@]}."
@@ -304,6 +338,17 @@ main() {
   if [[ "${#live_failed_domains[@]}" -gt 0 ]]; then
     echo "Live reload failed zones:"
     printf '  %s\n' "${live_failed_domains[@]}"
+    for domain in "${live_failed_domains[@]}"; do
+      local file=""
+      local pair
+      for pair in "${domain_files[@]}"; do
+        if [[ "${pair%%=*}" == "$domain" ]]; then
+          file="${pair#*=}"
+          break
+        fi
+      done
+      [[ -n "$file" ]] && print_zone_diagnostics "$domain" "$file"
+    done
   fi
   if [[ "$failed" -eq 0 && "${#live_failed_domains[@]}" -eq 0 ]]; then
     save_target_state
