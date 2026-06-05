@@ -185,6 +185,8 @@ const bulkZoneActionSchema = z.object({
   match: bulkZoneMatchSchema.optional(),
   patch: dnsRecordSchema.partial().optional()
 });
+type AccountDnsRecordInput = z.infer<typeof dnsRecordSchema>;
+type DnsRecordIdentity = { domainId: string; id?: string; type: AccountDnsRecordInput["type"]; name: string };
 const subdomainSchema = z.object({
   name: z.string().trim().toLowerCase().regex(/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/),
   target: z.string().trim().min(1),
@@ -300,6 +302,18 @@ async function applyAccountDnsZone(domainId: string, ownerAccountId: string) {
   const zone = renderZone(domain.name, domain.dnsRecords);
   const result = await sysagent.applyDnsZone({ domain: domain.name, zone });
   return { domain, zone, result };
+}
+
+async function removeAccountCnameConflicts(record: DnsRecordIdentity) {
+  const baseWhere = {
+    domainId: record.domainId,
+    name: record.name,
+    ...(record.id ? { id: { not: record.id } } : {})
+  };
+  const where: Prisma.DnsRecordWhereInput = record.type === "CNAME"
+    ? baseWhere
+    : { ...baseWhere, type: "CNAME" };
+  return prisma.dnsRecord.deleteMany({ where });
 }
 
 function deploymentWebhookSecretRef(deploymentSlug: string) {
@@ -1408,7 +1422,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       if (!body.record) throw app.httpErrors.badRequest("Record data is required for bulk add.");
       const created = [];
       for (const domain of domains) {
-        created.push(await prisma.dnsRecord.create({
+        const record = await prisma.dnsRecord.create({
           data: {
             domainId: domain.id,
             type: body.record.type,
@@ -1417,7 +1431,9 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
             ttl: body.record.ttl,
             priority: body.record.priority ?? null
           }
-        }));
+        });
+        created.push(record);
+        await removeAccountCnameConflicts(record);
       }
       const appliedZones = await Promise.all(domains.map((domain) => applyAccountDnsZone(domain.id, ownerAccountId)));
       await audit(request, { action: "CREATE", resource: "dns_record", description: `Account bulk added ${body.record.type} record to ${created.length} zone(s)`, metadata: { domains: domains.map((domain) => domain.name), record: body.record, applied: appliedZones.length } as any });
@@ -1452,6 +1468,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
           priority: merged.priority ?? null
         }
       });
+      await removeAccountCnameConflicts({ domainId: existing.domainId, id: existing.id, type: merged.type, name: merged.name });
       updated += 1;
     }
     const appliedZones = await Promise.all(domains.map((domain) => applyAccountDnsZone(domain.id, ownerAccountId)));
@@ -1493,6 +1510,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
         priority: body.priority ?? null
       }
     });
+    await removeAccountCnameConflicts(record);
     const applied = await applyAccountDnsZone(domain.id, ownerAccountId);
     await audit(request, { action: "CREATE", resource: "dns_record", resourceId: record.id, description: `Account created ${record.type} record for ${domain.name}`, metadata: { applied: applied.result } as any });
     return reply.code(201).send(record);
@@ -1514,6 +1532,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
         priority: body.priority ?? null
       }
     });
+    await removeAccountCnameConflicts(record);
     const applied = await applyAccountDnsZone(domain.id, ownerAccountId);
     await audit(request, { action: "UPDATE", resource: "dns_record", resourceId: record.id, description: `Account updated ${record.type} record for ${domain.name}`, metadata: { applied: applied.result } as any });
     return record;

@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
 import { audit } from "../lib/audit.js";
@@ -58,6 +59,7 @@ const nameServerSchema = nameServerBaseSchema.superRefine((record, ctx) => {
 const nameServerPatchSchema = nameServerBaseSchema.partial();
 
 type DnsRecordInput = z.infer<typeof dnsRecordBaseSchema>;
+type DnsRecordIdentity = { domainId: string; id?: string; type: DnsRecordInput["type"]; name: string };
 
 function normalizeHostname(value: string) {
   return value.trim().toLowerCase().replace(/\.$/, "");
@@ -102,7 +104,9 @@ function fqdn(value: string, domain: string) {
 
 export function renderZone(domain: string, records: Array<{ type: string; name: string; value: string; ttl: number; priority: number | null }>) {
   const serial = new Date().toISOString().slice(0, 10).replace(/-/g, "") + "01";
-  const nsRecords = records.filter((record) => record.type === "NS" && record.name === "@");
+  const cnameNames = new Set(records.filter((record) => record.type === "CNAME").map((record) => record.name));
+  const zoneRecords = records.filter((record) => record.type === "CNAME" || !cnameNames.has(record.name));
+  const nsRecords = zoneRecords.filter((record) => record.type === "NS" && record.name === "@");
   const primaryNameServer = nsRecords[0]?.value ? fqdn(nsRecords[0].value, domain) : `ns1.${domain}.`;
   const lines = [
     `$ORIGIN ${domain}.`,
@@ -119,7 +123,7 @@ export function renderZone(domain: string, records: Array<{ type: string; name: 
     lines.push(`@ IN NS ${primaryNameServer}`);
   }
 
-  for (const record of records) {
+  for (const record of zoneRecords) {
     const name = record.name === "@" ? "@" : record.name;
     const ttl = record.ttl || 3600;
     if (record.type === "MX" || record.type === "SRV") {
@@ -144,6 +148,18 @@ async function applyDnsZoneForDomain(domainId: string) {
   const zone = renderZone(domain.name, domain.dnsRecords);
   const result = await sysagent.applyDnsZone({ domain: domain.name, zone });
   return { domain, zone, result };
+}
+
+async function removeCnameConflicts(record: DnsRecordIdentity) {
+  const baseWhere = {
+    domainId: record.domainId,
+    name: record.name,
+    ...(record.id ? { id: { not: record.id } } : {})
+  };
+  const where: Prisma.DnsRecordWhereInput = record.type === "CNAME"
+    ? baseWhere
+    : { ...baseWhere, type: "CNAME" };
+  return prisma.dnsRecord.deleteMany({ where });
 }
 
 export const dnsRoutes: FastifyPluginAsync = async (app) => {
@@ -310,7 +326,9 @@ export const dnsRoutes: FastifyPluginAsync = async (app) => {
       const created = [];
       for (const domain of domains) {
         const input = dnsRecordSchema.parse({ ...body.record, domainId: domain.id });
-        created.push(await prisma.dnsRecord.create({ data: input }));
+        const record = await prisma.dnsRecord.create({ data: input });
+        created.push(record);
+        await removeCnameConflicts(record);
         await redis.del(`dns_records:${domain.id}`);
       }
       const appliedZones = await Promise.all(domains.map((domain) => applyDnsZoneForDomain(domain.id)));
@@ -347,6 +365,7 @@ export const dnsRoutes: FastifyPluginAsync = async (app) => {
           priority: merged.priority
         }
       });
+      await removeCnameConflicts({ domainId: existing.domainId, id: existing.id, type: merged.type, name: merged.name });
       await redis.del(`dns_records:${existing.domainId}`);
       updated += 1;
     }
@@ -358,6 +377,7 @@ export const dnsRoutes: FastifyPluginAsync = async (app) => {
   app.post("/records", async (request, reply) => {
     const body = dnsRecordSchema.parse(request.body);
     const record = await prisma.dnsRecord.create({ data: body });
+    await removeCnameConflicts(record);
     await redis.del(`dns_records:${body.domainId}`);
     const applied = await applyDnsZoneForDomain(body.domainId);
     await audit(request, { action: "CREATE", resource: "dns_record", resourceId: record.id, description: `Created ${record.type} record ${record.name}`, metadata: { applied: applied.result as any } });
@@ -379,6 +399,7 @@ export const dnsRoutes: FastifyPluginAsync = async (app) => {
         priority: merged.priority
       }
     });
+    await removeCnameConflicts(record);
     await redis.del(`dns_records:${record.domainId}`);
     const applied = await applyDnsZoneForDomain(record.domainId);
     await audit(request, { action: "UPDATE", resource: "dns_record", resourceId: record.id, description: `Updated ${record.type} record ${record.name}`, metadata: { applied: applied.result as any } });
