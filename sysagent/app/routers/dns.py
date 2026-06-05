@@ -39,15 +39,22 @@ def safe_zone_path(zone_dir: str, domain: str) -> Path:
     return target
 
 
+def zone_declaration_file_path(zone_path: Path) -> str:
+    if is_rhel() and str(zone_path).startswith("/var/named/"):
+        return zone_path.name
+    return str(zone_path)
+
+
 def ensure_zone_declared(named_conf_local: str, domain: str, zone_path: Path) -> dict:
     conf_path = Path(named_conf_local).resolve()
     if conf_path.name not in {"named.conf.local", "named.vps-panel.zones"}:
         raise HTTPException(status_code=400, detail="Unsupported named.conf.local path")
 
+    bind_file = zone_declaration_file_path(zone_path)
     block = (
         f'\nzone "{domain}" {{\n'
         "    type master;\n"
-        f'    file "{zone_path}";\n'
+        f'    file "{bind_file}";\n'
         "    allow-transfer { none; };\n"
         "};\n"
     )

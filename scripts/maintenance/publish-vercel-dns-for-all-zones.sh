@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bind-zone-common.sh
+source "$SCRIPT_DIR/bind-zone-common.sh"
+
 STATE_FILE="${VERCEL_DNS_STATE_FILE:-/var/lib/vps-panel/vercel-dns-target.env}"
 DEFAULT_APEX_IP="${DEFAULT_APEX_IP:-216.150.1.1}"
 DEFAULT_WWW_CNAME="${DEFAULT_WWW_CNAME:-c2e5a009d99b9e9a.vercel-dns-017.com.}"
@@ -9,6 +13,7 @@ WWW_CNAME="${2:-${WWW_CNAME:-$DEFAULT_WWW_CNAME}}"
 EXCLUDED_DOMAINS="${EXCLUDED_DOMAINS:-ebitans.com admin.ebitans.com}"
 TTL="${TTL:-60}"
 STAMP="$(date +%Y%m%d%H%M%S)"
+REBUILD_STAMP="$STAMP"
 
 usage() {
   cat >&2 <<EOF
@@ -42,30 +47,6 @@ fi
 
 WWW_CNAME="${WWW_CNAME%.}."
 
-bind_service() {
-  if systemctl list-unit-files named.service >/dev/null 2>&1; then
-    printf 'named'
-  else
-    printf 'bind9'
-  fi
-}
-
-named_main_conf() {
-  if [[ -f /etc/named.conf || -d /var/named ]]; then
-    printf '/etc/named.conf'
-  else
-    printf '/etc/bind/named.conf'
-  fi
-}
-
-zones_include_file() {
-  if [[ -f /etc/named.conf || -d /var/named ]]; then
-    printf '/etc/named.vps-panel.zones'
-  else
-    printf '/etc/bind/named.conf.local'
-  fi
-}
-
 save_target_state() {
   install -d -m 0755 "$(dirname "$STATE_FILE")"
   cat > "$STATE_FILE" <<EOF
@@ -74,81 +55,6 @@ WWW_CNAME=$WWW_CNAME
 TTL=$TTL
 UPDATED_AT=$(date -Iseconds)
 EOF
-}
-
-zone_domain() {
-  basename "$1" | sed 's/^db\.//'
-}
-
-dig_short() {
-  local resolver="$1"
-  local name="$2"
-  local type="$3"
-  dig "$resolver" +time=3 +tries=1 +short "$type" "$name" 2>/dev/null | sed 's/[[:space:]]*$//'
-}
-
-is_live_zone_file() {
-  local file="$1"
-  case "$file" in
-    *.bak|*.rollback|*.check|*.vps-panel.check|*.vps-panel.rollback|*.vps-panel-nsfix.bak|*.vercel-*.bak)
-      return 1
-      ;;
-  esac
-  return 0
-}
-
-is_public_domain_zone() {
-  local domain="$1"
-  [[ "$domain" == *.* ]] || return 1
-  [[ "$domain" != *".in-addr.arpa" ]] || return 1
-  [[ "$domain" != "localhost" ]] || return 1
-}
-
-is_excluded_domain() {
-  local domain="${1%.}"
-  local excluded
-  for excluded in $EXCLUDED_DOMAINS; do
-    [[ "$domain" == "${excluded%.}" ]] && return 0
-  done
-  return 1
-}
-
-ensure_named_include() {
-  local main_conf="$1"
-  local include_file="$2"
-  local include_line="include \"$include_file\";"
-  [[ -f "$main_conf" ]] || return 0
-  if ! grep -Fq "$include_line" "$main_conf"; then
-    cp -a "$main_conf" "$main_conf.vercel-$STAMP.bak"
-    printf '\n%s\n' "$include_line" >> "$main_conf"
-    echo "ADDED include $include_file to $main_conf"
-  fi
-}
-
-ensure_zone_declared() {
-  local include_file="$1"
-  local domain="$2"
-  local file="$3"
-  install -d -m 0755 "$(dirname "$include_file")"
-  touch "$include_file"
-  if ! grep -Eq "zone[[:space:]]+\"${domain//./\\.}\"" "$include_file"; then
-    cat >> "$include_file" <<EOF
-
-zone "$domain" {
-    type master;
-    file "$file";
-    allow-transfer { none; };
-};
-EOF
-    echo "DECLARED $domain in $include_file"
-  elif ! awk -v domain="$domain" -v file="$file" '
-    $0 ~ "zone[[:space:]]+\"" domain "\"" { in_zone = 1 }
-    in_zone && $0 ~ "file[[:space:]]+\"" file "\"" { found = 1 }
-    in_zone && /^};/ { in_zone = 0 }
-    END { exit found ? 0 : 1 }
-  ' "$include_file"; then
-    echo "WARN $domain: already declared in $include_file but not with file $file" >&2
-  fi
 }
 
 rewrite_zone() {
@@ -273,32 +179,6 @@ reload_zone() {
   rndc reload "$domain" 2>&1 || rndc reload "$domain" IN 2>&1
 }
 
-restart_bind() {
-  local service="$1"
-  rndc flush 2>/dev/null || true
-  systemctl restart "$service"
-  rndc flush 2>/dev/null || true
-}
-
-local_zone_matches() {
-  local domain="$1"
-  local local_a local_www
-  local_a="$(dig_short @127.0.0.1 "$domain" A)"
-  local_www="$(dig_short @127.0.0.1 "www.$domain" CNAME)"
-  [[ "$local_a" == *"$APEX_IP"* && "$local_www" == *"$WWW_CNAME"* ]]
-}
-
-print_zone_diagnostics() {
-  local domain="$1"
-  local file="$2"
-  echo "DIAG $domain: file=$file" >&2
-  grep -nE '(^|[[:space:]])(@|www)([[:space:]]|$)|216\.150\.1\.1|c2e5a009d99b9e9a' "$file" >&2 || true
-  rndc zonestatus "$domain" >&2 || true
-  dig @127.0.0.1 "$domain" SOA +noall +answer >&2 || true
-  dig @127.0.0.1 "$domain" A +noall +answer >&2 || true
-  dig @127.0.0.1 "www.$domain" CNAME +noall +answer >&2 || true
-}
-
 main() {
   shopt -s nullglob
   local files=(/var/named/db.* /etc/bind/zones/db.*)
@@ -312,28 +192,37 @@ main() {
   local reload_domains=()
   local domain_files=()
   local live_failed_domains=()
+  local all_live_files=()
 
   if [[ "${#files[@]}" -eq 0 ]]; then
     echo "No BIND zone files found under /var/named or /etc/bind/zones." >&2
     exit 2
   fi
 
+  while IFS= read -r file; do
+    [[ -n "$file" ]] && all_live_files+=("$file")
+  done < <(collect_live_zone_files)
+
+  if [[ "${#all_live_files[@]}" -eq 0 ]]; then
+    echo "No public domain zone files found." >&2
+    exit 2
+  fi
+
   main_conf="$(named_main_conf)"
   include_file="$(zones_include_file)"
-  ensure_named_include "$main_conf" "$include_file"
+  ensure_named_include "$main_conf" "$include_file" "$STAMP"
+  ensure_named_listen_any "$main_conf" "$STAMP"
+  rebuild_vps_panel_zones "$include_file" "${all_live_files[@]}"
 
-  for file in "${files[@]}"; do
+  for file in "${all_live_files[@]}"; do
     local domain tmp
-    is_live_zone_file "$file" || continue
     domain="$(zone_domain "$file")"
-    if ! is_public_domain_zone "$domain"; then
-      continue
-    fi
     if is_excluded_domain "$domain"; then
-      echo "SKIP excluded $domain"
+      echo "SKIP record rewrite for excluded $domain (zone still declared in BIND)"
+      reload_domains+=("$domain")
+      domain_files+=("$domain=$file")
       continue
     fi
-    ensure_zone_declared "$include_file" "$domain" "$file"
     tmp="$(mktemp)"
     rewrite_zone "$file" "$domain" "$tmp"
     checked=$((checked + 1))
@@ -360,17 +249,22 @@ main() {
     reload_domains+=("$domain")
   done
 
-  named-checkconf -z
+  if ! named-checkconf -z >/tmp/vps-panel-named-check.log 2>&1; then
+    echo "named-checkconf -z failed:" >&2
+    cat /tmp/vps-panel-named-check.log >&2
+    exit 3
+  fi
+
   service="$(bind_service)"
-  rndc reconfig || systemctl restart "$service"
-  rndc reload || systemctl reload "$service" || systemctl restart "$service"
+  reload_bind_service "$service"
   for domain in "${reload_domains[@]}"; do
+    is_excluded_domain "$domain" && continue
     if ! reload_output="$(reload_zone "$domain")"; then
       echo "WARN $domain: per-zone reload failed: $reload_output" >&2
       live_failed_domains+=("$domain")
       continue
     fi
-    if ! local_zone_matches "$domain"; then
+    if ! local_zone_matches_target "$domain" "$APEX_IP" "$WWW_CNAME"; then
       echo "WARN $domain: local BIND still does not serve @ A $APEX_IP and www CNAME $WWW_CNAME" >&2
       live_failed_domains+=("$domain")
     fi
@@ -378,10 +272,10 @@ main() {
 
   if [[ "${#live_failed_domains[@]}" -gt 0 ]]; then
     echo "Live verification failed after rndc reload; restarting $service and rechecking..." >&2
-    restart_bind "$service"
+    restart_bind_service "$service"
     local retry_failed_domains=()
     for domain in "${live_failed_domains[@]}"; do
-      if local_zone_matches "$domain"; then
+      if local_zone_matches_target "$domain" "$APEX_IP" "$WWW_CNAME"; then
         echo "RECOVERED $domain after $service restart"
       else
         retry_failed_domains+=("$domain")
@@ -415,6 +309,7 @@ main() {
     save_target_state
     echo "Saved Vercel DNS target state to $STATE_FILE"
   fi
+  echo "Expected target: @ A $APEX_IP, www CNAME $WWW_CNAME"
   echo "Authoritative DNS is reloaded now. External caches may still honor old TTL until they expire."
   [[ "$failed" -eq 0 && "${#live_failed_domains[@]}" -eq 0 ]]
 }

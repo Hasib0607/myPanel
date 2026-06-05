@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bind-zone-common.sh
+source "$SCRIPT_DIR/bind-zone-common.sh"
+
 STATE_FILE="${VERCEL_DNS_STATE_FILE:-/var/lib/vps-panel/vercel-dns-target.env}"
 DEFAULT_APEX_IP="${DEFAULT_APEX_IP:-216.150.1.1}"
 DEFAULT_WWW_CNAME="${DEFAULT_WWW_CNAME:-c2e5a009d99b9e9a.vercel-dns-017.com.}"
@@ -41,52 +45,20 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 
-zone_domain() {
-  basename "$1" | sed 's/^db\.//'
-}
-
-is_live_zone_file() {
-  local file="$1"
-  case "$file" in
-    *.bak|*.rollback|*.check|*.vps-panel.check|*.vps-panel.rollback|*.vps-panel-nsfix.bak|*.vercel-*.bak)
-      return 1
-      ;;
-  esac
-  return 0
-}
-
-is_public_domain_zone() {
-  local domain="$1"
-  [[ "$domain" == *.* ]] || return 1
-  [[ "$domain" != *".in-addr.arpa" ]] || return 1
-  [[ "$domain" != "localhost" ]] || return 1
-}
-
-is_excluded_domain() {
-  local domain="${1%.}"
-  local excluded
-  for excluded in $EXCLUDED_DOMAINS; do
-    [[ "$domain" == "${excluded%.}" ]] && return 0
-  done
-  return 1
-}
-
-dig_short() {
-  local resolver="$1"
-  local name="$2"
-  local type="$3"
-  dig "$resolver" +time=3 +tries=1 +short "$type" "$name" 2>/dev/null | sed 's/[[:space:]]*$//'
+join_csv() {
+  paste -sd ',' - | sed 's/,/, /g'
 }
 
 infer_local_target() {
-  local file domain inferred_a inferred_www
+  local file domain inferred_a inferred_www resolver
   for file in "$@"; do
     is_live_zone_file "$file" || continue
     domain="$(zone_domain "$file")"
     is_public_domain_zone "$domain" || continue
     is_excluded_domain "$domain" && continue
-    inferred_a="$(dig_short @127.0.0.1 "$domain" A | head -n 1)"
-    inferred_www="$(dig_short @127.0.0.1 "www.$domain" CNAME | head -n 1)"
+    resolver="$(local_dns_resolver "$domain")"
+    inferred_a="$(dig_short @"$resolver" "$domain" A | head -n 1)"
+    inferred_www="$(dig_short @"$resolver" "www.$domain" CNAME | head -n 1)"
     if [[ -n "$inferred_a" && -n "$inferred_www" ]]; then
       printf '%s\t%s\n' "$inferred_a" "$inferred_www"
       return 0
@@ -95,15 +67,12 @@ infer_local_target() {
   return 1
 }
 
-join_csv() {
-  paste -sd ',' - | sed 's/,/, /g'
-}
-
 check_domain() {
   local domain="$1"
-  local local_a local_www cf_a cf_www google_a google_www ns_records status
-  local_a="$(dig_short @127.0.0.1 "$domain" A | join_csv)"
-  local_www="$(dig_short @127.0.0.1 "www.$domain" CNAME | join_csv)"
+  local local_a local_www cf_a cf_www google_a google_www ns_records status resolver
+  resolver="$(local_dns_resolver "$domain")"
+  local_a="$(dig_short @"$resolver" "$domain" A | join_csv)"
+  local_www="$(dig_short @"$resolver" "www.$domain" CNAME | join_csv)"
   cf_a="$(dig_short @1.1.1.1 "$domain" A | join_csv)"
   cf_www="$(dig_short @1.1.1.1 "www.$domain" CNAME | join_csv)"
   google_a="$(dig_short @8.8.8.8 "$domain" A | join_csv)"
@@ -112,13 +81,17 @@ check_domain() {
 
   status="OK"
   if [[ "$local_a" != *"$APEX_IP"* || "$local_www" != *"$WWW_CNAME"* ]]; then
-    status="LOCAL_ZONE_NOT_UPDATED"
+    if ! zone_loaded_in_bind "$domain"; then
+      status="LOCAL_ZONE_NOT_LOADED"
+    else
+      status="LOCAL_ZONE_NOT_UPDATED"
+    fi
   elif [[ "$cf_a" != *"$APEX_IP"* || "$cf_www" != *"$WWW_CNAME"* || "$google_a" != *"$APEX_IP"* || "$google_www" != *"$WWW_CNAME"* ]]; then
     status="PUBLIC_DNS_NOT_UPDATED"
   fi
 
-  printf '%s\t%s\tlocal A=[%s] www=[%s]\tcloudflare A=[%s] www=[%s]\tgoogle A=[%s] www=[%s]\tNS=[%s]\n' \
-    "$status" "$domain" "${local_a:-none}" "${local_www:-none}" "${cf_a:-none}" "${cf_www:-none}" "${google_a:-none}" "${google_www:-none}" "${ns_records:-none}"
+  printf '%s\t%s\tlocal(@%s) A=[%s] www=[%s]\tcloudflare A=[%s] www=[%s]\tgoogle A=[%s] www=[%s]\tNS=[%s]\n' \
+    "$status" "$domain" "$resolver" "${local_a:-none}" "${local_www:-none}" "${cf_a:-none}" "${cf_www:-none}" "${google_a:-none}" "${google_www:-none}" "${ns_records:-none}"
 }
 
 main() {
@@ -133,6 +106,7 @@ main() {
   local checked=0
   local ok=0
   local local_failed=0
+  local local_not_loaded=0
   local public_failed=0
 
   if [[ "${#files[@]}" -eq 0 ]]; then
@@ -167,14 +141,18 @@ main() {
     checked=$((checked + 1))
     case "$status" in
       OK) ok=$((ok + 1)) ;;
+      LOCAL_ZONE_NOT_LOADED) local_not_loaded=$((local_not_loaded + 1)); local_failed=$((local_failed + 1)) ;;
       LOCAL_ZONE_NOT_UPDATED) local_failed=$((local_failed + 1)) ;;
       PUBLIC_DNS_NOT_UPDATED) public_failed=$((public_failed + 1)) ;;
     esac
   done
 
-  echo "Summary: checked=$checked ok=$ok local_failed=$local_failed public_failed=$public_failed"
+  echo "Summary: checked=$checked ok=$ok local_failed=$local_failed local_not_loaded=$local_not_loaded public_failed=$public_failed"
+  if [[ "$local_not_loaded" -gt 0 ]]; then
+    echo "Zones exist on disk but BIND did not load them. Run: scripts/maintenance/publish-vercel-dns-for-all-zones.sh"
+  fi
   if [[ "$public_failed" -gt 0 ]]; then
-    echo "If local is correct but public is not, Vercel cannot see this VPS because registrar nameservers/delegation are not using this BIND server, or DNS propagation/cache has not expired."
+    echo "If local is correct but public is not, registrar nameservers may not point to this BIND server, or DNS propagation/cache has not expired."
   fi
   [[ "$local_failed" -eq 0 && "$public_failed" -eq 0 ]]
 }
