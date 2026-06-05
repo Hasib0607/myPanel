@@ -70,22 +70,22 @@ rewrite_zone() {
     function lower(value) {
       return tolower(value)
     }
-    function bump_serial(line, serial, prefix, suffix, next) {
+    function bump_serial(line, serial, prefix, suffix, next_serial) {
       if (line ~ /;[[:space:]]*serial/) {
         serial = line
         sub(/^[^0-9]*/, "", serial)
         sub(/[^0-9].*$/, "", serial)
         if (serial ~ /^[0-9]+$/) {
           if (substr(serial, 1, 8) == today) {
-            next = serial + 1
+            next_serial = serial + 1
           } else {
-            next = today "01"
+            next_serial = today "01"
           }
           prefix = line
           sub(/[0-9]+[[:space:]]*;[[:space:]]*serial.*/, "", prefix)
           suffix = line
           sub(/^.*[0-9]+[[:space:]]*/, "", suffix)
-          return prefix next " " suffix
+          return prefix next_serial " " suffix
         }
       }
       return line
