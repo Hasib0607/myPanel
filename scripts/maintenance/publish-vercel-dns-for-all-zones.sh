@@ -6,6 +6,7 @@ DEFAULT_APEX_IP="${DEFAULT_APEX_IP:-216.150.1.1}"
 DEFAULT_WWW_CNAME="${DEFAULT_WWW_CNAME:-c2e5a009d99b9e9a.vercel-dns-017.com.}"
 APEX_IP="${1:-${APEX_IP:-$DEFAULT_APEX_IP}}"
 WWW_CNAME="${2:-${WWW_CNAME:-$DEFAULT_WWW_CNAME}}"
+EXCLUDED_DOMAINS="${EXCLUDED_DOMAINS:-ebitans.com admin.ebitans.com}"
 TTL="${TTL:-60}"
 STAMP="$(date +%Y%m%d%H%M%S)"
 
@@ -18,6 +19,7 @@ Updates every local BIND zone file so:
   www ${TTL} IN CNAME ${WWW_CNAME}
 
 Set TTL=300 $0 to use a different TTL.
+Excluded domains: $EXCLUDED_DOMAINS
 The chosen target is saved to $STATE_FILE so verify-vercel-dns-public.sh can
 reuse the same values without repeating arguments.
 EOF
@@ -77,7 +79,15 @@ is_public_domain_zone() {
   [[ "$domain" == *.* ]] || return 1
   [[ "$domain" != *".in-addr.arpa" ]] || return 1
   [[ "$domain" != "localhost" ]] || return 1
-  [[ "$domain" != admin.* ]] || return 1
+}
+
+is_excluded_domain() {
+  local domain="${1%.}"
+  local excluded
+  for excluded in $EXCLUDED_DOMAINS; do
+    [[ "$domain" == "${excluded%.}" ]] && return 0
+  done
+  return 1
 }
 
 rewrite_zone() {
@@ -204,6 +214,10 @@ main() {
     is_live_zone_file "$file" || continue
     domain="$(zone_domain "$file")"
     if ! is_public_domain_zone "$domain"; then
+      continue
+    fi
+    if is_excluded_domain "$domain"; then
+      echo "SKIP excluded $domain"
       continue
     fi
     tmp="$(mktemp)"

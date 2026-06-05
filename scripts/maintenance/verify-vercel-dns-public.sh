@@ -4,6 +4,7 @@ set -Eeuo pipefail
 STATE_FILE="${VERCEL_DNS_STATE_FILE:-/var/lib/vps-panel/vercel-dns-target.env}"
 DEFAULT_APEX_IP="${DEFAULT_APEX_IP:-216.150.1.1}"
 DEFAULT_WWW_CNAME="${DEFAULT_WWW_CNAME:-c2e5a009d99b9e9a.vercel-dns-017.com.}"
+EXCLUDED_DOMAINS="${EXCLUDED_DOMAINS:-ebitans.com admin.ebitans.com}"
 LIMIT="${LIMIT:-0}"
 
 state_value() {
@@ -29,6 +30,7 @@ Checks local BIND and public DNS for every local zone:
   www CNAME ${usage_www}
 
 Set LIMIT=10 $0 to check only the first 10 zones.
+Excluded domains: $EXCLUDED_DOMAINS
 If arguments are omitted, expected values come from environment variables,
 then $STATE_FILE, then script defaults.
 EOF
@@ -58,7 +60,15 @@ is_public_domain_zone() {
   [[ "$domain" == *.* ]] || return 1
   [[ "$domain" != *".in-addr.arpa" ]] || return 1
   [[ "$domain" != "localhost" ]] || return 1
-  [[ "$domain" != admin.* ]] || return 1
+}
+
+is_excluded_domain() {
+  local domain="${1%.}"
+  local excluded
+  for excluded in $EXCLUDED_DOMAINS; do
+    [[ "$domain" == "${excluded%.}" ]] && return 0
+  done
+  return 1
 }
 
 dig_short() {
@@ -74,6 +84,7 @@ infer_local_target() {
     is_live_zone_file "$file" || continue
     domain="$(zone_domain "$file")"
     is_public_domain_zone "$domain" || continue
+    is_excluded_domain "$domain" && continue
     inferred_a="$(dig_short @127.0.0.1 "$domain" A | head -n 1)"
     inferred_www="$(dig_short @127.0.0.1 "www.$domain" CNAME | head -n 1)"
     if [[ -n "$inferred_a" && -n "$inferred_www" ]]; then
@@ -146,6 +157,7 @@ main() {
     is_live_zone_file "$file" || continue
     domain="$(zone_domain "$file")"
     is_public_domain_zone "$domain" || continue
+    is_excluded_domain "$domain" && continue
     if [[ "$LIMIT" =~ ^[0-9]+$ && "$LIMIT" -gt 0 && "$checked" -ge "$LIMIT" ]]; then
       break
     fi
