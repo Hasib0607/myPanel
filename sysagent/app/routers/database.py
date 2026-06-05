@@ -1,6 +1,7 @@
 from __future__ import annotations
 import re
 import secrets
+import shlex
 import shutil
 import string
 import tempfile
@@ -159,13 +160,26 @@ def write_temp_content(content: str, suffix: str) -> str:
         return handle.name
 
 
+MYSQL_IMPORT_TIMEOUT_SECONDS = 21_600
+
+
 def import_sql_path(engine: str, database: str, path: str) -> dict:
     if engine == "POSTGRESQL":
         return run_command(["sudo", "-u", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-d", database, "-f", path], timeout=3600)
     ensure = ensure_mysql_runtime()
     if ensure is not None:
         return ensure
-    return run_command(["mysql", database, "-e", f"source {path}"], timeout=3600)
+    mysql_exec("SET GLOBAL max_allowed_packet=1073741824;")
+    init_sql = "SET SESSION foreign_key_checks=0; SET SESSION unique_checks=0; SET SESSION sql_log_bin=0;"
+    command = (
+        "mysql "
+        "--binary-mode=1 "
+        "--default-character-set=utf8mb4 "
+        "--max_allowed_packet=1G "
+        f"--init-command={shlex.quote(init_sql)} "
+        f"{shlex.quote(database)} < {shlex.quote(path)}"
+    )
+    return run_command(["sh", "-lc", command], timeout=MYSQL_IMPORT_TIMEOUT_SECONDS)
 
 
 def postgres_overview() -> dict:
@@ -467,7 +481,7 @@ def import_table(body: DatabaseTableImportRequest) -> dict:
         elif body.engine == "POSTGRESQL":
             result = run_command(["sudo", "-u", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-d", body.database, "-f", path], timeout=300)
         else:
-            result = run_command(["mysql", body.database, "-e", f"source {path}"], timeout=300)
+            result = import_sql_path(body.engine, body.database, path)
         return {"engine": body.engine, "database": body.database, "table": body.table, "format": body.format, "result": result}
     finally:
         Path(path).unlink(missing_ok=True)
