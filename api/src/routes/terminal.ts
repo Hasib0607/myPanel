@@ -13,6 +13,13 @@ type TerminalScope = {
   domain?: string;
 };
 
+type AccountTerminalDomain = {
+  name: string;
+  documentRoot: string | null;
+  status: string;
+  subdomains: Array<{ name: string }>;
+};
+
 function insideRoot(target: string, root: string) {
   return target === root || target.startsWith(`${root}${path.sep}`);
 }
@@ -23,6 +30,27 @@ async function pathExists(target: string) {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function ensureLinkOrDirectory(linkPath: string, targetPath: string) {
+  await fs.mkdir(targetPath, { recursive: true });
+  try {
+    const stat = await fs.lstat(linkPath);
+    if (stat.isSymbolicLink()) {
+      const current = await fs.readlink(linkPath);
+      if (path.resolve(path.dirname(linkPath), current) === targetPath) return;
+      await fs.unlink(linkPath);
+    } else {
+      return;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  try {
+    await fs.symlink(targetPath, linkPath, "dir");
+  } catch {
+    await fs.mkdir(linkPath, { recursive: true });
   }
 }
 
@@ -39,6 +67,28 @@ function accountDocumentPath(root: string, homeRoot: string, documentRoot: strin
   return path.resolve(homeRoot, value);
 }
 
+function subdomainFolderName(subdomain: string) {
+  return subdomain.trim().toLowerCase() === "*" ? "_wildcard" : subdomain.trim().toLowerCase();
+}
+
+async function scaffoldAccountTerminalHome(root: string, homeRoot: string, domains: AccountTerminalDomain[]) {
+  await fs.mkdir(homeRoot, { recursive: true });
+  await fs.mkdir(path.join(homeRoot, "public_html"), { recursive: true });
+  await fs.mkdir(path.join(homeRoot, "subdomains"), { recursive: true });
+
+  for (const domain of domains) {
+    const domainTarget = accountDocumentPath(root, homeRoot, domain.documentRoot);
+    if (!insideRoot(domainTarget, root)) continue;
+    await ensureLinkOrDirectory(path.join(homeRoot, domain.name), domainTarget);
+    for (const subdomain of domain.subdomains) {
+      const folderName = subdomainFolderName(subdomain.name);
+      const fqdn = `${subdomain.name}.${domain.name}`;
+      const subdomainTarget = path.join(homeRoot, "subdomains", folderName);
+      await ensureLinkOrDirectory(path.join(homeRoot, fqdn), subdomainTarget);
+    }
+  }
+}
+
 async function terminalCwd(accountId?: string) {
   if (!accountId) return { cwd: os.homedir() };
   const account = await prisma.account.findFirstOrThrow({
@@ -49,7 +99,12 @@ async function terminalCwd(accountId?: string) {
       domains: {
         orderBy: [{ status: "asc" }, { createdAt: "asc" }],
         take: 20,
-        select: { name: true, documentRoot: true, status: true }
+        select: {
+          name: true,
+          documentRoot: true,
+          status: true,
+          subdomains: { select: { name: true } }
+        }
       }
     }
   });
@@ -59,14 +114,9 @@ async function terminalCwd(accountId?: string) {
     throw Object.assign(new Error(`Account ${account.username} home root is outside the file manager root.`), { statusCode: 400 });
   }
   const primaryDomain = account.domains.find((domain) => domain.status === "ACTIVE") ?? account.domains[0];
-  const candidates = [
-    primaryDomain ? accountDocumentPath(root, homeRoot, primaryDomain.documentRoot) : null,
-    path.resolve(homeRoot, "public_html"),
-    homeRoot
-  ].filter(Boolean) as string[];
-  const cwd = candidates.find((candidate) => insideRoot(candidate, root) && candidate.includes(`${path.sep}accounts${path.sep}`)) ?? candidates.find((candidate) => insideRoot(candidate, root)) ?? homeRoot;
-  await fs.mkdir(cwd, { recursive: true });
-  if (cwd !== homeRoot && !(await pathExists(homeRoot))) await fs.mkdir(homeRoot, { recursive: true });
+  await scaffoldAccountTerminalHome(root, homeRoot, account.domains);
+  const cwd = homeRoot;
+  if (!(await pathExists(homeRoot))) await fs.mkdir(homeRoot, { recursive: true });
   return { cwd, username: account.username, domain: primaryDomain?.name };
 }
 
