@@ -617,6 +617,29 @@ EOF
   "$SYSTEMCTL_BIN" daemon-reload 2>&1 | tee -a "$LOG_FILE"
 }
 
+repair_sysagent_runtime() {
+  local sysagent_dir="$APP_DIR/sysagent"
+  local venv_python="$sysagent_dir/.venv/bin/python"
+  local python_bin=""
+  if [[ ! -f "$sysagent_dir/requirements.txt" ]]; then
+    log "sysagent requirements.txt missing; skipping sysagent runtime repair"
+    return 0
+  fi
+  python_bin="$(command -v python3.11 || command -v python3 || true)"
+  if [[ -z "$python_bin" ]]; then
+    log "python3 not found; skipping sysagent runtime repair"
+    return 0
+  fi
+  log "repairing sysagent Python runtime"
+  ln -sfn ../.env "$sysagent_dir/.env"
+  if [[ ! -x "$venv_python" ]]; then
+    run "$python_bin" -m venv "$sysagent_dir/.venv"
+  fi
+  run "$venv_python" -m pip install --upgrade pip
+  run "$venv_python" -m pip install -r "$sysagent_dir/requirements.txt"
+  run "$venv_python" -m py_compile "$sysagent_dir/app/main.py"
+}
+
 sudo_systemctl_output() {
   "$SUDO_BIN" -n "$SYSTEMCTL_BIN" "$@" 2>&1
 }
@@ -844,6 +867,7 @@ ensure_current_vps_ip_config
 ensure_live_sysagent_config
 ensure_large_upload_config
 repair_frontend_service_unit
+repair_sysagent_runtime
 
 npm_install_with_recovery
 run "$NPM_BIN" --workspace api run prisma:generate
