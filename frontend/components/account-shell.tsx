@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
-import { Blocks, Database, Gauge, Globe2, HardDrive, Inbox, Network, UserRound, Zap } from "lucide-react";
+import { Blocks, Database, Gauge, Globe2, HardDrive, Inbox, Network, SquareTerminal, UserRound, Zap } from "lucide-react";
 import { LogoutButton } from "@/components/logout-button";
 
 const nav = [
@@ -14,6 +14,7 @@ const nav = [
   { href: "/account/mail", label: "Mail", icon: Inbox },
   { href: "/account/deployments", label: "Deployments", icon: Blocks },
   { href: "/account/databases", label: "Databases", icon: Database },
+  { href: "/account/terminal", label: "Terminal", icon: SquareTerminal },
   { href: "/account/profile", label: "Profile", icon: UserRound }
 ];
 

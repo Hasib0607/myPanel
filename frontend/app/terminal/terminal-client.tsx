@@ -6,15 +6,15 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { apiBase } from "@/lib/api";
 
-function wsUrl(accountId?: string): string {
+function wsUrl({ accountId, endpointPath }: { accountId?: string; endpointPath: string }): string {
   const base = apiBase.startsWith("/")
     ? `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}${apiBase}`
     : apiBase.replace(/^https:/, "wss:").replace(/^http:/, "ws:");
   const params = accountId ? `?accountId=${encodeURIComponent(accountId)}` : "";
-  return `${base}/terminal/ws${params}`;
+  return `${base}${endpointPath}${params}`;
 }
 
-export function TerminalClient({ accountId }: { accountId?: string }) {
+export function TerminalClient({ accountId, endpointPath = "/terminal/ws" }: { accountId?: string; endpointPath?: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -57,7 +57,7 @@ export function TerminalClient({ accountId }: { accountId?: string }) {
       ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
     };
 
-    const ws = new WebSocket(wsUrl(accountId));
+    const ws = new WebSocket(wsUrl({ accountId, endpointPath }));
 
     ws.onopen = () => {
       fitAddon.fit();
@@ -97,7 +97,7 @@ export function TerminalClient({ accountId }: { accountId?: string }) {
       ws.close();
       term.dispose();
     };
-  }, [accountId]);
+  }, [accountId, endpointPath]);
 
   return <div ref={containerRef} className="h-full w-full" />;
 }

@@ -23,17 +23,8 @@ async function terminalCwd(accountId?: string) {
 }
 
 export const terminalRoutes: FastifyPluginAsync = async (app) => {
-  app.get("/ws", { websocket: true, preHandler: app.requireAuth }, async (socket: WebSocket, request: any) => {
-    const query = request.query as { accountId?: string };
+  function openTerminal(socket: WebSocket, cwd: string) {
     const shell = process.env.SHELL ?? (os.platform() === "win32" ? "cmd.exe" : "/bin/bash");
-    let cwd: string;
-    try {
-      cwd = await terminalCwd(query.accountId);
-    } catch (error) {
-      if (socket.readyState === 1) socket.send(`\r\nTerminal unavailable: ${error instanceof Error ? error.message : "Could not open account home."}\r\n`);
-      try { socket.close(); } catch { /* already closed */ }
-      return;
-    }
 
     const ptyProcess = pty.spawn(shell, [], {
       name: "xterm-color",
@@ -72,5 +63,29 @@ export const terminalRoutes: FastifyPluginAsync = async (app) => {
     socket.on("close", () => {
       try { ptyProcess.kill(); } catch { /* already dead */ }
     });
+  }
+
+  app.get("/ws", { websocket: true, preHandler: app.requireAuth }, async (socket: WebSocket, request: any) => {
+    const query = request.query as { accountId?: string };
+    let cwd: string;
+    try {
+      cwd = await terminalCwd(query.accountId);
+    } catch (error) {
+      if (socket.readyState === 1) socket.send(`\r\nTerminal unavailable: ${error instanceof Error ? error.message : "Could not open account home."}\r\n`);
+      try { socket.close(); } catch { /* already closed */ }
+      return;
+    }
+
+    openTerminal(socket, cwd);
+  });
+
+  app.get("/account/ws", { websocket: true, preHandler: app.requireAccount }, async (socket: WebSocket, request: any) => {
+    try {
+      const cwd = await terminalCwd(request.user.accountId);
+      openTerminal(socket, cwd);
+    } catch (error) {
+      if (socket.readyState === 1) socket.send(`\r\nTerminal unavailable: ${error instanceof Error ? error.message : "Could not open account home."}\r\n`);
+      try { socket.close(); } catch { /* already closed */ }
+    }
   });
 };
