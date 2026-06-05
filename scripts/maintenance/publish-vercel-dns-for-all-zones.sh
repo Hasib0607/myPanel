@@ -70,6 +70,10 @@ rewrite_zone() {
     function lower(value) {
       return tolower(value)
     }
+    function dns_type(value) {
+      value = toupper(value)
+      return value == "A" || value == "AAAA" || value == "CNAME" || value == "MX" || value == "TXT" || value == "NS" || value == "SRV" || value == "CAA" || value == "SOA"
+    }
     function bump_serial(line, serial, prefix, suffix, next_serial) {
       if (line ~ /;[[:space:]]*serial/) {
         serial = line
@@ -112,17 +116,17 @@ rewrite_zone() {
       type = ""
       for (i = 1; i <= part_count; i++) {
         upper = toupper(parts[i])
-        if (upper == "A" || upper == "CNAME") {
+        if (dns_type(upper)) {
           type = upper
           break
         }
       }
       comparable = lower(fqdn_to_name(name, domain))
-      if (type == "A" && comparable == "@") {
+      if ((type == "A" || type == "AAAA" || type == "CNAME") && comparable == "@") {
         changed = 1
         next
       }
-      if ((type == "A" || type == "CNAME") && comparable == "www") {
+      if (type != "" && comparable == "www") {
         changed = 1
         next
       }
@@ -142,6 +146,7 @@ main() {
   local checked=0
   local failed=0
   local service
+  local failed_domains=()
 
   if [[ "${#files[@]}" -eq 0 ]]; then
     echo "No BIND zone files found under /var/named or /etc/bind/zones." >&2
@@ -162,6 +167,7 @@ main() {
       cat /tmp/vps-panel-zone-check.log >&2
       rm -f "$tmp"
       failed=$((failed + 1))
+      failed_domains+=("$domain")
       continue
     fi
     if cmp -s "$file" "$tmp"; then
@@ -182,6 +188,10 @@ main() {
   systemctl is-active "$service"
 
   echo "Done. Checked $checked zones, updated $changed, failed $failed."
+  if [[ "$failed" -gt 0 ]]; then
+    echo "Failed zones:"
+    printf '  %s\n' "${failed_domains[@]}"
+  fi
   echo "Authoritative DNS is reloaded now. External caches may still honor old TTL until they expire."
   [[ "$failed" -eq 0 ]]
 }
