@@ -465,14 +465,14 @@ async function createDomainWithDefaults(input: CreateDomainInput, nameServers: A
   });
 }
 
-async function queueBulkDomainSslJobs(domains: Array<{ id: string; name: string; forceSsl: boolean }>) {
+async function queueBulkDomainSslJobs(domains: Array<{ id: string; name: string; forceSsl: boolean; documentRoot?: string | null }>) {
   const jobs = [];
   for (const [index, domain] of domains.entries()) {
     const job = await sslQueue.add("issue", {
       domainId: domain.id,
       domain: domain.name,
       email: `admin@${domain.name}`,
-      webRoot: path.join(env.FILE_MANAGER_ROOT, domain.name, "public_html"),
+      webRoot: path.join(env.FILE_MANAGER_ROOT, domain.name, normalizeDocumentRoot(domain.documentRoot)),
       includeWww: true,
       forceSsl: domain.forceSsl,
       source: "bulk-domain-ssl"
@@ -814,7 +814,7 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
     const uniqueDomainIds = [...new Set(body.domainIds)];
     const domains = await prisma.domain.findMany({
       where: { id: { in: uniqueDomainIds } },
-      select: { id: true, name: true, forceSsl: true }
+      select: { id: true, name: true, forceSsl: true, documentRoot: true }
     });
     const foundIds = new Set(domains.map((domain) => domain.id));
     const missing = uniqueDomainIds.filter((id) => !foundIds.has(id));
@@ -866,9 +866,10 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
       return { ok: true, action: body.action, affected: domains.length, sslQueued: 0, sslJobs: [] };
     }
 
+    await prisma.domain.updateMany({ where: { id: { in: uniqueDomainIds } }, data: { forceSsl: true } });
     const updatedDomains = await prisma.domain.findMany({
       where: { id: { in: uniqueDomainIds } },
-      select: { id: true, name: true, forceSsl: true }
+      select: { id: true, name: true, forceSsl: true, documentRoot: true }
     });
     const sslJobs = await queueBulkDomainSslJobs(updatedDomains);
     await audit(request, {
@@ -877,6 +878,7 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
       description: `Bulk queued SSL for ${sslJobs.length} domain(s)`,
       metadata: JSON.parse(JSON.stringify({ domains: updatedDomains, sslJobs })) as Prisma.InputJsonValue
     });
+    await clearDomainCaches();
     return { ok: true, action: body.action, affected: domains.length, sslQueued: sslJobs.length, sslJobs };
   });
 

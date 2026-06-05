@@ -225,6 +225,21 @@ async function markSslIssued(job: { data: { domain: string; domainId?: string | 
   }
 }
 
+async function publishHttpChallengeVhost(domainName: string, domainId: string | null | undefined, includeWww: boolean, webRoot?: string | null) {
+  if (!webRoot) return;
+  const result = await sysagent.writeStaticNginxVhost({
+    name: `domain-${nginxResourceName(domainName)}`,
+    serverName: sslServerName(domainName, includeWww),
+    rootPath: webRoot,
+    forceHttps: false
+  });
+  assertLiveCommandSucceeded("Nginx HTTP challenge vhost test", result.test as SysagentCommandResult);
+  assertLiveCommandSucceeded("Nginx HTTP challenge vhost reload", result.reload as SysagentCommandResult);
+  if (domainId) {
+    await redis.del("domain_list", `domain:${domainId}`);
+  }
+}
+
 export const sslWorker = new Worker(
   "ssl",
   async (job) => {
@@ -238,7 +253,16 @@ export const sslWorker = new Worker(
       let result: SysagentCommandResult | null = existingCertificate?.result ?? null;
       reusableCertificate = existingCertificate?.certificate ?? null;
       if (!result) {
-        result = isWildcardHostname(job.data.domain) || job.data.dnsChallenge
+        const dnsChallenge = isWildcardHostname(job.data.domain) || job.data.dnsChallenge;
+        if (!dnsChallenge) {
+          await publishHttpChallengeVhost(
+            job.data.domain,
+            job.data.domainId,
+            includeWww,
+            job.data.webRoot ?? `${env.FILE_MANAGER_ROOT}/${job.data.domain}/public_html`
+          );
+        }
+        result = dnsChallenge
           ? await sysagent.issueDnsCertificate({
             domain: job.data.domain,
             parentDomain: job.data.parentDomain ?? job.data.domain.replace(/^\*\./, ""),

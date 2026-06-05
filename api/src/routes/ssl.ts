@@ -94,7 +94,7 @@ async function optionalARecordPointsToVps(hostname: string, domainId: string, do
   }
 }
 
-async function runSslPreflight(domain: { id: string; name: string }, includeWww: boolean) {
+async function runSslPreflight(domain: { id: string; name: string; documentRoot?: string | null }, includeWww: boolean) {
   await publishDomainDnsZone(domain.id);
   let apexRecords: string[];
   try {
@@ -105,7 +105,7 @@ async function runSslPreflight(domain: { id: string; name: string }, includeWww:
       const detail = commandFailureDetail(certbot);
       throw Object.assign(new Error(`Certbot is not ready. Install certbot and enable ALLOW_LIVE_SSL. ${detail}`.trim()), { statusCode: 400 });
     }
-    const webRoot = path.join(env.FILE_MANAGER_ROOT, domain.name, "public_html");
+    const webRoot = path.join(env.FILE_MANAGER_ROOT, domain.name, domain.documentRoot || "public_html");
     return {
       dnsChecks: [{
         host: `_acme-challenge.${domain.name}`,
@@ -127,7 +127,7 @@ async function runSslPreflight(domain: { id: string; name: string }, includeWww:
   const wwwCheck = includeWww ? await optionalARecordPointsToVps(`www.${domain.name}`, domain.id, domain.name) : null;
   const effectiveIncludeWww = Boolean(wwwCheck?.ok);
   const dnsChecks = [apexCheck, ...(wwwCheck ? [wwwCheck] : [])];
-  const webRoot = path.join(env.FILE_MANAGER_ROOT, domain.name, "public_html");
+  const webRoot = path.join(env.FILE_MANAGER_ROOT, domain.name, domain.documentRoot || "public_html");
   const preflight = await sysagent.sslPreflight({ domain: domain.name, webRoot, includeWww: effectiveIncludeWww });
 
   if (!commandSucceeded(preflight.certbot)) {
@@ -262,7 +262,7 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
   app.post("/domains/:domainId/preflight", async (request) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const body = sslActionSchema.parse(request.body ?? {});
-    const domain = await prisma.domain.findUniqueOrThrow({ where: { id: domainId }, select: { id: true, name: true } });
+    const domain = await prisma.domain.findUniqueOrThrow({ where: { id: domainId }, select: { id: true, name: true, documentRoot: true } });
     return runSslPreflight(domain, body.includeWww);
   });
 
@@ -274,7 +274,7 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
   app.post("/domains/:domainId/issue", async (request, reply) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const body = sslActionSchema.parse(request.body ?? {});
-    const domain = await prisma.domain.findUniqueOrThrow({ where: { id: domainId }, select: { id: true, name: true, forceSsl: true } });
+    const domain = await prisma.domain.findUniqueOrThrow({ where: { id: domainId }, select: { id: true, name: true, forceSsl: true, documentRoot: true } });
     const preflight = await runSslPreflight(domain, body.includeWww);
     const job = await sslQueue.add("issue", {
       domainId,
@@ -329,7 +329,7 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
   app.post("/domains/:domainId/renew", async (request, reply) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const body = sslActionSchema.parse(request.body ?? {});
-    const domain = await prisma.domain.findUniqueOrThrow({ where: { id: domainId }, select: { id: true, name: true, forceSsl: true } });
+    const domain = await prisma.domain.findUniqueOrThrow({ where: { id: domainId }, select: { id: true, name: true, forceSsl: true, documentRoot: true } });
     const preflight = await runSslPreflight(domain, body.includeWww);
     const job = await sslQueue.add("renew", {
       domainId,

@@ -1288,6 +1288,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       return { ok: true, action: body.action, affected: domains.length, sslQueued: 0, sslJobs: [] };
     }
 
+    await prisma.domain.updateMany({ where: { id: { in: uniqueDomainIds }, accountId: account.id }, data: { forceSsl: true } });
     const updatedDomains = await prisma.domain.findMany({
       where: { id: { in: uniqueDomainIds }, accountId: account.id },
       select: { id: true, name: true, documentRoot: true, forceSsl: true }
