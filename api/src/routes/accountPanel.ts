@@ -15,6 +15,7 @@ import { githubApiErrorMessage, isGithubWebhookPermissionError } from "../lib/gi
 import { publishDomainDnsZone } from "../lib/domainDnsPublish.js";
 import { detectDeploymentFiles } from "../lib/deploymentDetection.js";
 import { deploymentRuntimeReview, prepareDeploymentRuntimeTools } from "../lib/deploymentRuntimeReview.js";
+import { buildDeploymentNginxRequest, deploymentIsRoutable } from "../lib/deploymentDomainSsl.js";
 import { prisma } from "../lib/prisma.js";
 import { resolvePublicA } from "../lib/publicDns.js";
 import { deleteSecret, getSecret, putSecret } from "../lib/secrets.js";
@@ -1353,28 +1354,54 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const domain = await prisma.domain.findFirstOrThrow({
       where: { id: domainId, accountId: accountId(request) },
-      include: { dnsRecords: true }
+      include: {
+        dnsRecords: true,
+        deployments: { orderBy: { createdAt: "desc" }, take: 1 },
+        deploymentBindings: {
+          orderBy: [{ role: "asc" }, { createdAt: "asc" }],
+          take: 1,
+          include: { deployment: true }
+        }
+      }
     });
     const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
     const dnsResult = await sysagent.applyDnsZone({ domain: domain.name, zone: renderZone(domain.name, domain.dnsRecords) });
-    const nginxResult = domain.hostingMode === "REDIRECT"
-      ? await sysagent.writeRedirectNginxVhost({
+    const deployment = domain.hostingDeploymentId
+      ? await prisma.deployment.findFirst({ where: { id: domain.hostingDeploymentId, accountId: account.id } })
+      : domain.deploymentBindings[0]?.deployment ?? domain.deployments[0] ?? null;
+    const nginxResult = deployment && deploymentIsRoutable(deployment)
+      ? await sysagent.deploymentNginx(
+          buildDeploymentNginxRequest({
+            deploymentId: deployment.id,
+            fqdn: `${domain.name} www.${domain.name}`,
+            upstreamPort: deployment.port,
+            rootPath: accountDeploymentAppPath(deployment),
+            framework: deployment.framework,
+            startCommand: deployment.startCommand,
+            publicDirectory: deployment.publicDirectory,
+            outputDirectory: deployment.outputDirectory,
+            fallbackRootPath: path.join(account.homeRoot, normalizeDocumentRoot(domain.documentRoot)),
+            forceSsl: domain.forceSsl && domain.sslEnabled
+          })
+        )
+      : domain.hostingMode === "REDIRECT"
+        ? await sysagent.writeRedirectNginxVhost({
           name: `domain-${nginxResourceName(domain.name)}`,
           serverName: `${domain.name} www.${domain.name}`,
           redirectUrl: normalizeRedirectUrl(domain.redirectUrl)
         })
-      : await sysagent.writeStaticNginxVhost({
-          name: `domain-${nginxResourceName(domain.name)}`,
-          serverName: `${domain.name} www.${domain.name}`,
-          rootPath: path.join(account.homeRoot, normalizeDocumentRoot(domain.documentRoot)),
-          forceHttps: domain.forceSsl && domain.sslEnabled,
-          ...(domain.sslEnabled
-            ? {
-                sslCertificate: `/etc/letsencrypt/live/${domain.name}/fullchain.pem`,
-                sslCertificateKey: `/etc/letsencrypt/live/${domain.name}/privkey.pem`
-              }
-            : {})
-        });
+        : await sysagent.writeStaticNginxVhost({
+            name: `domain-${nginxResourceName(domain.name)}`,
+            serverName: `${domain.name} www.${domain.name}`,
+            rootPath: path.join(account.homeRoot, normalizeDocumentRoot(domain.documentRoot)),
+            forceHttps: domain.forceSsl && domain.sslEnabled,
+            ...(domain.sslEnabled
+              ? {
+                  sslCertificate: `/etc/letsencrypt/live/${domain.name}/fullchain.pem`,
+                  sslCertificateKey: `/etc/letsencrypt/live/${domain.name}/privkey.pem`
+                }
+              : {})
+          });
     await audit(request, { action: "APPLY", resource: "domain", resourceId: domain.id, description: `Account published DNS and website for ${domain.name}`, metadata: { dnsResult, nginxResult } as any });
     return reply.code(202).send({ domain, dnsResult, nginxResult });
   });
