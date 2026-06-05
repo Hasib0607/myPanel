@@ -1,6 +1,6 @@
 "use client";
 
-import { type FormEvent, type ReactNode, useMemo, useState } from "react";
+import { type ComponentProps, type FormEvent, type ReactNode, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Lock, Plus, Search, Settings, Wrench } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
@@ -24,6 +24,20 @@ type DomainListResponse = {
 const pageSize = 100;
 
 export function DnsClient() {
+  return (
+    <AppShell>
+      <DnsZonePageContent />
+    </AppShell>
+  );
+}
+
+export function DnsZonePageContent({
+  domainsApiBase = "/domains",
+  editorApi
+}: {
+  domainsApiBase?: string;
+  editorApi?: ComponentProps<typeof DnsZoneEditor>["api"];
+}) {
   const [search, setSearch] = useState("");
   const [submittedSearch, setSubmittedSearch] = useState("");
   const [page, setPage] = useState(1);
@@ -31,8 +45,8 @@ export function DnsClient() {
   const [initialType, setInitialType] = useState<DnsRecordType>("A");
 
   const domains = useQuery({
-    queryKey: ["domains", "dns-zone-editor", submittedSearch, page],
-    queryFn: () => apiGet<DomainListResponse>(`/domains?page=${page}&pageSize=${pageSize}${submittedSearch ? `&search=${encodeURIComponent(submittedSearch)}` : ""}`)
+    queryKey: [domainsApiBase, "dns-zone-editor", submittedSearch, page],
+    queryFn: () => apiGet<DomainListResponse>(`${domainsApiBase}?page=${page}&pageSize=${pageSize}${submittedSearch ? `&search=${encodeURIComponent(submittedSearch)}` : ""}`)
   });
 
   const total = domains.data?.total ?? 0;
@@ -55,8 +69,7 @@ export function DnsClient() {
   }
 
   return (
-    <AppShell>
-      <section className="space-y-8 p-8">
+    <section className="space-y-8 p-8">
         <div>
           <h1 className="text-4xl font-light text-slate-800">Zone Editor</h1>
           <div className="mt-1 text-sm text-slate-600">Domains</div>
@@ -137,11 +150,10 @@ export function DnsClient() {
               </div>
               <button className="h-9 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50" onClick={() => setSelectedDomain(null)} type="button">Close editor</button>
             </div>
-            <DnsZoneEditor domainId={selectedDomain.id} initialType={initialType} />
+            <DnsZoneEditor api={editorApi} domainId={selectedDomain.id} initialType={initialType} />
           </div>
         ) : null}
       </section>
-    </AppShell>
   );
 }
 

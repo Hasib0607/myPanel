@@ -1245,6 +1245,19 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     return prisma.dnsRecord.findMany({ where: { domainId: domain.id }, orderBy: [{ type: "asc" }, { name: "asc" }] });
   });
 
+  app.get("/domains/:domainId/dns/zone", async (request: any) => {
+    const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
+    const domain = await prisma.domain.findFirstOrThrow({
+      where: { id: domainId, accountId: accountId(request) },
+      include: { dnsRecords: { orderBy: [{ type: "asc" }, { name: "asc" }] } }
+    });
+    return {
+      domain: domain.name,
+      serial: new Date().toISOString().slice(0, 10).replace(/-/g, "") + "01",
+      zone: renderZone(domain.name, domain.dnsRecords)
+    };
+  });
+
   app.post("/domains/:domainId/dns", async (request: any, reply) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const body = dnsRecordSchema.parse(request.body);
@@ -1261,6 +1274,25 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     });
     await audit(request, { action: "CREATE", resource: "dns_record", resourceId: record.id, description: `Account created ${record.type} record for ${domain.name}` });
     return reply.code(201).send(record);
+  });
+
+  app.patch("/domains/:domainId/dns/:recordId", async (request: any) => {
+    const { domainId, recordId } = z.object({ domainId: z.string(), recordId: z.string() }).parse(request.params);
+    const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
+    const existing = await prisma.dnsRecord.findFirstOrThrow({ where: { id: recordId, domainId: domain.id } });
+    const body = dnsRecordSchema.parse({ ...existing, ...dnsRecordSchema.partial().parse(request.body) });
+    const record = await prisma.dnsRecord.update({
+      where: { id: existing.id },
+      data: {
+        type: body.type,
+        name: body.name,
+        value: body.value,
+        ttl: body.ttl,
+        priority: body.priority ?? null
+      }
+    });
+    await audit(request, { action: "UPDATE", resource: "dns_record", resourceId: record.id, description: `Account updated ${record.type} record for ${domain.name}` });
+    return record;
   });
 
   app.delete("/domains/:domainId/dns/:recordId", async (request: any) => {

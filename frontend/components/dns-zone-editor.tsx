@@ -25,7 +25,16 @@ type ZoneExport = {
 
 const recordTypes: DnsRecordType[] = ["A", "AAAA", "CNAME", "MX", "TXT", "NS", "SRV", "CAA"];
 
-export function DnsZoneEditor({ domainId, initialType = "A" }: { domainId: string; initialType?: DnsRecordType }) {
+type DnsZoneEditorApi = {
+  recordsPath?: (domainId: string) => string;
+  zonePath?: (domainId: string) => string;
+  createPath?: (domainId: string) => string;
+  createPayload?: (domainId: string, draft: { type: DnsRecordType; name: string; value: string; ttl: number; priority: string }) => Record<string, unknown>;
+  updatePath?: (domainId: string, record: DnsRecord) => string;
+  deletePath?: (domainId: string, record: DnsRecord) => string;
+};
+
+export function DnsZoneEditor({ api, domainId, initialType = "A" }: { api?: DnsZoneEditorApi; domainId: string; initialType?: DnsRecordType }) {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState({
     type: "A" as DnsRecordType,
@@ -43,12 +52,12 @@ export function DnsZoneEditor({ domainId, initialType = "A" }: { domainId: strin
 
   const records = useQuery({
     queryKey: ["dns-records", domainId],
-    queryFn: () => apiGet<DnsRecord[]>(`/dns/${domainId}/records`)
+    queryFn: () => apiGet<DnsRecord[]>((api?.recordsPath ?? ((id) => `/dns/${id}/records`))(domainId))
   });
 
   const zone = useQuery({
     queryKey: ["dns-zone", domainId],
-    queryFn: () => apiGet<ZoneExport>(`/dns/${domainId}/zone`)
+    queryFn: () => apiGet<ZoneExport>((api?.zonePath ?? ((id) => `/dns/${id}/zone`))(domainId))
   });
 
   const invalidate = async () => {
@@ -61,14 +70,17 @@ export function DnsZoneEditor({ domainId, initialType = "A" }: { domainId: strin
 
   const create = useMutation({
     mutationFn: () =>
-      apiPost<DnsRecord>("/dns/records", {
-        domainId,
-        type: draft.type,
-        name: draft.name,
-        value: draft.value,
-        ttl: Number(draft.ttl),
-        priority: draft.priority === "" ? null : Number(draft.priority)
-      }),
+      apiPost<DnsRecord>(
+        (api?.createPath ?? (() => "/dns/records"))(domainId),
+        (api?.createPayload ?? ((id, recordDraft) => ({
+          domainId: id,
+          type: recordDraft.type,
+          name: recordDraft.name,
+          value: recordDraft.value,
+          ttl: Number(recordDraft.ttl),
+          priority: recordDraft.priority === "" ? null : Number(recordDraft.priority)
+        })))(domainId, draft)
+      ),
     onSuccess: async () => {
       setDraft({ type: "A", name: "@", value: "", ttl: 3600, priority: "" });
       setError("");
@@ -80,7 +92,7 @@ export function DnsZoneEditor({ domainId, initialType = "A" }: { domainId: strin
   const update = useMutation({
     mutationFn: (record: DnsRecord) => {
       const patch = editing[record.id] ?? {};
-      return apiPatch<DnsRecord>(`/dns/records/${record.id}`, {
+      return apiPatch<DnsRecord>((api?.updatePath ?? ((_domainId, current) => `/dns/records/${current.id}`))(domainId, record), {
         type: patch.type ?? record.type,
         name: patch.name ?? record.name,
         value: patch.value ?? record.value,
@@ -101,7 +113,7 @@ export function DnsZoneEditor({ domainId, initialType = "A" }: { domainId: strin
   });
 
   const remove = useMutation({
-    mutationFn: (recordId: string) => apiDelete(`/dns/records/${recordId}`),
+    mutationFn: (record: DnsRecord) => apiDelete((api?.deletePath ?? ((_domainId, current) => `/dns/records/${current.id}`))(domainId, record)),
     onSuccess: invalidate,
     onError: (err) => setError(err instanceof Error ? err.message : "Could not delete DNS record")
   });
@@ -178,7 +190,7 @@ export function DnsZoneEditor({ domainId, initialType = "A" }: { domainId: strin
                     <td className="px-3 py-2">
                       <div className="flex gap-2">
                         <button className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line hover:bg-slate-50" onClick={() => update.mutate(record)} title="Save" type="button"><Save size={15} /></button>
-                        <button className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-panel-danger hover:bg-red-50" onClick={() => remove.mutate(record.id)} title="Delete" type="button"><Trash2 size={15} /></button>
+                        <button className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-panel-danger hover:bg-red-50" onClick={() => remove.mutate(record)} title="Delete" type="button"><Trash2 size={15} /></button>
                       </div>
                     </td>
                   </tr>
