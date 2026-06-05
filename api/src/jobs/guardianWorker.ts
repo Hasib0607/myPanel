@@ -1,4 +1,5 @@
 import { Worker } from "bullmq";
+import type { DeploymentFramework, DeploymentPackageManager, DeploymentProcessManager, DeploymentRuntime } from "@prisma/client";
 import { redis } from "../lib/redis.js";
 import { logger } from "../lib/logger.js";
 import { expireGuardianIpBlocks, runGuardianAutoHeal, syncGuardianIncidentsOnly, type GuardianDiagnosis } from "../lib/guardianAutoHeal.js";
@@ -69,6 +70,29 @@ async function hasPendingDoctorApproval(deploymentId: string) {
     select: { id: true, actionKey: true }
   });
   return pending;
+}
+
+async function missingDeploymentRuntimeTools(deployment: {
+  framework: DeploymentFramework;
+  packageManager: DeploymentPackageManager | null;
+  runtime: DeploymentRuntime | null;
+  processManager: DeploymentProcessManager | null;
+  installCommand?: string | null;
+  buildCommand?: string | null;
+  startCommand?: string | null;
+}) {
+  const requiredTools = requiredRuntimeExecutables({
+    framework: deployment.framework,
+    packageManager: deployment.packageManager,
+    runtime: deployment.runtime,
+    processManager: deployment.processManager ?? defaultProcessManager(deployment.framework),
+    installCommand: deployment.installCommand,
+    buildCommand: deployment.buildCommand,
+    startCommand: deployment.startCommand
+  });
+  if (!requiredTools.length) return [];
+  const result = await sysagent.deploymentRuntimeTools({ tools: requiredTools });
+  return result.items.filter((tool) => !tool.installed).map((tool) => tool.name);
 }
 
 function deploymentLogDir(slug: string) {
@@ -557,6 +581,29 @@ async function runDeploymentWatch() {
   for (const deployment of deployments) {
     try {
       const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
+      const missingRuntimeTools = await missingDeploymentRuntimeTools(deployment);
+      if (missingRuntimeTools.length) {
+        const approval = await hasPendingDoctorApproval(deployment.id);
+        await prisma.deployment.update({
+          where: { id: deployment.id },
+          data: { healthStatus: "DOWN", lastHealthCheckAt: new Date() }
+        });
+        await prisma.deploymentLog.create({
+          data: {
+            deploymentId: deployment.id,
+            step: "HEALTH_CHECK",
+            level: "warn",
+            message: "Scheduled deployment watch skipped until runtime tools are approved",
+            metadata: {
+              missingRuntimeTools,
+              pendingApproval: approval?.actionKey ?? null,
+              runtimeTargets: runtimeInstallTargetsForMissingExecutables(missingRuntimeTools).map((target) => target.actionKey)
+            } as any
+          }
+        });
+        results.push({ deploymentId: deployment.id, healthy: false, skipped: "missing_runtime_tools", missingRuntimeTools });
+        continue;
+      }
       let result = await sysagent.deploymentHealth({
         deploymentId: deployment.id,
         port: deployment.port,

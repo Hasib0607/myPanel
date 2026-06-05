@@ -1,4 +1,12 @@
-# Env-Driven Deployment Runtime Installs
+# Deployment Runtime Installs
+
+Every deploy first checks the baseline runtime tools required by the detected framework. For Laravel that includes PHP/php-fpm, Composer, common PHP extensions, and Supervisor when the deployment uses the Supervisor process manager. If any of these are missing, the deploy is intentionally blocked until an admin approves the generated runtime-tool actions in the deployment runtime review modal or Deployment Doctor.
+
+Guardian's scheduled deployment watch also respects that approval gate. When a failed or stale deployment is missing baseline tools such as `composer`, `php-ext-redis`, `php-ext-bcmath`, `php-ext-intl`, or `supervisorctl`, Guardian records that health checks are skipped until approval instead of repeatedly running process-manager checks that cannot succeed yet.
+
+After approval, redeploy the project. The worker installs the approved tools, reruns runtime inspection, then continues with dependency install, build, process start, and health checks.
+
+## Env-Driven Runtime Installs
 
 The deploy worker scans Laravel env values after env normalization and before dependency install. When a known feature is configured, the same Guardian/Deployment Doctor runtime-tool installer is used.
 

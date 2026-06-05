@@ -1536,6 +1536,8 @@ def _pm2_process_mismatch(body: HealthRequest) -> str | None:
 def _supervisor_process_mismatch(body: HealthRequest) -> str | None:
     if not body.processName or (body.processManager or "").upper() != "SUPERVISOR":
         return None
+    if shutil.which("supervisorctl") is None:
+        return "Supervisor is not installed. Approve the install-supervisor runtime tool action, then redeploy."
     result = run_supervisorctl("status", body.processName)
     if result.get("dryRun"):
         return None

@@ -2,6 +2,7 @@ import unittest
 from unittest import mock
 
 from app.command import run_command
+from app.routers.deployments import HealthRequest, _supervisor_process_mismatch
 
 
 class DeploymentLiveCommandTests(unittest.TestCase):
@@ -30,6 +31,21 @@ class DeploymentLiveCommandTests(unittest.TestCase):
 
         self.assertTrue(result["dryRun"])
         self.assertTrue(result["liveCommandsDisabled"])
+
+    def test_supervisor_health_reports_missing_runtime_tool(self) -> None:
+        body = HealthRequest(
+            deploymentId="dep_1",
+            port=3000,
+            processName="laravel-app",
+            processManager="SUPERVISOR",
+        )
+        with mock.patch("app.routers.deployments.shutil.which", return_value=None):
+            result = _supervisor_process_mismatch(body)
+
+        self.assertEqual(
+            result,
+            "Supervisor is not installed. Approve the install-supervisor runtime tool action, then redeploy.",
+        )
 
 
 if __name__ == "__main__":
