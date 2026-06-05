@@ -261,7 +261,7 @@ def apply_bind_file_permissions(path: Path, zone_file: bool) -> None:
         os.chown(path, 0, named_gid)
     path.chmod(0o640)
     context_type = "named_zone_t" if zone_file else "named_conf_t"
-    subprocess.run(["chcon", "-t", context_type, str(path)], check=False)
+    subprocess.run(["chcon", "-t", context_type, str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
 
 def is_live_zone_file(path: Path) -> bool:
@@ -317,21 +317,30 @@ def reload_bind_zone() -> None:
 
 
 def txt_visible(hostname: str, expected: str) -> tuple[bool, str]:
-    checks = [
+    local_checks = [
         ["dig", "@127.0.0.1", "+short", "TXT", hostname],
-        ["dig", "+short", "TXT", hostname],
+    ]
+    public_checks = [
         ["dig", "@1.1.1.1", "+short", "TXT", hostname],
         ["dig", "@8.8.8.8", "+short", "TXT", hostname],
+        ["dig", "@9.9.9.9", "+short", "TXT", hostname],
     ]
     outputs = []
-    for command in checks:
+    local_visible = False
+    public_visible = False
+    for command in local_checks + public_checks:
         try:
             output = command_output(command)
         except FileNotFoundError:
             return True, "dig not installed; relying on configured propagation sleep"
         outputs.append("$ " + " ".join(command) + "\\n" + (output or "(no answer)"))
         if expected in output:
-            return True, "\\n".join(outputs)
+            if command in public_checks:
+                public_visible = True
+            else:
+                local_visible = True
+    if local_visible and public_visible:
+        return True, "\\n".join(outputs)
     return False, "\\n".join(outputs)
 
 
