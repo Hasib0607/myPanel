@@ -281,9 +281,9 @@ def rebuild_zone_declarations() -> None:
         domain = item.name.removeprefix("db.")
         bind_file = zone_declaration_file_path(item)
         blocks.append(
-            f'\\nzone "{{domain}}" {{\\n'
+            '\\nzone "' + domain + '" {{\\n'
             "    type master;\\n"
-            f'    file "{{bind_file}}";\\n'
+            '    file "' + bind_file + '";\\n'
             "    allow-transfer {{ none; }};\\n"
             "}};"
         )

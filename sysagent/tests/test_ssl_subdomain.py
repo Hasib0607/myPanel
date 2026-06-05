@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from app.config import settings
 from app.routers import ssl as ssl_router
-from app.routers.ssl import DnsCertificateRequest, certbot_should_include_www
+from app.routers.ssl import DnsCertificateRequest, certbot_should_include_www, dns_hook_script
 
 
 class CertbotIncludeWwwTests(unittest.TestCase):
@@ -39,3 +39,15 @@ class CertbotIncludeWwwTests(unittest.TestCase):
 
         self.assertEqual(captured["kwargs"]["timeout"], settings.ssl_certbot_timeout_seconds)
         self.assertIn("--preferred-challenges", captured["command"])
+
+    def test_dns_hook_script_compiles(self) -> None:
+        script = dns_hook_script(
+            Path("/var/named/db.alfena.shop"),
+            Path("/var/named"),
+            Path("/etc/named.vps-panel.zones"),
+            "alfena.shop",
+            "auth",
+            300,
+        )
+
+        compile(script, "certbot-dns-hook.py", "exec")
