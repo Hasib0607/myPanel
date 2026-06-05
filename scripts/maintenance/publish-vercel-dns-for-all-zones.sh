@@ -64,6 +64,13 @@ zone_domain() {
   basename "$1" | sed 's/^db\.//'
 }
 
+dig_short() {
+  local resolver="$1"
+  local name="$2"
+  local type="$3"
+  dig "$resolver" +time=3 +tries=1 +short "$type" "$name" 2>/dev/null | sed 's/[[:space:]]*$//'
+}
+
 is_live_zone_file() {
   local file="$1"
   case "$file" in
@@ -195,6 +202,31 @@ rewrite_zone() {
   ' "$file" > "$tmp"
 }
 
+install_zone_file() {
+  local source="$1"
+  local target="$2"
+  local backup="$3"
+  mv "$source" "$target"
+  chown --reference="$backup" "$target" 2>/dev/null || true
+  chmod --reference="$backup" "$target" 2>/dev/null || true
+  if command -v restorecon >/dev/null 2>&1; then
+    restorecon -F "$target" 2>/dev/null || true
+  fi
+}
+
+reload_zone() {
+  local domain="$1"
+  rndc reload "$domain" >/dev/null 2>&1 || rndc reload "$domain" IN >/dev/null 2>&1
+}
+
+local_zone_matches() {
+  local domain="$1"
+  local local_a local_www
+  local_a="$(dig_short @127.0.0.1 "$domain" A)"
+  local_www="$(dig_short @127.0.0.1 "www.$domain" CNAME)"
+  [[ "$local_a" == *"$APEX_IP"* && "$local_www" == *"$WWW_CNAME"* ]]
+}
+
 main() {
   shopt -s nullglob
   local files=(/var/named/db.* /etc/bind/zones/db.*)
@@ -203,6 +235,8 @@ main() {
   local failed=0
   local service
   local failed_domains=()
+  local reload_domains=()
+  local live_failed_domains=()
 
   if [[ "${#files[@]}" -eq 0 ]]; then
     echo "No BIND zone files found under /var/named or /etc/bind/zones." >&2
@@ -234,30 +268,49 @@ main() {
     if cmp -s "$file" "$tmp"; then
       echo "OK unchanged $domain"
       rm -f "$tmp"
+      reload_domains+=("$domain")
       continue
     fi
-    cp -a "$file" "$file.vercel-$STAMP.bak"
-    mv "$tmp" "$file"
+    local backup="$file.vercel-$STAMP.bak"
+    cp -a "$file" "$backup"
+    install_zone_file "$tmp" "$file" "$backup"
     echo "UPDATED $domain -> @ A $APEX_IP, www CNAME $WWW_CNAME"
     changed=$((changed + 1))
+    reload_domains+=("$domain")
   done
 
   named-checkconf -z
   service="$(bind_service)"
   rndc reconfig || systemctl restart "$service"
   rndc reload || systemctl reload "$service" || systemctl restart "$service"
+  for domain in "${reload_domains[@]}"; do
+    reload_zone "$domain" || {
+      echo "WARN $domain: per-zone reload failed" >&2
+      live_failed_domains+=("$domain")
+      continue
+    }
+    if ! local_zone_matches "$domain"; then
+      echo "WARN $domain: local BIND still does not serve @ A $APEX_IP and www CNAME $WWW_CNAME" >&2
+      live_failed_domains+=("$domain")
+    fi
+  done
   systemctl is-active "$service"
 
-  echo "Done. Checked $checked zones, updated $changed, failed $failed."
+  echo "Done. Checked $checked zones, updated $changed, failed $failed, live_failed ${#live_failed_domains[@]}."
   if [[ "$failed" -gt 0 ]]; then
     echo "Failed zones:"
     printf '  %s\n' "${failed_domains[@]}"
-  else
+  fi
+  if [[ "${#live_failed_domains[@]}" -gt 0 ]]; then
+    echo "Live reload failed zones:"
+    printf '  %s\n' "${live_failed_domains[@]}"
+  fi
+  if [[ "$failed" -eq 0 && "${#live_failed_domains[@]}" -eq 0 ]]; then
     save_target_state
     echo "Saved Vercel DNS target state to $STATE_FILE"
   fi
   echo "Authoritative DNS is reloaded now. External caches may still honor old TTL until they expire."
-  [[ "$failed" -eq 0 ]]
+  [[ "$failed" -eq 0 && "${#live_failed_domains[@]}" -eq 0 ]]
 }
 
 main "$@"
