@@ -47,11 +47,22 @@ zone_domain() {
   basename "$1" | sed 's/^db\.//'
 }
 
+is_live_zone_file() {
+  local file="$1"
+  case "$file" in
+    *.bak|*.rollback|*.check|*.vps-panel.check|*.vps-panel.rollback|*.vps-panel-nsfix.bak|*.vercel-*.bak)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
 is_public_domain_zone() {
   local domain="$1"
   [[ "$domain" == *.* ]] || return 1
   [[ "$domain" != *".in-addr.arpa" ]] || return 1
   [[ "$domain" != "localhost" ]] || return 1
+  [[ "$domain" != admin.* ]] || return 1
 }
 
 rewrite_zone() {
@@ -73,6 +84,24 @@ rewrite_zone() {
     function dns_type(value) {
       value = toupper(value)
       return value == "A" || value == "AAAA" || value == "CNAME" || value == "MX" || value == "TXT" || value == "NS" || value == "SRV" || value == "CAA" || value == "SOA"
+    }
+    function is_ttl(value) {
+      return value ~ /^[0-9]+$/
+    }
+    function record_owner(raw_line, part_count, parts, type_index, owner) {
+      if (part_count == 0 || type_index == 0) return ""
+      if (raw_line ~ /^[[:space:]]/) {
+        return last_owner
+      }
+      if (type_index == 1) {
+        return last_owner
+      }
+      owner = parts[1]
+      if (is_ttl(owner) || toupper(owner) == "IN") {
+        return last_owner
+      }
+      last_owner = owner
+      return owner
     }
     function bump_serial(line, serial, prefix, suffix, next_serial) {
       if (line ~ /;[[:space:]]*serial/) {
@@ -112,15 +141,17 @@ rewrite_zone() {
       stripped = line
       sub(/[[:space:]]*;.*/, "", stripped)
       part_count = split(stripped, parts, /[[:space:]]+/)
-      name = parts[1]
       type = ""
+      type_index = 0
       for (i = 1; i <= part_count; i++) {
         upper = toupper(parts[i])
         if (dns_type(upper)) {
           type = upper
+          type_index = i
           break
         }
       }
+      name = record_owner(raw, part_count, parts, type_index)
       comparable = lower(fqdn_to_name(name, domain))
       if ((type == "A" || type == "AAAA" || type == "CNAME") && comparable == "@") {
         changed = 1
@@ -155,6 +186,7 @@ main() {
 
   for file in "${files[@]}"; do
     local domain tmp
+    is_live_zone_file "$file" || continue
     domain="$(zone_domain "$file")"
     if ! is_public_domain_zone "$domain"; then
       continue

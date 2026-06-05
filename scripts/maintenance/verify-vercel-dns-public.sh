@@ -27,11 +27,22 @@ zone_domain() {
   basename "$1" | sed 's/^db\.//'
 }
 
+is_live_zone_file() {
+  local file="$1"
+  case "$file" in
+    *.bak|*.rollback|*.check|*.vps-panel.check|*.vps-panel.rollback|*.vps-panel-nsfix.bak|*.vercel-*.bak)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
 is_public_domain_zone() {
   local domain="$1"
   [[ "$domain" == *.* ]] || return 1
   [[ "$domain" != *".in-addr.arpa" ]] || return 1
   [[ "$domain" != "localhost" ]] || return 1
+  [[ "$domain" != admin.* ]] || return 1
 }
 
 dig_short() {
@@ -87,6 +98,7 @@ main() {
 
   for file in "${files[@]}"; do
     local domain line status
+    is_live_zone_file "$file" || continue
     domain="$(zone_domain "$file")"
     is_public_domain_zone "$domain" || continue
     if [[ "$LIMIT" =~ ^[0-9]+$ && "$LIMIT" -gt 0 && "$checked" -ge "$LIMIT" ]]; then
