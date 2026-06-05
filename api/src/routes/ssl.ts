@@ -4,7 +4,7 @@ import { z } from "zod";
 import { env } from "../config/env.js";
 import { ensureSubdomainFileStructure } from "../lib/domainFiles.js";
 import { publishDomainDnsZone } from "../lib/domainDnsPublish.js";
-import { assertPublicARecordPointsTo, defaultVanityNameServerHostnames, resolvePublicA } from "../lib/publicDns.js";
+import { assertPublicARecordPointsTo, defaultVanityNameServerHostnames, resolvePublicA, resolvePublicNameServers } from "../lib/publicDns.js";
 import { sslQueue } from "../jobs/queues.js";
 import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
@@ -78,6 +78,27 @@ async function panelVanityNameServers(domainId: string, domainName: string) {
   return hostnames.filter((hostname) => hostname.endsWith(`.${domainName}`));
 }
 
+async function assertDnsChallengeDelegated(domainId: string, domainName: string, reason: unknown) {
+  const [publicLookup, configuredNameServers] = await Promise.all([
+    resolvePublicNameServers(domainName),
+    panelVanityNameServers(domainId, domainName)
+  ]);
+  const publicNameServers = publicLookup.nameServers;
+  const expectedNameServers = configuredNameServers.map((hostname) => hostname.toLowerCase().replace(/\.$/, ""));
+  const matched = publicNameServers.filter((hostname) => expectedNameServers.includes(hostname));
+
+  if (matched.length > 0) return { publicNameServers, expectedNameServers };
+
+  const detail = reason instanceof Error ? reason.message : "HTTP A record is not ready";
+  const expected = expectedNameServers.length ? expectedNameServers.join(", ") : `ns1.${domainName}, ns2.${domainName}`;
+  const actual = publicNameServers.length ? publicNameServers.join(", ") : "none";
+  const checks = publicLookup.errors.length ? ` Resolver checks: ${publicLookup.errors.join("; ")}` : "";
+  throw Object.assign(
+    new Error(`Cannot issue DNS SSL for ${domainName} yet. Public nameservers are ${actual}, but this panel can only create DNS-01 TXT records when the registrar delegates the domain to ${expected}. ${detail}${checks}`),
+    { statusCode: 400 }
+  );
+}
+
 async function assertARecordPointsToVps(hostname: string, domainId: string, domainName: string) {
   const knownVanityNameServers = await panelVanityNameServers(domainId, domainName);
   return assertPublicARecordPointsTo(hostname, await currentVpsIp(), { knownVanityNameServers });
@@ -100,6 +121,7 @@ async function runSslPreflight(domain: { id: string; name: string; documentRoot?
   try {
     apexRecords = await assertARecordPointsToVps(domain.name, domain.id, domain.name);
   } catch (error) {
+    const delegation = await assertDnsChallengeDelegated(domain.id, domain.name, error);
     const certbot = await sysagent.certbotStatus();
     if (!commandSucceeded(certbot)) {
       const detail = commandFailureDetail(certbot);
@@ -109,7 +131,7 @@ async function runSslPreflight(domain: { id: string; name: string; documentRoot?
     return {
       dnsChecks: [{
         host: `_acme-challenge.${domain.name}`,
-        records: [] as string[],
+        records: delegation.publicNameServers,
         ok: true,
         skipped: false,
         dns01: true,
