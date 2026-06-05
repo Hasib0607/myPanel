@@ -47,6 +47,16 @@ def zone_declaration_file_path(zone_path: Path) -> str:
     return str(zone_path)
 
 
+def is_live_zone_file(path: Path) -> bool:
+    suffixes = path.name.split(".")
+    ignored_parts = {"bak", "rollback", "check", "tmp"}
+    return path.name.startswith("db.") and not any(part in ignored_parts for part in suffixes)
+
+
+def zone_domain_from_path(path: Path) -> str:
+    return path.name.removeprefix("db.")
+
+
 def apply_bind_file_permissions(path: Path, *, zone_file: bool = False) -> None:
     if not settings.allow_live_dns:
         return
@@ -62,29 +72,32 @@ def apply_bind_file_permissions(path: Path, *, zone_file: bool = False) -> None:
         run_command(["chcon", "-t", context_type, str(path)], allow_live=settings.allow_live_dns, timeout=10)
 
 
-def ensure_zone_declared(named_conf_local: str, domain: str, zone_path: Path) -> dict:
+def rebuild_zone_declarations(named_conf_local: str, zone_dir: str) -> dict:
     conf_path = Path(named_conf_local).resolve()
     if conf_path.name not in {"named.conf.local", "named.vps-panel.zones"}:
         raise HTTPException(status_code=400, detail="Unsupported named.conf.local path")
 
-    bind_file = zone_declaration_file_path(zone_path)
-    block = (
-        f'\nzone "{domain}" {{\n'
-        "    type master;\n"
-        f'    file "{bind_file}";\n'
-        "    allow-transfer { none; };\n"
-        "};\n"
-    )
-
     if not settings.allow_live_dns:
-        return {"dryRun": True, "command": ["append-zone", str(conf_path)], "returncode": 0}
+        return {"dryRun": True, "command": ["rebuild-zones", str(conf_path)], "returncode": 0}
+
+    root = Path(zone_dir).resolve()
+    zone_files = sorted(path for path in root.glob("db.*") if path.is_file() and is_live_zone_file(path))
+    blocks = ["// Managed by vps-panel. Rebuilt from existing zone files."]
+    for zone_file in zone_files:
+        domain = zone_domain_from_path(zone_file)
+        bind_file = zone_declaration_file_path(zone_file)
+        blocks.append(
+            f'\nzone "{domain}" {{\n'
+            "    type master;\n"
+            f'    file "{bind_file}";\n'
+            "    allow-transfer { none; };\n"
+            "};"
+        )
 
     conf_path.parent.mkdir(parents=True, exist_ok=True)
-    current = conf_path.read_text(encoding="utf-8") if conf_path.exists() else ""
-    if f'zone "{domain}"' not in current:
-        conf_path.write_text(current.rstrip() + block, encoding="utf-8")
+    conf_path.write_text("\n".join(blocks).rstrip() + "\n", encoding="utf-8")
     apply_bind_file_permissions(conf_path)
-    return {"dryRun": False, "command": ["append-zone", str(conf_path)], "returncode": 0}
+    return {"dryRun": False, "command": ["rebuild-zones", str(conf_path)], "returncode": 0, "zones": len(zone_files)}
 
 
 def ensure_public_authoritative_options(named_conf_options: str) -> dict:
@@ -246,7 +259,7 @@ def apply_zone(body: ZoneApplyRequest) -> dict:
     if settings.allow_live_dns:
         zone_path.write_text(body.zone, encoding="utf-8")
         apply_bind_file_permissions(zone_path, zone_file=True)
-    declare = ensure_zone_declared(named_conf_local, body.domain, zone_path)
+    declare = rebuild_zone_declarations(named_conf_local, zone_dir)
     zone_check = run_command(["named-checkzone", body.domain, str(zone_path)], allow_live=settings.allow_live_dns)
     conf_check = run_command(["named-checkconf"], allow_live=settings.allow_live_dns)
     reload = reload_bind_zone(body.domain) if command_ok(zone_check) and command_ok(conf_check) else {"returncode": 1, "stderr": "Skipped because BIND validation failed"}

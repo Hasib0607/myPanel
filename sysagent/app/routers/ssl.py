@@ -198,7 +198,7 @@ def issue_certificate(payload: CertificateRequest) -> dict:
     return run_command(command, allow_live=settings.allow_live_ssl, timeout=settings.ssl_certbot_timeout_seconds)
 
 
-def dns_hook_script(zone_path: Path, parent_domain: str, action: str, propagation_seconds: int) -> str:
+def dns_hook_script(zone_path: Path, zone_dir: Path, named_conf_local: Path, parent_domain: str, action: str, propagation_seconds: int) -> str:
     return f"""#!/usr/bin/env python3
 from __future__ import annotations
 import os
@@ -210,6 +210,8 @@ from datetime import datetime
 from pathlib import Path
 
 zone_path = Path({str(zone_path)!r})
+zone_dir = Path({str(zone_dir)!r})
+named_conf_local = Path({str(named_conf_local)!r})
 parent_domain = {parent_domain!r}.rstrip(".")
 action = {action!r}
 propagation_seconds = {propagation_seconds}
@@ -260,6 +262,33 @@ def apply_bind_file_permissions(path: Path, zone_file: bool) -> None:
     path.chmod(0o640)
     context_type = "named_zone_t" if zone_file else "named_conf_t"
     subprocess.run(["chcon", "-t", context_type, str(path)], check=False)
+
+
+def is_live_zone_file(path: Path) -> bool:
+    suffixes = path.name.split(".")
+    ignored_parts = {{"bak", "rollback", "check", "tmp"}}
+    return path.name.startswith("db.") and not any(part in ignored_parts for part in suffixes)
+
+
+def zone_declaration_file_path(path: Path) -> str:
+    return path.name if str(path).startswith("/var/named/") else str(path)
+
+
+def rebuild_zone_declarations() -> None:
+    zone_files = sorted(path for path in zone_dir.glob("db.*") if path.is_file() and is_live_zone_file(path))
+    blocks = ["// Managed by vps-panel. Rebuilt from existing zone files."]
+    for item in zone_files:
+        domain = item.name.removeprefix("db.")
+        bind_file = zone_declaration_file_path(item)
+        blocks.append(
+            f'\\nzone "{{domain}}" {{\\n'
+            "    type master;\\n"
+            f'    file "{{bind_file}}";\\n'
+            "    allow-transfer {{ none; }};\\n"
+            "}};"
+        )
+    named_conf_local.write_text("\\n".join(blocks).rstrip() + "\\n", encoding="utf-8")
+    apply_bind_file_permissions(named_conf_local, zone_file=False)
 
 
 def bind_service() -> str:
@@ -346,6 +375,7 @@ else:
 next_text = bump_serial("\\n".join(lines).rstrip() + "\\n")
 zone_path.write_text(next_text, encoding="utf-8")
 apply_bind_file_permissions(zone_path, zone_file=True)
+rebuild_zone_declarations()
 subprocess.run(["named-checkzone", parent_domain, str(zone_path)], check=True)
 reload_bind_zone()
 if action == "auth" and propagation_seconds > 0:
@@ -355,7 +385,7 @@ if action == "auth" and propagation_seconds > 0:
 
 @router.post("/issue-dns")
 def issue_dns_certificate(payload: DnsCertificateRequest) -> dict:
-    zone_dir, _named_conf_local, _named_conf_options = effective_dns_paths(payload)
+    zone_dir, named_conf_local, _named_conf_options = effective_dns_paths(payload)
     zone_path = safe_zone_path(zone_dir, payload.parentDomain.lower().rstrip("."))
     if not settings.allow_live_ssl or not settings.allow_live_dns:
         return {
@@ -369,8 +399,8 @@ def issue_dns_certificate(payload: DnsCertificateRequest) -> dict:
     with tempfile.TemporaryDirectory(prefix="vps-panel-certbot-dns-") as tmp:
         auth_path = Path(tmp) / "auth.py"
         cleanup_path = Path(tmp) / "cleanup.py"
-        auth_path.write_text(dns_hook_script(zone_path, payload.parentDomain, "auth", payload.propagationSeconds), encoding="utf-8")
-        cleanup_path.write_text(dns_hook_script(zone_path, payload.parentDomain, "cleanup", 0), encoding="utf-8")
+        auth_path.write_text(dns_hook_script(zone_path, Path(zone_dir), Path(named_conf_local), payload.parentDomain, "auth", payload.propagationSeconds), encoding="utf-8")
+        cleanup_path.write_text(dns_hook_script(zone_path, Path(zone_dir), Path(named_conf_local), payload.parentDomain, "cleanup", 0), encoding="utf-8")
         auth_path.chmod(0o700)
         cleanup_path.chmod(0o700)
         command = [
