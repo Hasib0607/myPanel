@@ -1,20 +1,36 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-APEX_IP="${1:-216.150.1.1}"
-WWW_CNAME="${2:-c2e5a009d99b9e9a.vercel-dns-017.com.}"
-WWW_CNAME="${WWW_CNAME%.}."
+STATE_FILE="${VERCEL_DNS_STATE_FILE:-/var/lib/vps-panel/vercel-dns-target.env}"
+DEFAULT_APEX_IP="${DEFAULT_APEX_IP:-216.150.1.1}"
+DEFAULT_WWW_CNAME="${DEFAULT_WWW_CNAME:-c2e5a009d99b9e9a.vercel-dns-017.com.}"
 LIMIT="${LIMIT:-0}"
 
+state_value() {
+  local key="$1"
+  [[ -r "$STATE_FILE" ]] || return 0
+  awk -F= -v key="$key" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$STATE_FILE"
+}
+
+STATE_APEX_IP="$(state_value APEX_IP)"
+STATE_WWW_CNAME="$(state_value WWW_CNAME)"
+APEX_IP="${1:-${APEX_IP:-${STATE_APEX_IP:-}}}"
+WWW_CNAME="${2:-${WWW_CNAME:-${STATE_WWW_CNAME:-}}}"
+
 usage() {
+  local usage_apex="${APEX_IP:-${STATE_APEX_IP:-$DEFAULT_APEX_IP}}"
+  local usage_www="${WWW_CNAME:-${STATE_WWW_CNAME:-$DEFAULT_WWW_CNAME}}"
+  usage_www="${usage_www%.}."
   cat >&2 <<EOF
 Usage: $0 [apex_ip] [www_cname]
 
 Checks local BIND and public DNS for every local zone:
-  @   A     ${APEX_IP}
-  www CNAME ${WWW_CNAME}
+  @   A     ${usage_apex}
+  www CNAME ${usage_www}
 
 Set LIMIT=10 $0 to check only the first 10 zones.
+If arguments are omitted, expected values come from environment variables,
+then $STATE_FILE, then script defaults.
 EOF
 }
 
@@ -52,6 +68,22 @@ dig_short() {
   dig "$resolver" +time=3 +tries=1 +short "$type" "$name" 2>/dev/null | sed 's/[[:space:]]*$//'
 }
 
+infer_local_target() {
+  local file domain inferred_a inferred_www
+  for file in "$@"; do
+    is_live_zone_file "$file" || continue
+    domain="$(zone_domain "$file")"
+    is_public_domain_zone "$domain" || continue
+    inferred_a="$(dig_short @127.0.0.1 "$domain" A | head -n 1)"
+    inferred_www="$(dig_short @127.0.0.1 "www.$domain" CNAME | head -n 1)"
+    if [[ -n "$inferred_a" && -n "$inferred_www" ]]; then
+      printf '%s\t%s\n' "$inferred_a" "$inferred_www"
+      return 0
+    fi
+  done
+  return 1
+}
+
 join_csv() {
   paste -sd ',' - | sed 's/,/, /g'
 }
@@ -86,6 +118,7 @@ main() {
 
   shopt -s nullglob
   local files=(/var/named/db.* /etc/bind/zones/db.*)
+  local inferred=""
   local checked=0
   local ok=0
   local local_failed=0
@@ -95,6 +128,18 @@ main() {
     echo "No BIND zone files found under /var/named or /etc/bind/zones." >&2
     exit 2
   fi
+
+  if [[ -z "$APEX_IP" || -z "$WWW_CNAME" ]]; then
+    inferred="$(infer_local_target "${files[@]}" || true)"
+    if [[ -n "$inferred" ]]; then
+      APEX_IP="${APEX_IP:-${inferred%%$'\t'*}}"
+      WWW_CNAME="${WWW_CNAME:-${inferred#*$'\t'}}"
+    fi
+  fi
+  APEX_IP="${APEX_IP:-$DEFAULT_APEX_IP}"
+  WWW_CNAME="${WWW_CNAME:-$DEFAULT_WWW_CNAME}"
+  WWW_CNAME="${WWW_CNAME%.}."
+  echo "Expected target: @ A ${APEX_IP}, www CNAME ${WWW_CNAME}"
 
   for file in "${files[@]}"; do
     local domain line status

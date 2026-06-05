@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-APEX_IP="${1:-216.150.1.1}"
-WWW_CNAME="${2:-c2e5a009d99b9e9a.vercel-dns-017.com.}"
+STATE_FILE="${VERCEL_DNS_STATE_FILE:-/var/lib/vps-panel/vercel-dns-target.env}"
+DEFAULT_APEX_IP="${DEFAULT_APEX_IP:-216.150.1.1}"
+DEFAULT_WWW_CNAME="${DEFAULT_WWW_CNAME:-c2e5a009d99b9e9a.vercel-dns-017.com.}"
+APEX_IP="${1:-${APEX_IP:-$DEFAULT_APEX_IP}}"
+WWW_CNAME="${2:-${WWW_CNAME:-$DEFAULT_WWW_CNAME}}"
 TTL="${TTL:-60}"
 STAMP="$(date +%Y%m%d%H%M%S)"
 
@@ -15,6 +18,8 @@ Updates every local BIND zone file so:
   www ${TTL} IN CNAME ${WWW_CNAME}
 
 Set TTL=300 $0 to use a different TTL.
+The chosen target is saved to $STATE_FILE so verify-vercel-dns-public.sh can
+reuse the same values without repeating arguments.
 EOF
 }
 
@@ -41,6 +46,16 @@ bind_service() {
   else
     printf 'bind9'
   fi
+}
+
+save_target_state() {
+  install -d -m 0755 "$(dirname "$STATE_FILE")"
+  cat > "$STATE_FILE" <<EOF
+APEX_IP=$APEX_IP
+WWW_CNAME=$WWW_CNAME
+TTL=$TTL
+UPDATED_AT=$(date -Iseconds)
+EOF
 }
 
 zone_domain() {
@@ -223,6 +238,9 @@ main() {
   if [[ "$failed" -gt 0 ]]; then
     echo "Failed zones:"
     printf '  %s\n' "${failed_domains[@]}"
+  else
+    save_target_state
+    echo "Saved Vercel DNS target state to $STATE_FILE"
   fi
   echo "Authoritative DNS is reloaded now. External caches may still honor old TTL until they expire."
   [[ "$failed" -eq 0 ]]
