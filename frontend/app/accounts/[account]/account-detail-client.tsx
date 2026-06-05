@@ -1,7 +1,8 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, Link2, RefreshCw, Save } from "lucide-react";
+import Link from "next/link";
+import { KeyRound, Link2, RefreshCw, Save, SquareTerminal } from "lucide-react";
 import { useState } from "react";
 import { apiGet, apiPatch, apiPost } from "@/lib/api";
 
@@ -107,10 +108,16 @@ export function AccountDetailClient({ accountId }: { accountId: string }) {
           <h1 className="text-2xl font-semibold">{data?.username ?? "Account"}</h1>
           <p className="mt-1 text-sm text-panel-muted">{data?.email ?? "No email"} · {data?.homeRoot ?? ""}</p>
         </div>
-        <button className="flex h-10 items-center gap-2 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50" onClick={() => refresh()} type="button">
-          <RefreshCw size={15} />
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <Link className="flex h-10 items-center gap-2 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50" href={`/accounts/${accountId}/terminal`}>
+            <SquareTerminal size={15} />
+            Terminal
+          </Link>
+          <button className="flex h-10 items-center gap-2 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50" onClick={() => refresh()} type="button">
+            <RefreshCw size={15} />
+            Refresh
+          </button>
+        </div>
       </div>
       {notice ? <div className="rounded-md border border-panel-line bg-white p-3 text-sm text-slate-700">{notice}</div> : null}
 

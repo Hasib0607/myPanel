@@ -6,14 +6,15 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { apiBase } from "@/lib/api";
 
-function wsUrl(): string {
+function wsUrl(accountId?: string): string {
   const base = apiBase.startsWith("/")
     ? `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}${apiBase}`
     : apiBase.replace(/^https:/, "wss:").replace(/^http:/, "ws:");
-  return `${base}/terminal/ws`;
+  const params = accountId ? `?accountId=${encodeURIComponent(accountId)}` : "";
+  return `${base}/terminal/ws${params}`;
 }
 
-export function TerminalClient() {
+export function TerminalClient({ accountId }: { accountId?: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -56,7 +57,7 @@ export function TerminalClient() {
       ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
     };
 
-    const ws = new WebSocket(wsUrl());
+    const ws = new WebSocket(wsUrl(accountId));
 
     ws.onopen = () => {
       fitAddon.fit();
@@ -96,7 +97,7 @@ export function TerminalClient() {
       ws.close();
       term.dispose();
     };
-  }, []);
+  }, [accountId]);
 
   return <div ref={containerRef} className="h-full w-full" />;
 }
