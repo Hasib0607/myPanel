@@ -14,7 +14,26 @@ PANEL_DOMAIN="${PANEL_DOMAIN:-}"
 PANEL_PUBLIC_SCHEME="${PANEL_PUBLIC_SCHEME:-http}"
 SSL_EMAIL="${SSL_EMAIL:-}"
 ENABLE_SSL="${ENABLE_SSL:-false}"
-VPS_IP="${VPS_IP:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
+VPS_IP_WAS_PROVIDED="${VPS_IP+x}"
+
+detect_vps_ip() {
+  local ip=""
+  if command -v curl >/dev/null 2>&1; then
+    ip="$(curl -fsS --max-time 3 https://api.ipify.org 2>/dev/null || true)"
+  fi
+  if [[ -z "$ip" ]] && command -v curl >/dev/null 2>&1; then
+    ip="$(curl -fsS --max-time 3 https://ifconfig.me/ip 2>/dev/null || true)"
+  fi
+  if [[ -z "$ip" ]]; then
+    ip="$(hostname -I 2>/dev/null | awk '{print $1}')" || true
+  fi
+  if [[ -z "$ip" ]]; then
+    ip="$(hostname -i 2>/dev/null | awk '{print $1}')" || true
+  fi
+  echo "${ip:-127.0.0.1}"
+}
+
+VPS_IP="${VPS_IP:-$(detect_vps_ip)}"
 VPS_IP="${VPS_IP:-127.0.0.1}"
 
 usage() {
@@ -97,7 +116,11 @@ CPANEL_LOGIN_PORT="${file_cpanel_login_port:-$CPANEL_LOGIN_PORT}"
 PANEL_PORT="${file_panel_port:-$PANEL_PORT}"
 FRONTEND_PORT="${file_frontend_port:-$FRONTEND_PORT}"
 PANEL_DOMAIN="${PANEL_DOMAIN:-$file_panel_domain}"
-VPS_IP="${file_vps_ip:-$VPS_IP}"
+if [[ -z "$VPS_IP_WAS_PROVIDED" && "$VPS_IP" == "127.0.0.1" && -n "$file_vps_ip" ]]; then
+  VPS_IP="$file_vps_ip"
+elif [[ -z "$VPS_IP_WAS_PROVIDED" && -n "$file_vps_ip" && "$file_vps_ip" != "$VPS_IP" ]]; then
+  echo "Detected current server IP $VPS_IP; replacing stale .env VPS_IP $file_vps_ip."
+fi
 PANEL_PUBLIC_SCHEME="${file_public_scheme:-$PANEL_PUBLIC_SCHEME}"
 
 if [[ "$PANEL_LOGIN_PORT" == "2083" ]]; then
@@ -146,7 +169,7 @@ set_env_value CPANEL_LOGIN_PORT "$CPANEL_LOGIN_PORT"
 set_env_value NEXT_PUBLIC_PANEL_LOGIN_PORT "$PANEL_LOGIN_PORT"
 set_env_value NEXT_PUBLIC_CPANEL_LOGIN_PORT "$CPANEL_LOGIN_PORT"
 set_env_value FRONTEND_URL "$PANEL_PUBLIC_SCHEME://$PANEL_PUBLIC_HOST:$PANEL_LOGIN_PORT"
-set_env_value NEXT_PUBLIC_API_URL "$PANEL_PUBLIC_SCHEME://$PANEL_PUBLIC_HOST:$PANEL_LOGIN_PORT/api/v1"
+set_env_value NEXT_PUBLIC_API_URL "/api/v1"
 set_env_value VPS_IP "$VPS_IP"
 if [[ -n "$PANEL_DOMAIN" ]]; then
   set_env_value PANEL_DOMAIN "$PANEL_DOMAIN"

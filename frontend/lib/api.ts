@@ -4,13 +4,24 @@ function resolveApiBase() {
 
   if (typeof window !== "undefined") {
     const configuredUrl = new URL(configured, window.location.origin);
+    const configuredPath = configuredUrl.pathname.replace(/\/$/, "");
     const browserIsLocal = ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
     const apiIsLocal = ["localhost", "127.0.0.1", "::1"].includes(configuredUrl.hostname);
     const sameHostname = configuredUrl.hostname === window.location.hostname;
     const sameOrigin = configuredUrl.origin === window.location.origin;
+    const panelPort = process.env.NEXT_PUBLIC_PANEL_LOGIN_PORT || configuredUrl.port;
+    const browserUsesDefaultPort = !window.location.port || window.location.port === "80" || window.location.port === "443";
+    const sameHostApiBase = () => {
+      if (window.location.protocol === "https:" || browserIsLocal || !browserUsesDefaultPort || !panelPort) {
+        return "/api/v1";
+      }
+      return `${window.location.protocol}//${window.location.hostname}:${panelPort}/api/v1`;
+    };
 
-    if (apiIsLocal && !browserIsLocal) return "/api/v1";
-    if (sameHostname && !sameOrigin) return "/api/v1";
+    if (configuredPath === "/api/v1" && !browserIsLocal) return sameHostApiBase();
+    if (window.location.protocol === "https:" && configuredUrl.protocol === "http:") return sameHostApiBase();
+    if (apiIsLocal && !browserIsLocal) return sameHostApiBase();
+    if (sameHostname && !sameOrigin) return sameHostApiBase();
   }
 
   return configured;
@@ -47,7 +58,7 @@ async function fetchJson<T>(path: string, init: RequestInit): Promise<T> {
   const data = await response.json().catch(() => null);
   if (!response.ok) {
     if (response.status === 401 && typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
-      window.location.assign("/api/v1/auth/logout?next=/login");
+      window.location.assign(apiUrl("/auth/logout?next=/login"));
     }
     const issueText = Array.isArray(data?.issues)
       ? data.issues

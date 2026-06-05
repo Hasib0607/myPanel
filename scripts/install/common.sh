@@ -3,7 +3,15 @@
 
 detect_vps_ip() {
   local ip=""
-  ip="$(hostname -I 2>/dev/null | awk '{print $1}')" || true
+  if command -v curl >/dev/null 2>&1; then
+    ip="$(curl -fsS --max-time 3 https://api.ipify.org 2>/dev/null || true)"
+  fi
+  if [[ -z "$ip" ]] && command -v curl >/dev/null 2>&1; then
+    ip="$(curl -fsS --max-time 3 https://ifconfig.me/ip 2>/dev/null || true)"
+  fi
+  if [[ -z "$ip" ]]; then
+    ip="$(hostname -I 2>/dev/null | awk '{print $1}')" || true
+  fi
   if [[ -z "$ip" ]]; then
     ip="$(hostname -i 2>/dev/null | awk '{print $1}')" || true
   fi
@@ -397,7 +405,7 @@ PANEL_UPDATE_POLL_ENABLED=true
 PANEL_UPDATE_POLL_REMOTE=origin
 PANEL_UPDATE_POLL_INTERVAL_MS=60000
 FRONTEND_URL=$PANEL_PUBLIC_SCHEME://$PANEL_PUBLIC_HOST:$PANEL_LOGIN_PORT
-NEXT_PUBLIC_API_URL=$PANEL_PUBLIC_SCHEME://$PANEL_PUBLIC_HOST:$PANEL_LOGIN_PORT/api/v1
+NEXT_PUBLIC_API_URL=/api/v1
 NEXT_PUBLIC_PANEL_LOGIN_PORT=$PANEL_LOGIN_PORT
 NEXT_PUBLIC_CPANEL_LOGIN_PORT=$CPANEL_LOGIN_PORT
 DATABASE_URL=$DATABASE_URL
