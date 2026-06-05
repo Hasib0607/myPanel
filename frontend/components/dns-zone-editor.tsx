@@ -6,6 +6,7 @@ import { Download, Plus, Save, Trash2 } from "lucide-react";
 import { apiDelete, apiGet, apiPatch, apiPost } from "@/lib/api";
 
 type DnsRecordType = "A" | "AAAA" | "CNAME" | "MX" | "TXT" | "NS" | "SRV" | "CAA";
+type DnsRecordTab = "ALL" | DnsRecordType;
 
 type DnsRecord = {
   id: string;
@@ -24,6 +25,7 @@ type ZoneExport = {
 };
 
 const recordTypes: DnsRecordType[] = ["A", "AAAA", "CNAME", "MX", "TXT", "NS", "SRV", "CAA"];
+const recordTabs: DnsRecordTab[] = ["ALL", ...recordTypes];
 
 type DnsZoneEditorApi = {
   recordsPath?: (domainId: string) => string;
@@ -34,7 +36,7 @@ type DnsZoneEditorApi = {
   deletePath?: (domainId: string, record: DnsRecord) => string;
 };
 
-export function DnsZoneEditor({ api, domainId, initialType = "A" }: { api?: DnsZoneEditorApi; domainId: string; initialType?: DnsRecordType }) {
+export function DnsZoneEditor({ api, domainId, initialType = "ALL" }: { api?: DnsZoneEditorApi; domainId: string; initialType?: DnsRecordTab }) {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState({
     type: "A" as DnsRecordType,
@@ -45,9 +47,13 @@ export function DnsZoneEditor({ api, domainId, initialType = "A" }: { api?: DnsZ
   });
   const [editing, setEditing] = useState<Record<string, Partial<DnsRecord>>>({});
   const [error, setError] = useState("");
+  const [activeTab, setActiveTab] = useState<DnsRecordTab>("ALL");
 
   useEffect(() => {
-    setDraft((current) => ({ ...current, type: initialType }));
+    setActiveTab(initialType);
+    if (initialType !== "ALL") {
+      setDraft((current) => ({ ...current, type: initialType }));
+    }
   }, [initialType]);
 
   const records = useQuery({
@@ -118,7 +124,19 @@ export function DnsZoneEditor({ api, domainId, initialType = "A" }: { api?: DnsZ
     onError: (err) => setError(err instanceof Error ? err.message : "Could not delete DNS record")
   });
 
-  const renderedRecords = useMemo(() => records.data ?? [], [records.data]);
+  const renderedRecords = useMemo(() => {
+    const items = records.data ?? [];
+    return activeTab === "ALL" ? items : items.filter((record) => record.type === activeTab);
+  }, [activeTab, records.data]);
+
+  const recordCounts = useMemo(() => {
+    const counts = new Map<DnsRecordTab, number>(recordTabs.map((type) => [type, 0]));
+    for (const record of records.data ?? []) {
+      counts.set("ALL", (counts.get("ALL") ?? 0) + 1);
+      counts.set(record.type, (counts.get(record.type) ?? 0) + 1);
+    }
+    return counts;
+  }, [records.data]);
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -141,8 +159,25 @@ export function DnsZoneEditor({ api, domainId, initialType = "A" }: { api?: DnsZ
   }
 
   return (
-    <section className="grid grid-cols-[1fr_440px] gap-6 p-8">
+    <section className="grid grid-cols-[minmax(0,1fr)_440px] gap-6 p-8">
       <div className="space-y-4">
+        <div className="flex flex-wrap gap-2">
+          {recordTabs.map((type) => (
+            <button
+              className={`h-9 rounded-md border px-3 text-sm font-semibold ${activeTab === type ? "border-panel-accent bg-panel-accent text-white" : "border-panel-line bg-white text-panel-ink hover:bg-slate-50"}`}
+              key={type}
+              onClick={() => {
+                setActiveTab(type);
+                if (type !== "ALL") setDraft((current) => ({ ...current, type }));
+              }}
+              type="button"
+            >
+              {type === "ALL" ? "All zones" : type}
+              <span className={activeTab === type ? "ml-2 text-white/80" : "ml-2 text-panel-muted"}>{recordCounts.get(type) ?? 0}</span>
+            </button>
+          ))}
+        </div>
+
         <form className="grid grid-cols-[110px_1fr_2fr_110px_110px_100px] gap-2 rounded-md border border-panel-line bg-white p-3" onSubmit={submit}>
           <select className="h-10 rounded-md border border-panel-line px-2 text-sm" onChange={(event) => setDraft((current) => ({ ...current, type: event.target.value as DnsRecordType }))} value={draft.type}>
             {recordTypes.map((type) => <option key={type}>{type}</option>)}
@@ -168,7 +203,13 @@ export function DnsZoneEditor({ api, domainId, initialType = "A" }: { api?: DnsZ
               </tr>
             </thead>
             <tbody>
-              {renderedRecords.map((record) => {
+              {renderedRecords.length === 0 ? (
+                <tr>
+                  <td className="px-4 py-6 text-sm text-panel-muted" colSpan={6}>
+                    No {activeTab === "ALL" ? "DNS" : activeTab} records found for this domain.
+                  </td>
+                </tr>
+              ) : renderedRecords.map((record) => {
                 const row = { ...record, ...(editing[record.id] ?? {}) };
                 return (
                   <tr key={record.id} className="border-t border-panel-line">

@@ -77,7 +77,12 @@ const bulkDomainSchema = z.object({
   domains: z.array(domainNameSchema).min(1).max(500),
   forceSsl: z.boolean().default(true),
   skipExisting: z.boolean().default(true),
-  publish: z.boolean().default(true)
+  publish: z.boolean().default(true),
+  issueSsl: z.boolean().default(false)
+});
+const bulkDomainActionSchema = z.object({
+  domainIds: z.array(z.string()).min(1).max(250),
+  action: z.enum(["activate", "deactivate", "delete", "force_ssl", "issue_ssl"])
 });
 const fileQuerySchema = z.object({ path: z.string().default(".") });
 const listFileQuerySchema = z.object({
@@ -168,6 +173,17 @@ const dnsRecordSchema = z.object({
   value: z.string().trim().min(1),
   ttl: z.number().int().min(60).max(86400).default(3600),
   priority: z.number().int().min(0).max(65535).nullable().optional()
+});
+const bulkZoneMatchSchema = z.object({
+  type: z.enum(["A", "AAAA", "CNAME", "MX", "TXT", "NS", "SRV", "CAA"]),
+  name: z.string().trim().min(1)
+});
+const bulkZoneActionSchema = z.object({
+  domainIds: z.array(z.string()).min(1).max(250),
+  action: z.enum(["add", "edit", "delete"]),
+  record: dnsRecordSchema.optional(),
+  match: bulkZoneMatchSchema.optional(),
+  patch: dnsRecordSchema.partial().optional()
 });
 const subdomainSchema = z.object({
   name: z.string().trim().toLowerCase().regex(/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/),
@@ -780,6 +796,26 @@ async function accountSslPreflight(request: any, domain: { id: string; name: str
   };
 }
 
+async function queueAccountBulkDomainSslJobs(account: { homeRoot: string }, domains: Array<{ id: string; name: string; documentRoot?: string | null; forceSsl: boolean }>) {
+  const jobs = [];
+  for (const [index, domain] of domains.entries()) {
+    const job = await sslQueue.add("issue", {
+      domainId: domain.id,
+      domain: domain.name,
+      email: `admin@${domain.name}`,
+      webRoot: path.join(account.homeRoot, normalizeDocumentRoot(domain.documentRoot)),
+      includeWww: true,
+      forceSsl: domain.forceSsl,
+      source: "account-bulk-domain-ssl"
+    }, {
+      delay: index * 60_000,
+      attempts: 1
+    });
+    jobs.push({ domainId: domain.id, domain: domain.name, jobId: job.id });
+  }
+  return jobs;
+}
+
 function preflightChallengeChecks(preflight: { checks: unknown[]; localChecks?: unknown[] }) {
   return preflight.localChecks?.length ? preflight.localChecks : preflight.checks;
 }
@@ -1121,6 +1157,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     });
     const uniqueDomains = [...new Set(body.domains)];
     const results: Array<{ input: string; name: string; status: "created" | "skipped" | "failed"; error?: string; publishWarning?: string }> = [];
+    const sslTargets: Array<{ id: string; name: string; documentRoot?: string | null; forceSsl: boolean }> = [];
     let currentDomainCount = account._count.domains;
 
     for (const name of uniqueDomains) {
@@ -1157,6 +1194,9 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
           }
         }
         await audit(request, { action: "CREATE", resource: "domain", resourceId: domain.id, description: `Account bulk-created domain ${domain.name}` });
+        if (body.issueSsl) {
+          sslTargets.push({ id: domain.id, name: domain.name, documentRoot: domain.documentRoot, forceSsl: domain.forceSsl });
+        }
         results.push({ input: name, name: domain.name, status: "created", publishWarning });
       } catch (error) {
         if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002" && body.skipExisting) {
@@ -1171,7 +1211,70 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       skipped: results.filter((result) => result.status === "skipped").length,
       failed: results.filter((result) => result.status === "failed").length
     };
-    return reply.code(summary.failed > 0 ? 207 : 201).send({ ...summary, total: results.length, results });
+    const sslJobs = body.issueSsl ? await queueAccountBulkDomainSslJobs(account, sslTargets) : [];
+    return reply.code(summary.failed > 0 ? 207 : 201).send({ ...summary, total: results.length, results, sslQueued: sslJobs.length, sslJobs });
+  });
+
+  app.post("/domains/bulk-action", async (request: any) => {
+    const body = bulkDomainActionSchema.parse(request.body);
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    const uniqueDomainIds = [...new Set(body.domainIds)];
+    const domains = await prisma.domain.findMany({
+      where: { id: { in: uniqueDomainIds }, accountId: account.id },
+      select: { id: true, name: true, documentRoot: true, forceSsl: true }
+    });
+    const foundIds = new Set(domains.map((domain) => domain.id));
+    const missing = uniqueDomainIds.filter((id) => !foundIds.has(id));
+    if (missing.length > 0) {
+      throw app.httpErrors.notFound(`Could not find ${missing.length} selected domain(s).`);
+    }
+
+    if (body.action === "delete") {
+      await prisma.domain.deleteMany({ where: { id: { in: uniqueDomainIds }, accountId: account.id } });
+      await audit(request, {
+        action: "DELETE",
+        resource: "domain",
+        description: `Account bulk deleted ${domains.length} domain(s)`,
+        metadata: JSON.parse(JSON.stringify({ domains })) as Prisma.InputJsonValue
+      });
+      return { ok: true, action: body.action, affected: domains.length, sslQueued: 0, sslJobs: [] };
+    }
+
+    if (body.action === "activate" || body.action === "deactivate") {
+      const status = body.action === "activate" ? "ACTIVE" : "SUSPENDED";
+      await prisma.domain.updateMany({ where: { id: { in: uniqueDomainIds }, accountId: account.id }, data: { status } });
+      await audit(request, {
+        action: "UPDATE",
+        resource: "domain",
+        description: `Account bulk updated ${domains.length} domain(s) to ${status}`,
+        metadata: JSON.parse(JSON.stringify({ domains, status })) as Prisma.InputJsonValue
+      });
+      return { ok: true, action: body.action, affected: domains.length, sslQueued: 0, sslJobs: [] };
+    }
+
+    if (body.action === "force_ssl") {
+      await prisma.domain.updateMany({ where: { id: { in: uniqueDomainIds }, accountId: account.id }, data: { forceSsl: true } });
+      await audit(request, {
+        action: "UPDATE",
+        resource: "domain",
+        description: `Account bulk enabled Force SSL for ${domains.length} domain(s)`,
+        metadata: JSON.parse(JSON.stringify({ domains })) as Prisma.InputJsonValue
+      });
+      return { ok: true, action: body.action, affected: domains.length, sslQueued: 0, sslJobs: [] };
+    }
+
+    const updatedDomains = await prisma.domain.findMany({
+      where: { id: { in: uniqueDomainIds }, accountId: account.id },
+      select: { id: true, name: true, documentRoot: true, forceSsl: true }
+    });
+    const sslJobs = await queueAccountBulkDomainSslJobs(account, updatedDomains);
+    await audit(request, {
+      action: "APPLY",
+      resource: "ssl",
+      description: `Account bulk queued SSL for ${sslJobs.length} domain(s)`,
+      metadata: JSON.parse(JSON.stringify({ domains: updatedDomains, sslJobs })) as Prisma.InputJsonValue
+    });
+    return { ok: true, action: body.action, affected: domains.length, sslQueued: sslJobs.length, sslJobs };
   });
 
   app.get("/domains/:domainId", async (request: any) => {
@@ -1277,6 +1380,69 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     });
     await audit(request, { action: "CREATE", resource: "subdomain", resourceId: result.subdomain.id, description: `Account created subdomain ${body.name}.${domain.name}` });
     return reply.code(201).send(result);
+  });
+
+  app.post("/domains/dns/bulk-zone-action", async (request: any, reply) => {
+    const body = bulkZoneActionSchema.parse(request.body);
+    const uniqueDomainIds = [...new Set(body.domainIds)];
+    const domains = await prisma.domain.findMany({
+      where: { id: { in: uniqueDomainIds }, accountId: accountId(request) },
+      select: { id: true, name: true }
+    });
+    const foundIds = new Set(domains.map((domain) => domain.id));
+    const missing = uniqueDomainIds.filter((id) => !foundIds.has(id));
+    if (missing.length > 0) throw app.httpErrors.notFound(`Could not find ${missing.length} selected zone(s).`);
+
+    if (body.action === "add") {
+      if (!body.record) throw app.httpErrors.badRequest("Record data is required for bulk add.");
+      const created = [];
+      for (const domain of domains) {
+        created.push(await prisma.dnsRecord.create({
+          data: {
+            domainId: domain.id,
+            type: body.record.type,
+            name: body.record.name,
+            value: body.record.value,
+            ttl: body.record.ttl,
+            priority: body.record.priority ?? null
+          }
+        }));
+      }
+      await audit(request, { action: "CREATE", resource: "dns_record", description: `Account bulk added ${body.record.type} record to ${created.length} zone(s)`, metadata: { domains: domains.map((domain) => domain.name), record: body.record } as any });
+      return reply.code(201).send({ ok: true, action: body.action, affected: created.length });
+    }
+
+    if (!body.match) throw app.httpErrors.badRequest("Record match type and name are required.");
+
+    if (body.action === "delete") {
+      const deleted = await prisma.dnsRecord.deleteMany({
+        where: { domainId: { in: uniqueDomainIds }, type: body.match.type, name: body.match.name }
+      });
+      await audit(request, { action: "DELETE", resource: "dns_record", description: `Account bulk deleted ${body.match.type} ${body.match.name} record from ${deleted.count} zone(s)`, metadata: { domains: domains.map((domain) => domain.name), match: body.match } as any });
+      return { ok: true, action: body.action, affected: deleted.count };
+    }
+
+    if (!body.patch || Object.keys(body.patch).length === 0) throw app.httpErrors.badRequest("Patch data is required for bulk edit.");
+    const records = await prisma.dnsRecord.findMany({
+      where: { domainId: { in: uniqueDomainIds }, type: body.match.type, name: body.match.name }
+    });
+    let updated = 0;
+    for (const existing of records) {
+      const merged = dnsRecordSchema.parse({ ...existing, ...body.patch });
+      await prisma.dnsRecord.update({
+        where: { id: existing.id },
+        data: {
+          type: merged.type,
+          name: merged.name,
+          value: merged.value,
+          ttl: merged.ttl,
+          priority: merged.priority ?? null
+        }
+      });
+      updated += 1;
+    }
+    await audit(request, { action: "UPDATE", resource: "dns_record", description: `Account bulk edited ${body.match.type} ${body.match.name} record in ${updated} zone(s)`, metadata: { domains: domains.map((domain) => domain.name), match: body.match, patch: body.patch } as any });
+    return { ok: true, action: body.action, affected: updated };
   });
 
   app.get("/domains/:domainId/dns", async (request: any) => {

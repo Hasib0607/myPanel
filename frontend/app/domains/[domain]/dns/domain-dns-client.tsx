@@ -1,11 +1,13 @@
 import { PageHeader } from "@/components/page-header";
 import { DnsZoneEditor } from "@/components/dns-zone-editor";
 
-export function DomainDnsClient({ domainId }: { domainId: string }) {
+type DnsRecordType = "ALL" | "A" | "AAAA" | "CNAME" | "MX" | "TXT" | "NS" | "SRV" | "CAA";
+
+export function DomainDnsClient({ domainId, initialType = "ALL" }: { domainId: string; initialType?: DnsRecordType }) {
   return (
     <>
-      <PageHeader title="DNS Records" description="Per-domain visual DNS records and raw BIND zone editing." />
-      <DnsZoneEditor domainId={domainId} />
+      <PageHeader title="Manage DNS Records" description="Current records, type tabs, and raw BIND zone export for this domain." />
+      <DnsZoneEditor domainId={domainId} initialType={initialType} />
     </>
   );
 }

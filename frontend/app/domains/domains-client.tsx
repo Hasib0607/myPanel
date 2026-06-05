@@ -71,7 +71,19 @@ type BulkDomainResponse = {
   skipped: number;
   failed: number;
   total: number;
+  sslQueued?: number;
+  sslJobs?: Array<{ domainId: string; domain: string; jobId: string | number | null }>;
   results: BulkDomainResult[];
+};
+
+type BulkDomainAction = "activate" | "deactivate" | "delete" | "force_ssl" | "issue_ssl";
+
+type BulkDomainActionResponse = {
+  ok: boolean;
+  action: BulkDomainAction;
+  affected: number;
+  sslQueued?: number;
+  sslJobs?: Array<{ domainId: string; domain: string; jobId: string | number | null }>;
 };
 
 function statusClass(status: DomainStatus) {
@@ -127,10 +139,13 @@ export function DomainsClient({
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkText, setBulkText] = useState("");
   const [bulkForceSsl, setBulkForceSsl] = useState(true);
+  const [bulkIssueSsl, setBulkIssueSsl] = useState(false);
   const [bulkPublish, setBulkPublish] = useState(true);
   const [bulkSkipExisting, setBulkSkipExisting] = useState(true);
   const [bulkResults, setBulkResults] = useState<BulkDomainResponse | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Domain | null>(null);
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
+  const [selectedDomainIds, setSelectedDomainIds] = useState<string[]>([]);
   const [deleteSubdomainTarget, setDeleteSubdomainTarget] = useState<{ domainId: string; subdomainId: string; fqdn: string } | null>(null);
   const normalizedNewDomain = normalizeDomainInput(newDomain);
   const parsedBulkDomains = useMemo(() => {
@@ -151,6 +166,11 @@ export function DomainsClient({
     queryKey: ["domains", apiBase, search],
     queryFn: () => apiGet<DomainListResponse>(queryPath)
   });
+  const visibleDomains = domains.data?.items ?? [];
+  const visibleDomainIds = visibleDomains.map((domain) => domain.id);
+  const visibleSelectedCount = visibleDomainIds.filter((id) => selectedDomainIds.includes(id)).length;
+  const allVisibleSelected = visibleDomainIds.length > 0 && visibleSelectedCount === visibleDomainIds.length;
+  const selectedCount = selectedDomainIds.length;
 
   const deployments = useQuery({
     queryKey: ["deployments", deploymentApiBase, "domain-hosting"],
@@ -177,13 +197,14 @@ export function DomainsClient({
     mutationFn: () => apiPost<BulkDomainResponse>(`${apiBase}/bulk`, {
       domains: parsedBulkDomains,
       forceSsl: bulkForceSsl,
+      issueSsl: bulkPublish && bulkIssueSsl,
       skipExisting: bulkSkipExisting,
       publish: bulkPublish
     }),
     onSuccess: async (response) => {
       setError("");
       setBulkResults(response);
-      setNotice(`Bulk add complete: ${response.created} created, ${response.skipped} skipped, ${response.failed} failed.`);
+      setNotice(`Bulk add complete: ${response.created} created, ${response.skipped} skipped, ${response.failed} failed${response.sslQueued ? `, ${response.sslQueued} SSL jobs queued` : ""}.`);
       if (response.failed === 0) setBulkText("");
       await queryClient.invalidateQueries({ queryKey: ["domains"] });
       await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
@@ -224,6 +245,32 @@ export function DomainsClient({
       await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
     onError: (err) => setError(err instanceof Error ? err.message : "Could not delete subdomain")
+  });
+
+  const bulkDomainAction = useMutation({
+    mutationFn: (action: BulkDomainAction) =>
+      apiPost<BulkDomainActionResponse>(`${apiBase}/bulk-action`, {
+        domainIds: selectedDomainIds,
+        action
+      }),
+    onSuccess: async (response) => {
+      setError("");
+      setConfirmBulkDelete(false);
+      setSelectedDomainIds([]);
+      const actionLabel = response.action === "activate"
+        ? "activated"
+        : response.action === "deactivate"
+          ? "deactivated"
+          : response.action === "delete"
+            ? "deleted"
+            : response.action === "force_ssl"
+              ? "updated for Force SSL"
+              : "queued for SSL";
+      setNotice(`${response.affected} domain${response.affected === 1 ? "" : "s"} ${actionLabel}${response.sslQueued ? `, ${response.sslQueued} SSL jobs queued` : ""}.`);
+      await queryClient.invalidateQueries({ queryKey: ["domains"] });
+      await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : "Could not run selected domain action")
   });
 
   const publishDomain = useMutation({
@@ -312,6 +359,23 @@ export function DomainsClient({
     createBulkDomains.mutate();
   }
 
+  function toggleDomainSelection(domainId: string) {
+    setSelectedDomainIds((current) =>
+      current.includes(domainId)
+        ? current.filter((id) => id !== domainId)
+        : [...current, domainId]
+    );
+  }
+
+  function toggleVisibleSelection() {
+    setSelectedDomainIds((current) => {
+      if (allVisibleSelected) {
+        return current.filter((id) => !visibleDomainIds.includes(id));
+      }
+      return [...new Set([...current, ...visibleDomainIds])];
+    });
+  }
+
   return (
     <>
       <PageHeader
@@ -384,13 +448,78 @@ export function DomainsClient({
         ) : null}
 
         <div className="rounded-md border border-panel-line bg-white">
-          <div className="flex items-center justify-between border-b border-panel-line px-4 py-3 text-sm">
-            <span className="font-semibold">Domain Inventory</span>
-            <span className="text-panel-muted">{domains.data ? `${domains.data.total} total` : "Loading..."}</span>
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-panel-line px-4 py-3 text-sm">
+            <div className="flex items-center gap-3">
+              <span className="font-semibold">Domain Inventory</span>
+              {selectedCount > 0 ? <span className="text-panel-muted">{selectedCount} selected</span> : null}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {selectedCount > 0 ? (
+                <>
+                  <button
+                    className="h-9 rounded-md border border-panel-line px-3 text-sm font-semibold hover:bg-slate-50 disabled:opacity-60"
+                    disabled={bulkDomainAction.isPending}
+                    onClick={() => bulkDomainAction.mutate("activate")}
+                    type="button"
+                  >
+                    Active
+                  </button>
+                  <button
+                    className="h-9 rounded-md border border-panel-line px-3 text-sm font-semibold hover:bg-slate-50 disabled:opacity-60"
+                    disabled={bulkDomainAction.isPending}
+                    onClick={() => bulkDomainAction.mutate("deactivate")}
+                    type="button"
+                  >
+                    Deactive
+                  </button>
+                  <button
+                    className="h-9 rounded-md border border-panel-line px-3 text-sm font-semibold hover:bg-slate-50 disabled:opacity-60"
+                    disabled={bulkDomainAction.isPending}
+                    onClick={() => bulkDomainAction.mutate("force_ssl")}
+                    type="button"
+                  >
+                    Force SSL
+                  </button>
+                  <button
+                    className="h-9 rounded-md border border-panel-line px-3 text-sm font-semibold hover:bg-slate-50 disabled:opacity-60"
+                    disabled={bulkDomainAction.isPending}
+                    onClick={() => bulkDomainAction.mutate("issue_ssl")}
+                    type="button"
+                  >
+                    Issue SSL
+                  </button>
+                  <button
+                    className="h-9 rounded-md border border-red-200 px-3 text-sm font-semibold text-panel-danger hover:bg-red-50 disabled:opacity-60"
+                    disabled={bulkDomainAction.isPending}
+                    onClick={() => setConfirmBulkDelete(true)}
+                    type="button"
+                  >
+                    Delete
+                  </button>
+                  <button
+                    className="h-9 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50"
+                    onClick={() => setSelectedDomainIds([])}
+                    type="button"
+                  >
+                    Clear
+                  </button>
+                </>
+              ) : null}
+              <span className="text-panel-muted">{domains.data ? `${domains.data.total} total` : "Loading..."}</span>
+            </div>
           </div>
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs uppercase text-panel-muted">
               <tr>
+                <th className="w-12 px-4 py-3">
+                  <input
+                    aria-label="Select visible domains"
+                    checked={allVisibleSelected}
+                    disabled={visibleDomainIds.length === 0}
+                    onChange={toggleVisibleSelection}
+                    type="checkbox"
+                  />
+                </th>
                 <th className="px-4 py-3">Domain</th>
                 <th className="px-4 py-3">Status</th>
                 <th className="px-4 py-3">DNS</th>
@@ -402,9 +531,17 @@ export function DomainsClient({
               </tr>
             </thead>
             <tbody>
-              {(domains.data?.items ?? []).map((domain) => (
+              {visibleDomains.map((domain) => (
                 <Fragment key={domain.id}>
                   <tr className="border-t border-panel-line">
+                    <td className="px-4 py-3">
+                      <input
+                        aria-label={`Select ${domain.name}`}
+                        checked={selectedDomainIds.includes(domain.id)}
+                        onChange={() => toggleDomainSelection(domain.id)}
+                        type="checkbox"
+                      />
+                    </td>
                     <td className="px-4 py-3 font-medium">{domain.name}</td>
                     <td className="px-4 py-3">
                       <select
@@ -478,6 +615,7 @@ export function DomainsClient({
                   </tr>
                   {domain.subdomains.map((subdomain) => (
                     <tr key={subdomain.id} className="border-t border-panel-line bg-slate-50/60">
+                      <td className="px-4 py-3" />
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2 pl-4">
                           <Split className="text-panel-muted" size={15} />
@@ -563,10 +701,14 @@ export function DomainsClient({
                     value={bulkText}
                   />
                 </label>
-                <div className="grid gap-3 md:grid-cols-3">
+                <div className="grid gap-3 md:grid-cols-4">
                   <label className="flex items-center gap-2 rounded-md border border-panel-line px-3 py-2 text-sm">
                     <input checked={bulkForceSsl} onChange={(event) => setBulkForceSsl(event.target.checked)} type="checkbox" />
                     Force SSL
+                  </label>
+                  <label className="flex items-center gap-2 rounded-md border border-panel-line px-3 py-2 text-sm">
+                    <input checked={bulkIssueSsl} disabled={!bulkPublish} onChange={(event) => setBulkIssueSsl(event.target.checked)} type="checkbox" />
+                    Issue real SSL
                   </label>
                   <label className="flex items-center gap-2 rounded-md border border-panel-line px-3 py-2 text-sm">
                     <input checked={bulkPublish} onChange={(event) => setBulkPublish(event.target.checked)} type="checkbox" />
@@ -581,7 +723,7 @@ export function DomainsClient({
                   <div className="rounded-md border border-panel-line">
                     <div className="flex items-center justify-between border-b border-panel-line px-4 py-3 text-sm">
                       <span className="font-semibold">Import results</span>
-                      <span className="text-panel-muted">{bulkResults.created} created, {bulkResults.skipped} skipped, {bulkResults.failed} failed</span>
+                      <span className="text-panel-muted">{bulkResults.created} created, {bulkResults.skipped} skipped, {bulkResults.failed} failed{bulkResults.sslQueued ? `, ${bulkResults.sslQueued} SSL queued` : ""}</span>
                     </div>
                     <div className="max-h-56 overflow-auto">
                       {bulkResults.results.map((result) => (
@@ -721,6 +863,18 @@ export function DomainsClient({
         open={Boolean(deleteSubdomainTarget)}
         pending={deleteSubdomain.isPending}
         title="Delete subdomain?"
+      />
+      <ConfirmModal
+        confirmLabel="Delete selected"
+        message={`This removes ${selectedCount} selected domain${selectedCount === 1 ? "" : "s"} with their DNS records, mail accounts, subdomains, and deployment metadata.`}
+        onClose={() => setConfirmBulkDelete(false)}
+        onConfirm={() => {
+          setNotice("");
+          bulkDomainAction.mutate("delete");
+        }}
+        open={confirmBulkDelete}
+        pending={bulkDomainAction.isPending}
+        title="Delete selected domains?"
       />
       <ConfirmModal
         confirmLabel="Delete domain"

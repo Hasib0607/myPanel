@@ -22,6 +22,18 @@ const dnsRecordBaseSchema = z.object({
 
 const dnsRecordSchema = dnsRecordBaseSchema.superRefine((record, ctx) => validateRecord(record, ctx));
 const dnsRecordPatchSchema = dnsRecordBaseSchema.omit({ domainId: true }).partial();
+const bulkZoneRecordSchema = dnsRecordBaseSchema.omit({ domainId: true });
+const bulkZoneMatchSchema = z.object({
+  type: z.enum(["A", "AAAA", "CNAME", "MX", "TXT", "NS", "SRV", "CAA"]),
+  name: z.string().min(1)
+});
+const bulkZoneActionSchema = z.object({
+  domainIds: z.array(z.string()).min(1).max(250),
+  action: z.enum(["add", "edit", "delete"]),
+  record: bulkZoneRecordSchema.optional(),
+  match: bulkZoneMatchSchema.optional(),
+  patch: bulkZoneRecordSchema.partial().optional()
+});
 const nameServerBaseSchema = z.object({
   hostname: z.string().min(1).transform((value) => normalizeHostname(value)),
   ipv4: z.string().trim().optional().nullable(),
@@ -278,6 +290,61 @@ export const dnsRoutes: FastifyPluginAsync = async (app) => {
     const result = await sysagent.applyDnsZone({ domain: domain.name, zone });
     await audit(request, { action: "APPLY", resource: "dns", resourceId: domain.id, description: `Applied DNS zone for ${domain.name}`, metadata: { dryRunResult: result as any } });
     return reply.code(202).send({ domain: domain.name, zone, result });
+  });
+
+  app.post("/bulk-zone-action", async (request, reply) => {
+    const body = bulkZoneActionSchema.parse(request.body);
+    const domainIds = [...new Set(body.domainIds)];
+    const domains = await prisma.domain.findMany({ where: { id: { in: domainIds } }, select: { id: true, name: true } });
+    const foundIds = new Set(domains.map((domain) => domain.id));
+    const missing = domainIds.filter((id) => !foundIds.has(id));
+    if (missing.length > 0) throw app.httpErrors.notFound(`Could not find ${missing.length} selected zone(s).`);
+
+    if (body.action === "add") {
+      if (!body.record) throw app.httpErrors.badRequest("Record data is required for bulk add.");
+      const created = [];
+      for (const domain of domains) {
+        const input = dnsRecordSchema.parse({ ...body.record, domainId: domain.id });
+        created.push(await prisma.dnsRecord.create({ data: input }));
+        await redis.del(`dns_records:${domain.id}`);
+      }
+      await audit(request, { action: "CREATE", resource: "dns_record", description: `Bulk added ${body.record.type} record to ${created.length} zone(s)`, metadata: { domains: domains.map((domain) => domain.name), record: body.record } });
+      return reply.code(201).send({ ok: true, action: body.action, affected: created.length });
+    }
+
+    if (!body.match) throw app.httpErrors.badRequest("Record match type and name are required.");
+
+    if (body.action === "delete") {
+      const deleted = await prisma.dnsRecord.deleteMany({
+        where: { domainId: { in: domainIds }, type: body.match.type, name: body.match.name }
+      });
+      await Promise.all(domainIds.map((domainId) => redis.del(`dns_records:${domainId}`)));
+      await audit(request, { action: "DELETE", resource: "dns_record", description: `Bulk deleted ${body.match.type} ${body.match.name} record from ${deleted.count} zone(s)`, metadata: { domains: domains.map((domain) => domain.name), match: body.match } });
+      return { ok: true, action: body.action, affected: deleted.count };
+    }
+
+    if (!body.patch || Object.keys(body.patch).length === 0) throw app.httpErrors.badRequest("Patch data is required for bulk edit.");
+    const records = await prisma.dnsRecord.findMany({
+      where: { domainId: { in: domainIds }, type: body.match.type, name: body.match.name }
+    });
+    let updated = 0;
+    for (const existing of records) {
+      const merged = dnsRecordSchema.parse({ ...existing, ...body.patch, domainId: existing.domainId });
+      await prisma.dnsRecord.update({
+        where: { id: existing.id },
+        data: {
+          type: merged.type,
+          name: merged.name,
+          value: merged.value,
+          ttl: merged.ttl,
+          priority: merged.priority
+        }
+      });
+      await redis.del(`dns_records:${existing.domainId}`);
+      updated += 1;
+    }
+    await audit(request, { action: "UPDATE", resource: "dns_record", description: `Bulk edited ${body.match.type} ${body.match.name} record in ${updated} zone(s)`, metadata: { domains: domains.map((domain) => domain.name), match: body.match, patch: body.patch } });
+    return { ok: true, action: body.action, affected: updated };
   });
 
   app.post("/records", async (request, reply) => {

@@ -308,5 +308,5 @@ export const sslWorker = new Worker(
 
     throw new Error(`Unknown SSL job: ${job.name}`);
   },
-  { connection: redis }
+  { connection: redis, concurrency: 1 }
 );

@@ -13,6 +13,7 @@ import { sysagent } from "../lib/sysagent.js";
 import { nginxResourceName } from "../lib/nginxNames.js";
 import { renderZone } from "./dns.js";
 import { currentVpsIp } from "../lib/serverIp.js";
+import { sslQueue } from "../jobs/queues.js";
 
 export function normalizeDomainName(value: string) {
   return value
@@ -51,7 +52,13 @@ const createDomainSchema = z.object({
 const bulkCreateDomainSchema = createDomainSchema.omit({ name: true }).extend({
   domains: z.array(domainNameSchema).min(1).max(250),
   skipExisting: z.boolean().default(true),
-  publish: z.boolean().default(true)
+  publish: z.boolean().default(true),
+  issueSsl: z.boolean().default(false)
+});
+
+const bulkDomainActionSchema = z.object({
+  domainIds: z.array(z.string()).min(1).max(250),
+  action: z.enum(["activate", "deactivate", "delete", "force_ssl", "issue_ssl"])
 });
 
 const subdomainSchema = z.object({
@@ -458,6 +465,26 @@ async function createDomainWithDefaults(input: CreateDomainInput, nameServers: A
   });
 }
 
+async function queueBulkDomainSslJobs(domains: Array<{ id: string; name: string; forceSsl: boolean }>) {
+  const jobs = [];
+  for (const [index, domain] of domains.entries()) {
+    const job = await sslQueue.add("issue", {
+      domainId: domain.id,
+      domain: domain.name,
+      email: `admin@${domain.name}`,
+      webRoot: path.join(env.FILE_MANAGER_ROOT, domain.name, "public_html"),
+      includeWww: true,
+      forceSsl: domain.forceSsl,
+      source: "bulk-domain-ssl"
+    }, {
+      delay: index * 60_000,
+      attempts: 1
+    });
+    jobs.push({ domainId: domain.id, domain: domain.name, jobId: job.id });
+  }
+  return jobs;
+}
+
 async function getActiveNameServers() {
   return prisma.nameServer.findMany({
     where: { active: true },
@@ -685,6 +712,7 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
     const body = parseBulkCreateDomains(request.body);
     const uniqueDomains = [...new Set(body.domains)];
     const nameServers = await getActiveNameServers();
+    const sslTargets: Array<{ id: string; name: string; forceSsl: boolean }> = [];
     const results: Array<{
       input: string;
       name: string;
@@ -738,6 +766,9 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
           }
         }
         await clearDomainCaches(domain.id);
+        if (body.issueSsl) {
+          sslTargets.push({ id: domain.id, name: domain.name, forceSsl: domain.forceSsl });
+        }
         await audit(request, {
           action: "CREATE",
           resource: "domain",
@@ -765,16 +796,88 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
       skipped: results.filter((result) => result.status === "skipped").length,
       failed: results.filter((result) => result.status === "failed").length
     };
+    const sslJobs = body.issueSsl ? await queueBulkDomainSslJobs(sslTargets) : [];
 
     await clearDomainCaches();
     await audit(request, {
       action: "CREATE",
       resource: "domain",
       description: `Bulk domain add: ${summary.created} created, ${summary.skipped} skipped, ${summary.failed} failed`,
-      metadata: JSON.parse(JSON.stringify({ summary, domains: uniqueDomains })) as Prisma.InputJsonValue
+      metadata: JSON.parse(JSON.stringify({ summary, domains: uniqueDomains, sslJobs })) as Prisma.InputJsonValue
     });
 
-    return reply.code(summary.failed > 0 ? 207 : 201).send({ ...summary, total: results.length, results });
+    return reply.code(summary.failed > 0 ? 207 : 201).send({ ...summary, total: results.length, results, sslQueued: sslJobs.length, sslJobs });
+  });
+
+  app.post("/bulk-action", async (request) => {
+    const body = bulkDomainActionSchema.parse(request.body);
+    const uniqueDomainIds = [...new Set(body.domainIds)];
+    const domains = await prisma.domain.findMany({
+      where: { id: { in: uniqueDomainIds } },
+      select: { id: true, name: true, forceSsl: true }
+    });
+    const foundIds = new Set(domains.map((domain) => domain.id));
+    const missing = uniqueDomainIds.filter((id) => !foundIds.has(id));
+    if (missing.length > 0) {
+      throw app.httpErrors.notFound(`Could not find ${missing.length} selected domain(s).`);
+    }
+
+    if (body.action === "delete") {
+      await prisma.domain.deleteMany({ where: { id: { in: uniqueDomainIds } } });
+      await clearDomainCaches();
+      await audit(request, {
+        action: "DELETE",
+        resource: "domain",
+        description: `Bulk deleted ${domains.length} domain(s)`,
+        metadata: JSON.parse(JSON.stringify({ domains })) as Prisma.InputJsonValue
+      });
+      return { ok: true, action: body.action, affected: domains.length, sslQueued: 0, sslJobs: [] };
+    }
+
+    if (body.action === "activate" || body.action === "deactivate") {
+      const status = body.action === "activate" ? "ACTIVE" : "SUSPENDED";
+      await prisma.domain.updateMany({ where: { id: { in: uniqueDomainIds } }, data: { status } });
+      await clearDomainCaches();
+      await audit(request, {
+        action: "UPDATE",
+        resource: "domain",
+        description: `Bulk updated ${domains.length} domain(s) to ${status}`,
+        metadata: JSON.parse(JSON.stringify({ domains, status })) as Prisma.InputJsonValue
+      });
+      return { ok: true, action: body.action, affected: domains.length, sslQueued: 0, sslJobs: [] };
+    }
+
+    if (body.action === "force_ssl") {
+      await prisma.domain.updateMany({ where: { id: { in: uniqueDomainIds } }, data: { forceSsl: true } });
+      for (const domain of domains) {
+        try {
+          await publishDomainHosting(domain.id);
+        } catch (error) {
+          app.log.warn({ error, domain: domain.name }, "bulk force ssl publish failed");
+        }
+      }
+      await clearDomainCaches();
+      await audit(request, {
+        action: "UPDATE",
+        resource: "domain",
+        description: `Bulk enabled Force SSL for ${domains.length} domain(s)`,
+        metadata: JSON.parse(JSON.stringify({ domains })) as Prisma.InputJsonValue
+      });
+      return { ok: true, action: body.action, affected: domains.length, sslQueued: 0, sslJobs: [] };
+    }
+
+    const updatedDomains = await prisma.domain.findMany({
+      where: { id: { in: uniqueDomainIds } },
+      select: { id: true, name: true, forceSsl: true }
+    });
+    const sslJobs = await queueBulkDomainSslJobs(updatedDomains);
+    await audit(request, {
+      action: "APPLY",
+      resource: "ssl",
+      description: `Bulk queued SSL for ${sslJobs.length} domain(s)`,
+      metadata: JSON.parse(JSON.stringify({ domains: updatedDomains, sslJobs })) as Prisma.InputJsonValue
+    });
+    return { ok: true, action: body.action, affected: domains.length, sslQueued: sslJobs.length, sslJobs };
   });
 
   app.get("/:domainId", async (request) => {
