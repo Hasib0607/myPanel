@@ -14,10 +14,16 @@ type TerminalScope = {
 };
 
 type AccountTerminalDomain = {
+  id: string;
   name: string;
   documentRoot: string | null;
   status: string;
-  subdomains: Array<{ name: string }>;
+  deploymentBindings: Array<{ deployment: { rootPath: string } }>;
+  deployments: Array<{ rootPath: string }>;
+  subdomains: Array<{
+    name: string;
+    deploymentBindings: Array<{ deployment: { rootPath: string } }>;
+  }>;
 };
 
 function insideRoot(target: string, root: string) {
@@ -67,6 +73,18 @@ function accountDocumentPath(root: string, homeRoot: string, documentRoot: strin
   return path.resolve(homeRoot, value);
 }
 
+function deploymentRootPath(root: string, value: string | null | undefined) {
+  if (!value) return null;
+  const target = path.resolve(value);
+  return insideRoot(target, root) ? target : null;
+}
+
+function domainTargetPath(root: string, homeRoot: string, domain: AccountTerminalDomain) {
+  return deploymentRootPath(root, domain.deploymentBindings[0]?.deployment.rootPath)
+    ?? deploymentRootPath(root, domain.deployments[0]?.rootPath)
+    ?? accountDocumentPath(root, homeRoot, domain.documentRoot);
+}
+
 function subdomainFolderName(subdomain: string) {
   return subdomain.trim().toLowerCase() === "*" ? "_wildcard" : subdomain.trim().toLowerCase();
 }
@@ -77,13 +95,14 @@ async function scaffoldAccountTerminalHome(root: string, homeRoot: string, domai
   await fs.mkdir(path.join(homeRoot, "subdomains"), { recursive: true });
 
   for (const domain of domains) {
-    const domainTarget = accountDocumentPath(root, homeRoot, domain.documentRoot);
+    const domainTarget = domainTargetPath(root, homeRoot, domain);
     if (!insideRoot(domainTarget, root)) continue;
     await ensureLinkOrDirectory(path.join(homeRoot, domain.name), domainTarget);
     for (const subdomain of domain.subdomains) {
       const folderName = subdomainFolderName(subdomain.name);
       const fqdn = `${subdomain.name}.${domain.name}`;
-      const subdomainTarget = path.join(homeRoot, "subdomains", folderName);
+      const subdomainTarget = deploymentRootPath(root, subdomain.deploymentBindings[0]?.deployment.rootPath)
+        ?? path.join(homeRoot, "subdomains", folderName);
       await ensureLinkOrDirectory(path.join(homeRoot, fqdn), subdomainTarget);
     }
   }
@@ -101,9 +120,29 @@ async function terminalCwd(accountId?: string) {
         take: 20,
         select: {
           name: true,
+          id: true,
           documentRoot: true,
           status: true,
-          subdomains: { select: { name: true } }
+          deployments: {
+            orderBy: { createdAt: "desc" },
+            take: 1,
+            select: { rootPath: true }
+          },
+          deploymentBindings: {
+            orderBy: [{ role: "asc" }, { createdAt: "asc" }],
+            take: 1,
+            select: { deployment: { select: { rootPath: true } } }
+          },
+          subdomains: {
+            select: {
+              name: true,
+              deploymentBindings: {
+                orderBy: [{ role: "asc" }, { createdAt: "asc" }],
+                take: 1,
+                select: { deployment: { select: { rootPath: true } } }
+              }
+            }
+          }
         }
       }
     }
