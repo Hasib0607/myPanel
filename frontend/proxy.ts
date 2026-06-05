@@ -25,7 +25,21 @@ function requestPort(request: NextRequest) {
 
 function loginPortAllowed(request: NextRequest) {
   const loginPort = request.headers.get("x-panel-login-port") ?? process.env.PANEL_LOGIN_PORT ?? process.env.NEXT_PUBLIC_PANEL_LOGIN_PORT ?? "";
-  return !loginPort || requestPort(request) === loginPort;
+  const accountPort = process.env.CPANEL_LOGIN_PORT ?? process.env.NEXT_PUBLIC_CPANEL_LOGIN_PORT ?? "";
+  const port = requestPort(request);
+  return !loginPort || port === loginPort || (!!accountPort && port === accountPort);
+}
+
+function redirectToPanelPort(request: NextRequest, pathname: string, hasSession: boolean) {
+  const loginPort = request.headers.get("x-panel-login-port") ?? process.env.PANEL_LOGIN_PORT ?? process.env.NEXT_PUBLIC_PANEL_LOGIN_PORT ?? "";
+  if (!loginPort) return null;
+
+  const port = requestPort(request);
+  if (port !== "80" && port !== "443") return null;
+
+  const target = new URL(hasSession && pathname !== "/login" ? "/dashboard" : "/login", request.url);
+  target.port = loginPort;
+  return NextResponse.redirect(target);
 }
 
 export function proxy(request: NextRequest) {
@@ -33,8 +47,12 @@ export function proxy(request: NextRequest) {
   const isProtected = protectedRoutes.some((route) => pathname === route || pathname.startsWith(`${route}/`));
   const hasSession = request.cookies.has("panel_session");
 
+  if (pathname === "/") {
+    return redirectToPanelPort(request, pathname, hasSession) ?? NextResponse.redirect(new URL(hasSession ? "/dashboard" : "/login", request.url));
+  }
+
   if ((pathname === "/login" || isProtected) && !loginPortAllowed(request)) {
-    return new NextResponse("Not found", { status: 404 });
+    return redirectToPanelPort(request, pathname, hasSession) ?? new NextResponse("Not found", { status: 404 });
   }
 
   if (isProtected && !hasSession) {
@@ -52,6 +70,7 @@ export function proxy(request: NextRequest) {
 
 export const config = {
   matcher: [
+    "/",
     "/dashboard/:path*",
     "/domains/:path*",
     "/dns/:path*",

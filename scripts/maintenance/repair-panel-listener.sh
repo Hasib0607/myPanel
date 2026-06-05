@@ -195,6 +195,13 @@ echo "Writing $NGINX_SITES_AVAILABLE/$PANEL_NGINX_SITE"
 cat > "$NGINX_SITES_AVAILABLE/$PANEL_NGINX_SITE" <<EOF
 # Protected panel listener. Domain/project publishing must never overwrite this file.
 server {
+    listen 80;
+    server_name $VPS_IP;
+
+    return 302 http://$VPS_IP:$PANEL_LOGIN_PORT/login;
+}
+
+server {
     listen $PANEL_LOGIN_PORT$ssl_listen;
     server_name $PANEL_PUBLIC_HOST $VPS_IP _;
 

@@ -602,6 +602,13 @@ write_panel_nginx_config() {
   write_file "$NGINX_SITES_AVAILABLE/$PANEL_NGINX_SITE" <<EOF
 # Protected panel listener. Domain/project publishing must never overwrite this file.
 server {
+    listen 80;
+    server_name $VPS_IP;
+
+    return 302 http://$VPS_IP:$PANEL_LOGIN_PORT/login;
+}
+
+server {
     listen $PANEL_LOGIN_PORT$(if [[ "$PANEL_PUBLIC_SCHEME" == "https" && -n "$PANEL_DOMAIN" ]]; then printf " ssl"; fi);
     server_name $PANEL_PUBLIC_HOST $VPS_IP _;
 
