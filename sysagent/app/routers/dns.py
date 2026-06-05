@@ -1,4 +1,5 @@
 from pathlib import Path
+from shutil import copy2
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -114,16 +115,71 @@ include "/etc/named.vps-panel.zones";
     return {"dryRun": False, "command": ["write-file", str(conf_path)], "returncode": 0, "backupPath": str(backup_path)}
 
 
+def command_ok(result: dict) -> bool:
+    return int(result.get("returncode", 0) or 0) == 0
+
+
+def restart_bind_service() -> dict:
+    return run_command(
+        ["sh", "-lc", "systemctl restart named 2>/dev/null || systemctl restart bind9"],
+        allow_live=settings.allow_live_dns,
+        timeout=30,
+    )
+
+
+def restore_file(path: Path, backup_path: Path | None) -> dict:
+    if not settings.allow_live_dns:
+        return {"dryRun": True, "command": ["restore-file", str(path)], "returncode": 0}
+    if backup_path and backup_path.exists():
+        copy2(backup_path, path)
+        return {"dryRun": False, "command": ["restore-file", str(path)], "returncode": 0, "backupPath": str(backup_path)}
+    if path.exists():
+        path.unlink()
+    return {"dryRun": False, "command": ["remove-file", str(path)], "returncode": 0}
+
+
 @router.post("/zone/apply")
 def apply_zone(body: ZoneApplyRequest) -> dict:
     zone_dir, named_conf_local, named_conf_options = effective_dns_paths(body)
     zone_path = safe_zone_path(zone_dir, body.domain)
-    options = ensure_public_authoritative_options(named_conf_options)
+    conf_path = Path(named_conf_local).resolve()
+    options_path = Path(named_conf_options).resolve()
+    zone_backup = zone_path.with_suffix(f"{zone_path.suffix}.vps-panel.rollback")
+    conf_backup = conf_path.with_suffix(f"{conf_path.suffix}.vps-panel.rollback")
+    options_backup = options_path.with_suffix(f"{options_path.suffix}.vps-panel.rollback")
+    temp_zone_path = zone_path.with_suffix(f"{zone_path.suffix}.vps-panel.check")
+
     if settings.allow_live_dns:
         zone_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_zone_path.write_text(body.zone, encoding="utf-8")
+    preflight_zone_check = run_command(["named-checkzone", body.domain, str(temp_zone_path if settings.allow_live_dns else zone_path)], allow_live=settings.allow_live_dns)
+    if settings.allow_live_dns:
+        temp_zone_path.unlink(missing_ok=True)
+    if not command_ok(preflight_zone_check):
+        return {
+            "write": {"dryRun": not settings.allow_live_dns, "command": ["write-file", str(zone_path)], "returncode": 1, "stderr": "Zone preflight failed; live BIND files were not changed."},
+            "zoneCheck": preflight_zone_check,
+            "zonePath": str(zone_path),
+            "rolledBack": False,
+        }
+
+    if settings.allow_live_dns:
+        if zone_path.exists():
+            copy2(zone_path, zone_backup)
+        if conf_path.exists():
+            copy2(conf_path, conf_backup)
+        if options_path.exists():
+            copy2(options_path, options_backup)
+
+    options = ensure_public_authoritative_options(named_conf_options)
+    if settings.allow_live_dns:
         zone_path.write_text(body.zone, encoding="utf-8")
     declare = ensure_zone_declared(named_conf_local, body.domain, zone_path)
-    return {
+    zone_check = run_command(["named-checkzone", body.domain, str(zone_path)], allow_live=settings.allow_live_dns)
+    conf_check = run_command(["named-checkconf"], allow_live=settings.allow_live_dns)
+    reconfig = run_command(["rndc", "reconfig"], allow_live=settings.allow_live_dns) if command_ok(zone_check) and command_ok(conf_check) else {"returncode": 1, "stderr": "Skipped because BIND validation failed"}
+    reload = run_command(["rndc", "reload", body.domain], allow_live=settings.allow_live_dns) if command_ok(reconfig) else {"returncode": 1, "stderr": "Skipped because BIND reconfig failed"}
+    result = {
         "write": {
             "dryRun": not settings.allow_live_dns,
             "command": ["write-file", str(zone_path)],
@@ -133,9 +189,24 @@ def apply_zone(body: ZoneApplyRequest) -> dict:
         },
         "options": options,
         "declare": declare,
-        "zoneCheck": run_command(["named-checkzone", body.domain, str(zone_path)], allow_live=settings.allow_live_dns),
-        "confCheck": run_command(["named-checkconf"], allow_live=settings.allow_live_dns),
-        "reconfig": run_command(["rndc", "reconfig"], allow_live=settings.allow_live_dns),
-        "reload": run_command(["rndc", "reload", body.domain], allow_live=settings.allow_live_dns),
+        "zoneCheck": zone_check,
+        "confCheck": conf_check,
+        "reconfig": reconfig,
+        "reload": reload,
         "zonePath": str(zone_path),
     }
+    if not all(command_ok(step) for step in [zone_check, conf_check, reconfig, reload]):
+        restore_zone = restore_file(zone_path, zone_backup if zone_backup.exists() else None)
+        restore_conf = restore_file(conf_path, conf_backup if conf_backup.exists() else None)
+        restore_options = restore_file(options_path, options_backup if options_backup.exists() else None)
+        restart = restart_bind_service()
+        result["rolledBack"] = True
+        result["rollback"] = {
+            "zone": restore_zone,
+            "conf": restore_conf,
+            "options": restore_options,
+            "restart": restart,
+        }
+    else:
+        result["rolledBack"] = False
+    return result
