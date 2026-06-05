@@ -10,6 +10,7 @@ import { apiDeleteBody, apiGet, apiPatch, apiPost } from "@/lib/api";
 
 type DomainStatus = "ACTIVE" | "PENDING" | "SUSPENDED";
 type DomainHostingMode = "PUBLIC_HTML" | "DEPLOYMENT_PROXY" | "REDIRECT";
+const PAGE_SIZE = 50;
 
 type Domain = {
   id: string;
@@ -73,6 +74,7 @@ type BulkDomainResponse = {
   total: number;
   sslQueued?: number;
   sslJobs?: Array<{ domainId: string; domain: string; jobId: string | number | null }>;
+  queueCounts?: Record<string, number>;
   results: BulkDomainResult[];
 };
 
@@ -84,6 +86,7 @@ type BulkDomainActionResponse = {
   affected: number;
   sslQueued?: number;
   sslJobs?: Array<{ domainId: string; domain: string; jobId: string | number | null }>;
+  queueCounts?: Record<string, number>;
 };
 
 function statusClass(status: DomainStatus) {
@@ -135,6 +138,7 @@ export function DomainsClient({
   const [forceSsl, setForceSsl] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [page, setPage] = useState(1);
   const [hostingDraft, setHostingDraft] = useState<HostingDraft | null>(null);
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkText, setBulkText] = useState("");
@@ -157,16 +161,20 @@ export function DomainsClient({
   }, [bulkText]);
 
   const queryPath = useMemo(() => {
-    const params = new URLSearchParams({ page: "1", pageSize: "50" });
+    const params = new URLSearchParams({ page: String(page), pageSize: String(PAGE_SIZE) });
     if (search) params.set("search", search);
     return `${apiBase}?${params.toString()}`;
-  }, [apiBase, search]);
+  }, [apiBase, page, search]);
 
   const domains = useQuery({
-    queryKey: ["domains", apiBase, search],
+    queryKey: ["domains", apiBase, search, page],
     queryFn: () => apiGet<DomainListResponse>(queryPath)
   });
   const visibleDomains = domains.data?.items ?? [];
+  const totalDomains = domains.data?.total ?? 0;
+  const totalPages = Math.max(1, Math.ceil(totalDomains / PAGE_SIZE));
+  const pageStart = totalDomains === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
+  const pageEnd = Math.min(page * PAGE_SIZE, totalDomains);
   const visibleDomainIds = visibleDomains.map((domain) => domain.id);
   const visibleSelectedCount = visibleDomainIds.filter((id) => selectedDomainIds.includes(id)).length;
   const allVisibleSelected = visibleDomainIds.length > 0 && visibleSelectedCount === visibleDomainIds.length;
@@ -187,6 +195,7 @@ export function DomainsClient({
       setNotice(`${domain.name} added with default DNS records.`);
       setSearch("");
       setDraftSearch("");
+      setPage(1);
       await queryClient.invalidateQueries({ queryKey: ["domains"] });
       await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
@@ -204,8 +213,15 @@ export function DomainsClient({
     onSuccess: async (response) => {
       setError("");
       setBulkResults(response);
-      setNotice(`Bulk add complete: ${response.created} created, ${response.skipped} skipped, ${response.failed} failed${response.sslQueued ? `, ${response.sslQueued} SSL jobs queued` : ""}.`);
+      const queueText = response.sslQueued
+        ? ` ${response.sslQueued} SSL job${response.sslQueued === 1 ? "" : "s"} queued serially; first job starts now, then one job every minute.`
+        : "";
+      const countText = response.queueCounts
+        ? ` Queue: waiting ${response.queueCounts.waiting ?? 0}, delayed ${response.queueCounts.delayed ?? 0}, active ${response.queueCounts.active ?? 0}, failed ${response.queueCounts.failed ?? 0}.`
+        : "";
+      setNotice(`Bulk add complete: ${response.created} created, ${response.skipped} skipped, ${response.failed} failed.${queueText}${countText}`);
       if (response.failed === 0) setBulkText("");
+      setPage(1);
       await queryClient.invalidateQueries({ queryKey: ["domains"] });
       await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
@@ -256,7 +272,7 @@ export function DomainsClient({
     onSuccess: async (response) => {
       setError("");
       setConfirmBulkDelete(false);
-      setSelectedDomainIds([]);
+      if (response.action !== "issue_ssl") setSelectedDomainIds([]);
       const actionLabel = response.action === "activate"
         ? "activated"
         : response.action === "deactivate"
@@ -266,7 +282,13 @@ export function DomainsClient({
             : response.action === "force_ssl"
               ? "updated for Force SSL"
               : "queued for SSL";
-      setNotice(`${response.affected} domain${response.affected === 1 ? "" : "s"} ${actionLabel}${response.sslQueued ? `, ${response.sslQueued} SSL jobs queued` : ""}.`);
+      const queueText = response.action === "issue_ssl" && response.sslQueued
+        ? ` ${response.sslQueued} SSL job${response.sslQueued === 1 ? "" : "s"} queued serially; first job starts now, then one job every minute.`
+        : "";
+      const countText = response.queueCounts && response.action === "issue_ssl"
+        ? ` Queue: waiting ${response.queueCounts.waiting ?? 0}, delayed ${response.queueCounts.delayed ?? 0}, active ${response.queueCounts.active ?? 0}, failed ${response.queueCounts.failed ?? 0}.`
+        : "";
+      setNotice(`${response.affected} domain${response.affected === 1 ? "" : "s"} ${actionLabel}.${queueText}${countText}`);
       await queryClient.invalidateQueries({ queryKey: ["domains"] });
       await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
@@ -324,6 +346,7 @@ export function DomainsClient({
 
   function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setPage(1);
     setSearch(draftSearch.trim());
   }
 
@@ -428,11 +451,36 @@ export function DomainsClient({
             Search
           </button>
           {search ? (
-            <button className="h-10 rounded-md border border-panel-line bg-white px-3 text-sm hover:bg-slate-50" onClick={() => { setSearch(""); setDraftSearch(""); }} type="button">
+            <button className="h-10 rounded-md border border-panel-line bg-white px-3 text-sm hover:bg-slate-50" onClick={() => { setPage(1); setSearch(""); setDraftSearch(""); }} type="button">
               Clear
             </button>
           ) : null}
         </form>
+
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 text-sm">
+          <div className="text-panel-muted">
+            {domains.data ? `Showing ${pageStart}-${pageEnd} of ${totalDomains}` : "Loading domains..."}
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              className="h-9 rounded-md border border-panel-line bg-white px-3 font-semibold hover:bg-slate-50 disabled:opacity-50"
+              disabled={page <= 1 || domains.isFetching}
+              onClick={() => setPage((current) => Math.max(1, current - 1))}
+              type="button"
+            >
+              Previous
+            </button>
+            <span className="min-w-24 text-center text-panel-muted">Page {page} of {totalPages}</span>
+            <button
+              className="h-9 rounded-md border border-panel-line bg-white px-3 font-semibold hover:bg-slate-50 disabled:opacity-50"
+              disabled={page >= totalPages || domains.isFetching}
+              onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+              type="button"
+            >
+              Next
+            </button>
+          </div>
+        </div>
 
         {error || domains.isError ? (
           <div className="mb-4 flex items-center gap-3 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-panel-danger">
@@ -669,13 +717,37 @@ export function DomainsClient({
               ))}
               {domains.data?.items.length === 0 ? (
                 <tr>
-                  <td className="px-4 py-8 text-center text-panel-muted" colSpan={8}>
+                  <td className="px-4 py-8 text-center text-panel-muted" colSpan={9}>
                     No domains found
                   </td>
                 </tr>
               ) : null}
             </tbody>
           </table>
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-panel-line px-4 py-3 text-sm">
+            <span className="text-panel-muted">
+              {domains.data ? `Showing ${pageStart}-${pageEnd} of ${totalDomains}` : "Loading domains..."}
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                className="h-9 rounded-md border border-panel-line px-3 font-semibold hover:bg-slate-50 disabled:opacity-50"
+                disabled={page <= 1 || domains.isFetching}
+                onClick={() => setPage((current) => Math.max(1, current - 1))}
+                type="button"
+              >
+                Previous
+              </button>
+              <span className="min-w-24 text-center text-panel-muted">Page {page} of {totalPages}</span>
+              <button
+                className="h-9 rounded-md border border-panel-line px-3 font-semibold hover:bg-slate-50 disabled:opacity-50"
+                disabled={page >= totalPages || domains.isFetching}
+                onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+                type="button"
+              >
+                Next
+              </button>
+            </div>
+          </div>
         </div>
       </section>
       {bulkOpen ? (

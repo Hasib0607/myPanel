@@ -834,11 +834,18 @@ async function queueAccountBulkDomainSslJobs(account: { homeRoot: string }, doma
       source: "account-bulk-domain-ssl"
     }, {
       delay: index * 60_000,
-      attempts: 1
+      attempts: 2,
+      backoff: { type: "fixed", delay: 30_000 },
+      removeOnComplete: 100,
+      removeOnFail: 500
     });
     jobs.push({ domainId: domain.id, domain: domain.name, jobId: job.id });
   }
   return jobs;
+}
+
+async function sslJobCounts() {
+  return sslQueue.getJobCounts("waiting", "delayed", "active", "failed");
 }
 
 function preflightChallengeChecks(preflight: { checks: unknown[]; localChecks?: unknown[] }) {
@@ -1237,7 +1244,8 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       failed: results.filter((result) => result.status === "failed").length
     };
     const sslJobs = body.issueSsl ? await queueAccountBulkDomainSslJobs(account, sslTargets) : [];
-    return reply.code(summary.failed > 0 ? 207 : 201).send({ ...summary, total: results.length, results, sslQueued: sslJobs.length, sslJobs });
+    const queueCounts = body.issueSsl ? await sslJobCounts() : undefined;
+    return reply.code(summary.failed > 0 ? 207 : 201).send({ ...summary, total: results.length, results, sslQueued: sslJobs.length, sslJobs, queueCounts });
   });
 
   app.post("/domains/bulk-action", async (request: any) => {
@@ -1294,13 +1302,14 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       select: { id: true, name: true, documentRoot: true, forceSsl: true }
     });
     const sslJobs = await queueAccountBulkDomainSslJobs(account, updatedDomains);
+    const queueCounts = await sslJobCounts();
     await audit(request, {
       action: "APPLY",
       resource: "ssl",
       description: `Account bulk queued SSL for ${sslJobs.length} domain(s)`,
       metadata: JSON.parse(JSON.stringify({ domains: updatedDomains, sslJobs })) as Prisma.InputJsonValue
     });
-    return { ok: true, action: body.action, affected: domains.length, sslQueued: sslJobs.length, sslJobs };
+    return { ok: true, action: body.action, affected: domains.length, sslQueued: sslJobs.length, sslJobs, queueCounts };
   });
 
   app.get("/domains/:domainId", async (request: any) => {

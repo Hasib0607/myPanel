@@ -478,11 +478,18 @@ async function queueBulkDomainSslJobs(domains: Array<{ id: string; name: string;
       source: "bulk-domain-ssl"
     }, {
       delay: index * 60_000,
-      attempts: 1
+      attempts: 2,
+      backoff: { type: "fixed", delay: 30_000 },
+      removeOnComplete: 100,
+      removeOnFail: 500
     });
     jobs.push({ domainId: domain.id, domain: domain.name, jobId: job.id });
   }
   return jobs;
+}
+
+async function sslJobCounts() {
+  return sslQueue.getJobCounts("waiting", "delayed", "active", "failed");
 }
 
 async function getActiveNameServers() {
@@ -797,6 +804,7 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
       failed: results.filter((result) => result.status === "failed").length
     };
     const sslJobs = body.issueSsl ? await queueBulkDomainSslJobs(sslTargets) : [];
+    const queueCounts = body.issueSsl ? await sslJobCounts() : undefined;
 
     await clearDomainCaches();
     await audit(request, {
@@ -806,7 +814,7 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
       metadata: JSON.parse(JSON.stringify({ summary, domains: uniqueDomains, sslJobs })) as Prisma.InputJsonValue
     });
 
-    return reply.code(summary.failed > 0 ? 207 : 201).send({ ...summary, total: results.length, results, sslQueued: sslJobs.length, sslJobs });
+    return reply.code(summary.failed > 0 ? 207 : 201).send({ ...summary, total: results.length, results, sslQueued: sslJobs.length, sslJobs, queueCounts });
   });
 
   app.post("/bulk-action", async (request) => {
@@ -872,6 +880,7 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
       select: { id: true, name: true, forceSsl: true, documentRoot: true }
     });
     const sslJobs = await queueBulkDomainSslJobs(updatedDomains);
+    const queueCounts = await sslJobCounts();
     await audit(request, {
       action: "APPLY",
       resource: "ssl",
@@ -879,7 +888,7 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
       metadata: JSON.parse(JSON.stringify({ domains: updatedDomains, sslJobs })) as Prisma.InputJsonValue
     });
     await clearDomainCaches();
-    return { ok: true, action: body.action, affected: domains.length, sslQueued: sslJobs.length, sslJobs };
+    return { ok: true, action: body.action, affected: domains.length, sslQueued: sslJobs.length, sslJobs, queueCounts };
   });
 
   app.get("/:domainId", async (request) => {
