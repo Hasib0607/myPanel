@@ -981,6 +981,7 @@ function deploymentEnvWithPublicUrl(envVars: Record<string, string>, domain: Bou
 }
 
 function isPostgresDeploymentEnvironment(deployment: { dbType?: string | null }, envVars: Record<string, string>) {
+  if (deployment.dbType === "MYSQL") return false;
   return deployment.dbType === "POSTGRESQL"
     || envVars.DB_CONNECTION === "pgsql"
     || envVars.DATABASE_URL?.startsWith("postgres://")
