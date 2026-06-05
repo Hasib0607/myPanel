@@ -292,6 +292,16 @@ function accountGithubTokenSecretRef(accountId: string) {
   return `github:account:${accountId}:token`;
 }
 
+async function applyAccountDnsZone(domainId: string, ownerAccountId: string) {
+  const domain = await prisma.domain.findFirstOrThrow({
+    where: { id: domainId, accountId: ownerAccountId },
+    include: { dnsRecords: { orderBy: [{ type: "asc" }, { name: "asc" }] } }
+  });
+  const zone = renderZone(domain.name, domain.dnsRecords);
+  const result = await sysagent.applyDnsZone({ domain: domain.name, zone });
+  return { domain, zone, result };
+}
+
 function deploymentWebhookSecretRef(deploymentSlug: string) {
   return `deployment:${deploymentSlug}:webhook`;
 }
@@ -1384,9 +1394,10 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
 
   app.post("/domains/dns/bulk-zone-action", async (request: any, reply) => {
     const body = bulkZoneActionSchema.parse(request.body);
+    const ownerAccountId = accountId(request);
     const uniqueDomainIds = [...new Set(body.domainIds)];
     const domains = await prisma.domain.findMany({
-      where: { id: { in: uniqueDomainIds }, accountId: accountId(request) },
+      where: { id: { in: uniqueDomainIds }, accountId: ownerAccountId },
       select: { id: true, name: true }
     });
     const foundIds = new Set(domains.map((domain) => domain.id));
@@ -1408,8 +1419,9 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
           }
         }));
       }
-      await audit(request, { action: "CREATE", resource: "dns_record", description: `Account bulk added ${body.record.type} record to ${created.length} zone(s)`, metadata: { domains: domains.map((domain) => domain.name), record: body.record } as any });
-      return reply.code(201).send({ ok: true, action: body.action, affected: created.length });
+      const appliedZones = await Promise.all(domains.map((domain) => applyAccountDnsZone(domain.id, ownerAccountId)));
+      await audit(request, { action: "CREATE", resource: "dns_record", description: `Account bulk added ${body.record.type} record to ${created.length} zone(s)`, metadata: { domains: domains.map((domain) => domain.name), record: body.record, applied: appliedZones.length } as any });
+      return reply.code(201).send({ ok: true, action: body.action, affected: created.length, applied: appliedZones.length });
     }
 
     if (!body.match) throw app.httpErrors.badRequest("Record match type and name are required.");
@@ -1418,8 +1430,9 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       const deleted = await prisma.dnsRecord.deleteMany({
         where: { domainId: { in: uniqueDomainIds }, type: body.match.type, name: body.match.name }
       });
-      await audit(request, { action: "DELETE", resource: "dns_record", description: `Account bulk deleted ${body.match.type} ${body.match.name} record from ${deleted.count} zone(s)`, metadata: { domains: domains.map((domain) => domain.name), match: body.match } as any });
-      return { ok: true, action: body.action, affected: deleted.count };
+      const appliedZones = await Promise.all(domains.map((domain) => applyAccountDnsZone(domain.id, ownerAccountId)));
+      await audit(request, { action: "DELETE", resource: "dns_record", description: `Account bulk deleted ${body.match.type} ${body.match.name} record from ${deleted.count} zone(s)`, metadata: { domains: domains.map((domain) => domain.name), match: body.match, applied: appliedZones.length } as any });
+      return { ok: true, action: body.action, affected: deleted.count, applied: appliedZones.length };
     }
 
     if (!body.patch || Object.keys(body.patch).length === 0) throw app.httpErrors.badRequest("Patch data is required for bulk edit.");
@@ -1441,8 +1454,9 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       });
       updated += 1;
     }
-    await audit(request, { action: "UPDATE", resource: "dns_record", description: `Account bulk edited ${body.match.type} ${body.match.name} record in ${updated} zone(s)`, metadata: { domains: domains.map((domain) => domain.name), match: body.match, patch: body.patch } as any });
-    return { ok: true, action: body.action, affected: updated };
+    const appliedZones = await Promise.all(domains.map((domain) => applyAccountDnsZone(domain.id, ownerAccountId)));
+    await audit(request, { action: "UPDATE", resource: "dns_record", description: `Account bulk edited ${body.match.type} ${body.match.name} record in ${updated} zone(s)`, metadata: { domains: domains.map((domain) => domain.name), match: body.match, patch: body.patch, applied: appliedZones.length } as any });
+    return { ok: true, action: body.action, affected: updated, applied: appliedZones.length };
   });
 
   app.get("/domains/:domainId/dns", async (request: any) => {
@@ -1467,7 +1481,8 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
   app.post("/domains/:domainId/dns", async (request: any, reply) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const body = dnsRecordSchema.parse(request.body);
-    const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
+    const ownerAccountId = accountId(request);
+    const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: ownerAccountId } });
     const record = await prisma.dnsRecord.create({
       data: {
         domainId: domain.id,
@@ -1478,13 +1493,15 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
         priority: body.priority ?? null
       }
     });
-    await audit(request, { action: "CREATE", resource: "dns_record", resourceId: record.id, description: `Account created ${record.type} record for ${domain.name}` });
+    const applied = await applyAccountDnsZone(domain.id, ownerAccountId);
+    await audit(request, { action: "CREATE", resource: "dns_record", resourceId: record.id, description: `Account created ${record.type} record for ${domain.name}`, metadata: { applied: applied.result } as any });
     return reply.code(201).send(record);
   });
 
   app.patch("/domains/:domainId/dns/:recordId", async (request: any) => {
     const { domainId, recordId } = z.object({ domainId: z.string(), recordId: z.string() }).parse(request.params);
-    const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
+    const ownerAccountId = accountId(request);
+    const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: ownerAccountId } });
     const existing = await prisma.dnsRecord.findFirstOrThrow({ where: { id: recordId, domainId: domain.id } });
     const body = dnsRecordSchema.parse({ ...existing, ...dnsRecordSchema.partial().parse(request.body) });
     const record = await prisma.dnsRecord.update({
@@ -1497,16 +1514,19 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
         priority: body.priority ?? null
       }
     });
-    await audit(request, { action: "UPDATE", resource: "dns_record", resourceId: record.id, description: `Account updated ${record.type} record for ${domain.name}` });
+    const applied = await applyAccountDnsZone(domain.id, ownerAccountId);
+    await audit(request, { action: "UPDATE", resource: "dns_record", resourceId: record.id, description: `Account updated ${record.type} record for ${domain.name}`, metadata: { applied: applied.result } as any });
     return record;
   });
 
   app.delete("/domains/:domainId/dns/:recordId", async (request: any) => {
     const { domainId, recordId } = z.object({ domainId: z.string(), recordId: z.string() }).parse(request.params);
-    const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
+    const ownerAccountId = accountId(request);
+    const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: ownerAccountId } });
     const deleted = await prisma.dnsRecord.deleteMany({ where: { id: recordId, domainId: domain.id } });
     if (deleted.count === 0) throw app.httpErrors.notFound("DNS record not found");
-    await audit(request, { action: "DELETE", resource: "dns_record", resourceId: recordId, description: `Account deleted DNS record for ${domain.name}` });
+    const applied = await applyAccountDnsZone(domain.id, ownerAccountId);
+    await audit(request, { action: "DELETE", resource: "dns_record", resourceId: recordId, description: `Account deleted DNS record for ${domain.name}`, metadata: { applied: applied.result } as any });
     return { ok: true };
   });
 
