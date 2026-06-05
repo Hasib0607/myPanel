@@ -15,10 +15,11 @@ NODE_BIN="${NODE_BIN:-node}"
 REQUIRED_NODE_VERSION="${PANEL_UPDATE_REQUIRED_NODE_VERSION:-20.9.0}"
 SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-}"
 SUDO_BIN="${SUDO_BIN:-sudo}"
-SERVICES="${PANEL_UPDATE_SERVICES:-vps-panel-sysagent vps-panel-workers vps-panel-frontend vps-panel-api}"
+SERVICES="${PANEL_UPDATE_SERVICES:-vps-panel-workers vps-panel-frontend vps-panel-api vps-panel-sysagent}"
 API_SERVICE="${PANEL_UPDATE_API_SERVICE:-vps-panel-api}"
 HEALTH_URL="${PANEL_UPDATE_HEALTH_URL:-http://127.0.0.1:4000/health}"
 FRONTEND_HEALTH_URL="${PANEL_UPDATE_FRONTEND_HEALTH_URL:-http://127.0.0.1:3000/health}"
+SYSAGENT_HEALTH_URL="${PANEL_UPDATE_SYSAGENT_HEALTH_URL:-http://127.0.0.1:5000/health}"
 DIRTY_STRATEGY="${PANEL_UPDATE_DIRTY_STRATEGY:-fail}"
 COMMAND_TIMEOUT="${PANEL_UPDATE_COMMAND_TIMEOUT:-30}"
 SYSTEMCTL_NO_BLOCK="${PANEL_UPDATE_SYSTEMCTL_NO_BLOCK:-true}"
@@ -661,6 +662,10 @@ wait_service_active() {
   local service="$1"
   local attempts="${PANEL_UPDATE_SERVICE_ACTIVE_ATTEMPTS:-20}"
   local cmd=()
+  case "$service" in
+    vps-panel-sysagent) attempts="${PANEL_UPDATE_SYSAGENT_ACTIVE_ATTEMPTS:-90}" ;;
+    vps-panel-api|vps-panel-frontend) attempts="${PANEL_UPDATE_WEB_SERVICE_ACTIVE_ATTEMPTS:-60}" ;;
+  esac
   if [[ -n "$SUDO_BIN" ]]; then
     cmd=("$SUDO_BIN" -n)
   fi
@@ -676,6 +681,21 @@ wait_service_active() {
   log "$service did not become active"
   run_systemctl status "$service" || true
   return 1
+}
+
+restart_service_with_recovery() {
+  local service="$1"
+  run_systemctl restart "$service" || {
+    log "$service restart command failed; trying start as recovery"
+    run_systemctl start "$service" || true
+  }
+  if wait_service_active "$service"; then
+    return 0
+  fi
+  log "$service still inactive after restart; trying reset-failed and start"
+  run_systemctl reset-failed "$service" || true
+  run_systemctl start "$service" || true
+  wait_service_active "$service"
 }
 
 wait_http_ready() {
@@ -840,12 +860,12 @@ patch_nginx_websocket
 
 for service in $SERVICES; do
   write_status "running" "restarting $service" "$NEW_COMMIT" "$NEW_COMMIT_SUBJECT"
-  run_systemctl restart "$service"
-  wait_service_active "$service"
+  restart_service_with_recovery "$service"
 done
 
 wait_http_ready "API health" "$HEALTH_URL" 30
 wait_http_ready "frontend" "$FRONTEND_HEALTH_URL" 30
+wait_http_ready "sysagent" "$SYSAGENT_HEALTH_URL" 45
 recover_frontend_static_assets "http://127.0.0.1:$FRONTEND_PORT"
 
 write_status "succeeded" "panel self-update completed" "$NEW_COMMIT" "$NEW_COMMIT_SUBJECT"
