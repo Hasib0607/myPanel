@@ -38,7 +38,7 @@ class DnsCertificateRequest(BaseModel):
     parentDomain: str = Field(pattern=r"^[a-zA-Z0-9.-]+$")
     email: str
     certName: str = Field(pattern=r"^[a-zA-Z0-9_.-]+$")
-    propagationSeconds: int = Field(default=30, ge=0, le=300)
+    propagationSeconds: int = Field(default=120, ge=0, le=300)
     zoneDir: str = "/etc/bind/zones"
     namedConfLocal: str = "/etc/bind/named.conf.local"
     namedConfOptions: str = "/etc/bind/named.conf.options"
@@ -240,12 +240,56 @@ def bump_serial(text: str) -> str:
     return re.sub(r"(\\n\\s*)(\\d{{10}})(\\s*;\\s*serial)", repl, text, count=1, flags=re.IGNORECASE)
 
 
+def command_output(command: list[str]) -> str:
+    result = subprocess.run(command, text=True, capture_output=True, check=False)
+    return "\\n".join([result.stdout, result.stderr]).strip()
+
+
+def txt_visible(hostname: str, expected: str) -> tuple[bool, str]:
+    checks = [
+        ["dig", "@127.0.0.1", "+short", "TXT", hostname],
+        ["dig", "+short", "TXT", hostname],
+        ["dig", "@1.1.1.1", "+short", "TXT", hostname],
+        ["dig", "@8.8.8.8", "+short", "TXT", hostname],
+    ]
+    outputs = []
+    for command in checks:
+        try:
+            output = command_output(command)
+        except FileNotFoundError:
+            return True, "dig not installed; relying on configured propagation sleep"
+        outputs.append("$ " + " ".join(command) + "\\n" + (output or "(no answer)"))
+        if expected in output:
+            return True, "\\n".join(outputs)
+    return False, "\\n".join(outputs)
+
+
+def wait_for_txt(hostname: str, expected: str, seconds: int) -> None:
+    deadline = time.time() + max(seconds, 1)
+    last_output = ""
+    while time.time() <= deadline:
+        visible, output = txt_visible(hostname, expected)
+        last_output = output
+        if visible:
+            print(f"TXT visible for {{hostname}}")
+            if output:
+                print(output)
+            return
+        time.sleep(5)
+    raise SystemExit(
+        "DNS TXT record was written locally but is not visible to public resolvers yet for "
+        f"{{hostname}}. Waited {{seconds}} seconds. Confirm this VPS is authoritative for the "
+        f"domain and BIND port 53 is reachable. Last checks:\\n{{last_output}}"
+    )
+
+
 validation = os.environ.get("CERTBOT_VALIDATION", "").strip()
 certbot_domain = os.environ.get("CERTBOT_DOMAIN", "").strip()
 if not validation or not certbot_domain:
     raise SystemExit("CERTBOT_DOMAIN/CERTBOT_VALIDATION missing")
 
 name = relative_challenge_name(certbot_domain)
+fqdn = f"{{name}}.{{parent_domain}}".replace("..", ".").rstrip(".")
 line = f'{{name}} 60 IN TXT "{{validation}}"'
 text = zone_path.read_text(encoding="utf-8") if zone_path.exists() else ""
 lines = text.splitlines()
@@ -260,10 +304,10 @@ else:
 next_text = bump_serial("\\n".join(lines).rstrip() + "\\n")
 zone_path.write_text(next_text, encoding="utf-8")
 subprocess.run(["named-checkzone", parent_domain, str(zone_path)], check=True)
-subprocess.run(["rndc", "reload", parent_domain], check=False)
 subprocess.run(["rndc", "reconfig"], check=False)
+subprocess.run(["rndc", "reload", parent_domain], check=False)
 if action == "auth" and propagation_seconds > 0:
-    time.sleep(propagation_seconds)
+    wait_for_txt(fqdn, validation, propagation_seconds)
 """
 
 
