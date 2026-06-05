@@ -24,6 +24,7 @@ router = APIRouter()
 
 WATCHED_SERVICE_DEFS = [
     {"key": "nginx", "name": "Nginx", "unit": "nginx", "ports": [80]},
+    {"key": "bind9", "name": "BIND9", "serviceKey": "bind9", "ports": [53]},
     {"key": "redis", "name": "Redis", "serviceKey": "redis", "ports": [6379]},
     {"key": "postgres", "name": "PostgreSQL", "unit": "postgresql", "ports": [5432, 5433]},
     {"key": "pgbouncer", "name": "PgBouncer", "unit": "pgbouncer", "ports": [6432], "optional": True},
@@ -328,7 +329,7 @@ def file_watch_scan() -> dict[str, Any]:
 
 @router.post("/actions/restart-service")
 def restart_service(body: ServiceRestartRequest) -> dict[str, Any]:
-    unit = SAFE_RESTART_UNITS.get(body.serviceKey)
+    unit = service_unit("bind9", current_os()) if body.serviceKey == "bind9" else SAFE_RESTART_UNITS.get(body.serviceKey)
     if not unit:
         raise HTTPException(status_code=400, detail="Service is not in the Guardian safe restart allowlist")
     return {

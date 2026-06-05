@@ -245,6 +245,35 @@ def command_output(command: list[str]) -> str:
     return "\\n".join([result.stdout, result.stderr]).strip()
 
 
+def command_result(command: list[str]):
+    return subprocess.run(command, text=True, capture_output=True, check=False)
+
+
+def bind_service() -> str:
+    named = command_result(["systemctl", "list-unit-files", "named.service", "--no-legend"])
+    return "named" if named.returncode == 0 and named.stdout.strip() else "bind9"
+
+
+def reload_bind_zone() -> None:
+    reconfig = command_result(["rndc", "reconfig"])
+    reload = command_result(["rndc", "reload", parent_domain]) if reconfig.returncode == 0 else None
+    if reconfig.returncode == 0 and reload and reload.returncode == 0:
+        return
+
+    service = bind_service()
+    restart = command_result(["systemctl", "restart", service])
+    if restart.returncode != 0:
+        details = [
+            "rndc reload failed and BIND service restart failed.",
+            reconfig.stderr.strip(),
+            reload.stderr.strip() if reload else "",
+            restart.stderr.strip(),
+            restart.stdout.strip(),
+        ]
+        raise SystemExit("\\n".join(item for item in details if item))
+    print(f"rndc reload failed; restarted {{service}} so BIND loads {{parent_domain}}")
+
+
 def txt_visible(hostname: str, expected: str) -> tuple[bool, str]:
     checks = [
         ["dig", "@127.0.0.1", "+short", "TXT", hostname],
@@ -304,8 +333,7 @@ else:
 next_text = bump_serial("\\n".join(lines).rstrip() + "\\n")
 zone_path.write_text(next_text, encoding="utf-8")
 subprocess.run(["named-checkzone", parent_domain, str(zone_path)], check=True)
-subprocess.run(["rndc", "reconfig"], check=False)
-subprocess.run(["rndc", "reload", parent_domain], check=False)
+reload_bind_zone()
 if action == "auth" and propagation_seconds > 0:
     wait_for_txt(fqdn, validation, propagation_seconds)
 """

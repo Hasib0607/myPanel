@@ -128,12 +128,56 @@ def command_ok(result: dict) -> bool:
     return int(result.get("returncode", 0) or 0) == 0
 
 
+def command_has_output(result: dict) -> bool:
+    return command_ok(result) and bool(str(result.get("stdout", "")).strip())
+
+
 def restart_bind_service() -> dict:
     return run_command(
         ["sh", "-lc", "systemctl restart named 2>/dev/null || systemctl restart bind9"],
         allow_live=settings.allow_live_dns,
         timeout=30,
     )
+
+
+def reload_bind_zone(domain: str) -> dict:
+    reconfig = run_command(["rndc", "reconfig"], allow_live=settings.allow_live_dns, timeout=30)
+    reload = (
+        run_command(["rndc", "reload", domain], allow_live=settings.allow_live_dns, timeout=30)
+        if command_ok(reconfig)
+        else {"returncode": 1, "stderr": "Skipped because BIND reconfig failed"}
+    )
+    if command_ok(reconfig) and command_ok(reload):
+        return {
+            "dryRun": bool(reload.get("dryRun")),
+            "command": ["rndc", "reload", domain],
+            "returncode": 0,
+            "stdout": "\n".join([str(reconfig.get("stdout", "")).strip(), str(reload.get("stdout", "")).strip()]).strip(),
+            "stderr": "\n".join([str(reconfig.get("stderr", "")).strip(), str(reload.get("stderr", "")).strip()]).strip(),
+            "reconfig": reconfig,
+            "reload": reload,
+        }
+
+    restart = restart_bind_service()
+    return {
+        "dryRun": bool(restart.get("dryRun")),
+        "command": ["bind-reload-or-restart", domain],
+        "returncode": 0 if command_ok(restart) else 1,
+        "stdout": str(restart.get("stdout", "")).strip(),
+        "stderr": "\n".join([
+            "rndc reload failed; restarted BIND service as fallback.",
+            str(reconfig.get("stderr", "")).strip(),
+            str(reload.get("stderr", "")).strip(),
+            str(restart.get("stderr", "")).strip(),
+        ]).strip(),
+        "reconfig": reconfig,
+        "reload": reload,
+        "restart": restart,
+    }
+
+
+def local_zone_visible(domain: str) -> dict:
+    return run_command(["dig", "@127.0.0.1", "+short", "SOA", domain], allow_live=settings.allow_live_dns, timeout=10)
 
 
 def restore_file(path: Path, backup_path: Path | None) -> dict:
@@ -186,8 +230,8 @@ def apply_zone(body: ZoneApplyRequest) -> dict:
     declare = ensure_zone_declared(named_conf_local, body.domain, zone_path)
     zone_check = run_command(["named-checkzone", body.domain, str(zone_path)], allow_live=settings.allow_live_dns)
     conf_check = run_command(["named-checkconf"], allow_live=settings.allow_live_dns)
-    reconfig = run_command(["rndc", "reconfig"], allow_live=settings.allow_live_dns) if command_ok(zone_check) and command_ok(conf_check) else {"returncode": 1, "stderr": "Skipped because BIND validation failed"}
-    reload = run_command(["rndc", "reload", body.domain], allow_live=settings.allow_live_dns) if command_ok(reconfig) else {"returncode": 1, "stderr": "Skipped because BIND reconfig failed"}
+    reload = reload_bind_zone(body.domain) if command_ok(zone_check) and command_ok(conf_check) else {"returncode": 1, "stderr": "Skipped because BIND validation failed"}
+    local_check = local_zone_visible(body.domain) if command_ok(reload) else {"returncode": 1, "stderr": "Skipped because BIND reload/restart failed"}
     result = {
         "write": {
             "dryRun": not settings.allow_live_dns,
@@ -200,11 +244,11 @@ def apply_zone(body: ZoneApplyRequest) -> dict:
         "declare": declare,
         "zoneCheck": zone_check,
         "confCheck": conf_check,
-        "reconfig": reconfig,
         "reload": reload,
+        "localCheck": local_check,
         "zonePath": str(zone_path),
     }
-    if not all(command_ok(step) for step in [zone_check, conf_check, reconfig, reload]):
+    if not all(command_ok(step) for step in [zone_check, conf_check, reload]) or not command_has_output(local_check):
         restore_zone = restore_file(zone_path, zone_backup if zone_backup.exists() else None)
         restore_conf = restore_file(conf_path, conf_backup if conf_backup.exists() else None)
         restore_options = restore_file(options_path, options_backup if options_backup.exists() else None)

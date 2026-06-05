@@ -274,7 +274,8 @@ export const sslWorker = new Worker(
             domain: job.data.domain,
             parentDomain: job.data.parentDomain ?? job.data.domain.replace(/^\*\./, ""),
             email: job.data.email,
-            certName
+            certName,
+            propagationSeconds: 300
           })
           : await sysagent.issueCertificate({
             domain: job.data.domain,
@@ -315,7 +316,8 @@ export const sslWorker = new Worker(
             domain: job.data.domain,
             parentDomain: job.data.parentDomain ?? job.data.domain.replace(/^\*\./, ""),
             email: job.data.email ?? `admin@${job.data.parentDomain ?? job.data.domain.replace(/^\*\./, "")}`,
-            certName
+            certName,
+            propagationSeconds: 300
           })
         : await sysagent.renewCertificate(certName);
       if (letsEncryptExactSetRateLimited(result)) {
