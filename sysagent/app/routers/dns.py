@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import grp
+import os
 from pathlib import Path
 from shutil import copy2
 
@@ -45,6 +47,21 @@ def zone_declaration_file_path(zone_path: Path) -> str:
     return str(zone_path)
 
 
+def apply_bind_file_permissions(path: Path, *, zone_file: bool = False) -> None:
+    if not settings.allow_live_dns:
+        return
+    try:
+        named_gid = grp.getgrnam("named").gr_gid
+    except KeyError:
+        named_gid = -1
+    if named_gid >= 0:
+        os.chown(path, 0, named_gid)
+    path.chmod(0o640)
+    if is_rhel():
+        context_type = "named_zone_t" if zone_file else "named_conf_t"
+        run_command(["chcon", "-t", context_type, str(path)], allow_live=settings.allow_live_dns, timeout=10)
+
+
 def ensure_zone_declared(named_conf_local: str, domain: str, zone_path: Path) -> dict:
     conf_path = Path(named_conf_local).resolve()
     if conf_path.name not in {"named.conf.local", "named.vps-panel.zones"}:
@@ -66,6 +83,7 @@ def ensure_zone_declared(named_conf_local: str, domain: str, zone_path: Path) ->
     current = conf_path.read_text(encoding="utf-8") if conf_path.exists() else ""
     if f'zone "{domain}"' not in current:
         conf_path.write_text(current.rstrip() + block, encoding="utf-8")
+    apply_bind_file_permissions(conf_path)
     return {"dryRun": False, "command": ["append-zone", str(conf_path)], "returncode": 0}
 
 
@@ -227,6 +245,7 @@ def apply_zone(body: ZoneApplyRequest) -> dict:
     options = ensure_public_authoritative_options(named_conf_options)
     if settings.allow_live_dns:
         zone_path.write_text(body.zone, encoding="utf-8")
+        apply_bind_file_permissions(zone_path, zone_file=True)
     declare = ensure_zone_declared(named_conf_local, body.domain, zone_path)
     zone_check = run_command(["named-checkzone", body.domain, str(zone_path)], allow_live=settings.allow_live_dns)
     conf_check = run_command(["named-checkconf"], allow_live=settings.allow_live_dns)

@@ -202,6 +202,7 @@ def dns_hook_script(zone_path: Path, parent_domain: str, action: str, propagatio
     return f"""#!/usr/bin/env python3
 from __future__ import annotations
 import os
+import grp
 import re
 import subprocess
 import time
@@ -247,6 +248,18 @@ def command_output(command: list[str]) -> str:
 
 def command_result(command: list[str]):
     return subprocess.run(command, text=True, capture_output=True, check=False)
+
+
+def apply_bind_file_permissions(path: Path, zone_file: bool) -> None:
+    try:
+        named_gid = grp.getgrnam("named").gr_gid
+    except KeyError:
+        named_gid = -1
+    if named_gid >= 0:
+        os.chown(path, 0, named_gid)
+    path.chmod(0o640)
+    context_type = "named_zone_t" if zone_file else "named_conf_t"
+    subprocess.run(["chcon", "-t", context_type, str(path)], check=False)
 
 
 def bind_service() -> str:
@@ -332,6 +345,7 @@ else:
 
 next_text = bump_serial("\\n".join(lines).rstrip() + "\\n")
 zone_path.write_text(next_text, encoding="utf-8")
+apply_bind_file_permissions(zone_path, zone_file=True)
 subprocess.run(["named-checkzone", parent_domain, str(zone_path)], check=True)
 reload_bind_zone()
 if action == "auth" and propagation_seconds > 0:
