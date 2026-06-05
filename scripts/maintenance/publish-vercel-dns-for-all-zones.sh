@@ -50,6 +50,22 @@ bind_service() {
   fi
 }
 
+named_main_conf() {
+  if [[ -f /etc/named.conf || -d /var/named ]]; then
+    printf '/etc/named.conf'
+  else
+    printf '/etc/bind/named.conf'
+  fi
+}
+
+zones_include_file() {
+  if [[ -f /etc/named.conf || -d /var/named ]]; then
+    printf '/etc/named.vps-panel.zones'
+  else
+    printf '/etc/bind/named.conf.local'
+  fi
+}
+
 save_target_state() {
   install -d -m 0755 "$(dirname "$STATE_FILE")"
   cat > "$STATE_FILE" <<EOF
@@ -95,6 +111,44 @@ is_excluded_domain() {
     [[ "$domain" == "${excluded%.}" ]] && return 0
   done
   return 1
+}
+
+ensure_named_include() {
+  local main_conf="$1"
+  local include_file="$2"
+  local include_line="include \"$include_file\";"
+  [[ -f "$main_conf" ]] || return 0
+  if ! grep -Fq "$include_line" "$main_conf"; then
+    cp -a "$main_conf" "$main_conf.vercel-$STAMP.bak"
+    printf '\n%s\n' "$include_line" >> "$main_conf"
+    echo "ADDED include $include_file to $main_conf"
+  fi
+}
+
+ensure_zone_declared() {
+  local include_file="$1"
+  local domain="$2"
+  local file="$3"
+  install -d -m 0755 "$(dirname "$include_file")"
+  touch "$include_file"
+  if ! grep -Eq "zone[[:space:]]+\"${domain//./\\.}\"" "$include_file"; then
+    cat >> "$include_file" <<EOF
+
+zone "$domain" {
+    type master;
+    file "$file";
+    allow-transfer { none; };
+};
+EOF
+    echo "DECLARED $domain in $include_file"
+  elif ! awk -v domain="$domain" -v file="$file" '
+    $0 ~ "zone[[:space:]]+\"" domain "\"" { in_zone = 1 }
+    in_zone && $0 ~ "file[[:space:]]+\"" file "\"" { found = 1 }
+    in_zone && /^};/ { in_zone = 0 }
+    END { exit found ? 0 : 1 }
+  ' "$include_file"; then
+    echo "WARN $domain: already declared in $include_file but not with file $file" >&2
+  fi
 }
 
 rewrite_zone() {
@@ -252,6 +306,8 @@ main() {
   local checked=0
   local failed=0
   local service
+  local main_conf
+  local include_file
   local failed_domains=()
   local reload_domains=()
   local domain_files=()
@@ -261,6 +317,10 @@ main() {
     echo "No BIND zone files found under /var/named or /etc/bind/zones." >&2
     exit 2
   fi
+
+  main_conf="$(named_main_conf)"
+  include_file="$(zones_include_file)"
+  ensure_named_include "$main_conf" "$include_file"
 
   for file in "${files[@]}"; do
     local domain tmp
@@ -273,6 +333,7 @@ main() {
       echo "SKIP excluded $domain"
       continue
     fi
+    ensure_zone_declared "$include_file" "$domain" "$file"
     tmp="$(mktemp)"
     rewrite_zone "$file" "$domain" "$tmp"
     checked=$((checked + 1))
