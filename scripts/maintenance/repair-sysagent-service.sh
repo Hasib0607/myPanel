@@ -48,6 +48,8 @@ Environment=ALLOW_LIVE_DNS=true
 ExecStart=$APP_DIR/sysagent/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port $SYSAGENT_PORT
 Restart=always
 RestartSec=3
+KillMode=process
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target

@@ -195,7 +195,7 @@ def issue_certificate(payload: CertificateRequest) -> dict:
     if certbot_should_include_www(payload.domain, payload.includeWww):
         command.extend(["-d", f"www.{payload.domain}"])
 
-    return run_command(command, allow_live=settings.allow_live_ssl)
+    return run_command(command, allow_live=settings.allow_live_ssl, timeout=settings.ssl_certbot_timeout_seconds)
 
 
 def dns_hook_script(zone_path: Path, parent_domain: str, action: str, propagation_seconds: int) -> str:
@@ -351,7 +351,7 @@ def issue_dns_certificate(payload: DnsCertificateRequest) -> dict:
             "-d",
             payload.domain,
         ]
-        return run_command(command, allow_live=True)
+        return run_command(command, allow_live=True, timeout=settings.ssl_certbot_timeout_seconds)
 
 
 @router.post("/renew/{domain}")
@@ -363,7 +363,7 @@ def renew_certificate(domain: str) -> dict:
         domain,
         "--deploy-hook",
         "systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true",
-    ], allow_live=settings.allow_live_ssl)
+    ], allow_live=settings.allow_live_ssl, timeout=settings.ssl_certbot_timeout_seconds)
 
 
 @router.post("/renew-all")
@@ -373,7 +373,7 @@ def renew_all_certificates() -> dict:
         "renew",
         "--deploy-hook",
         "systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true",
-    ], allow_live=settings.allow_live_ssl)
+    ], allow_live=settings.allow_live_ssl, timeout=settings.ssl_certbot_timeout_seconds)
 
 
 @router.get("/certbot")

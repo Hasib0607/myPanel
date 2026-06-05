@@ -10,6 +10,8 @@ EnvironmentFile=/opt/vps-panel/.env
 ExecStart=/opt/vps-panel/sysagent/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 5000
 Restart=always
 RestartSec=3
+KillMode=process
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target

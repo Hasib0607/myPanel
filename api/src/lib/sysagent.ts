@@ -7,6 +7,7 @@ export type SysagentCommandResult = {
   stdout?: string;
   stderr?: string;
   returncode?: number;
+  signal?: string;
 };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {

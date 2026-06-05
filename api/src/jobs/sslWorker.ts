@@ -20,8 +20,15 @@ function assertLiveCommandSucceeded(action: string, result: SysagentCommandResul
     throw new Error(`${action} did not run live. Set ALLOW_LIVE_SSL=true on vps-panel-sysagent, install certbot, then restart sysagent and workers.`);
   }
   if (result.returncode !== 0) {
+    const signal = result.signal ? ` (${result.signal})` : "";
     const detail = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
-    throw new Error(`${action} failed with exit code ${result.returncode}${detail ? `: ${detail}` : ""}`);
+    const lowerDetail = detail.toLowerCase();
+    const wasTerminated = result.returncode === -15 || result.signal === "SIGTERM";
+    const certbotRecoveryCrash = lowerDetail.includes("keyauthorizationannotatedchallenge");
+    const certbotHint = action.startsWith("Certbot") && (wasTerminated || certbotRecoveryCrash)
+      ? " Certbot was interrupted during the ACME challenge/recovery step. Make sure vps-panel-sysagent is not being restarted while SSL jobs are active, repair/reload the sysagent service so child commands are not killed, then retry SSL issuance."
+      : "";
+    throw new Error(`${action} failed with exit code ${result.returncode}${signal}${detail ? `: ${detail}` : ""}${certbotHint}`);
   }
 }
 

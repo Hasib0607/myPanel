@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     allow_live_ssl: bool = True
     allow_live_backup: bool = False
     deployment_command_timeout_seconds: int = 900
+    ssl_certbot_timeout_seconds: int = 1800
     deployment_log_root: str = "/var/log/vps-panel/deployments"
     backup_root: str = "/var/backups/vps-panel"
     file_manager_root: str = "/var/www"

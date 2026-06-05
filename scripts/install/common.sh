@@ -419,6 +419,7 @@ REDIS_URL=redis://localhost:6379
 SYSAGENT_URL=http://127.0.0.1:$SYSAGENT_PORT
 VPS_IP=$VPS_IP
 DEPLOYMENT_COMMAND_TIMEOUT_SECONDS=900
+SSL_CERTBOT_TIMEOUT_SECONDS=1800
 REQUIRE_DOMAIN_NAMESERVER_MATCH=true
 ALLOW_PENDING_DOMAIN_NAMESERVER_MISMATCH=true
 ALLOW_VANITY_NAMESERVER_GLUE_FALLBACK=true
@@ -573,6 +574,8 @@ Environment=ALLOW_LIVE_DNS=true
 ExecStart=$APP_DIR/sysagent/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port $SYSAGENT_PORT
 Restart=always
 RestartSec=3
+KillMode=process
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target
