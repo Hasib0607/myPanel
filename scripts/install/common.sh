@@ -85,6 +85,10 @@ mask_url_secret() {
   echo "$url" | sed -E 's#(://[^:/@]+:)[^@]+@#\1****@#'
 }
 
+strip_wrapping_quotes() {
+  printf '%s' "$1" | sed "s/^[[:space:]\"'“”‘’]*//;s/[[:space:]\"'“”‘’]*$//"
+}
+
 env_file_value() {
   local key="$1"
   local file="${2:-$APP_DIR/.env}"
@@ -346,6 +350,7 @@ write_panel_env() {
   log "Generating secrets"
   sync_database_credentials_from_existing_env
   local existing_jwt existing_totp existing_webhook existing_admin_hash existing_database_url existing_direct_database_url
+  SUPERADMIN_USERNAME="$(strip_wrapping_quotes "$SUPERADMIN_USERNAME")"
   existing_jwt="$(env_file_value JWT_SECRET || true)"
   existing_totp="$(env_file_value TOTP_ENCRYPTION_KEY || true)"
   existing_webhook="$(env_file_value PANEL_UPDATE_WEBHOOK_SECRET || true)"

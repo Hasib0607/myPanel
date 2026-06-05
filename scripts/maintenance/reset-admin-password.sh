@@ -7,6 +7,12 @@ ENV_FILE="$APP_DIR/.env"
 PASSWORD="${1:-${NEW_PASS:-${SUPERADMIN_PASSWORD:-}}}"
 USERNAME="${SUPERADMIN_USERNAME:-admin}"
 
+strip_wrapping_quotes() {
+  printf '%s' "$1" | sed "s/^[[:space:]\"'“”‘’]*//;s/[[:space:]\"'“”‘’]*$//"
+}
+
+USERNAME="$(strip_wrapping_quotes "$USERNAME")"
+
 if [[ -z "$PASSWORD" ]]; then
   echo "Usage: sudo NEW_PASS='new-password' bash scripts/maintenance/reset-admin-password.sh"
   echo "   or: sudo bash scripts/maintenance/reset-admin-password.sh 'new-password'"
