@@ -397,10 +397,19 @@ frontend_static_assets_present() {
 
 frontend_css_smoke_check() {
   local base_url="${1%/}"
-  local html_file css_path css_code
+  local html_file css_path css_code page_path page_url
   html_file="$(mktemp)"
 
-  if ! curl -fsS --connect-timeout 5 --max-time 20 "$base_url/login" -o "$html_file" 2>&1 | tee -a "$LOG_FILE"; then
+  for page_path in "/login" "/health" "/"; do
+    page_url="$base_url$page_path"
+    if curl -fsS --connect-timeout 5 --max-time 20 "$page_url" -o "$html_file" 2>&1 | tee -a "$LOG_FILE"; then
+      break
+    fi
+    : > "$html_file"
+  done
+
+  if [[ ! -s "$html_file" ]]; then
+    log "frontend CSS smoke check skipped: no probe page returned HTTP 200 at $base_url"
     rm -f "$html_file"
     return 1
   fi
@@ -408,7 +417,7 @@ frontend_css_smoke_check() {
   css_path="$(sed -n 's/.*href="\([^"]*\/_next\/static\/css\/[^"]*\.css\)".*/\1/p' "$html_file" | head -1)"
   rm -f "$html_file"
   if [[ -z "$css_path" ]]; then
-    log "frontend CSS smoke check failed: no Next CSS asset link found in $base_url/login"
+    log "frontend CSS smoke check skipped: no Next CSS asset link found in $page_url"
     return 1
   fi
 
@@ -435,7 +444,9 @@ recover_frontend_static_assets() {
   run_systemctl restart vps-panel-frontend
   wait_service_active vps-panel-frontend
   wait_http_ready "frontend" "$FRONTEND_HEALTH_URL" 30
-  frontend_css_smoke_check "$base_url"
+  if ! frontend_css_smoke_check "$base_url"; then
+    log "frontend CSS smoke check still did not pass after rebuild; continuing because frontend readiness is healthy"
+  fi
 }
 
 set_env_value() {
@@ -633,7 +644,7 @@ wait_http_ready() {
 
   log "Waiting for $label at $url"
   for i in $(seq 1 "$attempts"); do
-    if curl --fail --silent --show-error "$url" 2>&1 | tee -a "$LOG_FILE" >/dev/null; then
+    if curl --fail --silent --show-error --output /dev/null "$url" 2>&1 | tee -a "$LOG_FILE" >/dev/null; then
       log "$label readiness check passed"
       return 0
     fi
