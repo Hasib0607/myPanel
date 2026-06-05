@@ -102,12 +102,17 @@ function fqdn(value: string, domain: string) {
   return `${value}.${domain}.`;
 }
 
+function fallbackPanelNameServer() {
+  const baseDomain = process.env.PANEL_DOMAIN || "ebitans.com";
+  return `ns1.${baseDomain.replace(/^https?:\/\//, "").split(/[/:]/)[0].replace(/^www\./, "").replace(/\.$/, "")}.`;
+}
+
 export function renderZone(domain: string, records: Array<{ type: string; name: string; value: string; ttl: number; priority: number | null }>) {
   const serial = new Date().toISOString().slice(0, 10).replace(/-/g, "") + "01";
   const cnameNames = new Set(records.filter((record) => record.type === "CNAME").map((record) => record.name));
   const zoneRecords = records.filter((record) => record.type === "CNAME" || !cnameNames.has(record.name));
   const nsRecords = zoneRecords.filter((record) => record.type === "NS" && record.name === "@");
-  const primaryNameServer = nsRecords[0]?.value ? fqdn(nsRecords[0].value, domain) : `ns1.${domain}.`;
+  const primaryNameServer = nsRecords[0]?.value ? fqdn(nsRecords[0].value, domain) : fallbackPanelNameServer();
   const lines = [
     `$ORIGIN ${domain}.`,
     "$TTL 3600",
