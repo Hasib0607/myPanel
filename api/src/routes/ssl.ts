@@ -106,7 +106,7 @@ async function runSslPreflight(domain: { id: string; name: string }, includeWww:
     throw Object.assign(new Error(`Certbot is not ready. Install certbot and enable ALLOW_LIVE_SSL. ${detail}`.trim()), { statusCode: 400 });
   }
 
-  const failedCheck = preflight.checks.find((check) => !commandSucceeded(check));
+  const failedCheck = preflightChallengeChecks(preflight).find((check) => !commandSucceeded(check));
   if (failedCheck) {
     const detail = commandFailureDetail(failedCheck);
     throw Object.assign(new Error(`HTTP ACME challenge failed for ${domain.name}. Publish the domain first and keep port 80 open.${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
@@ -180,13 +180,17 @@ async function runSubdomainSslPreflight(subdomainId: string) {
     throw Object.assign(new Error(`Certbot is not ready. Install certbot and enable ALLOW_LIVE_SSL. ${detail}`.trim()), { statusCode: 400 });
   }
 
-  const failedCheck = preflight.checks.find((check) => !commandSucceeded(check));
+  const failedCheck = preflightChallengeChecks(preflight).find((check) => !commandSucceeded(check));
   if (failedCheck) {
     const detail = commandFailureDetail(failedCheck);
     throw Object.assign(new Error(`HTTP ACME challenge failed for ${target.fqdn}. Publish the subdomain first and keep port 80 open.${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
   }
 
   return { ...target, dnsChecks, httpVhost, preflight, includeWww: false, dnsChallenge: false, certName: certbotCertificateName(target.fqdn) };
+}
+
+function preflightChallengeChecks(preflight: { checks: SysagentCommandResult[]; localChecks?: SysagentCommandResult[] }) {
+  return preflight.localChecks?.length ? preflight.localChecks : preflight.checks;
 }
 
 export const sslRoutes: FastifyPluginAsync = async (app) => {

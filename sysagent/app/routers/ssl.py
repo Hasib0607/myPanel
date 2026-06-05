@@ -360,9 +360,19 @@ def preflight(payload: CertificatePreflightRequest) -> dict:
     hosts = [payload.domain]
     if payload.includeWww:
         hosts.append(f"www.{payload.domain}")
-    checks = []
+    local_checks = []
+    public_checks = []
     for host in hosts:
-        checks.append(run_command([
+        local_checks.append(run_command([
+            "curl",
+            "-fsS",
+            "--max-time",
+            "10",
+            "-H",
+            f"Host: {host}",
+            f"http://127.0.0.1/.well-known/acme-challenge/{token}",
+        ], allow_live=settings.allow_live_ssl))
+        public_checks.append(run_command([
             "curl",
             "-fsS",
             "--max-time",
@@ -376,6 +386,8 @@ def preflight(payload: CertificatePreflightRequest) -> dict:
     return {
         "certbot": certbot,
         "write": write,
-        "checks": checks,
+        "checks": public_checks,
+        "localChecks": local_checks,
+        "publicChecks": public_checks,
         "webRoot": str(web_root),
     }

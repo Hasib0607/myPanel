@@ -731,7 +731,7 @@ async function accountSslPreflight(request: any, domain: { id: string; name: str
   if (certbotFailure) {
     throw Object.assign(new Error(`Certbot is not ready for ${domain.name}. ${certbotFailure}`), { statusCode: 400 });
   }
-  const failedCheck = preflight.checks.find((check) => failedCommand(check));
+  const failedCheck = preflightChallengeChecks(preflight).find((check) => failedCommand(check));
   if (failedCheck) {
     throw Object.assign(new Error(`HTTP ACME challenge failed for ${domain.name}. Publish the website and keep port 80 open. ${failedCommand(failedCheck) ?? ""}`.trim()), { statusCode: 400 });
   }
@@ -744,6 +744,10 @@ async function accountSslPreflight(request: any, domain: { id: string; name: str
     ],
     preflight
   };
+}
+
+function preflightChallengeChecks(preflight: { checks: unknown[]; localChecks?: unknown[] }) {
+  return preflight.localChecks?.length ? preflight.localChecks : preflight.checks;
 }
 
 function assertLimit(current: number, limit: number | null | undefined, label: string) {

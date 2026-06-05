@@ -204,7 +204,14 @@ export const sysagent = {
   certbotStatus: () =>
     request<SysagentCommandResult>("/ssl/certbot"),
   sslPreflight: (body: unknown) =>
-    request<{ certbot: SysagentCommandResult; write: SysagentCommandResult; checks: SysagentCommandResult[]; webRoot: string }>("/ssl/preflight", { method: "POST", body: JSON.stringify(body) }),
+    request<{
+      certbot: SysagentCommandResult;
+      write: SysagentCommandResult;
+      checks: SysagentCommandResult[];
+      localChecks?: SysagentCommandResult[];
+      publicChecks?: SysagentCommandResult[];
+      webRoot: string;
+    }>("/ssl/preflight", { method: "POST", body: JSON.stringify(body) }),
   issueCertificate: (body: unknown) =>
     request<SysagentCommandResult>("/ssl/issue", { method: "POST", body: JSON.stringify(body) }),
   issueDnsCertificate: (body: unknown) =>
