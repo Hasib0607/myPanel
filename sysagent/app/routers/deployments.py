@@ -134,6 +134,7 @@ class HealthRequest(BaseModel):
     processManager: str | None = None
     rootPath: str | None = None
     framework: str | None = None
+    logDir: str | None = None
 
 
 class PortStatusRequest(BaseModel):
@@ -1549,6 +1550,13 @@ def _supervisor_process_mismatch(body: HealthRequest) -> str | None:
     return None
 
 
+def _health_runtime_logs(body: HealthRequest) -> dict | None:
+    if not body.processName:
+        return None
+    logs = runtime_logs(RuntimeLogsRequest(name=body.processName, logDir=body.logDir, rootPath=body.rootPath, lines=120))
+    return logs if logs.get("ok") else None
+
+
 @router.post("/runtime-tools")
 def runtime_tools(body: RuntimeToolsRequest) -> dict:
     names = []
@@ -2143,12 +2151,14 @@ def health(body: HealthRequest) -> dict:
         }
     supervisor_mismatch = _supervisor_process_mismatch(body)
     if supervisor_mismatch:
+        logs = _health_runtime_logs(body)
         return {
             "dryRun": False,
             "command": ["supervisorctl", "status", body.processName or ""],
             "returncode": 1,
             "stdout": "",
-            "stderr": supervisor_mismatch,
+            "stderr": supervisor_mismatch + (f"\n\nRuntime logs:\n{logs.get('text')}" if logs and logs.get("text") else ""),
+            "logs": logs,
         }
     if (body.framework or "").upper() == "LARAVEL" and not laravel_has_public_web_root(body.rootPath):
         return backend_only_laravel_health(body.processName)

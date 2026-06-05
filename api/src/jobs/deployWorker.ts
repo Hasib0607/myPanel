@@ -674,7 +674,8 @@ async function runLiveDeploymentProcess(
           processName: body.name,
           processManager: body.processManager,
           rootPath: body.rootPath,
-          framework: body.framework
+          framework: body.framework,
+          logDir: body.logDir
         })
       );
       const healthError = liveResultFailureMessage(lastHealth, `${label} Supervisor STARTING health poll ${attempt}`);
@@ -1096,7 +1097,8 @@ async function runHealthCheckWithGuardianRecovery(
           processName: deployment.slug,
           processManager,
           rootPath: appPath,
-          framework: deployment.framework
+          framework: deployment.framework,
+          logDir: deploymentLogDir(deployment.slug)
         })
     );
 

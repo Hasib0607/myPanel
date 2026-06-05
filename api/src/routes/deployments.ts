@@ -1331,7 +1331,7 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
 
   let health: unknown = null;
   try {
-    health = await sysagent.deploymentHealth({ deploymentId: deployment.id, port: deployment.port, healthUrl: deployment.healthUrl, processName: deployment.slug, processManager, rootPath: appPath });
+    health = await sysagent.deploymentHealth({ deploymentId: deployment.id, port: deployment.port, healthUrl: deployment.healthUrl, processName: deployment.slug, processManager, rootPath: appPath, logDir: deploymentLogDir(deployment.slug) });
   } catch (error) {
     health = { returncode: 1, stderr: error instanceof Error ? error.message : "Health check failed" };
   }
@@ -2519,7 +2519,8 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
         healthUrl: deployment.healthUrl,
         processName: deployment.slug,
         processManager: deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework],
-        rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory)
+        rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
+        logDir: deploymentLogDir(deployment.slug)
       });
       const healthy = !commandFailed(result);
       await prisma.deployment.update({ where: { id: deployment.id }, data: { healthStatus: healthy ? "HEALTHY" : "DOWN", lastHealthCheckAt: new Date() } });
@@ -2730,7 +2731,11 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     const result = await sysagent.deploymentHealth({
       deploymentId: deployment.id,
       port: deployment.port,
-      healthUrl: deployment.healthUrl
+      healthUrl: deployment.healthUrl,
+      processName: deployment.slug,
+      processManager: deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework],
+      rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
+      logDir: deploymentLogDir(deployment.slug)
     });
     const healthResult = result as { dryRun?: boolean; returncode?: number; stderr?: string; stdout?: string };
     const healthy = !healthResult.dryRun && healthResult.returncode === 0;

@@ -72,6 +72,13 @@ export function runtimeTargetsForFailedDeploymentLog(text: string) {
   const lower = text.toLowerCase();
   const missingTools = new Set<string>();
   const targets: RuntimeInstallTarget[] = [];
+  for (const match of text.matchAll(/Missing runtime tools(?:\s+on\s+the\s+server)?:\s*([^\n.]+)/ig)) {
+    for (const item of match[1].split(",")) {
+      const tool = item.trim().replace(/[`'"]/g, "");
+      if (tool) missingTools.add(tool);
+    }
+  }
+
   if ((lower.includes("swoole") || lower.includes("openswoole")) && (lower.includes("requires php") || lower.includes("require php version 8.2 or later"))) {
     targets.push(...runtimeInstallTargetsForTools(["php82", "php-swoole"]));
   }

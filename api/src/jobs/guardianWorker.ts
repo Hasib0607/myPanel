@@ -611,7 +611,8 @@ async function runDeploymentWatch() {
         processName: deployment.slug,
         processManager: deployment.processManager ?? defaultProcessManager(deployment.framework),
         rootPath: appPath,
-        framework: deployment.framework
+        framework: deployment.framework,
+        logDir: deploymentLogDir(deployment.slug)
       }) as { dryRun?: boolean; returncode?: number; degraded?: boolean; stderr?: string; stdout?: string };
       let healthy = !result.dryRun && (result.returncode === 0 || Boolean(result.degraded));
       if (!healthy && (deployment.framework === "LARAVEL" || result.returncode === 23 || result.returncode === 22)) {
@@ -624,7 +625,8 @@ async function runDeploymentWatch() {
             processName: deployment.slug,
             processManager: deployment.processManager ?? defaultProcessManager(deployment.framework),
             rootPath: appPath,
-            framework: deployment.framework
+            framework: deployment.framework,
+            logDir: deploymentLogDir(deployment.slug)
           }) as typeof result;
           healthy = !result.dryRun && (result.returncode === 0 || Boolean(result.degraded));
         } catch (repairError) {

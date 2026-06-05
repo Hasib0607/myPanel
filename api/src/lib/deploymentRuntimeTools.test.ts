@@ -274,6 +274,18 @@ test("failed deploy parser maps missing process/runtime commands to exact repair
   ]);
 });
 
+test("failed deploy parser maps explicit missing runtime tools list to approvals", () => {
+  const log = "Missing runtime tools on the server: composer, php-ext-redis, php-ext-bcmath, php-ext-intl, supervisorctl. Installation requires explicit approval.";
+
+  assert.deepEqual(runtimeTargetsForFailedDeploymentLog(log).map((target) => target.actionKey), [
+    "install-composer",
+    "install-php-extension-bcmath",
+    "install-php-extension-intl",
+    "install-php-extension-redis",
+    "install-supervisor"
+  ]);
+});
+
 test("failed deploy parser maps Swoole on old PHP to PHP 8.2 and Swoole repairs", () => {
   const log = "pecl/swoole requires PHP version >= 8.2.0, installed version is 8.0.30";
   assert.deepEqual(runtimeTargetsForFailedDeploymentLog(log).map((target) => target.actionKey), [
