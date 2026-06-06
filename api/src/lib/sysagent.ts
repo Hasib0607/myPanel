@@ -10,6 +10,29 @@ export type SysagentCommandResult = {
   signal?: string;
 };
 
+export type SysagentBackupCreateJob = {
+  jobId: string;
+  status: "RUNNING" | "SUCCEEDED" | "FAILED";
+  archivePath: string;
+  stagingDir: string;
+  includes: string[];
+  sizeBytes?: number | null;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  result: SysagentCommandResult;
+};
+
+export type SysagentBackupUploadJob = {
+  jobId: string;
+  status: "RUNNING" | "SUCCEEDED" | "FAILED";
+  archivePath: string;
+  remoteTarget: string;
+  remotePath: string;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  result: SysagentCommandResult;
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
@@ -40,8 +63,16 @@ export const sysagent = {
   backupArchives: () => request<{ items: Array<{ path: string; name: string; sizeBytes: number; modifiedAt: string; checksumPath: string }> }>("/backup/archives"),
   createBackup: (body: unknown) =>
     request<{ archivePath: string; stagingDir: string; includes: string[]; sizeBytes?: number | null; result: SysagentCommandResult }>("/backup/create", { method: "POST", body: JSON.stringify(body) }),
+  createBackupJob: (body: unknown) =>
+    request<SysagentBackupCreateJob>("/backup/create-jobs", { method: "POST", body: JSON.stringify(body) }),
+  backupCreateJob: (jobId: string) =>
+    request<SysagentBackupCreateJob>(`/backup/create-jobs/${encodeURIComponent(jobId)}`),
   uploadBackupToRemote: (body: unknown) =>
     request<{ archivePath: string; remoteTarget: string; remotePath: string; result: SysagentCommandResult }>("/backup/upload-remote", { method: "POST", body: JSON.stringify(body) }),
+  uploadBackupJob: (body: unknown) =>
+    request<SysagentBackupUploadJob>("/backup/upload-jobs", { method: "POST", body: JSON.stringify(body) }),
+  backupUploadJob: (jobId: string) =>
+    request<SysagentBackupUploadJob>(`/backup/upload-jobs/${encodeURIComponent(jobId)}`),
   downloadBackupFromRemote: (body: unknown) =>
     request<{ archivePath: string; remotePath: string; skipped: boolean; result: SysagentCommandResult }>("/backup/download-remote", { method: "POST", body: JSON.stringify(body) }),
   pruneRemoteBackups: (body: unknown) =>

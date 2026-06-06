@@ -189,77 +189,69 @@ function backupTarget(backupRoot: string, label: string, encrypted: boolean) {
   };
 }
 
-async function waitWithProgress<T>(
-  promise: Promise<T>,
-  options: {
-    onProgress?: BackupProgressHandler;
-    phase: string;
-    from: number;
-    to: number;
-    message: string;
-    maxDurationMs: number;
-  }
-) {
-  const startedAt = Date.now();
-  let lastPercent = options.from;
-  const tick = async () => {
-    const elapsedMs = Date.now() - startedAt;
-    const ratio = Math.min(0.98, elapsedMs / options.maxDurationMs);
-    const percent = Math.max(options.from, Math.min(options.to, Math.floor(options.from + (options.to - options.from) * ratio)));
-    if (percent > lastPercent) lastPercent = percent;
-    await options.onProgress?.({
-      phase: options.phase,
-      percent: lastPercent,
-      message: `${options.message} Elapsed: ${formatElapsed(elapsedMs)}.`
-    });
-  };
-  const timer = setInterval(() => {
-    void tick().catch(() => undefined);
-  }, 5000);
-  try {
-    return await promise;
-  } finally {
-    clearInterval(timer);
-  }
-}
-
-async function recoverCreatedArchive(
-  archivePath: string,
-  includes: string[],
+async function waitForCreateBackupJob(
+  jobId: string,
   onProgress?: BackupProgressHandler
-): Promise<{ archivePath: string; stagingDir: string; includes: string[]; sizeBytes?: number | null; result: NonNullable<SysagentResultEnvelope["result"]> }> {
+): Promise<Awaited<ReturnType<typeof sysagent.createBackup>>> {
   const startedAt = Date.now();
-  const maxWaitMs = 60 * 60 * 1000;
+  const maxWaitMs = 6 * 60 * 60 * 1000;
   let lastError = "";
   while (Date.now() - startedAt < maxWaitMs) {
-    await onProgress?.({
-      phase: "CREATING_ARCHIVE",
-      percent: 54,
-      message: `Sysagent connection was interrupted; checking whether the server archive completed. Elapsed: ${formatElapsed(Date.now() - startedAt)}.`
-    });
-    const verify = await sysagent.verifyBackup(archivePath).catch((error) => {
+    const elapsedMs = Date.now() - startedAt;
+    const percent = Math.min(54, Math.max(10, Math.floor(10 + 44 * Math.min(0.98, elapsedMs / (90 * 60 * 1000)))));
+    const job = await sysagent.backupCreateJob(jobId).catch((error) => {
       lastError = error instanceof Error ? error.message : String(error);
       return null;
     });
-    if (verify?.ok) {
-      const archives = await sysagent.backupArchives().catch(() => ({ items: [] }));
-      const item = archives.items.find((entry) => entry.path === archivePath);
+    if (job?.status === "SUCCEEDED" || job?.status === "FAILED") {
       return {
-        archivePath,
-        stagingDir: "",
-        includes,
-        sizeBytes: item?.sizeBytes ?? null,
-        result: {
-          dryRun: false,
-          returncode: 0,
-          stdout: "Recovered completed backup after sysagent connection interruption.",
-          stderr: lastError ? `Initial sysagent interruption: ${lastError}` : ""
-        }
+        archivePath: job.archivePath,
+        stagingDir: job.stagingDir,
+        includes: job.includes,
+        sizeBytes: job.sizeBytes ?? null,
+        result: job.result
       };
     }
+    await onProgress?.({
+      phase: "CREATING_ARCHIVE",
+      percent,
+      message: `${lastError ? "Server backup is still running independently; waiting for status reconnect." : "Creating full server archive in isolated backup worker."} Elapsed: ${formatElapsed(elapsedMs)}.`
+    });
     await new Promise((resolve) => setTimeout(resolve, 10000));
   }
-  throw new Error(`Sysagent connection was interrupted and the archive did not verify within 60 minutes.${lastError ? ` Last check: ${lastError}` : ""}`);
+  throw new Error(`Server backup did not finish within 6 hours.${lastError ? ` Last status check: ${lastError}` : ""}`);
+}
+
+async function waitForUploadBackupJob(
+  jobId: string,
+  onProgress?: BackupProgressHandler
+): Promise<Awaited<ReturnType<typeof sysagent.uploadBackupToRemote>>> {
+  const startedAt = Date.now();
+  const maxWaitMs = 2 * 60 * 60 * 1000;
+  let lastError = "";
+  while (Date.now() - startedAt < maxWaitMs) {
+    const elapsedMs = Date.now() - startedAt;
+    const percent = Math.min(84, Math.max(70, Math.floor(70 + 14 * Math.min(0.98, elapsedMs / (90 * 60 * 1000)))));
+    const job = await sysagent.backupUploadJob(jobId).catch((error) => {
+      lastError = error instanceof Error ? error.message : String(error);
+      return null;
+    });
+    if (job?.status === "SUCCEEDED" || job?.status === "FAILED") {
+      return {
+        archivePath: job.archivePath,
+        remoteTarget: job.remoteTarget,
+        remotePath: job.remotePath,
+        result: job.result
+      };
+    }
+    await onProgress?.({
+      phase: "UPLOADING",
+      percent,
+      message: `${lastError ? "Google Drive upload is still running independently; waiting for status reconnect." : "Uploading backup archive in isolated backup worker."} Elapsed: ${formatElapsed(elapsedMs)}.`
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10000));
+  }
+  throw new Error(`Google Drive upload did not finish within 2 hours.${lastError ? ` Last status check: ${lastError}` : ""}`);
 }
 
 export async function runPanelBackup(input: unknown, request?: any, onProgress?: BackupProgressHandler) {
@@ -277,21 +269,14 @@ export async function runPanelBackup(input: unknown, request?: any, onProgress?:
     const target = backupTarget(plan.backupRoot, body.label, Boolean(body.encryptPassphrase));
     const createBody = { ...body, archivePath: target.archivePath, stagingDir: target.stagingDir };
     await onProgress?.({ phase: "CREATING_ARCHIVE", percent: 10, message: "Creating full server archive." });
-    let result: Awaited<ReturnType<typeof sysagent.createBackup>>;
-    try {
-      result = await waitWithProgress(sysagent.createBackup(createBody), {
-        onProgress,
-        phase: "CREATING_ARCHIVE",
-        from: 10,
-        to: 54,
-        message: "Creating full server archive.",
-        maxDurationMs: 90 * 60 * 1000
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!/sysagent .*request failed/i.test(message)) throw error;
-      result = await recoverCreatedArchive(target.finalPath, includes, onProgress);
-    }
+    const createJob = await sysagent.createBackupJob(createBody);
+    const result = createJob.status === "RUNNING" ? await waitForCreateBackupJob(createJob.jobId, onProgress) : {
+      archivePath: createJob.archivePath,
+      stagingDir: createJob.stagingDir,
+      includes: createJob.includes,
+      sizeBytes: createJob.sizeBytes ?? null,
+      result: createJob.result
+    };
     let uploadResult: Awaited<ReturnType<typeof sysagent.uploadBackupToRemote>> | null = null;
     const createError = backupCommandError("Backup archive creation", result);
     if (createError) {
@@ -304,14 +289,13 @@ export async function runPanelBackup(input: unknown, request?: any, onProgress?:
     if (settings.remoteProvider === "GOOGLE_DRIVE" && settings.remoteTarget) {
       const googleDrive = await googleDriveConfig(settings);
       await onProgress?.({ phase: "UPLOADING", percent: 70, message: "Uploading backup archive to Google Drive." });
-      uploadResult = await waitWithProgress(sysagent.uploadBackupToRemote({ path: result.archivePath, remoteTarget: settings.remoteTarget, googleDrive }), {
-        onProgress,
-        phase: "UPLOADING",
-        from: 70,
-        to: 84,
-        message: "Uploading backup archive to Google Drive.",
-        maxDurationMs: 90 * 60 * 1000
-      });
+      const uploadJob = await sysagent.uploadBackupJob({ path: result.archivePath, remoteTarget: settings.remoteTarget, googleDrive });
+      uploadResult = uploadJob.status === "RUNNING" ? await waitForUploadBackupJob(uploadJob.jobId, onProgress) : {
+        archivePath: uploadJob.archivePath,
+        remoteTarget: uploadJob.remoteTarget,
+        remotePath: uploadJob.remotePath,
+        result: uploadJob.result
+      };
       const uploadError = backupCommandError("Google Drive upload", uploadResult);
       if (uploadError) {
         throw Object.assign(new Error(uploadError), { result: { ...result, remote: uploadResult } });

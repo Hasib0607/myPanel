@@ -5,6 +5,9 @@ import re
 import shlex
 import shutil
 import json
+import subprocess
+import sys
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -94,6 +97,18 @@ def path_under_backup_root(value: str) -> str:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Backup paths must be under backup root") from exc
     return str(path)
+
+
+def backup_jobs_root() -> Path:
+    root = Path(settings.backup_root) / ".jobs"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def write_json_atomic(path: Path, value: dict[str, Any]) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(value, default=str), encoding="utf-8")
+    tmp.replace(path)
 
 
 def backup_paths(body: BackupRequest) -> list[str]:
@@ -200,6 +215,160 @@ def archives() -> dict[str, Any]:
                 "checksumPath": str(path) + ".sha256",
             })
     return {"items": items}
+
+
+@router.post("/create-jobs")
+def create_backup_job(body: BackupRequest) -> dict[str, Any]:
+    root = Path(settings.backup_root)
+    root.mkdir(parents=True, exist_ok=True)
+    label = safe_label(body.label)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    archive_path = path_under_backup_root(body.archive_path) if body.archive_path else str(root / f"mypanel-{label}-{stamp}.tar.gz")
+    staging_dir = path_under_backup_root(body.staging_dir) if body.staging_dir else str(root / f".staging-{label}-{stamp}")
+    final_path = archive_path.replace(".tar.gz", ".tar.gz.gpg") if body.encrypt_passphrase else archive_path
+    includes = backup_paths(body)
+    job_id = uuid.uuid4().hex
+    job_dir = backup_jobs_root() / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    status_path = job_dir / "status.json"
+    script_path = job_dir / "backup.sh"
+    runner_path = job_dir / "runner.py"
+    stdout_path = job_dir / "stdout.log"
+    stderr_path = job_dir / "stderr.log"
+    started_at = datetime.now(timezone.utc).isoformat()
+
+    if not settings.allow_live_backup:
+        status = {
+            "jobId": job_id,
+            "status": "FAILED",
+            "archivePath": final_path,
+            "stagingDir": staging_dir,
+            "includes": includes,
+            "sizeBytes": None,
+            "startedAt": started_at,
+            "finishedAt": datetime.now(timezone.utc).isoformat(),
+            "result": {
+                "dryRun": True,
+                "liveCommandsDisabled": True,
+                "returncode": 0,
+                "stdout": "",
+                "stderr": "ALLOW_LIVE_BACKUP=false. Set ALLOW_LIVE_BACKUP=true and restart vps-panel-sysagent plus vps-panel-workers.",
+            },
+        }
+        write_json_atomic(status_path, status)
+        return status
+
+    script_path.write_text(backup_script(body, archive_path, staging_dir), encoding="utf-8")
+    os.chmod(script_path, 0o700)
+    initial = {
+        "jobId": job_id,
+        "status": "RUNNING",
+        "archivePath": final_path,
+        "stagingDir": staging_dir,
+        "includes": includes,
+        "sizeBytes": None,
+        "startedAt": started_at,
+        "finishedAt": None,
+        "result": {"dryRun": False, "returncode": None, "stdout": "", "stderr": ""},
+    }
+    write_json_atomic(status_path, initial)
+
+    runner = f"""
+import json
+import os
+import signal
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+
+status_path = Path({str(status_path)!r})
+script_path = Path({str(script_path)!r})
+stdout_path = Path({str(stdout_path)!r})
+stderr_path = Path({str(stderr_path)!r})
+archive_path = {final_path!r}
+staging_dir = {staging_dir!r}
+includes = {includes!r}
+job_id = {job_id!r}
+started_at = {started_at!r}
+timeout = 21600
+
+def read_tail(path, limit=20000):
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        return ""
+    return data[-limit:].decode("utf-8", errors="replace")
+
+def write_status(value):
+    tmp = status_path.with_suffix(status_path.suffix + ".tmp")
+    tmp.write_text(json.dumps(value), encoding="utf-8")
+    tmp.replace(status_path)
+
+def status(state, returncode=None, timed_out=False):
+    size = None
+    try:
+        p = Path(archive_path)
+        if p.exists():
+            size = p.stat().st_size
+    except Exception:
+        size = None
+    return {{
+        "jobId": job_id,
+        "status": state,
+        "archivePath": archive_path,
+        "stagingDir": staging_dir,
+        "includes": includes,
+        "sizeBytes": size,
+        "startedAt": started_at,
+        "finishedAt": datetime.now(timezone.utc).isoformat() if state != "RUNNING" else None,
+        "result": {{
+            "dryRun": False,
+            "returncode": returncode,
+            "stdout": read_tail(stdout_path),
+            "stderr": ("Command timed out after " + str(timeout) + " seconds\\n" if timed_out else "") + read_tail(stderr_path),
+        }},
+    }}
+
+with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
+    process = subprocess.Popen(
+        ["bash", str(script_path)],
+        stdout=stdout,
+        stderr=stderr,
+        text=True,
+        env={{**os.environ, "DATABASE_URL": os.environ.get("DATABASE_URL", "")}},
+        start_new_session=True,
+    )
+    try:
+        returncode = process.wait(timeout=timeout)
+        write_status(status("SUCCEEDED" if returncode == 0 else "FAILED", returncode))
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            process.kill()
+        process.wait()
+        write_status(status("FAILED", 124, timed_out=True))
+"""
+    runner_path.write_text(runner, encoding="utf-8")
+    os.chmod(runner_path, 0o700)
+    subprocess.Popen(
+        [sys.executable, str(runner_path)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
+    return initial
+
+
+@router.get("/create-jobs/{job_id}")
+def backup_job_status(job_id: str) -> dict[str, Any]:
+    if not re.fullmatch(r"[a-f0-9]{32}", job_id):
+        raise HTTPException(status_code=400, detail="Invalid backup job id")
+    status_path = backup_jobs_root() / job_id / "status.json"
+    if not status_path.exists():
+        raise HTTPException(status_code=404, detail="Backup job not found")
+    return json.loads(status_path.read_text(encoding="utf-8"))
 
 
 @router.post("/create")
@@ -310,6 +479,157 @@ fi
 """
     result = run_command(["bash", "-lc", script], env=env, allow_live=settings.allow_live_backup, timeout=7200)
     return {"archivePath": str(archive), "remoteTarget": remote_target, "remotePath": remote_path, "result": result}
+
+
+@router.post("/upload-jobs")
+def upload_remote_job(body: RemoteUploadRequest) -> dict[str, Any]:
+    archive = checked_archive(body.path)
+    checksum = Path(str(archive) + ".sha256")
+    remote_target = body.remote_target.rstrip("/")
+    remote_path = f"{remote_target}/{archive.name}"
+    quoted_target = shlex.quote(remote_target)
+    quoted_archive = shlex.quote(str(archive))
+    quoted_checksum = shlex.quote(str(checksum))
+    quoted_remote_path = shlex.quote(remote_path)
+    setup, env = rclone_env_and_setup(body.google_drive, remote_target)
+    script = f"""
+set -Eeuo pipefail
+{setup}
+if ! command -v rclone >/dev/null 2>&1; then
+  echo "rclone is not installed on the server. Install rclone, then retry Google Drive backup upload." >&2
+  exit 127
+fi
+echo "Preparing Google Drive target {remote_target}" >&2
+rclone mkdir {quoted_target} --drive-acknowledge-abuse
+echo "Uploading archive to {remote_path}" >&2
+rclone copyto {quoted_archive} {quoted_remote_path} --drive-acknowledge-abuse --stats 30s
+if [ -f {quoted_checksum} ]; then
+  echo "Uploading checksum to {remote_path}.sha256" >&2
+  rclone copyto {quoted_checksum} {shlex.quote(remote_path + ".sha256")} --drive-acknowledge-abuse
+fi
+"""
+    job_id = uuid.uuid4().hex
+    job_dir = backup_jobs_root() / f"upload-{job_id}"
+    job_dir.mkdir(parents=True, exist_ok=True)
+    status_path = job_dir / "status.json"
+    script_path = job_dir / "upload.sh"
+    runner_path = job_dir / "runner.py"
+    stdout_path = job_dir / "stdout.log"
+    stderr_path = job_dir / "stderr.log"
+    started_at = datetime.now(timezone.utc).isoformat()
+    initial = {
+        "jobId": job_id,
+        "status": "RUNNING",
+        "archivePath": str(archive),
+        "remoteTarget": remote_target,
+        "remotePath": remote_path,
+        "startedAt": started_at,
+        "finishedAt": None,
+        "result": {"dryRun": False, "returncode": None, "stdout": "", "stderr": ""},
+    }
+    if not settings.allow_live_backup:
+        initial["status"] = "FAILED"
+        initial["finishedAt"] = datetime.now(timezone.utc).isoformat()
+        initial["result"] = {
+            "dryRun": True,
+            "liveCommandsDisabled": True,
+            "returncode": 0,
+            "stdout": "",
+            "stderr": "ALLOW_LIVE_BACKUP=false. Set ALLOW_LIVE_BACKUP=true and restart vps-panel-sysagent plus vps-panel-workers.",
+        }
+        write_json_atomic(status_path, initial)
+        return initial
+    script_path.write_text(script, encoding="utf-8")
+    os.chmod(script_path, 0o700)
+    write_json_atomic(status_path, initial)
+    runner = f"""
+import json
+import os
+import signal
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+
+status_path = Path({str(status_path)!r})
+script_path = Path({str(script_path)!r})
+stdout_path = Path({str(stdout_path)!r})
+stderr_path = Path({str(stderr_path)!r})
+job_id = {job_id!r}
+archive_path = {str(archive)!r}
+remote_target = {remote_target!r}
+remote_path = {remote_path!r}
+started_at = {started_at!r}
+timeout = 7200
+
+def read_tail(path, limit=20000):
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        return ""
+    return data[-limit:].decode("utf-8", errors="replace")
+
+def write_status(value):
+    tmp = status_path.with_suffix(status_path.suffix + ".tmp")
+    tmp.write_text(json.dumps(value), encoding="utf-8")
+    tmp.replace(status_path)
+
+def status(state, returncode=None, timed_out=False):
+    return {{
+        "jobId": job_id,
+        "status": state,
+        "archivePath": archive_path,
+        "remoteTarget": remote_target,
+        "remotePath": remote_path,
+        "startedAt": started_at,
+        "finishedAt": datetime.now(timezone.utc).isoformat() if state != "RUNNING" else None,
+        "result": {{
+            "dryRun": False,
+            "returncode": returncode,
+            "stdout": read_tail(stdout_path),
+            "stderr": ("Command timed out after " + str(timeout) + " seconds\\n" if timed_out else "") + read_tail(stderr_path),
+        }},
+    }}
+
+with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
+    process = subprocess.Popen(
+        ["bash", str(script_path)],
+        stdout=stdout,
+        stderr=stderr,
+        text=True,
+        env={{**os.environ, **{env!r}}},
+        start_new_session=True,
+    )
+    try:
+        returncode = process.wait(timeout=timeout)
+        write_status(status("SUCCEEDED" if returncode == 0 else "FAILED", returncode))
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            process.kill()
+        process.wait()
+        write_status(status("FAILED", 124, timed_out=True))
+"""
+    runner_path.write_text(runner, encoding="utf-8")
+    os.chmod(runner_path, 0o700)
+    subprocess.Popen(
+        [sys.executable, str(runner_path)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
+    return initial
+
+
+@router.get("/upload-jobs/{job_id}")
+def upload_job_status(job_id: str) -> dict[str, Any]:
+    if not re.fullmatch(r"[a-f0-9]{32}", job_id):
+        raise HTTPException(status_code=400, detail="Invalid upload job id")
+    status_path = backup_jobs_root() / f"upload-{job_id}" / "status.json"
+    if not status_path.exists():
+        raise HTTPException(status_code=404, detail="Upload job not found")
+    return json.loads(status_path.read_text(encoding="utf-8"))
 
 
 @router.post("/download-remote")
