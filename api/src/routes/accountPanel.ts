@@ -53,9 +53,12 @@ function normalizeDomainName(value: string) {
 
 const domainNameSchema = z.string().transform((value) => normalizeDomainName(value)).superRefine((value, ctx) => {
   const labels = value.split(".");
-  const validLabels = labels.every((label) => /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(label));
+  const validLabels = labels.every((label, index) => {
+    if (label === "*" && index === 0) return true;
+    return /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(label);
+  });
   if (labels.length < 2 || value.length > 253 || !validLabels || !/^[a-z]{2,63}$/.test(labels[labels.length - 1] ?? "")) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Enter a valid root domain, like example.com" });
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Enter a valid root domain, like example.com, or a wildcard subdomain like *.example.com" });
   }
 });
 
@@ -661,6 +664,60 @@ async function upsertAccountARecord(domainId: string, name: string) {
   return prisma.dnsRecord.create({ data: { domainId, type: "A", name, value: vpsIp, ttl: 300 } });
 }
 
+async function findAccountManagedParentDomain(ownerAccountId: string, fqdnName: string) {
+  const accountDomains = await prisma.domain.findMany({
+    where: { accountId: ownerAccountId },
+    select: { id: true, name: true }
+  });
+  const parent = accountDomains
+    .filter((item) => domainLabelInsideParent(fqdnName, item.name))
+    .sort((a, b) => b.name.length - a.name.length)[0];
+  const subdomainName = parent ? domainLabelInsideParent(fqdnName, parent.name) : null;
+  return parent && subdomainName ? { parent, subdomainName } : null;
+}
+
+async function createAccountSubdomainShortcut(ownerAccountId: string, fqdnName: string) {
+  const managedParent = await findAccountManagedParentDomain(ownerAccountId, fqdnName);
+  if (!managedParent) return null;
+
+  const target = await currentVpsIp();
+  const recordType = dnsRecordTypeForTarget(target);
+  const created = await prisma.$transaction(async (tx) => {
+    const subdomain = await tx.subdomain.create({
+      data: {
+        domainId: managedParent.parent.id,
+        name: managedParent.subdomainName,
+        target,
+        sslEnabled: false
+      }
+    });
+    await tx.dnsRecord.createMany({
+      data: [{ domainId: managedParent.parent.id, type: recordType, name: managedParent.subdomainName, value: target, ttl: 300 }],
+      skipDuplicates: true
+    });
+    return {
+      subdomain,
+      dnsRecord: { type: recordType, name: managedParent.subdomainName, value: target, ttl: 300 }
+    };
+  });
+
+  let publishWarning: string | undefined;
+  try {
+    await publishDomainDnsZone(managedParent.parent.id);
+  } catch (error) {
+    publishWarning = error instanceof Error ? error.message : "Subdomain DNS publish failed";
+  }
+
+  return {
+    kind: "subdomain" as const,
+    name: fqdnName,
+    parentDomain: managedParent.parent,
+    subdomain: created.subdomain,
+    dnsRecord: created.dnsRecord,
+    publishWarning
+  };
+}
+
 async function ensureAccountDomainDns(request: any, domain: { id: string; name: string }) {
   await upsertAccountARecord(domain.id, "@");
   await publishDomainDnsZone(domain.id);
@@ -1149,6 +1206,29 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       where: { id: accountId(request) },
       include: { _count: { select: { domains: true, deployments: true, mailAccounts: true } } }
     });
+    const subdomainShortcut = await createAccountSubdomainShortcut(account.id, body.name).catch((error) => {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        throw Object.assign(new Error("Subdomain already exists"), { statusCode: 409 });
+      }
+      throw error;
+    });
+    if (!subdomainShortcut && body.name.startsWith("*.")) {
+      throw Object.assign(new Error(`Add the parent domain ${body.name.slice(2)} before creating wildcard subdomain ${body.name}.`), { statusCode: 400 });
+    }
+    if (subdomainShortcut) {
+      await audit(request, {
+        action: "CREATE",
+        resource: "subdomain",
+        resourceId: subdomainShortcut.subdomain.id,
+        description: `Account created subdomain ${subdomainShortcut.name}`,
+        metadata: JSON.parse(JSON.stringify({
+          parentDomainId: subdomainShortcut.parentDomain.id,
+          dnsRecord: subdomainShortcut.dnsRecord,
+          publishWarning: subdomainShortcut.publishWarning
+        })) as Prisma.InputJsonValue
+      });
+      return reply.code(201).send(subdomainShortcut);
+    }
     assertLimit(account._count.domains, account.domainLimit, "Domain");
     const documentRoot = normalizeDocumentRoot(body.documentRoot || "public_html");
     const redirectUrl = normalizeRedirectUrl(body.redirectUrl);
@@ -1188,12 +1268,31 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       include: { _count: { select: { domains: true } } }
     });
     const uniqueDomains = [...new Set(body.domains)];
-    const results: Array<{ input: string; name: string; status: "created" | "skipped" | "failed"; error?: string; publishWarning?: string }> = [];
+    const results: Array<{ input: string; name: string; status: "created" | "skipped" | "failed"; kind?: "domain" | "subdomain"; error?: string; publishWarning?: string }> = [];
     const sslTargets: Array<{ id: string; name: string; documentRoot?: string | null; forceSsl: boolean }> = [];
     let currentDomainCount = account._count.domains;
 
     for (const name of uniqueDomains) {
       try {
+        const subdomainShortcut = await createAccountSubdomainShortcut(account.id, name);
+        if (!subdomainShortcut && name.startsWith("*.")) {
+          throw new Error(`Add the parent domain ${name.slice(2)} before creating wildcard subdomain ${name}.`);
+        }
+        if (subdomainShortcut) {
+          await audit(request, {
+            action: "CREATE",
+            resource: "subdomain",
+            resourceId: subdomainShortcut.subdomain.id,
+            description: `Account bulk-created subdomain ${subdomainShortcut.name}`,
+            metadata: JSON.parse(JSON.stringify({
+              parentDomainId: subdomainShortcut.parentDomain.id,
+              dnsRecord: subdomainShortcut.dnsRecord,
+              publishWarning: subdomainShortcut.publishWarning
+            })) as Prisma.InputJsonValue
+          });
+          results.push({ input: name, name: subdomainShortcut.name, status: "created", kind: "subdomain", publishWarning: subdomainShortcut.publishWarning });
+          continue;
+        }
         const vpsIp = await currentVpsIp();
         const existing = await prisma.domain.findUnique({ where: { name } });
         if (existing && body.skipExisting) {
@@ -1229,10 +1328,10 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
         if (body.issueSsl) {
           sslTargets.push({ id: domain.id, name: domain.name, documentRoot: domain.documentRoot, forceSsl: domain.forceSsl });
         }
-        results.push({ input: name, name: domain.name, status: "created", publishWarning });
+        results.push({ input: name, name: domain.name, status: "created", kind: "domain", publishWarning });
       } catch (error) {
         if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002" && body.skipExisting) {
-          results.push({ input: name, name, status: "skipped", error: "Domain already exists" });
+          results.push({ input: name, name, status: "skipped", error: "Domain or subdomain already exists" });
           continue;
         }
         results.push({ input: name, name, status: "failed", error: error instanceof Error ? error.message : "Could not add domain" });
