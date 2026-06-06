@@ -26,3 +26,34 @@ test("only running deployments are routable through domain proxy vhosts", async 
   assert.equal(deploymentIsRoutable({ status: "FAILED" }), false);
   assert.equal(deploymentIsRoutable(null), false);
 });
+
+test("wildcard deployment certificates use the safe certbot lineage name", async () => {
+  const { deploymentSslCertificatePaths } = await import("./deploymentDomainSsl.js");
+  const paths = deploymentSslCertificatePaths({
+    id: "subdomain:sub_1",
+    name: "*.ebitans.store",
+    forceSsl: true
+  });
+
+  assert.equal(paths.sslCertificate, "/etc/letsencrypt/live/wildcard.ebitans.store/fullchain.pem");
+  assert.equal(paths.sslCertificateKey, "/etc/letsencrypt/live/wildcard.ebitans.store/privkey.pem");
+});
+
+test("wildcard deployment skips HTTP ACME webroot preparation", async () => {
+  const { ensureAcmeWebroot } = await import("./deploymentDomainSsl.js");
+  const { sysagent } = await import("./sysagent.js");
+  const original = sysagent.ensureAcmeWebroot;
+  let calls = 0;
+  sysagent.ensureAcmeWebroot = async () => {
+    calls += 1;
+    throw new Error("should not be called for wildcard domains");
+  };
+
+  try {
+    await ensureAcmeWebroot({ id: "subdomain:sub_1", name: "*.ebitans.store", forceSsl: true });
+  } finally {
+    sysagent.ensureAcmeWebroot = original;
+  }
+
+  assert.equal(calls, 0);
+});

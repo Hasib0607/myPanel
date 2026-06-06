@@ -58,6 +58,7 @@ import {
   retireDeploymentNginxRoute,
   waitForQueueJob
 } from "../lib/deploymentDomainSsl.js";
+import { certbotCertificateName, isWildcardHostname } from "../lib/nginxNames.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -283,6 +284,24 @@ async function wwwPointsToThisVps(domain: BoundDomain) {
   } catch {
     return false;
   }
+}
+
+function deploymentSslQueuePayload(domain: BoundDomain, source: string, includeWww: boolean) {
+  const wildcard = isWildcardHostname(domain.name);
+  const parentDomain = wildcard ? domain.name.replace(/^\*\./, "") : undefined;
+  return {
+    domainId: domain.id.startsWith("subdomain:") ? null : domain.id,
+    subdomainId: domain.id.startsWith("subdomain:") ? domain.id.slice("subdomain:".length) : null,
+    domain: domain.name,
+    email: deploymentSslContactEmail(domain),
+    webRoot: deploymentFallbackRootPath(domain) ?? `${env.FILE_MANAGER_ROOT}/${domain.name}/public_html`,
+    includeWww: wildcard ? false : includeWww,
+    forceSsl: true,
+    dnsChallenge: wildcard || undefined,
+    parentDomain,
+    certName: wildcard ? certbotCertificateName(domain.name) : undefined,
+    source
+  };
 }
 
 async function nextAvailableDeploymentPort(excludeDeploymentId?: string, blockedPorts = new Set<number>()) {
@@ -1228,8 +1247,16 @@ async function repairDeploymentSslAccess(
   }
 
   try {
-    const includeWww = await wwwPointsToThisVps(domain);
+    const wildcard = isWildcardHostname(domain.name);
+    const includeWww = wildcard ? false : await wwwPointsToThisVps(domain);
     await runStep(deploymentId, releaseId, "CONFIGURING_PROXY", "ACME preflight before SSL repair", async () => {
+      if (wildcard) {
+        return {
+          skipped: true,
+          reason: "Wildcard certificates use DNS-01 validation, not HTTP ACME webroot validation.",
+          domain: domain.name
+        };
+      }
       await ensureAcmeWebroot(domain);
       const webRoot = deploymentFallbackRootPath(domain) ?? `${env.FILE_MANAGER_ROOT}/${domain.name}/public_html`;
       const preflight = await sysagent.sslPreflight({
@@ -1244,17 +1271,7 @@ async function repairDeploymentSslAccess(
       }
       return preflight;
     });
-
-    const sslJob = await sslQueue.add("issue", {
-      domainId: domain.id.startsWith("subdomain:") ? null : domain.id,
-      subdomainId: domain.id.startsWith("subdomain:") ? domain.id.slice("subdomain:".length) : null,
-      domain: domain.name,
-      email: deploymentSslContactEmail(domain),
-      webRoot: deploymentFallbackRootPath(domain) ?? `${env.FILE_MANAGER_ROOT}/${domain.name}/public_html`,
-      includeWww,
-      forceSsl: true,
-      source: "deployment-repair"
-    });
+    const sslJob = await sslQueue.add("issue", deploymentSslQueuePayload(domain, "deployment-repair", includeWww));
     await runStep(deploymentId, releaseId, "CONFIGURING_PROXY", "SSL repair issue", async () => {
       await waitForQueueJob(sslJob);
       return { jobId: sslJob.id, completed: true };
@@ -3680,19 +3697,21 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     }
 
     if (domain && !backendOnlyLaravel && !proxyHttpsReady) {
-      const serverName = deploymentServerName(domain);
-      await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Prepare ACME webroot", () => ensureAcmeWebroot(domain));
-      const includeWww = await wwwPointsToThisVps(domain);
-      const sslJob = await sslQueue.add("issue", {
-        domainId: domain.id.startsWith("subdomain:") ? null : domain.id,
-        subdomainId: domain.id.startsWith("subdomain:") ? domain.id.slice("subdomain:".length) : null,
-        domain: domain.name,
-        email: deploymentSslContactEmail(domain),
-        webRoot: deploymentFallbackRootPath(domain) ?? `${env.FILE_MANAGER_ROOT}/${domain.name}/public_html`,
-        includeWww,
-        forceSsl: true,
-        source: "deployment"
+      const wildcard = isWildcardHostname(domain.name);
+      await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Prepare ACME webroot", async () => {
+        if (wildcard) {
+          return {
+            skipped: true,
+            reason: "Wildcard certificates use DNS-01 validation, not HTTP ACME webroot validation.",
+            domain: domain!.name
+          };
+        }
+        await ensureAcmeWebroot(domain);
+        return { domain: domain!.name };
       });
+      const includeWww = wildcard ? false : await wwwPointsToThisVps(domain);
+      const serverName = deploymentServerName({ ...domain, includeWww });
+      const sslJob = await sslQueue.add("issue", deploymentSslQueuePayload(domain, "deployment", includeWww));
       try {
         await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "SSL certificate issue", async () => {
           await waitForQueueJob(sslJob);

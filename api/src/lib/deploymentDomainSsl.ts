@@ -6,6 +6,7 @@ import { env } from "../config/env.js";
 import path from "node:path";
 import { sysagent } from "./sysagent.js";
 import { subdomainFolderName } from "./domainFiles.js";
+import { certbotCertificateName, isWildcardHostname } from "./nginxNames.js";
 
 export type BoundDomain = {
   id: string;
@@ -85,16 +86,17 @@ export function deploymentServerName(domain: { name: string; includeWww?: boolea
 
 export function deploymentSslCertificatePaths(domain: BoundDomain | null) {
   if (!domain?.name || !deploymentWantsSsl(domain)) return {};
+  const certName = certbotCertificateName(domain.name);
   return {
-    sslCertificate: `/etc/letsencrypt/live/${domain.name}/fullchain.pem`,
-    sslCertificateKey: `/etc/letsencrypt/live/${domain.name}/privkey.pem`
+    sslCertificate: `/etc/letsencrypt/live/${certName}/fullchain.pem`,
+    sslCertificateKey: `/etc/letsencrypt/live/${certName}/privkey.pem`
   };
 }
 
 export async function deploymentHttpsReady(domain: BoundDomain | null) {
   if (!domain?.name) return false;
   try {
-    const status = await sysagent.certificateExists(domain.name);
+    const status = await sysagent.certificateExists(certbotCertificateName(domain.name));
     return Boolean(status.exists);
   } catch {
     return false;
@@ -357,6 +359,7 @@ export async function publishDeploymentProxyNginx(input: {
 
 export async function ensureAcmeWebroot(domain: BoundDomain | null) {
   if (!domain?.name) return;
+  if (isWildcardHostname(domain.name)) return;
   await sysagent.ensureAcmeWebroot({
     domain: domain.name,
     webRoot: deploymentFallbackRootPath(domain) ?? undefined

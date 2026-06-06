@@ -817,6 +817,13 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
   if (lower.includes("prisma") && (lower.includes("migration") || lower.includes("p100") || lower.includes("database"))) return { message: "Prisma/database migration failed. Check DATABASE_URL, database grants, and migration state.", repairAction: "redeploy", category: "prisma_migration" };
   if (supervisorStartStillStarting(text)) return { message: "Supervisor returned an abnormal start result while the program was still STARTING. Deployment Doctor now waits for health before marking the deploy failed.", repairAction: "restart", category: "supervisor_starting_race" };
   if (nginxProxyMissingDomainFailure(text)) return { message: "The deployment has no linked domain, so Nginx proxy publishing must be skipped. Deployment Doctor now keeps no-domain deployments running on their managed internal port; redeploy to apply the corrected flow.", repairAction: "redeploy", category: "nginx_proxy_missing_domain" };
+  if (lower.includes("ensure-acme-webroot") && lower.includes("string_pattern_mismatch") && text.includes("*.")) {
+    return {
+      message: "Wildcard deployments must use DNS-01 SSL validation, not HTTP ACME webroot validation. Redeploy so Guardian skips webroot prep and queues wildcard DNS SSL.",
+      repairAction: "redeploy",
+      category: "wildcard_acme_webroot"
+    };
+  }
   if (lower.includes("another nginx config still claims server_name") || (lower.includes("conflicting server name") && lower.includes("server_name"))) {
     return {
       message: "A stale Nginx vhost still claims this deployment hostname. Deployment Doctor will rewrite the vhost and scrub conflicting server_name configs, including wildcard hosts.",
