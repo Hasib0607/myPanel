@@ -115,7 +115,7 @@ const mailboxSchema = z.object({
 const mailboxUpdateSchema = z.object({
   quotaMb: z.number().int().min(128).optional(),
   enabled: z.boolean().optional(),
-  password: z.string().min(10).max(128).optional()
+  password: z.string().min(10).max(500).optional()
 });
 const deploymentSchema = z.object({
   domainId: z.string().nullable().optional(),
@@ -200,12 +200,12 @@ const databaseSchema = z.object({
   engine: z.enum(["POSTGRESQL", "MYSQL"]),
   database: z.string().regex(/^[a-zA-Z0-9_]+$/),
   username: z.string().regex(/^[a-zA-Z0-9_]+$/),
-  password: z.string().min(12).max(256).optional()
+  password: z.string().min(12).max(500).optional()
 });
 const databasePasswordSchema = z.object({
   engine: z.enum(["POSTGRESQL", "MYSQL"]),
   username: z.string().regex(/^[a-zA-Z0-9_]+$/),
-  password: z.string().min(12).max(256).optional()
+  password: z.string().min(12).max(500).optional()
 });
 const databaseTargetSchema = z.object({
   engine: z.enum(["POSTGRESQL", "MYSQL"]),
@@ -2737,7 +2737,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
 
   app.post("/databases/:databaseId/password", async (request: any) => {
     const { databaseId } = z.object({ databaseId: z.string() }).parse(request.params);
-    const body = z.object({ password: z.string().min(12).max(256) }).parse(request.body);
+    const body = z.object({ password: z.string().min(12).max(500) }).parse(request.body);
     const accountDatabase = await prisma.accountDatabase.findFirstOrThrow({ where: { id: databaseId, accountId: accountId(request) } });
     const result = await sysagent.databasePassword({ engine: accountDatabase.engine, username: accountDatabase.username, password: body.password });
     await audit(request, { action: "UPDATE", resource: "database-user", resourceId: accountDatabase.id, description: `Account changed DB password for ${accountDatabase.username}`, metadata: { result } as any });
@@ -3046,7 +3046,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
   app.post("/password", async (request: any) => {
     const body = z.object({
       currentPassword: z.string().min(1),
-      newPassword: z.string().min(10).max(128)
+      newPassword: z.string().min(10).max(500)
     }).parse(request.body);
     const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
     const ok = await bcrypt.compare(body.currentPassword, account.passwordHash);

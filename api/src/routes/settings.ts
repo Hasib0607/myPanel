@@ -8,7 +8,7 @@ import { audit } from "../lib/audit.js";
 
 const passwordSchema = z.object({
   currentPassword: z.string().min(1),
-  newPassword: z.string().min(10).max(256)
+  newPassword: z.string().min(10).max(500)
 });
 
 const envUpdateSchema = z.object({

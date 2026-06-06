@@ -10,7 +10,7 @@ import { sysagent } from "../lib/sysagent.js";
 
 const engineSchema = z.enum(["POSTGRESQL", "MYSQL"]);
 const identifierSchema = z.string().regex(/^[a-zA-Z0-9_]+$/, "Use only letters, numbers, and underscores");
-const passwordSchema = z.string().min(12).max(256).optional();
+const passwordSchema = z.string().min(12).max(500).optional();
 
 const provisionSchema = z.object({
   engine: engineSchema,

@@ -14,6 +14,7 @@ import { renderZone } from "./dns.js";
 import { defaultRecords, normalizeDomainName } from "./domains.js";
 
 const usernameSchema = z.string().trim().toLowerCase().regex(/^[a-z0-9][a-z0-9_-]{2,31}$/);
+const passwordMaxLength = 500;
 
 const accountBaseSchema = z.object({
   username: usernameSchema,
@@ -25,8 +26,8 @@ const accountBaseSchema = z.object({
   }, "Enter a valid domain, like example.com"),
   email: z.string().email().nullable().optional(),
   ownerName: z.string().trim().min(1).nullable().optional(),
-  password: z.string().min(10).max(128).optional(),
-  confirmPassword: z.string().max(128).optional(),
+  password: z.string().min(10).max(passwordMaxLength).optional(),
+  confirmPassword: z.string().max(passwordMaxLength).optional(),
   packageId: z.string().nullable().optional(),
   packageName: z.string().trim().min(1).nullable().optional(),
   diskLimitMb: z.number().int().min(0).nullable().optional(),
@@ -254,7 +255,7 @@ export const accountRoutes: FastifyPluginAsync = async (app) => {
 
   app.post("/:accountId/password", async (request) => {
     const { accountId } = z.object({ accountId: z.string() }).parse(request.params);
-    const body = z.object({ password: z.string().min(10).max(128).optional() }).parse(request.body ?? {});
+    const body = z.object({ password: z.string().min(10).max(passwordMaxLength).optional() }).parse(request.body ?? {});
     const existing = await prisma.account.findFirstOrThrow({ where: { OR: [{ id: accountId }, { username: accountId }] } });
     const password = body.password ?? generatedPassword();
     const passwordHash = await bcrypt.hash(password, 12);
