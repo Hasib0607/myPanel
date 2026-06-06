@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, BadgeCheck, Clock, RefreshCw, ShieldCheck } from "lucide-react";
+import { AlertTriangle, BadgeCheck, Clock, RefreshCw, ShieldCheck, XCircle } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { apiGet, apiPatch, apiPost } from "@/lib/api";
 
@@ -22,6 +22,7 @@ type SslStatus = {
   state: "missing" | "expired" | "expiring" | "valid";
   daysRemaining: number | null;
   alert: boolean;
+  activeJobId?: string | null;
 };
 
 type SslQueueResponse = {
@@ -39,6 +40,13 @@ type SslJobStatus = {
   timestamp: number;
   processedOn?: number;
   finishedOn?: number;
+};
+
+type SslKillResponse = {
+  killed: boolean;
+  jobId: string;
+  state: string;
+  removed: boolean;
 };
 
 type SslPreflight = {
@@ -97,6 +105,23 @@ export function SslClient({ domainId, subdomainId, domainApiBase = "/domains", s
       await queryClient.invalidateQueries({ queryKey: ["ssl-status", sslApiBase, resourceKey] });
     }
   });
+  const killJob = useMutation({
+    mutationFn: () => {
+      if (!activeJobId) throw new Error("No active SSL job to kill.");
+      return apiPost<SslKillResponse>(`${sslApiBase}/jobs/${activeJobId}/kill`, {});
+    },
+    onSuccess: async () => {
+      setActiveJobId(null);
+      await queryClient.invalidateQueries({ queryKey: ["ssl-status", sslApiBase, resourceKey] });
+      await queryClient.invalidateQueries({ queryKey: ["ssl-job", sslApiBase] });
+    }
+  });
+
+  useEffect(() => {
+    if (!activeJobId && ssl.data?.activeJobId) {
+      setActiveJobId(ssl.data.activeJobId);
+    }
+  }, [activeJobId, ssl.data?.activeJobId]);
 
   useEffect(() => {
     if (jobStatus.data?.state === "completed") {
@@ -108,12 +133,13 @@ export function SslClient({ domainId, subdomainId, domainApiBase = "/domains", s
 
   const status = ssl.data;
   const statusText = status?.state ?? "missing";
-  const actionError = issue.error ?? renew.error ?? update.error ?? preflight.error ?? jobStatus.error;
+  const actionError = issue.error ?? renew.error ?? update.error ?? preflight.error ?? killJob.error ?? jobStatus.error;
   const actionErrorText = actionError instanceof Error ? actionError.message : null;
   const liveJobState = jobStatus.data?.state;
   const jobFailedReason = jobStatus.data?.failedReason;
   const jobIsRunning = Boolean(activeJobId && liveJobState && !["completed", "failed"].includes(liveJobState));
   const isBusy = issue.isPending || renew.isPending || update.isPending || preflight.isPending || jobIsRunning;
+  const canKillJob = Boolean(activeJobId && liveJobState && !["completed", "failed"].includes(liveJobState));
   const jobAgeSeconds = jobStatus.data ? Math.max(0, Math.round((Date.now() - jobStatus.data.timestamp) / 1000)) : 0;
   const sslDomainName = status?.domain ?? domain.data?.name ?? "Domain";
   const isWildcardDomain = sslDomainName.startsWith("*.");
@@ -208,6 +234,10 @@ export function SslClient({ domainId, subdomainId, domainApiBase = "/domains", s
             <button className="flex items-center gap-2 rounded-md border border-panel-line px-3 py-2 text-sm font-semibold hover:bg-slate-50 disabled:opacity-60" disabled={isBusy} onClick={() => renew.mutate()} type="button">
               <RefreshCw size={15} />
               Renew
+            </button>
+            <button className="flex items-center gap-2 rounded-md border border-red-200 px-3 py-2 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:opacity-60" disabled={!canKillJob || killJob.isPending} onClick={() => killJob.mutate()} type="button">
+              <XCircle size={15} />
+              Kill
             </button>
           </div>
 

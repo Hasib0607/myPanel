@@ -55,6 +55,11 @@ class EnsureAcmeWebrootRequest(BaseModel):
     webRoot: str | None = None
 
 
+class KillSslProcessRequest(BaseModel):
+    domain: str = Field(pattern=r"^(\*\.)?[a-zA-Z0-9.-]+$")
+    certName: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_.-]+$")
+
+
 def safe_cert_lookup_name(value: str) -> str:
     primary = value.split()[0].strip()
     if not re.fullmatch(r"[a-zA-Z0-9_.-]+", primary):
@@ -169,6 +174,28 @@ def ensure_acme_webroot(body: EnsureAcmeWebrootRequest) -> dict:
         "webRoot": str(web_root),
         "challengeDir": str(challenge_dir),
         "domain": primary,
+    }
+
+
+@router.post("/kill")
+def kill_ssl_process(body: KillSslProcessRequest) -> dict:
+    terms = [body.domain]
+    if body.certName:
+        terms.append(body.certName)
+    pattern = "certbot.*(" + "|".join(re.escape(term) for term in terms) + ")"
+    result = run_command(["pkill", "-TERM", "-f", pattern], allow_live=settings.allow_live_ssl)
+    if result.get("returncode") == 1:
+        result = {
+            **result,
+            "stdout": result.get("stdout") or "No matching certbot process was running.",
+            "stderr": "",
+            "returncode": 0,
+        }
+    return {
+        **result,
+        "domain": body.domain,
+        "certName": body.certName,
+        "pattern": pattern,
     }
 
 

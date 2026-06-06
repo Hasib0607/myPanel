@@ -144,6 +144,8 @@ export const sysagent = {
     request<{ requested: string; domain: string; exists: boolean; expiry: string | null; certificate: string; privateKey: string; candidates?: unknown[] }>(`/ssl/certificate-reusable/${encodeURIComponent(domain.split(" ")[0] ?? domain)}`),
   ensureAcmeWebroot: (body: { domain: string; webRoot?: string | null }) =>
     request<SysagentCommandResult & { webRoot?: string; challengeDir?: string }>("/ssl/ensure-acme-webroot", { method: "POST", body: JSON.stringify(body) }),
+  killSslProcess: (body: { domain: string; certName?: string | null }) =>
+    request<SysagentCommandResult & { domain?: string; certName?: string | null; pattern?: string }>("/ssl/kill", { method: "POST", body: JSON.stringify(body) }),
   applyDnsZone: (body: unknown) =>
     request("/dns/zone/apply", { method: "POST", body: JSON.stringify(body) }),
   provisionDatabase: (body: unknown) =>

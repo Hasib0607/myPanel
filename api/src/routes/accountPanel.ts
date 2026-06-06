@@ -629,9 +629,7 @@ async function accountSslJobStatus(request: any, jobId: string) {
   if (!job) {
     throw Object.assign(new Error("SSL job not found. It may have already been cleaned up."), { statusCode: 404 });
   }
-  if (job.data?.domainId) {
-    await prisma.domain.findFirstOrThrow({ where: { id: job.data.domainId, accountId: accountId(request) } });
-  }
+  await assertAccountOwnsSslJob(request, job);
   const state = await job.getState();
   return {
     id: job.id,
@@ -646,6 +644,59 @@ async function accountSslJobStatus(request: any, jobId: string) {
     processedOn: job.processedOn,
     finishedOn: job.finishedOn
   };
+}
+
+async function assertAccountOwnsSslJob(request: any, job: { data?: { domainId?: string | null; subdomainId?: string | null } }) {
+  const ownerAccountId = accountId(request);
+  if (job.data?.domainId) {
+    await prisma.domain.findFirstOrThrow({ where: { id: job.data.domainId, accountId: ownerAccountId } });
+    return;
+  }
+  if (job.data?.subdomainId) {
+    await prisma.subdomain.findFirstOrThrow({ where: { id: job.data.subdomainId, domain: { accountId: ownerAccountId } } });
+    return;
+  }
+  throw Object.assign(new Error("SSL job is not linked to this account."), { statusCode: 404 });
+}
+
+async function killAccountSslJob(request: any, jobId: string) {
+  const job = await sslQueue.getJob(jobId);
+  if (!job) {
+    throw Object.assign(new Error("SSL job not found. It may have already been cleaned up."), { statusCode: 404 });
+  }
+  await assertAccountOwnsSslJob(request, job);
+  const state = await job.getState();
+  const terminal = state === "completed" || state === "failed";
+  let processKill: Awaited<ReturnType<typeof sysagent.killSslProcess>> | null = null;
+  if (!terminal && job.data?.domain) {
+    processKill = await sysagent.killSslProcess({
+      domain: job.data.domain,
+      certName: job.data.certName ?? certbotCertificateName(job.data.domain)
+    }).catch((error) => ({
+      returncode: 1,
+      stderr: error instanceof Error ? error.message : "Could not kill SSL process"
+    }));
+  }
+  let removed = false;
+  if (!terminal) {
+    try {
+      await job.remove();
+      removed = true;
+    } catch {
+      removed = false;
+    }
+  }
+  return { killed: true, jobId, state, removed, processKill };
+}
+
+async function activeAccountSslJobIdForResource(resource: { domainId?: string | null; subdomainId?: string | null }) {
+  const jobs = await sslQueue.getJobs(["waiting", "active", "delayed", "paused", "prioritized", "waiting-children"], 0, 100, true);
+  const job = jobs.find((item) => {
+    if (resource.domainId && item.data?.domainId === resource.domainId) return true;
+    if (resource.subdomainId && item.data?.subdomainId === resource.subdomainId) return true;
+    return false;
+  });
+  return job?.id ? String(job.id) : null;
 }
 
 function domainLabelInsideParent(domainName: string, parentName: string) {
@@ -1759,6 +1810,11 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     return accountSslJobStatus(request, jobId);
   });
 
+  app.post("/ssl/jobs/:jobId/kill", async (request: any) => {
+    const { jobId } = z.object({ jobId: z.string() }).parse(request.params);
+    return killAccountSslJob(request, jobId);
+  });
+
   app.get("/ssl/domains/:domainId/status", async (request: any) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
@@ -1769,6 +1825,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       sslEnabled: domain.sslEnabled,
       sslExpiry: effectiveExpiry,
       forceSsl: domain.forceSsl,
+      activeJobId: await activeAccountSslJobIdForResource({ domainId: domain.id }),
       ...expiryStatus(effectiveExpiry)
     };
   });
@@ -1784,6 +1841,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       sslEnabled: target.subdomain.sslEnabled && Boolean(cert.exists),
       sslExpiry: expiry,
       forceSsl: target.subdomain.sslEnabled,
+      activeJobId: await activeAccountSslJobIdForResource({ subdomainId }),
       ...expiryStatus(expiry)
     };
   });

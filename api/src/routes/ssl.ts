@@ -55,6 +55,54 @@ async function sslJobStatus(jobId: string) {
   };
 }
 
+async function killSslJob(jobId: string) {
+  const job = await sslQueue.getJob(jobId);
+  if (!job) {
+    throw Object.assign(new Error("SSL job not found. It may have already been cleaned up."), { statusCode: 404 });
+  }
+
+  const state = await job.getState();
+  const terminal = state === "completed" || state === "failed";
+  let processKill: Awaited<ReturnType<typeof sysagent.killSslProcess>> | null = null;
+  if (!terminal && job.data?.domain) {
+    processKill = await sysagent.killSslProcess({
+      domain: job.data.domain,
+      certName: job.data.certName ?? certbotCertificateName(job.data.domain)
+    }).catch((error) => ({
+      returncode: 1,
+      stderr: error instanceof Error ? error.message : "Could not kill SSL process"
+    }));
+  }
+
+  let removed = false;
+  if (!terminal) {
+    try {
+      await job.remove();
+      removed = true;
+    } catch {
+      removed = false;
+    }
+  }
+
+  return {
+    killed: true,
+    jobId,
+    state,
+    removed,
+    processKill
+  };
+}
+
+async function activeSslJobIdForResource(resource: { domainId?: string | null; subdomainId?: string | null }) {
+  const jobs = await sslQueue.getJobs(["waiting", "active", "delayed", "paused", "prioritized", "waiting-children"], 0, 100, true);
+  const job = jobs.find((item) => {
+    if (resource.domainId && item.data?.domainId === resource.domainId) return true;
+    if (resource.subdomainId && item.data?.subdomainId === resource.subdomainId) return true;
+    return false;
+  });
+  return job?.id ? String(job.id) : null;
+}
+
 function commandSucceeded(result: SysagentCommandResult) {
   return result.returncode === 0 && !result.dryRun;
 }
@@ -252,6 +300,11 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
     return sslJobStatus(jobId);
   });
 
+  app.post("/jobs/:jobId/kill", async (request) => {
+    const { jobId } = z.object({ jobId: z.string() }).parse(request.params);
+    return killSslJob(jobId);
+  });
+
   app.get("/domains/:domainId/status", async (request) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const domain = await prisma.domain.findUniqueOrThrow({ where: { id: domainId } });
@@ -262,6 +315,7 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
       sslEnabled: domain.sslEnabled,
       sslExpiry: effectiveExpiry,
       forceSsl: domain.forceSsl,
+      activeJobId: await activeSslJobIdForResource({ domainId: domain.id }),
       ...expiryStatus(effectiveExpiry)
     };
   });
@@ -277,6 +331,7 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
       sslEnabled: target.subdomain.sslEnabled && cert.exists,
       sslExpiry: expiry,
       forceSsl: target.subdomain.sslEnabled,
+      activeJobId: await activeSslJobIdForResource({ subdomainId }),
       ...expiryStatus(expiry)
     };
   });
