@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Archive, Download, Eye, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
+import { Archive, Download, Eye, RefreshCw, RotateCcw, ShieldCheck, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { apiDeleteBody, apiGet, apiPost, apiPut } from "@/lib/api";
 
@@ -25,6 +25,19 @@ type BackupArchive = {
   checksumPath: string;
 };
 
+type RestoreJob = {
+  id: string;
+  source: "LOCAL" | "GOOGLE_DRIVE";
+  status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED";
+  phase: string;
+  percent: number;
+  message: string;
+  remotePath?: string;
+  localPath?: string;
+  downloadSkipped?: boolean;
+  error?: string;
+};
+
 const initialDraft = {
   label: "manual",
   appDir: "/opt/vps-panel",
@@ -35,16 +48,30 @@ const initialDraft = {
   includeDeployments: true,
   includeNginx: true,
   includeDns: true,
+  includeMail: true,
+  includeSsl: true,
   includeLogs: false,
   excludePatterns: "node_modules\n.next/cache\ncache\ntmp\n*.log",
   encryptPassphrase: ""
 };
 const initialSettings = {
-  scheduleEnabled: false,
-  cron: "0 3 * * *",
-  retentionKeepLast: "14",
-  remoteProvider: "NONE",
-  remoteTarget: "",
+  scheduleEnabled: true,
+  timezone: "Asia/Dhaka",
+  scheduleTimes: "11:01\n23:01",
+  retentionKeepLast: "2",
+  remoteProvider: "GOOGLE_DRIVE",
+  remoteTarget: "mypanel-drive:vps-panel-backups",
+  googleDriveAuthMode: "SERVICE_ACCOUNT",
+  googleDriveFolderId: "",
+  googleDriveTeamDriveId: "",
+  googleDriveClientId: "",
+  googleDriveClientSecret: "",
+  googleDriveRefreshToken: "",
+  googleDriveServiceAccountJson: "",
+  googleDriveClientIdConfigured: false,
+  googleDriveClientSecretConfigured: false,
+  googleDriveRefreshTokenConfigured: false,
+  googleDriveServiceAccountConfigured: false,
   encryptionEnabled: false
 };
 
@@ -53,6 +80,9 @@ export function BackupsClient() {
   const [draft, setDraft] = useState(initialDraft);
   const [notice, setNotice] = useState("");
   const [restore, setRestore] = useState<string[]>([]);
+  const [restorePath, setRestorePath] = useState("");
+  const [remoteRestorePath, setRemoteRestorePath] = useState("");
+  const [activeRestoreJobId, setActiveRestoreJobId] = useState("");
   const [manifest, setManifest] = useState<string[]>([]);
   const [settings, setSettings] = useState(initialSettings);
   const backups = useQuery({
@@ -64,10 +94,22 @@ export function BackupsClient() {
     if (!saved) return;
     setSettings({
       scheduleEnabled: Boolean(saved.scheduleEnabled),
-      cron: String(saved.cron ?? "0 3 * * *"),
-      retentionKeepLast: String(saved.retentionKeepLast ?? 14),
-      remoteProvider: String(saved.remoteProvider ?? "NONE"),
-      remoteTarget: String(saved.remoteTarget ?? ""),
+      timezone: String(saved.timezone ?? "Asia/Dhaka"),
+      scheduleTimes: Array.isArray(saved.scheduleTimes) ? saved.scheduleTimes.join("\n") : "11:01\n23:01",
+      retentionKeepLast: String(saved.retentionKeepLast ?? 2),
+      remoteProvider: String(saved.remoteProvider ?? "GOOGLE_DRIVE"),
+      remoteTarget: String(saved.remoteTarget ?? "mypanel-drive:vps-panel-backups"),
+      googleDriveAuthMode: String(saved.googleDriveAuthMode ?? "SERVICE_ACCOUNT"),
+      googleDriveFolderId: String(saved.googleDriveFolderId ?? ""),
+      googleDriveTeamDriveId: String(saved.googleDriveTeamDriveId ?? ""),
+      googleDriveClientId: "",
+      googleDriveClientSecret: "",
+      googleDriveRefreshToken: "",
+      googleDriveServiceAccountJson: "",
+      googleDriveClientIdConfigured: Boolean(saved.googleDriveClientIdConfigured),
+      googleDriveClientSecretConfigured: Boolean(saved.googleDriveClientSecretConfigured),
+      googleDriveRefreshTokenConfigured: Boolean(saved.googleDriveRefreshTokenConfigured),
+      googleDriveServiceAccountConfigured: Boolean(saved.googleDriveServiceAccountConfigured),
       encryptionEnabled: Boolean(saved.encryptionEnabled)
     });
   }, [backups.data?.settings]);
@@ -89,6 +131,20 @@ export function BackupsClient() {
     onSuccess: (data) => setRestore(data.commands),
     onError: (error) => setNotice(error instanceof Error ? error.message : "Restore preview failed.")
   });
+  const restoreJob = useQuery({
+    queryKey: ["backup-restore-job", activeRestoreJobId],
+    queryFn: () => apiGet<RestoreJob>(`/backups/restore-jobs/${activeRestoreJobId}`),
+    enabled: Boolean(activeRestoreJobId),
+    refetchInterval: 1000
+  });
+  const startRestore = useMutation({
+    mutationFn: (body: { source: "LOCAL" | "GOOGLE_DRIVE"; path: string }) => apiPost<RestoreJob>("/backups/restore-jobs", { ...body, execute: true, mode: "full" }),
+    onSuccess: (job) => {
+      setActiveRestoreJobId(job.id);
+      setNotice("");
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Restore failed.")
+  });
   const verify = useMutation({
     mutationFn: (path: string) => apiPost<{ ok: boolean; error?: string }>("/backups/verify", { path }),
     onSuccess: (data) => setNotice(data.ok ? "Checksum verified." : data.error ?? "Checksum failed."),
@@ -108,7 +164,7 @@ export function BackupsClient() {
     onError: (error) => setNotice(error instanceof Error ? error.message : "Delete failed.")
   });
   const prune = useMutation({
-    mutationFn: () => apiPost("/backups/prune", { keepLast: Number(settings.retentionKeepLast || 14) }),
+    mutationFn: () => apiPost("/backups/prune", { keepLast: Number(settings.retentionKeepLast || 2) }),
     onSuccess: async () => {
       setNotice("Prune completed.");
       await refresh();
@@ -116,17 +172,34 @@ export function BackupsClient() {
     onError: (error) => setNotice(error instanceof Error ? error.message : "Prune failed.")
   });
   const saveSettings = useMutation({
-    mutationFn: () => apiPut("/backups/settings", { ...settings, retentionKeepLast: Number(settings.retentionKeepLast || 14) }),
-    onSuccess: () => setNotice("Backup settings saved."),
+    mutationFn: () => apiPut("/backups/settings", {
+      ...settings,
+      scheduleTimes: settings.scheduleTimes.split("\n").map((item) => item.trim()).filter(Boolean),
+      retentionKeepLast: Number(settings.retentionKeepLast || 2)
+    }),
+    onSuccess: async () => {
+      setNotice("Backup settings saved.");
+      await refresh();
+    },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Settings failed.")
   });
+  const runLocalRestore = (path: string, label = path) => {
+    if (confirm(`Restore ${label}? This overwrites panel files, databases, DNS, mail, and service config.`)) {
+      startRestore.mutate({ source: "LOCAL", path });
+    }
+  };
+  const runDriveRestore = (path: string) => {
+    if (confirm(`Download and restore ${path}? If download already exists locally, it will be reused.`)) {
+      startRestore.mutate({ source: "GOOGLE_DRIVE", path });
+    }
+  };
 
   return (
     <section className="space-y-6 p-8">
       <header className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-3xl font-semibold tracking-normal text-panel-ink">Backups</h1>
-          <p className="mt-1 text-sm text-panel-muted">Full myPanel archive with app, env, DB dump, account files, deployments, Nginx, and DNS zones.</p>
+          <p className="mt-1 text-sm text-panel-muted">Full myPanel archive with code, env, databases, accounts, domains, DNS, mail, SSL, and storage.</p>
         </div>
         <button className="rounded-md border border-panel-line p-2 hover:bg-white" onClick={() => refresh()} type="button" title="Refresh">
           <RefreshCw size={16} />
@@ -152,6 +225,8 @@ export function BackupsClient() {
               ["includeDeployments", "Deployments"],
               ["includeNginx", "Nginx configs"],
               ["includeDns", "DNS zone files"],
+              ["includeMail", "Mail config and mailboxes"],
+              ["includeSsl", "SSL certificates"],
               ["includeLogs", "Panel logs"]
             ] as const).map(([key, label]) => (
               <label className="flex items-center gap-2 text-sm" key={key}>
@@ -173,23 +248,63 @@ export function BackupsClient() {
 
         <div className="space-y-6">
           <div className="rounded-md border border-panel-line bg-white">
-            <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Schedule, Retention, Remote</div>
+            <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Schedule, Retention, Drive</div>
             <div className="grid grid-cols-2 gap-3 p-4">
               <label className="flex items-center gap-2 text-sm">
                 <input checked={settings.scheduleEnabled} onChange={(event) => setSettings({ ...settings, scheduleEnabled: event.target.checked })} type="checkbox" />
                 Scheduled
               </label>
-              <Input label="Cron" value={settings.cron} onChange={(cron) => setSettings({ ...settings, cron })} />
+              <Input label="Timezone" value={settings.timezone} onChange={(timezone) => setSettings({ ...settings, timezone })} />
+              <label className="block space-y-1 text-xs font-medium text-panel-muted">
+                <span>Daily Times</span>
+                <textarea className="min-h-20 w-full rounded-md border border-panel-line px-3 py-2 text-sm text-panel-ink" value={settings.scheduleTimes} onChange={(event) => setSettings({ ...settings, scheduleTimes: event.target.value })} />
+              </label>
               <Input label="Keep Last" value={settings.retentionKeepLast} onChange={(retentionKeepLast) => setSettings({ ...settings, retentionKeepLast: retentionKeepLast.replace(/\D/g, "") })} />
               <label className="block space-y-1 text-xs font-medium text-panel-muted">
                 <span>Remote Provider</span>
                 <select className="h-10 w-full rounded-md border border-panel-line px-3 text-sm text-panel-ink" value={settings.remoteProvider} onChange={(event) => setSettings({ ...settings, remoteProvider: event.target.value })}>
-                  {["NONE", "S3", "R2", "B2", "SFTP"].map((item) => <option key={item}>{item}</option>)}
+                  {["GOOGLE_DRIVE", "NONE", "S3", "R2", "B2", "SFTP"].map((item) => <option key={item}>{item}</option>)}
                 </select>
               </label>
-              <Input label="Remote Target" value={settings.remoteTarget} onChange={(remoteTarget) => setSettings({ ...settings, remoteTarget })} />
+              <Input label="Drive Target" value={settings.remoteTarget} onChange={(remoteTarget) => setSettings({ ...settings, remoteTarget })} />
               <button className="rounded-md border border-panel-line px-3 text-sm font-semibold hover:bg-slate-50" onClick={() => saveSettings.mutate()} type="button">Save</button>
               <button className="rounded-md border border-panel-line px-3 text-sm font-semibold hover:bg-slate-50" onClick={() => prune.mutate()} type="button">Prune</button>
+            </div>
+          </div>
+
+          <div className="rounded-md border border-panel-line bg-white">
+            <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Google Drive Secrets</div>
+            <div className="grid grid-cols-2 gap-3 p-4">
+              <label className="block space-y-1 text-xs font-medium text-panel-muted">
+                <span>Auth Mode</span>
+                <select className="h-10 w-full rounded-md border border-panel-line px-3 text-sm text-panel-ink" value={settings.googleDriveAuthMode} onChange={(event) => setSettings({ ...settings, googleDriveAuthMode: event.target.value })}>
+                  <option value="SERVICE_ACCOUNT">Service Account JSON</option>
+                  <option value="OAUTH_REFRESH_TOKEN">OAuth Refresh Token</option>
+                  <option value="RCLONE_REMOTE">Existing rclone remote</option>
+                </select>
+              </label>
+              <Input label="Drive Folder ID" value={settings.googleDriveFolderId} onChange={(googleDriveFolderId) => setSettings({ ...settings, googleDriveFolderId })} />
+              <Input label="Shared Drive ID" value={settings.googleDriveTeamDriveId} onChange={(googleDriveTeamDriveId) => setSettings({ ...settings, googleDriveTeamDriveId })} />
+              <Input label={`Client ID${settings.googleDriveClientIdConfigured ? " configured" : ""}`} value={settings.googleDriveClientId} onChange={(googleDriveClientId) => setSettings({ ...settings, googleDriveClientId })} />
+              <Input label={`Client Secret${settings.googleDriveClientSecretConfigured ? " configured" : ""}`} value={settings.googleDriveClientSecret} onChange={(googleDriveClientSecret) => setSettings({ ...settings, googleDriveClientSecret })} />
+              <Input label={`Refresh Token${settings.googleDriveRefreshTokenConfigured ? " configured" : ""}`} value={settings.googleDriveRefreshToken} onChange={(googleDriveRefreshToken) => setSettings({ ...settings, googleDriveRefreshToken })} />
+              <label className="col-span-2 block space-y-1 text-xs font-medium text-panel-muted">
+                <span>Service Account JSON{settings.googleDriveServiceAccountConfigured ? " configured" : ""}</span>
+                <textarea className="min-h-28 w-full rounded-md border border-panel-line px-3 py-2 font-mono text-xs text-panel-ink" value={settings.googleDriveServiceAccountJson} onChange={(event) => setSettings({ ...settings, googleDriveServiceAccountJson: event.target.value })} />
+              </label>
+              <button className="col-span-2 rounded-md border border-panel-line px-3 py-2 text-sm font-semibold hover:bg-slate-50" onClick={() => saveSettings.mutate()} type="button">Save Google Secrets</button>
+            </div>
+          </div>
+
+          <div className="rounded-md border border-panel-line bg-white">
+            <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Restore Backup</div>
+            <div className="grid grid-cols-[1fr_auto_auto] gap-2 p-4">
+              <Input label="Archive Path" value={restorePath} onChange={setRestorePath} />
+              <button className="mt-5 rounded-md border border-panel-line px-3 text-sm font-semibold hover:bg-slate-50 disabled:opacity-50" disabled={!restorePath.trim()} onClick={() => previewRestore.mutate(restorePath)} type="button">Preview</button>
+              <button className="mt-5 rounded-md border border-red-200 px-3 text-sm font-semibold text-panel-danger hover:bg-red-50 disabled:opacity-50" disabled={!restorePath.trim()} onClick={() => runLocalRestore(restorePath)} type="button">Restore Now</button>
+              <Input label="Drive Archive Name / Path" value={remoteRestorePath} onChange={setRemoteRestorePath} />
+              <button className="mt-5 rounded-md border border-panel-line px-3 text-sm font-semibold hover:bg-slate-50 disabled:opacity-50" disabled={!remoteRestorePath.trim()} onClick={() => runDriveRestore(remoteRestorePath)} type="button">Download + Restore</button>
+              <div className="mt-5 rounded-md border border-panel-line px-3 py-2 text-xs text-panel-muted">Downloaded file stays if restore fails, and is reused next retry.</div>
             </div>
           </div>
 
@@ -208,6 +323,7 @@ export function BackupsClient() {
                     <button className="rounded-md border border-panel-line p-2 hover:bg-slate-50" onClick={() => verify.mutate(item.archivePath!)} type="button" title="Verify"><ShieldCheck size={15} /></button>
                     <button className="rounded-md border border-panel-line p-2 hover:bg-slate-50" onClick={() => loadManifest.mutate(item.archivePath!)} type="button" title="Manifest"><Archive size={15} /></button>
                     <button className="rounded-md border border-panel-line p-2 hover:bg-slate-50" onClick={() => previewRestore.mutate(item.archivePath!)} type="button" title="Restore preview"><Eye size={15} /></button>
+                    <button className="rounded-md border border-red-200 p-2 text-panel-danger hover:bg-red-50" onClick={() => runLocalRestore(item.archivePath!, item.label)} type="button" title="Restore now"><RotateCcw size={15} /></button>
                     <button className="rounded-md border border-red-200 p-2 text-panel-danger hover:bg-red-50" onClick={() => deleteArchive.mutate(item.archivePath!)} type="button" title="Delete"><Trash2 size={15} /></button>
                   </div> : null}
                 </div>
@@ -231,6 +347,7 @@ export function BackupsClient() {
                     <button className="rounded-md border border-panel-line p-2 hover:bg-slate-50" onClick={() => verify.mutate(item.path)} type="button" title="Verify"><ShieldCheck size={15} /></button>
                     <button className="rounded-md border border-panel-line p-2 hover:bg-slate-50" onClick={() => loadManifest.mutate(item.path)} type="button" title="Manifest"><Archive size={15} /></button>
                     <button className="rounded-md border border-panel-line p-2 hover:bg-slate-50" onClick={() => previewRestore.mutate(item.path)} type="button" title="Restore preview"><Eye size={15} /></button>
+                    <button className="rounded-md border border-red-200 p-2 text-panel-danger hover:bg-red-50" onClick={() => runLocalRestore(item.path, item.name)} type="button" title="Restore now"><RotateCcw size={15} /></button>
                     <button className="rounded-md border border-red-200 p-2 text-panel-danger hover:bg-red-50" onClick={() => deleteArchive.mutate(item.path)} type="button" title="Delete"><Trash2 size={15} /></button>
                   </div>
                 </div>
@@ -253,6 +370,34 @@ export function BackupsClient() {
           ) : null}
         </div>
       </div>
+      {activeRestoreJobId ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/40 p-4">
+          <div className="w-full max-w-lg rounded-md bg-white shadow-xl">
+            <div className="flex items-center justify-between border-b border-panel-line px-4 py-3">
+              <div className="text-sm font-semibold">Restore Progress</div>
+              <button className="rounded-md border border-panel-line px-2 py-1 text-xs disabled:opacity-50" disabled={restoreJob.data?.status === "RUNNING" || restoreJob.data?.status === "QUEUED"} onClick={() => setActiveRestoreJobId("")} type="button">Close</button>
+            </div>
+            <div className="space-y-4 p-4">
+              <div>
+                <div className="mb-2 flex justify-between text-sm">
+                  <span>{restoreJob.data?.phase ?? "QUEUED"}</span>
+                  <span>{restoreJob.data?.percent ?? 1}%</span>
+                </div>
+                <div className="h-3 overflow-hidden rounded-full bg-slate-100">
+                  <div className={`h-full ${restoreJob.data?.status === "FAILED" ? "bg-red-500" : "bg-panel-accent"}`} style={{ width: `${restoreJob.data?.percent ?? 1}%` }} />
+                </div>
+              </div>
+              <div className="rounded-md border border-panel-line bg-slate-50 p-3 text-sm text-slate-700">
+                {restoreJob.data?.message ?? "Starting restore..."}
+                {restoreJob.data?.downloadSkipped ? <div className="mt-1 text-xs text-panel-muted">Local file was already present, download skipped.</div> : null}
+                {restoreJob.data?.localPath ? <div className="mt-1 truncate text-xs text-panel-muted">Local: {restoreJob.data.localPath}</div> : null}
+                {restoreJob.data?.remotePath ? <div className="mt-1 truncate text-xs text-panel-muted">Drive: {restoreJob.data.remotePath}</div> : null}
+                {restoreJob.data?.error ? <div className="mt-2 text-xs text-panel-danger">{restoreJob.data.error}</div> : null}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }

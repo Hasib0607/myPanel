@@ -1,34 +1,57 @@
 import type { FastifyPluginAsync } from "fastify";
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { audit } from "../lib/audit.js";
+import { getBackupSettings, googleDriveConfig, runPanelBackup, saveBackupSettings } from "../lib/panelBackups.js";
 import { prisma } from "../lib/prisma.js";
 import { sysagent } from "../lib/sysagent.js";
 
-const backupSchema = z.object({
-  label: z.string().trim().min(1).max(80).default("manual"),
-  appDir: z.string().trim().default("/opt/vps-panel"),
-  includeApp: z.boolean().default(true),
-  includeEnv: z.boolean().default(true),
-  includeDatabase: z.boolean().default(true),
-  includeAccounts: z.boolean().default(true),
-  includeDeployments: z.boolean().default(true),
-  includeNginx: z.boolean().default(true),
-  includeDns: z.boolean().default(true),
-  includeLogs: z.boolean().default(false),
-  excludePatterns: z.array(z.string()).default(["node_modules", ".next/cache", "cache", "tmp", "*.log"]),
-  encryptPassphrase: z.string().optional()
-});
 const pathSchema = z.object({ path: z.string().min(1) });
-const settingsSchema = z.object({
-  scheduleEnabled: z.boolean().default(false),
-  cron: z.string().default("0 3 * * *"),
-  retentionKeepLast: z.number().int().min(1).max(500).default(14),
-  remoteProvider: z.enum(["NONE", "S3", "R2", "B2", "SFTP"]).default("NONE"),
-  remoteTarget: z.string().default(""),
-  encryptionEnabled: z.boolean().default(false)
+const restoreJobSchema = z.object({
+  source: z.enum(["LOCAL", "GOOGLE_DRIVE"]).default("LOCAL"),
+  path: z.string().min(1),
+  execute: z.boolean().default(true),
+  mode: z.string().default("full")
 });
+
+type RestoreJobStatus = {
+  id: string;
+  source: "LOCAL" | "GOOGLE_DRIVE";
+  status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED";
+  phase: "QUEUED" | "CHECKING_LOCAL" | "DOWNLOADING" | "DOWNLOADED" | "RESTORING" | "CLEANING_UP" | "SUCCEEDED" | "FAILED";
+  percent: number;
+  message: string;
+  remotePath?: string;
+  localPath?: string;
+  downloadSkipped?: boolean;
+  error?: string;
+  result?: unknown;
+  startedAt: string;
+  finishedAt?: string;
+};
+
+function restoreJobKey(id: string) {
+  return `panel_restore_job:${id}`;
+}
+
+async function saveRestoreJob(job: RestoreJobStatus) {
+  await prisma.guardianSetting.upsert({
+    where: { key: restoreJobKey(job.id) },
+    update: { value: job as any },
+    create: { key: restoreJobKey(job.id), value: job as any }
+  });
+}
+
+function remoteArchivePath(remoteTarget: string, input: string) {
+  if (input.includes(":")) return input;
+  return `${remoteTarget.replace(/\/$/, "")}/${path.basename(input)}`;
+}
+
+function localRestorePath(backupRoot: string, input: string) {
+  return path.join(backupRoot, path.basename(input));
+}
 
 export const backupRoutes: FastifyPluginAsync = async (app) => {
   app.addHook("preHandler", app.requireAuth);
@@ -38,52 +61,22 @@ export const backupRoutes: FastifyPluginAsync = async (app) => {
       sysagent.backupPlan(),
       sysagent.backupArchives(),
       prisma.panelBackup.findMany({ orderBy: { createdAt: "desc" }, take: 50 }),
-      prisma.guardianSetting.findUnique({ where: { key: "panel_backup_settings" } })
+      getBackupSettings()
     ]);
-    return { plan, archives: archives.items, records, settings: settings?.value ?? settingsSchema.parse({}) };
+    return { plan, archives: archives.items, records, settings };
   });
 
   app.put("/settings", async (request) => {
-    const body = settingsSchema.parse(request.body ?? {});
-    const item = await prisma.guardianSetting.upsert({
-      where: { key: "panel_backup_settings" },
-      update: { value: body as any },
-      create: { key: "panel_backup_settings", value: body as any }
-    });
+    const item = await saveBackupSettings(request.body ?? {});
     await audit(request, { action: "UPDATE", resource: "panel_backup_settings", description: "Updated backup settings" });
     return item.value;
   });
 
   app.post("/", async (request, reply) => {
-    const body = backupSchema.parse(request.body ?? {});
-    const includes = Object.entries(body)
-      .filter(([key, value]) => key.startsWith("include") && value === true)
-      .map(([key]) => key);
-    const record = await prisma.panelBackup.create({
-      data: { label: body.label, status: "RUNNING", includes, startedAt: new Date() }
-    });
     try {
-      const result = await sysagent.createBackup(body);
-      const ok = result.result.returncode === 0;
-      const updated = await prisma.panelBackup.update({
-        where: { id: record.id },
-        data: {
-          status: ok ? "SUCCEEDED" : "FAILED",
-          archivePath: result.archivePath,
-          sizeBytes: result.sizeBytes ?? null,
-          includes: result.includes,
-          result: result as any,
-          finishedAt: new Date()
-        }
-      });
-      await audit(request, { action: "CREATE", resource: "panel_backup", resourceId: updated.id, description: `Created panel backup ${body.label}` });
-      return reply.code(201).send(updated);
+      return reply.code(201).send(await runPanelBackup(request.body ?? {}, request));
     } catch (error) {
-      const updated = await prisma.panelBackup.update({
-        where: { id: record.id },
-        data: { status: "FAILED", result: { error: error instanceof Error ? error.message : String(error) } as any, finishedAt: new Date() }
-      });
-      return reply.code(500).send(updated);
+      return reply.code(500).send((error as any).record ?? { error: error instanceof Error ? error.message : String(error) });
     }
   });
 
@@ -94,7 +87,90 @@ export const backupRoutes: FastifyPluginAsync = async (app) => {
 
   app.post("/restore", async (request) => {
     const body = z.object({ path: z.string().min(1), execute: z.boolean().default(false), mode: z.string().default("full") }).parse(request.body);
-    return sysagent.restoreBackup(body);
+    const result = await sysagent.restoreBackup(body);
+    await audit(request, { action: "APPLY", resource: "panel_backup_restore", description: `${body.execute ? "Executed" : "Previewed"} restore for ${body.path}`, metadata: result as any });
+    return result;
+  });
+
+  app.post("/restore-jobs", async (request, reply) => {
+    const body = restoreJobSchema.parse(request.body ?? {});
+    const id = randomUUID();
+    const plan = await sysagent.backupPlan();
+    const settings = await getBackupSettings();
+    const remotePath = body.source === "GOOGLE_DRIVE" ? remoteArchivePath(settings.remoteTarget, body.path) : undefined;
+    const localPath = body.source === "GOOGLE_DRIVE" ? localRestorePath(plan.backupRoot, body.path) : body.path;
+    const initial: RestoreJobStatus = {
+      id,
+      source: body.source,
+      status: "QUEUED",
+      phase: "QUEUED",
+      percent: 1,
+      message: "Restore job queued.",
+      remotePath,
+      localPath,
+      startedAt: new Date().toISOString()
+    };
+    await saveRestoreJob(initial);
+
+    void (async () => {
+      let job = initial;
+      const update = async (patch: Partial<RestoreJobStatus>) => {
+        job = { ...job, ...patch };
+        await saveRestoreJob(job);
+      };
+      try {
+        await update({ status: "RUNNING", phase: "CHECKING_LOCAL", percent: 5, message: "Checking local archive." });
+        if (body.source === "GOOGLE_DRIVE") {
+          await update({ phase: "DOWNLOADING", percent: 15, message: "Downloading archive from Google Drive if local copy is missing." });
+          const googleDrive = await googleDriveConfig(settings);
+          const download = await sysagent.downloadBackupFromRemote({ remotePath, localPath, googleDrive });
+          if (download.result.returncode !== 0) {
+            throw new Error(download.result.stderr || "Google Drive download failed.");
+          }
+          await update({
+            phase: "DOWNLOADED",
+            percent: 40,
+            message: download.skipped ? "Local archive already exists; skipped download." : "Download complete.",
+            localPath: download.archivePath,
+            downloadSkipped: download.skipped,
+            result: { download }
+          });
+        }
+
+        await update({ phase: "RESTORING", percent: 60, message: body.execute ? "Running restore." : "Restore dry-run/preview running." });
+        const restore = await sysagent.restoreBackup({ path: job.localPath, execute: body.execute, mode: body.mode });
+        const restoreOk = restore.result.returncode === 0;
+        if (!restoreOk) {
+          throw Object.assign(new Error(restore.result.stderr || "Restore failed."), { restore });
+        }
+
+        if (body.source === "GOOGLE_DRIVE" && body.execute) {
+          await update({ phase: "CLEANING_UP", percent: 92, message: "Restore complete. Cleaning up downloaded archive." });
+          await sysagent.deleteBackupArchive(job.localPath!);
+        }
+        await update({ status: "SUCCEEDED", phase: "SUCCEEDED", percent: 100, message: "Restore completed.", result: { ...(job.result as any), restore }, finishedAt: new Date().toISOString() });
+        await audit(request, { action: "APPLY", resource: "panel_backup_restore", description: `Restore job ${id} completed for ${job.localPath}`, metadata: job as any });
+      } catch (error) {
+        await update({
+          status: "FAILED",
+          phase: "FAILED",
+          percent: Math.max(job.percent, body.source === "GOOGLE_DRIVE" ? 40 : 5),
+          message: "Restore incomplete. Downloaded archive was kept for retry.",
+          error: error instanceof Error ? error.message : String(error),
+          result: { ...(job.result as any), restore: (error as any).restore },
+          finishedAt: new Date().toISOString()
+        });
+      }
+    })();
+
+    return reply.code(202).send(initial);
+  });
+
+  app.get("/restore-jobs/:id", async (request, reply) => {
+    const params = z.object({ id: z.string().min(1) }).parse(request.params);
+    const row = await prisma.guardianSetting.findUnique({ where: { key: restoreJobKey(params.id) } });
+    if (!row) return reply.code(404).send({ error: "Restore job not found" });
+    return row.value;
   });
 
   app.post("/verify", async (request) => {

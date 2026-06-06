@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,27 +22,55 @@ SAFE_LABEL = re.compile(r"[^a-zA-Z0-9_.-]+")
 
 class BackupRequest(BaseModel):
     label: str = Field(default="manual")
-    app_dir: str = Field(default="/opt/vps-panel")
-    include_app: bool = True
-    include_env: bool = True
-    include_database: bool = True
-    include_accounts: bool = True
-    include_deployments: bool = True
-    include_nginx: bool = True
-    include_dns: bool = True
-    include_logs: bool = False
+    app_dir: str = Field(default="/opt/vps-panel", alias="appDir")
+    include_app: bool = Field(default=True, alias="includeApp")
+    include_env: bool = Field(default=True, alias="includeEnv")
+    include_database: bool = Field(default=True, alias="includeDatabase")
+    include_accounts: bool = Field(default=True, alias="includeAccounts")
+    include_deployments: bool = Field(default=True, alias="includeDeployments")
+    include_nginx: bool = Field(default=True, alias="includeNginx")
+    include_dns: bool = Field(default=True, alias="includeDns")
+    include_mail: bool = Field(default=True, alias="includeMail")
+    include_ssl: bool = Field(default=True, alias="includeSsl")
+    include_logs: bool = Field(default=False, alias="includeLogs")
     exclude_patterns: list[str] = Field(default_factory=lambda: [
         "node_modules",
         ".next/cache",
         "cache",
         "tmp",
         "*.log",
-    ])
-    encrypt_passphrase: str | None = None
+    ], alias="excludePatterns")
+    encrypt_passphrase: str | None = Field(default=None, alias="encryptPassphrase")
+
+    model_config = {"populate_by_name": True}
 
 
 class PruneRequest(BaseModel):
     keep_last: int = Field(default=10, ge=1, le=500)
+
+
+class RemoteUploadRequest(BaseModel):
+    path: str
+    remote_target: str = Field(alias="remoteTarget")
+    google_drive: dict[str, Any] | None = Field(default=None, alias="googleDrive")
+
+    model_config = {"populate_by_name": True}
+
+
+class RemoteDownloadRequest(BaseModel):
+    remote_path: str = Field(alias="remotePath")
+    local_path: str = Field(alias="localPath")
+    google_drive: dict[str, Any] | None = Field(default=None, alias="googleDrive")
+
+    model_config = {"populate_by_name": True}
+
+
+class RemotePruneRequest(BaseModel):
+    remote_target: str = Field(alias="remoteTarget")
+    keep_last: int = Field(default=2, ge=1, le=500, alias="keepLast")
+    google_drive: dict[str, Any] | None = Field(default=None, alias="googleDrive")
+
+    model_config = {"populate_by_name": True}
 
 
 class RestoreRequest(BaseModel):
@@ -69,42 +99,56 @@ def backup_paths(body: BackupRequest) -> list[str]:
         paths.extend(["/etc/nginx/sites-available", "/etc/nginx/sites-enabled", "/etc/nginx/conf.d"])
     if body.include_dns:
         paths.extend(["/etc/bind", "/var/cache/bind", "/etc/named.conf", "/var/named"])
+    if body.include_mail:
+        paths.extend(["/etc/postfix", "/etc/dovecot", "/var/mail", "/var/vmail", "/home/vmail"])
+    if body.include_ssl:
+        paths.extend(["/etc/letsencrypt", "/var/lib/letsencrypt"])
     if body.include_logs:
         paths.append("/var/log/vps-panel")
     return paths
 
 
 def backup_script(body: BackupRequest, archive_path: str, staging_dir: str) -> str:
-    includes = " ".join([f'"{path}"' for path in backup_paths(body)])
-    excludes = " ".join([f"--exclude='{pattern}'" for pattern in body.exclude_patterns])
+    includes = " ".join([shlex.quote(path.lstrip("/")) for path in backup_paths(body)])
+    excludes = " ".join([f"--exclude={shlex.quote(pattern)}" for pattern in body.exclude_patterns])
     output_path = archive_path
     encryption_part = ""
     if body.encrypt_passphrase:
         output_path = archive_path.replace(".tar.gz", ".tar.gz.gpg")
         encryption_part = (
-            f"gpg --batch --yes --passphrase '{body.encrypt_passphrase}' "
-            f"--symmetric --cipher-algo AES256 --output \"{output_path}\" \"{archive_path}\" && rm -f \"{archive_path}\""
+            f"gpg --batch --yes --passphrase {shlex.quote(body.encrypt_passphrase)} "
+            f"--symmetric --cipher-algo AES256 --output {shlex.quote(output_path)} {shlex.quote(archive_path)} && rm -f {shlex.quote(archive_path)}"
         )
     database_part = ""
     if body.include_database:
+        panel_dump = shlex.quote(f"{staging_dir}/panel-main.dump")
+        postgres_dump = shlex.quote(f"{staging_dir}/postgres-all.sql")
+        mysql_dump = shlex.quote(f"{staging_dir}/mysql-all.sql")
         database_part = (
             'if [ -n "${DATABASE_URL:-}" ]; then '
-            f'pg_dump "$DATABASE_URL" --format=custom --file="{staging_dir}/panel-main.dump"; '
+            f'pg_dump "$DATABASE_URL" --format=custom --file={panel_dump} || true; '
+            'fi\n'
+            f'if command -v pg_dumpall >/dev/null 2>&1; then pg_dumpall --file={postgres_dump} || true; fi\n'
+            f'if command -v mysqldump >/dev/null 2>&1; then mysqldump --all-databases --single-transaction --routines --events --triggers > {mysql_dump} || true; '
             'fi'
         )
+    staging_archive_paths = shlex.quote(staging_dir.lstrip("/")) if body.include_database else shlex.quote(f"{staging_dir}/manifest.txt".lstrip("/"))
+    archive_arg = shlex.quote(archive_path)
+    output_arg = shlex.quote(output_path)
+    staging_arg = shlex.quote(staging_dir)
     return f"""
 set -Eeuo pipefail
-mkdir -p "{staging_dir}"
-cat > "{staging_dir}/manifest.txt" <<MANIFEST
+mkdir -p {staging_arg}
+cat > {shlex.quote(f"{staging_dir}/manifest.txt")} <<MANIFEST
 created_at={datetime.now(timezone.utc).isoformat()}
 hostname=$(hostname -f 2>/dev/null || hostname)
 app_dir={body.app_dir}
 MANIFEST
 {database_part}
-tar --ignore-failed-read --warning=no-file-changed {excludes} -czf "{archive_path}" -C / {includes} "{staging_dir}/manifest.txt" {f'"{staging_dir}/panel-main.dump"' if body.include_database else ""}
+tar --ignore-failed-read --warning=no-file-changed {excludes} -czf {archive_arg} -C / {includes} {staging_archive_paths}
 {encryption_part}
-sha256sum "{output_path}" > "{output_path}.sha256" 2>/dev/null || shasum -a 256 "{output_path}" > "{output_path}.sha256"
-stat -c '%s' "{output_path}" 2>/dev/null || stat -f '%z' "{output_path}"
+sha256sum {output_arg} > {shlex.quote(output_path + ".sha256")} 2>/dev/null || shasum -a 256 {output_arg} > {shlex.quote(output_path + ".sha256")}
+stat -c '%s' {output_arg} 2>/dev/null || stat -f '%z' {output_arg}
 """
 
 
@@ -123,6 +167,8 @@ def backup_plan() -> dict[str, Any]:
             "/etc/nginx/sites-available",
             "/etc/nginx/sites-enabled",
             "BIND/named zone paths",
+            "mail config and mailboxes",
+            "Let's Encrypt certificate material",
         ],
     }
 
@@ -168,6 +214,132 @@ def create_backup(body: BackupRequest) -> dict[str, Any]:
         "sizeBytes": size,
         "result": result,
     }
+
+
+def remote_name(remote_target: str) -> str:
+    if ":" not in remote_target:
+        return "mypanel-drive"
+    return remote_target.split(":", 1)[0]
+
+
+def rclone_env_and_setup(google_drive: dict[str, Any] | None, remote_target: str) -> tuple[str, dict[str, str]]:
+    if not google_drive:
+        return "", {}
+
+    root = Path(settings.backup_root) / ".rclone"
+    root.mkdir(parents=True, exist_ok=True)
+    config_path = root / "rclone.conf"
+    name = remote_name(remote_target)
+    auth_mode = str(google_drive.get("authMode") or "SERVICE_ACCOUNT")
+    folder_id = str(google_drive.get("folderId") or "")
+    team_drive_id = str(google_drive.get("teamDriveId") or "")
+    client_id = str(google_drive.get("clientId") or "")
+    client_secret = str(google_drive.get("clientSecret") or "")
+    refresh_token = str(google_drive.get("refreshToken") or "")
+    service_account_json = str(google_drive.get("serviceAccountJson") or "")
+
+    lines = [f"[{name}]", "type = drive", "scope = drive"]
+    if folder_id:
+        lines.append(f"root_folder_id = {folder_id}")
+    if team_drive_id:
+        lines.append(f"team_drive = {team_drive_id}")
+    if client_id:
+        lines.append(f"client_id = {client_id}")
+    if client_secret:
+        lines.append(f"client_secret = {client_secret}")
+
+    if auth_mode == "SERVICE_ACCOUNT":
+        if not service_account_json:
+            raise HTTPException(status_code=400, detail="Google Drive service account JSON is not configured")
+        service_account_path = root / "service-account.json"
+        service_account_path.write_text(service_account_json, encoding="utf-8")
+        lines.append(f"service_account_file = {service_account_path}")
+    elif auth_mode == "OAUTH_REFRESH_TOKEN":
+        if not refresh_token:
+            raise HTTPException(status_code=400, detail="Google Drive refresh token is not configured")
+        token = {"refresh_token": refresh_token, "token_type": "Bearer"}
+        token_path = root / "token.json"
+        token_path.write_text(json.dumps(token), encoding="utf-8")
+        lines.append(f"token = {json.dumps(token)}")
+
+    config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.chmod(config_path, 0o600)
+    return f"export RCLONE_CONFIG={shlex.quote(str(config_path))}\n", {"RCLONE_CONFIG": str(config_path)}
+
+
+@router.post("/upload-remote")
+def upload_remote(body: RemoteUploadRequest) -> dict[str, Any]:
+    archive = checked_archive(body.path)
+    checksum = Path(str(archive) + ".sha256")
+    remote_target = body.remote_target.rstrip("/")
+    remote_path = f"{remote_target}/{archive.name}"
+    quoted_target = shlex.quote(remote_target)
+    quoted_archive = shlex.quote(str(archive))
+    quoted_checksum = shlex.quote(str(checksum))
+    quoted_remote_path = shlex.quote(remote_path)
+    setup, env = rclone_env_and_setup(body.google_drive, remote_target)
+    script = f"""
+set -Eeuo pipefail
+{setup}
+command -v rclone >/dev/null 2>&1
+rclone mkdir {quoted_target}
+rclone copyto {quoted_archive} {quoted_remote_path}
+if [ -f {quoted_checksum} ]; then rclone copyto {quoted_checksum} {shlex.quote(remote_path + ".sha256")}; fi
+"""
+    result = run_command(["bash", "-lc", script], env=env, allow_live=settings.allow_live_backup, timeout=7200)
+    return {"archivePath": str(archive), "remoteTarget": remote_target, "remotePath": remote_path, "result": result}
+
+
+@router.post("/download-remote")
+def download_remote(body: RemoteDownloadRequest) -> dict[str, Any]:
+    local = Path(body.local_path)
+    root = Path(settings.backup_root).resolve()
+    try:
+        local.resolve().relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Downloaded archive must be under backup root") from exc
+    local.parent.mkdir(parents=True, exist_ok=True)
+    if local.exists() and local.stat().st_size > 0:
+        return {
+            "archivePath": str(local),
+            "remotePath": body.remote_path,
+            "skipped": True,
+            "result": {"dryRun": False, "returncode": 0, "stdout": "Local archive already exists; skipping download.", "stderr": ""},
+        }
+    partial = Path(str(local) + ".part")
+    setup, env = rclone_env_and_setup(body.google_drive, body.remote_path)
+    script = f"""
+set -Eeuo pipefail
+{setup}
+command -v rclone >/dev/null 2>&1
+rm -f {shlex.quote(str(partial))}
+rclone copyto {shlex.quote(body.remote_path)} {shlex.quote(str(partial))}
+mv {shlex.quote(str(partial))} {shlex.quote(str(local))}
+rclone copyto {shlex.quote(body.remote_path + ".sha256")} {shlex.quote(str(local) + ".sha256")} || true
+"""
+    result = run_command(["bash", "-lc", script], env=env, allow_live=settings.allow_live_backup, timeout=7200)
+    return {"archivePath": str(local), "remotePath": body.remote_path, "skipped": False, "result": result}
+
+
+@router.post("/prune-remote")
+def prune_remote(body: RemotePruneRequest) -> dict[str, Any]:
+    remote_target = body.remote_target.rstrip("/")
+    quoted_target = shlex.quote(remote_target)
+    setup, env = rclone_env_and_setup(body.google_drive, remote_target)
+    list_result = run_command(
+        ["bash", "-lc", f'set -Eeuo pipefail\n{setup}rclone lsf --format "tp" {quoted_target} | grep -E "\\.tar\\.gz(\\.gpg)?$" | sort -r'],
+        env=env,
+        allow_live=settings.allow_live_backup,
+        timeout=900,
+    )
+    names = [line.split(";", 1)[1] for line in list_result.get("stdout", "").splitlines() if ";" in line]
+    removable = names[body.keep_last:]
+    script = "\n".join([
+        f"rclone deletefile {shlex.quote(remote_target + '/' + name)}; rclone deletefile {shlex.quote(remote_target + '/' + name + '.sha256')} || true"
+        for name in removable
+    ]) or "true"
+    result = run_command(["bash", "-lc", f"set -Eeuo pipefail\n{setup}{script}"], env=env, allow_live=settings.allow_live_backup, timeout=1800)
+    return {"remoteTarget": remote_target, "kept": names[:body.keep_last], "removed": removable, "result": result}
 
 
 def checked_archive(path: str) -> Path:

@@ -10,6 +10,34 @@ DATABASE_URL="$DATABASE_URL" BACKUP_DIR=/var/backups/vps-panel ./scripts/backup/
 
 Keep at least daily backups for 14 days and weekly backups for 8 weeks. Copy backups off the VPS.
 
+The superadmin Backups page creates full myPanel archives that include panel code/env, PostgreSQL/MySQL dumps when tools are available, account files, deployment files, Nginx config, DNS zone paths, mail config/mailboxes, and Let's Encrypt material. The worker service checks Bangladesh time and runs scheduled backups at `11:01` and `23:01` by default.
+
+For live scheduled/manual backups and restores, set:
+
+```bash
+ALLOW_LIVE_BACKUP=true
+BACKUP_ROOT=/var/backups/vps-panel
+```
+
+Google Drive upload uses `rclone`. You can either paste Google credentials in the Backups page or select `Existing rclone remote`.
+
+Recommended service-account setup:
+
+- Create a Google Cloud service account.
+- Enable Google Drive API.
+- Create/download the service account JSON key.
+- Share the target Google Drive folder with the service account email.
+- Paste the JSON into `Google Drive Secrets`.
+- Set `Drive Target` to `mypanel-drive:vps-panel-backups`.
+
+OAuth setup is also supported from the same screen with client ID, client secret, refresh token, and optional folder/shared-drive IDs. If you already configured rclone manually on the VPS, choose `Existing rclone remote` and set the target to something like:
+
+```text
+gdrive:vps-panel-backups
+```
+
+The panel prunes both local archives and the configured Drive folder to the newest 2 backup archives.
+
 ## Restore
 
 Restore only during a maintenance window:

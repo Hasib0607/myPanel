@@ -33,6 +33,12 @@ export const sysagent = {
   backupArchives: () => request<{ items: Array<{ path: string; name: string; sizeBytes: number; modifiedAt: string; checksumPath: string }> }>("/backup/archives"),
   createBackup: (body: unknown) =>
     request<{ archivePath: string; stagingDir: string; includes: string[]; sizeBytes?: number | null; result: SysagentCommandResult }>("/backup/create", { method: "POST", body: JSON.stringify(body) }),
+  uploadBackupToRemote: (body: unknown) =>
+    request<{ archivePath: string; remoteTarget: string; remotePath: string; result: SysagentCommandResult }>("/backup/upload-remote", { method: "POST", body: JSON.stringify(body) }),
+  downloadBackupFromRemote: (body: unknown) =>
+    request<{ archivePath: string; remotePath: string; skipped: boolean; result: SysagentCommandResult }>("/backup/download-remote", { method: "POST", body: JSON.stringify(body) }),
+  pruneRemoteBackups: (body: unknown) =>
+    request<{ remoteTarget: string; kept: string[]; removed: string[]; result: SysagentCommandResult }>("/backup/prune-remote", { method: "POST", body: JSON.stringify(body) }),
   restorePreview: (path: string) =>
     request<{ archivePath: string; commands: string[]; note: string }>(`/backup/restore-preview?path=${encodeURIComponent(path)}`, { method: "POST" }),
   restoreBackup: (body: unknown) =>
