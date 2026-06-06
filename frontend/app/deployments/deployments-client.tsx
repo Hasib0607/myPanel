@@ -275,7 +275,7 @@ export function DeploymentsClient({
   const [selectedRepo, setSelectedRepo] = useState<GithubRepo | null>(null);
   const [githubToken, setGithubToken] = useState("");
   const [githubUsername, setGithubUsername] = useState("");
-  const [domainToAdd, setDomainToAdd] = useState("");
+  const [domainsToAdd, setDomainsToAdd] = useState<string[]>([]);
   const [envKey, setEnvKey] = useState("");
   const [envValue, setEnvValue] = useState("");
   const [envSecret, setEnvSecret] = useState(false);
@@ -320,6 +320,10 @@ export function DeploymentsClient({
   useEffect(() => {
     if (!draft.port && nextPort.data?.port) setDraft((current) => ({ ...current, port: String(nextPort.data.port) }));
   }, [draft.port, nextPort.data?.port]);
+
+  useEffect(() => {
+    setDomainsToAdd([]);
+  }, [selected?.id]);
 
   const accountRoot = accountInfo.data?.fileRoot ?? accountInfo.data?.account?.homeRoot ?? accountInfo.data?.homeRoot;
   const rootBase = apiBase === "/account/deployments" && accountRoot
@@ -545,13 +549,20 @@ export function DeploymentsClient({
   });
 
   const addDomain = useMutation({
-    mutationFn: () => {
+    mutationFn: async () => {
       if (!selected) throw new Error("Select a project first");
-      return apiPost<DeploymentDomainBinding>(`${apiBase}/${selected.slug}/domains`, { domainId: domainToAdd, primary: !selected.domainId });
+      const selectedIds = [...new Set(domainsToAdd)].filter(Boolean);
+      if (selectedIds.length === 0) throw new Error("Select at least one domain");
+      const results: DeploymentDomainBinding[] = [];
+      for (const [index, domainId] of selectedIds.entries()) {
+        results.push(await apiPost<DeploymentDomainBinding>(`${apiBase}/${selected.slug}/domains`, { domainId, primary: !selected.domainId && index === 0 }));
+      }
+      return results;
     },
     onSuccess: async () => {
-      setDomainToAdd("");
-      setNotice("Domain added to project.");
+      const count = domainsToAdd.length;
+      setDomainsToAdd([]);
+      setNotice(`${count} domain${count === 1 ? "" : "s"} added to project.`);
       await invalidateDeployments();
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not add domain")
@@ -781,7 +792,7 @@ export function DeploymentsClient({
 
               <div className="min-h-0 flex-1 overflow-auto p-5">
                 {activeTab === "overview" ? <OverviewPanel deployment={selected} /> : null}
-                {activeTab === "domains" ? <DomainsPanel deployment={selected} domains={domainOptions(domains.data?.items ?? [])} domainToAdd={domainToAdd} setDomainToAdd={setDomainToAdd} addDomain={() => addDomain.mutate()} setPrimary={(binding) => setPrimaryDomain.mutate(binding)} removeDomain={(binding) => removeDomain.mutate(binding)} /> : null}
+                {activeTab === "domains" ? <DomainsPanel deployment={selected} domains={domainOptions(domains.data?.items ?? [])} domainsToAdd={domainsToAdd} setDomainsToAdd={setDomainsToAdd} addDomain={() => addDomain.mutate()} addingDomain={addDomain.isPending} setPrimary={(binding) => setPrimaryDomain.mutate(binding)} removeDomain={(binding) => removeDomain.mutate(binding)} /> : null}
                 {activeTab === "history" ? <HistoryPanel deployment={selected} releases={releases.data ?? selected.releases ?? []} loading={releases.isLoading} onRefresh={() => releases.refetch()} onJump={(release) => rollbackRelease.mutate({ deployment: selected, releaseId: release.id })} jumping={rollbackRelease.isPending} /> : null}
                 {activeTab === "env" ? <EnvPanel deployment={selected} envKey={envKey} envValue={envValue} envSecret={envSecret} bulkEnvText={bulkEnvText} bulkEnvSecret={bulkEnvSecret} revealedValues={revealedEnvValues} revealingKey={revealEnv.variables} savingLineKey={saveEnvLine.variables?.item.key} setEnvKey={setEnvKey} setEnvValue={setEnvValue} setEnvSecret={setEnvSecret} setBulkEnvText={setBulkEnvText} setBulkEnvSecret={setBulkEnvSecret} saveEnv={(onSuccess) => saveEnv.mutate(undefined, { onSuccess })} saveBulkEnv={(onSuccess) => saveBulkEnv.mutate(undefined, { onSuccess })} saveRawEnv={(text, onSuccess) => saveBulkEnv.mutate(text, { onSuccess })} savingEnv={saveEnv.isPending} savingBulkEnv={saveBulkEnv.isPending} revealEnv={(key) => revealEnv.mutate(key)} hideEnv={hideEnv} saveEnvLine={(item, value) => saveEnvLine.mutate({ item, value })} removeEnv={(key) => removeEnv.mutate(key)} removeBulkEnv={(keys) => removeBulkEnv.mutate(keys)} removingBulkEnv={removeBulkEnv.isPending} clearDatabaseEnvOverrides={() => clearDatabaseEnvOverrides.mutate()} clearingDatabaseEnvOverrides={clearDatabaseEnvOverrides.isPending} /> : null}
                 {activeTab === "settings" ? <SettingsPanel deployment={selected} deleteText={deleteText} setDeleteText={setDeleteText} onEdit={openEdit} onDelete={() => deleteProject.mutate()} deleting={deleteProject.isPending} /> : null}
@@ -894,9 +905,109 @@ function Metric({ label, value }: { label: string; value: string }) {
   return <div className="rounded-md border border-panel-line p-4"><div className="text-xs uppercase text-panel-muted">{label}</div><div className="mt-3 truncate text-sm font-semibold">{value}</div></div>;
 }
 
-function DomainsPanel({ deployment, domains, domainToAdd, setDomainToAdd, addDomain, setPrimary, removeDomain }: { deployment: Deployment; domains: DomainOption[]; domainToAdd: string; setDomainToAdd: (id: string) => void; addDomain: () => void; setPrimary: (binding: DeploymentDomainBinding) => void; removeDomain: (binding: DeploymentDomainBinding) => void }) {
-  const boundIds = new Set((deployment.domainBindings ?? []).map((binding) => binding.subdomainId ?? binding.domainId).filter(Boolean));
-  return <div className="space-y-4"><div className="flex gap-2"><select className="h-10 min-w-72 rounded-md border border-panel-line px-2 text-sm" onChange={(event) => setDomainToAdd(event.target.value)} value={domainToAdd}><option value="">Select domain</option>{domains.filter((domain) => !boundIds.has(domain.id)).map((domain) => <option key={domain.id} value={domain.id}>{domain.name}</option>)}</select><button className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={!domainToAdd} onClick={addDomain} type="button"><Plus size={15} />Add domain</button></div><div className="overflow-hidden rounded-md border border-panel-line">{(deployment.domainBindings ?? []).map((binding) => <div className="flex items-center justify-between border-b border-panel-line p-3 last:border-b-0" key={binding.id}><div><div className="font-semibold">{deploymentBindingName(binding)}</div><div className="text-xs text-panel-muted">{binding.role}</div></div><div className="flex gap-2"><button className="h-8 rounded-md border border-panel-line px-2 text-xs" disabled={binding.role === "primary"} onClick={() => setPrimary(binding)} type="button">Make primary</button><button className="h-8 rounded-md border border-panel-line px-2 text-xs text-panel-danger" onClick={() => removeDomain(binding)} type="button">Remove</button></div></div>)}{(deployment.domainBindings ?? []).length === 0 ? <div className="p-8 text-center text-sm text-panel-muted">No domains attached.</div> : null}</div></div>;
+function DomainsPanel({ deployment, domains, domainsToAdd, setDomainsToAdd, addDomain, addingDomain, setPrimary, removeDomain }: { deployment: Deployment; domains: DomainOption[]; domainsToAdd: string[]; setDomainsToAdd: (ids: string[]) => void; addDomain: () => void; addingDomain?: boolean; setPrimary: (binding: DeploymentDomainBinding) => void; removeDomain: (binding: DeploymentDomainBinding) => void }) {
+  const boundIds = new Set(
+    (deployment.domainBindings ?? [])
+      .flatMap((binding) => [binding.domainId, binding.subdomainId ? `subdomain:${binding.subdomainId}` : null])
+      .filter(Boolean) as string[]
+  );
+  const availableDomains = domains.filter((domain) => !boundIds.has(domain.id));
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap gap-2">
+        <DomainMultiSelect options={availableDomains} selectedIds={domainsToAdd} onChange={setDomainsToAdd} />
+        <button className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={domainsToAdd.length === 0 || addingDomain} onClick={addDomain} type="button">
+          <Plus size={15} />
+          Add {domainsToAdd.length > 1 ? `${domainsToAdd.length} domains` : "domain"}
+        </button>
+      </div>
+      <div className="overflow-hidden rounded-md border border-panel-line">
+        {(deployment.domainBindings ?? []).map((binding) => (
+          <div className="flex items-center justify-between border-b border-panel-line p-3 last:border-b-0" key={binding.id}>
+            <div>
+              <div className="font-semibold">{deploymentBindingName(binding)}</div>
+              <div className="text-xs text-panel-muted">{binding.role}</div>
+            </div>
+            <div className="flex gap-2">
+              <button className="h-8 rounded-md border border-panel-line px-2 text-xs" disabled={binding.role === "primary"} onClick={() => setPrimary(binding)} type="button">Make primary</button>
+              <button className="h-8 rounded-md border border-panel-line px-2 text-xs text-panel-danger" onClick={() => removeDomain(binding)} type="button">Remove</button>
+            </div>
+          </div>
+        ))}
+        {(deployment.domainBindings ?? []).length === 0 ? <div className="p-8 text-center text-sm text-panel-muted">No domains attached.</div> : null}
+      </div>
+    </div>
+  );
+}
+
+function DomainMultiSelect({ options, selectedIds, onChange }: { options: DomainOption[]; selectedIds: string[]; onChange: (ids: string[]) => void }) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const selected = new Set(selectedIds);
+  const filteredOptions = options.filter((option) => option.name.toLowerCase().includes(search.trim().toLowerCase()));
+  const allFilteredSelected = filteredOptions.length > 0 && filteredOptions.every((option) => selected.has(option.id));
+  const buttonLabel = selectedIds.length === 0
+    ? "Select domains"
+    : selectedIds.length === 1
+      ? options.find((option) => option.id === selectedIds[0])?.name ?? "1 selected"
+      : `${selectedIds.length} domains selected`;
+
+  useEffect(() => {
+    function closeOnOutside(event: MouseEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+    document.addEventListener("mousedown", closeOnOutside);
+    return () => document.removeEventListener("mousedown", closeOnOutside);
+  }, []);
+
+  function toggle(id: string) {
+    onChange(selected.has(id) ? selectedIds.filter((item) => item !== id) : [...selectedIds, id]);
+  }
+
+  function toggleAllFiltered() {
+    if (allFilteredSelected) {
+      const filteredIds = new Set(filteredOptions.map((option) => option.id));
+      onChange(selectedIds.filter((id) => !filteredIds.has(id)));
+      return;
+    }
+    onChange([...new Set([...selectedIds, ...filteredOptions.map((option) => option.id)])]);
+  }
+
+  return (
+    <div className="relative min-w-80" ref={rootRef}>
+      <button className="flex h-10 w-full items-center justify-between rounded-md border border-panel-line bg-white px-3 text-left text-sm hover:bg-slate-50" onClick={() => setOpen((current) => !current)} type="button">
+        <span className={selectedIds.length ? "truncate font-medium text-panel-ink" : "truncate text-panel-muted"}>{buttonLabel}</span>
+        <span className="text-xs text-panel-muted">{options.length}</span>
+      </button>
+      {open ? (
+        <div className="absolute left-0 top-12 z-30 w-[26rem] overflow-hidden rounded-md border border-panel-line bg-white shadow-xl">
+          <div className="border-b border-panel-line p-2">
+            <div className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-2">
+              <Search size={15} className="text-panel-muted" />
+              <input className="h-full min-w-0 flex-1 text-sm outline-none" onChange={(event) => setSearch(event.target.value)} placeholder="Search domains" value={search} />
+            </div>
+            <div className="mt-2 flex items-center justify-between gap-2">
+              <button className="h-8 rounded-md border border-panel-line px-2 text-xs font-semibold hover:bg-slate-50 disabled:opacity-50" disabled={filteredOptions.length === 0} onClick={toggleAllFiltered} type="button">{allFilteredSelected ? "Clear shown" : "Select all"}</button>
+              <button className="h-8 rounded-md border border-panel-line px-2 text-xs font-semibold hover:bg-slate-50 disabled:opacity-50" disabled={selectedIds.length === 0} onClick={() => onChange([])} type="button">Clear all</button>
+            </div>
+          </div>
+          <div className="max-h-80 overflow-auto p-1">
+            {filteredOptions.map((option) => {
+              const checked = selected.has(option.id);
+              return (
+                <button className={`flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-slate-50 ${checked ? "bg-emerald-50 text-emerald-800" : "text-panel-ink"}`} key={option.id} onClick={() => toggle(option.id)} type="button">
+                  {checked ? <CheckCircle2 size={16} /> : <Square size={16} className="text-panel-muted" />}
+                  <span className="truncate">{option.name}</span>
+                </button>
+              );
+            })}
+            {filteredOptions.length === 0 ? <div className="px-3 py-8 text-center text-sm text-panel-muted">No domains found.</div> : null}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function HistoryPanel({ deployment, releases, loading, jumping, onRefresh, onJump }: { deployment: Deployment; releases: DeploymentRelease[]; loading?: boolean; jumping?: boolean; onRefresh: () => void; onJump: (release: DeploymentRelease) => void }) {
