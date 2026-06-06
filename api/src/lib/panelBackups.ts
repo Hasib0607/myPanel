@@ -1,4 +1,5 @@
 import { z } from "zod";
+import path from "node:path";
 import { audit } from "./audit.js";
 import { prisma } from "./prisma.js";
 import { getSecret, putSecret } from "./secrets.js";
@@ -156,6 +157,25 @@ function formatElapsed(ms: number) {
   return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
 }
 
+function safeBackupLabel(label: string) {
+  return label.replace(/[^a-zA-Z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "manual";
+}
+
+function backupStamp() {
+  return new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+}
+
+function backupTarget(backupRoot: string, label: string, encrypted: boolean) {
+  const safeLabel = safeBackupLabel(label);
+  const stamp = backupStamp();
+  const archivePath = path.posix.join(backupRoot, `mypanel-${safeLabel}-${stamp}.tar.gz`);
+  return {
+    archivePath,
+    finalPath: encrypted ? archivePath.replace(/\.tar\.gz$/, ".tar.gz.gpg") : archivePath,
+    stagingDir: path.posix.join(backupRoot, `.staging-${safeLabel}-${stamp}`)
+  };
+}
+
 async function waitWithProgress<T>(
   promise: Promise<T>,
   options: {
@@ -190,6 +210,45 @@ async function waitWithProgress<T>(
   }
 }
 
+async function recoverCreatedArchive(
+  archivePath: string,
+  includes: string[],
+  onProgress?: BackupProgressHandler
+): Promise<{ archivePath: string; stagingDir: string; includes: string[]; sizeBytes?: number | null; result: NonNullable<SysagentResultEnvelope["result"]> }> {
+  const startedAt = Date.now();
+  const maxWaitMs = 60 * 60 * 1000;
+  let lastError = "";
+  while (Date.now() - startedAt < maxWaitMs) {
+    await onProgress?.({
+      phase: "CREATING_ARCHIVE",
+      percent: 54,
+      message: `Sysagent connection was interrupted; checking whether the server archive completed. Elapsed: ${formatElapsed(Date.now() - startedAt)}.`
+    });
+    const verify = await sysagent.verifyBackup(archivePath).catch((error) => {
+      lastError = error instanceof Error ? error.message : String(error);
+      return null;
+    });
+    if (verify?.ok) {
+      const archives = await sysagent.backupArchives().catch(() => ({ items: [] }));
+      const item = archives.items.find((entry) => entry.path === archivePath);
+      return {
+        archivePath,
+        stagingDir: "",
+        includes,
+        sizeBytes: item?.sizeBytes ?? null,
+        result: {
+          dryRun: false,
+          returncode: 0,
+          stdout: "Recovered completed backup after sysagent connection interruption.",
+          stderr: lastError ? `Initial sysagent interruption: ${lastError}` : ""
+        }
+      };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10000));
+  }
+  throw new Error(`Sysagent connection was interrupted and the archive did not verify within 60 minutes.${lastError ? ` Last check: ${lastError}` : ""}`);
+}
+
 export async function runPanelBackup(input: unknown, request?: any, onProgress?: BackupProgressHandler) {
   const body = backupSchema.parse(input ?? {});
   const settings = await getBackupSettings();
@@ -201,15 +260,25 @@ export async function runPanelBackup(input: unknown, request?: any, onProgress?:
   });
 
   try {
+    const plan = await sysagent.backupPlan();
+    const target = backupTarget(plan.backupRoot, body.label, Boolean(body.encryptPassphrase));
+    const createBody = { ...body, archivePath: target.archivePath, stagingDir: target.stagingDir };
     await onProgress?.({ phase: "CREATING_ARCHIVE", percent: 10, message: "Creating full server archive." });
-    const result = await waitWithProgress(sysagent.createBackup(body), {
-      onProgress,
-      phase: "CREATING_ARCHIVE",
-      from: 10,
-      to: 54,
-      message: "Creating full server archive.",
-      maxDurationMs: 90 * 60 * 1000
-    });
+    let result: Awaited<ReturnType<typeof sysagent.createBackup>>;
+    try {
+      result = await waitWithProgress(sysagent.createBackup(createBody), {
+        onProgress,
+        phase: "CREATING_ARCHIVE",
+        from: 10,
+        to: 54,
+        message: "Creating full server archive.",
+        maxDurationMs: 90 * 60 * 1000
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/sysagent .*request failed/i.test(message)) throw error;
+      result = await recoverCreatedArchive(target.finalPath, includes, onProgress);
+    }
     let uploadResult: Awaited<ReturnType<typeof sysagent.uploadBackupToRemote>> | null = null;
     const createError = backupCommandError("Backup archive creation", result);
     if (createError) {

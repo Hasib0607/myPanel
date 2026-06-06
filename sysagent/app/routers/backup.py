@@ -41,6 +41,8 @@ class BackupRequest(BaseModel):
         "*.log",
     ], alias="excludePatterns")
     encrypt_passphrase: str | None = Field(default=None, alias="encryptPassphrase")
+    archive_path: str | None = Field(default=None, alias="archivePath")
+    staging_dir: str | None = Field(default=None, alias="stagingDir")
 
     model_config = {"populate_by_name": True}
 
@@ -82,6 +84,16 @@ class RestoreRequest(BaseModel):
 def safe_label(label: str) -> str:
     cleaned = SAFE_LABEL.sub("-", label.strip()).strip("-")
     return cleaned[:80] or "manual"
+
+
+def path_under_backup_root(value: str) -> str:
+    root = Path(settings.backup_root).resolve()
+    path = Path(value).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Backup paths must be under backup root") from exc
+    return str(path)
 
 
 def backup_paths(body: BackupRequest) -> list[str]:
@@ -196,8 +208,8 @@ def create_backup(body: BackupRequest) -> dict[str, Any]:
     root.mkdir(parents=True, exist_ok=True)
     label = safe_label(body.label)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    archive_path = str(root / f"mypanel-{label}-{stamp}.tar.gz")
-    staging_dir = str(root / f".staging-{label}-{stamp}")
+    archive_path = path_under_backup_root(body.archive_path) if body.archive_path else str(root / f"mypanel-{label}-{stamp}.tar.gz")
+    staging_dir = path_under_backup_root(body.staging_dir) if body.staging_dir else str(root / f".staging-{label}-{stamp}")
     script = backup_script(body, archive_path, staging_dir)
     result = run_command(["bash", "-lc", script], env={"DATABASE_URL": os.environ.get("DATABASE_URL", "")}, allow_live=settings.allow_live_backup, timeout=21600)
     final_path = archive_path.replace(".tar.gz", ".tar.gz.gpg") if body.encrypt_passphrase else archive_path

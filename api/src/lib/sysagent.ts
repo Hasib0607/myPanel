@@ -11,13 +11,20 @@ export type SysagentCommandResult = {
 };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${env.SYSAGENT_URL}${path}`, {
-    ...init,
-    headers: {
-      "content-type": "application/json",
-      ...(init?.headers ?? {})
-    }
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${env.SYSAGENT_URL}${path}`, {
+      ...init,
+      headers: {
+        "content-type": "application/json",
+        ...(init?.headers ?? {})
+      }
+    });
+  } catch (error) {
+    const cause = (error as any)?.cause;
+    const detail = cause?.code ? `${cause.code}${cause.address ? ` ${cause.address}` : ""}${cause.port ? `:${cause.port}` : ""}` : error instanceof Error ? error.message : String(error);
+    throw new Error(`sysagent ${path} request failed: ${detail}`);
+  }
 
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
