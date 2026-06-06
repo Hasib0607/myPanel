@@ -16,7 +16,8 @@ export type SysagentBackupCreateJob = {
   archivePath: string;
   stagingDir: string;
   includes: string[];
-  sizeBytes?: number | null;
+  sizeBytes?: number | string | null;
+  sizeBytesText?: string | null;
   startedAt?: string | null;
   finishedAt?: string | null;
   result: SysagentCommandResult;
@@ -60,9 +61,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const sysagent = {
   stats: () => request("/system/stats"),
   backupPlan: () => request<{ backupRoot: string; liveEnabled: boolean; freeBytes: number; includes: string[] }>("/backup/plan"),
-  backupArchives: () => request<{ items: Array<{ path: string; name: string; sizeBytes: number; modifiedAt: string; checksumPath: string }> }>("/backup/archives"),
+  backupArchives: () => request<{ items: Array<{ path: string; name: string; sizeBytes: number | string; sizeBytesText?: string | null; modifiedAt: string; checksumPath: string }> }>("/backup/archives"),
   createBackup: (body: unknown) =>
-    request<{ archivePath: string; stagingDir: string; includes: string[]; sizeBytes?: number | null; result: SysagentCommandResult }>("/backup/create", { method: "POST", body: JSON.stringify(body) }),
+    request<{ archivePath: string; stagingDir: string; includes: string[]; sizeBytes?: number | string | null; sizeBytesText?: string | null; result: SysagentCommandResult }>("/backup/create", { method: "POST", body: JSON.stringify(body) }),
   createBackupJob: (body: unknown) =>
     request<SysagentBackupCreateJob>("/backup/create-jobs", { method: "POST", body: JSON.stringify(body) }),
   backupCreateJob: (jobId: string) =>

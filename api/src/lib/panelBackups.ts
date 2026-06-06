@@ -170,22 +170,35 @@ function formatElapsed(ms: number) {
   return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
 }
 
-function formatBytes(value?: number | null) {
-  if (!value || value <= 0) return "";
-  if (value >= 1024 * 1024 * 1024) return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`;
-  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(2)} MB`;
-  if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${value} B`;
+function sizeToBigInt(value?: number | string | bigint | null) {
+  if (typeof value === "bigint") return value > 0n ? value : null;
+  if (typeof value === "number") return Number.isFinite(value) && value > 0 ? BigInt(Math.floor(value)) : null;
+  if (typeof value === "string" && /^\d+$/.test(value)) {
+    const parsed = BigInt(value);
+    return parsed > 0n ? parsed : null;
+  }
+  return null;
 }
 
-function backupSizeForDb(value?: number | null) {
-  return value && value > 0 ? BigInt(Math.floor(value)) : null;
+function formatBytes(value?: number | string | bigint | null) {
+  const parsed = sizeToBigInt(value);
+  if (!parsed) return "";
+  const asNumber = Number(parsed);
+  if (asNumber >= 1024 ** 4) return `${(asNumber / 1024 ** 4).toFixed(2)} TB`;
+  if (asNumber >= 1024 ** 3) return `${(asNumber / 1024 ** 3).toFixed(2)} GB`;
+  if (asNumber >= 1024 ** 2) return `${(asNumber / 1024 ** 2).toFixed(2)} MB`;
+  if (asNumber >= 1024) return `${(asNumber / 1024).toFixed(1)} KB`;
+  return `${parsed.toString()} B`;
 }
 
-function panelBackupForJson<T extends { sizeBytes?: bigint | number | null }>(record: T): Omit<T, "sizeBytes"> & { sizeBytes: number | null } {
+function backupSizeForDb(value?: number | string | bigint | null) {
+  return sizeToBigInt(value);
+}
+
+function panelBackupForJson<T extends { sizeBytes?: bigint | number | string | null }>(record: T): Omit<T, "sizeBytes"> & { sizeBytes: string | null } {
   return {
     ...record,
-    sizeBytes: typeof record.sizeBytes === "bigint" ? Number(record.sizeBytes) : record.sizeBytes ?? null
+    sizeBytes: sizeToBigInt(record.sizeBytes)?.toString() ?? null
   };
 }
 
@@ -240,12 +253,13 @@ async function waitForCreateBackupJob(
         archivePath: job.archivePath,
         stagingDir: job.stagingDir,
         includes: job.includes,
-        sizeBytes: job.sizeBytes ?? null,
+        sizeBytes: job.sizeBytesText ?? job.sizeBytes ?? null,
         result: job.result
       };
     }
-    const percent = job?.sizeBytes && job.sizeBytes > 0 ? 35 : 5;
-    const size = formatBytes(job?.sizeBytes);
+    const currentSize = job?.sizeBytesText ?? job?.sizeBytes ?? null;
+    const percent = sizeToBigInt(currentSize) ? 35 : 5;
+    const size = formatBytes(currentSize);
     await onProgress?.({
       phase: "CREATING_ARCHIVE",
       percent,
@@ -311,7 +325,7 @@ export async function runPanelBackup(input: unknown, request?: any, onProgress?:
       archivePath: createJob.archivePath,
       stagingDir: createJob.stagingDir,
       includes: createJob.includes,
-      sizeBytes: createJob.sizeBytes ?? null,
+      sizeBytes: createJob.sizeBytesText ?? createJob.sizeBytes ?? null,
       result: createJob.result
     };
     let uploadResult: Awaited<ReturnType<typeof sysagent.uploadBackupToRemote>> | null = null;
@@ -319,7 +333,7 @@ export async function runPanelBackup(input: unknown, request?: any, onProgress?:
     if (createError) {
       throw Object.assign(new Error(createError), { result });
     }
-    if (!result.sizeBytes || result.sizeBytes <= 0) {
+    if (!sizeToBigInt(result.sizeBytes)) {
       throw Object.assign(new Error("Backup archive was not created or is empty. Check sysagent backup logs and available disk space."), { result });
     }
     await onProgress?.({ phase: "ARCHIVE_CREATED", percent: 55, message: `Archive created${formatBytes(result.sizeBytes) ? ` (${formatBytes(result.sizeBytes)})` : ""}.`, result });

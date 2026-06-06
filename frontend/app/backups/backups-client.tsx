@@ -10,7 +10,7 @@ type BackupRecord = {
   label: string;
   status: string;
   archivePath: string | null;
-  sizeBytes: number | null;
+  sizeBytes: number | string | null;
   includes: string[];
   result: { result?: { dryRun?: boolean; command?: string[]; stdout?: string; stderr?: string; returncode?: number } };
   createdAt: string;
@@ -20,7 +20,8 @@ type BackupRecord = {
 type BackupArchive = {
   path: string;
   name: string;
-  sizeBytes: number;
+  sizeBytes: number | string;
+  sizeBytesText?: string | null;
   modifiedAt: string;
   checksumPath: string;
 };
@@ -515,11 +516,14 @@ function Input({ label, value, onChange }: { label: string; value: string; onCha
   );
 }
 
-function formatBytes(value: number | null) {
-  if (!value) return "0 B";
-  if (value > 1024 * 1024 * 1024) return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`;
-  if (value > 1024 * 1024) return `${(value / 1024 / 1024).toFixed(2)} MB`;
-  return `${(value / 1024).toFixed(1)} KB`;
+function formatBytes(value: number | string | null | undefined) {
+  if (value === null || value === undefined || value === "" || value === 0) return "0 B";
+  const numeric = typeof value === "string" ? Number(value) : value;
+  if (!Number.isFinite(numeric) || numeric <= 0) return "0 B";
+  if (numeric >= 1024 ** 4) return `${(numeric / 1024 ** 4).toFixed(2)} TB`;
+  if (numeric >= 1024 ** 3) return `${(numeric / 1024 ** 3).toFixed(2)} GB`;
+  if (numeric >= 1024 ** 2) return `${(numeric / 1024 ** 2).toFixed(2)} MB`;
+  return `${(numeric / 1024).toFixed(1)} KB`;
 }
 
 function statusClass(status: string) {

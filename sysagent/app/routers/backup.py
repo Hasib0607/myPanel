@@ -272,10 +272,12 @@ def archives() -> dict[str, Any]:
     if root.exists():
         for path in sorted([*root.glob("mypanel-*.tar.gz"), *root.glob("mypanel-*.tar.gz.gpg")], key=lambda p: p.stat().st_mtime, reverse=True):
             stat = path.stat()
+            size = stat.st_size
             items.append({
                 "path": str(path),
                 "name": path.name,
-                "sizeBytes": stat.st_size,
+                "sizeBytes": size,
+                "sizeBytesText": str(size),
                 "modifiedAt": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
                 "checksumPath": str(path) + ".sha256",
             })
@@ -310,6 +312,7 @@ def create_backup_job(body: BackupRequest) -> dict[str, Any]:
             "stagingDir": staging_dir,
             "includes": includes,
             "sizeBytes": None,
+            "sizeBytesText": None,
             "startedAt": started_at,
             "finishedAt": datetime.now(timezone.utc).isoformat(),
             "result": {
@@ -332,6 +335,7 @@ def create_backup_job(body: BackupRequest) -> dict[str, Any]:
         "stagingDir": staging_dir,
         "includes": includes,
         "sizeBytes": None,
+        "sizeBytesText": None,
         "startedAt": started_at,
         "finishedAt": None,
         "result": {"dryRun": False, "returncode": None, "stdout": "", "stderr": ""},
@@ -385,6 +389,7 @@ def status(state, returncode=None, timed_out=False):
         "stagingDir": staging_dir,
         "includes": includes,
         "sizeBytes": size,
+        "sizeBytesText": str(size) if size is not None else None,
         "startedAt": started_at,
         "finishedAt": datetime.now(timezone.utc).isoformat() if state != "RUNNING" else None,
         "result": {{
@@ -465,6 +470,7 @@ def create_backup(body: BackupRequest) -> dict[str, Any]:
         "stagingDir": staging_dir,
         "includes": backup_paths(body),
         "sizeBytes": size,
+        "sizeBytesText": str(size) if size is not None else None,
         "result": result,
     }
 
