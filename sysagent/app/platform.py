@@ -368,6 +368,7 @@ PACKAGE_SETS: dict[OsFamily, dict[str, tuple[str, ...]]] = {
         "python311_runtime": DEBIAN_PYTHON311_PACKAGES,
         "nodejs_runtime": ("nodejs", "npm"),
         "supervisor": ("supervisor",),
+        "rclone": ("rclone",),
         "golang": ("golang-go",),
         "composer": ("composer",),
     },
@@ -427,13 +428,14 @@ PACKAGE_SETS: dict[OsFamily, dict[str, tuple[str, ...]]] = {
         "python311_runtime": RHEL_PYTHON311_PACKAGES,
         "nodejs_runtime": ("nodejs", "npm"),
         "supervisor": ("supervisor",),
+        "rclone": ("rclone",),
         "golang": ("golang",),
         "composer": RHEL_COMPOSER_PACKAGES,
     },
 }
 
 # Package keys that require EPEL on AlmaLinux/RHEL before dnf install.
-EPEL_PACKAGE_KEYS = frozenset({"certbot", "composer", "supervisor"})
+EPEL_PACKAGE_KEYS = frozenset({"certbot", "composer", "supervisor", "rclone"})
 
 SERVICE_SPECS: dict[OsFamily, dict[str, ServiceSpec]] = {
     OsFamily.DEBIAN: {
@@ -996,6 +998,15 @@ def install_plan_for(key: str, info: OsReleaseInfo | None = None) -> PackageInst
         return dovecot_install_plan(info)
 
     packages = tuple(packages_for(key, info))
+    if package_requires_epel(key, info):
+        return PackageInstallPlan(
+            key=key,
+            packages=packages,
+            steps=(
+                *epel_prerequisite_steps(info),
+                _single_package_install_step(key, info),
+            ),
+        )
     return PackageInstallPlan(
         key=key,
         packages=packages,

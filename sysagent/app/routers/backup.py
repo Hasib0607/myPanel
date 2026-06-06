@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from app.command import run_command
 from app.config import settings
+from app.platform import current_os, package_install_command, package_install_env
 
 router = APIRouter()
 
@@ -109,6 +110,33 @@ def write_json_atomic(path: Path, value: dict[str, Any]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(value, default=str), encoding="utf-8")
     tmp.replace(path)
+
+
+def rclone_install_snippet() -> str:
+    info = current_os()
+    command = " ".join(shlex.quote(part) for part in package_install_command(["rclone"], info))
+    env = " ".join(f"{shlex.quote(key)}={shlex.quote(value)}" for key, value in package_install_env(info).items())
+    prefix = f"{env} " if env else ""
+    rhel_prereqs = ""
+    if info.is_rhel:
+        rhel_prereqs = """
+  if command -v dnf >/dev/null 2>&1; then
+    dnf -y install dnf-plugins-core || true
+    dnf config-manager --set-enabled crb || true
+    dnf -y install epel-release || true
+  fi
+"""
+    return f"""
+if ! command -v rclone >/dev/null 2>&1; then
+  echo "rclone is missing; attempting automatic install." >&2
+{rhel_prereqs.rstrip()}
+  {prefix}{command}
+fi
+if ! command -v rclone >/dev/null 2>&1; then
+  echo "rclone is not installed and automatic install did not make it available. Install rclone, then retry Google Drive backup upload." >&2
+  exit 127
+fi
+"""
 
 
 def backup_paths(body: BackupRequest) -> list[str]:
@@ -464,10 +492,7 @@ def upload_remote(body: RemoteUploadRequest) -> dict[str, Any]:
     script = f"""
 set -Eeuo pipefail
 {setup}
-if ! command -v rclone >/dev/null 2>&1; then
-  echo "rclone is not installed on the server. Install rclone, then retry Google Drive backup upload." >&2
-  exit 127
-fi
+{rclone_install_snippet()}
 echo "Preparing Google Drive target {remote_target}" >&2
 rclone mkdir {quoted_target} --drive-acknowledge-abuse
 echo "Uploading archive to {remote_path}" >&2
@@ -495,10 +520,7 @@ def upload_remote_job(body: RemoteUploadRequest) -> dict[str, Any]:
     script = f"""
 set -Eeuo pipefail
 {setup}
-if ! command -v rclone >/dev/null 2>&1; then
-  echo "rclone is not installed on the server. Install rclone, then retry Google Drive backup upload." >&2
-  exit 127
-fi
+{rclone_install_snippet()}
 echo "Preparing Google Drive target {remote_target}" >&2
 rclone mkdir {quoted_target} --drive-acknowledge-abuse
 echo "Uploading archive to {remote_path}" >&2
