@@ -897,6 +897,20 @@ function deploymentDomain(deployment: { domain?: BoundDomain | null; domainBindi
     ?? null;
 }
 
+function deploymentRouteDomains(deployment: { domain?: BoundDomain | null; domainBindings?: Array<{ role: string; domain?: BoundDomain | null; subdomain?: { id: string; name: string; sslEnabled: boolean; domainId: string; domain: { name: string; documentRoot?: string | null } } | null }> }) {
+  const domains = [
+    ...(deployment.domainBindings ?? []).map((binding) => boundDomainFromBinding(binding)),
+    deployment.domain ?? null
+  ].filter(Boolean) as BoundDomain[];
+  const seen = new Set<string>();
+  return domains.filter((domain) => {
+    const key = domain.name.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function deploymentPublicEnv(domain: BoundDomain | null, httpsReady = false) {
   if (!domain?.name) return {} as Record<string, string>;
   const scheme = httpsReady ? "https" : "http";
@@ -1320,6 +1334,47 @@ async function republishDeploymentNginxVhost(
       forceHttps: httpsReady
     })
   );
+}
+
+async function publishDeploymentNginxRoute(
+  deploymentId: string,
+  releaseId: string | undefined,
+  deployment: {
+    id: string;
+    port: number;
+    rootPath: string;
+    framework: DeploymentFramework;
+    startCommand?: string | null;
+    publicDirectory?: string | null;
+    outputDirectory?: string | null;
+  },
+  domain: BoundDomain,
+  forceSsl: boolean,
+  label = `Nginx proxy config for ${domain.name}`
+) {
+  const serverName = deploymentServerName(domain);
+  const nginxResult = await runStep(deploymentId, releaseId, "CONFIGURING_PROXY", label, async () =>
+    sysagent.deploymentNginx(
+      buildDeploymentNginxRequest({
+        deploymentId: deployment.id,
+        fqdn: serverName ?? domain.name,
+        upstreamPort: deployment.port,
+        rootPath: deployment.rootPath,
+        framework: deployment.framework,
+        startCommand: deployment.startCommand,
+        publicDirectory: deployment.publicDirectory,
+        outputDirectory: deployment.outputDirectory,
+        fallbackRootPath: deploymentFallbackRootPath(domain),
+        forceSsl,
+        ...(await deploymentSslCertificatePathsWhenReady(domain))
+      })
+    )
+  );
+  assertLiveResult((nginxResult as { write?: unknown }).write, `${label} write`);
+  assertLiveResult((nginxResult as { enable?: unknown }).enable, `${label} enable`);
+  assertLiveResult((nginxResult as { test?: unknown }).test, `${label} test`);
+  assertLiveResult((nginxResult as { reload?: unknown }).reload, `${label} reload`);
+  return nginxResult;
 }
 
 async function reconcileNodeProductionStartCommand(
@@ -3189,6 +3244,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
     ({ deployment, appPath } = await reconcileLaravelRootDirectory(deployment, releaseId, appPath));
     const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
     const domain = deploymentDomain(deployment);
+    const routeDomains = deploymentRouteDomains(deployment);
     const runtimeEnvVars = deploymentEnvWithPublicUrl(envVars, domain);
 
     const lifecycleBackendOnlyLaravel = Boolean(
@@ -3210,36 +3266,26 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
         reason: "No public/index.php exists and public_html has no index file. The Laravel process can still run as backend-only/worker-safe."
       }, "warn");
     }
-    if (processAction !== "stop" && domain && !lifecycleBackendOnlyLaravel) {
-      await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Link deployment domain", () =>
-        ensureParentDomainDeploymentProxy(deployment.id, domain).then(() => ({
-          domain: domain.name,
-          domainId: domain.id,
-          fallbackRootPath: deploymentFallbackRootPath(domain)
-        }))
+    if (processAction !== "stop" && routeDomains.length > 0 && !lifecycleBackendOnlyLaravel) {
+      await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Link deployment domains", async () =>
+        Promise.all(routeDomains.map((routeDomain) =>
+          ensureParentDomainDeploymentProxy(deployment.id, routeDomain).then(() => ({
+            domain: routeDomain.name,
+            domainId: routeDomain.id,
+            fallbackRootPath: deploymentFallbackRootPath(routeDomain)
+          }))
+        ))
       );
-      const serverName = deploymentServerName(domain);
-      const nginxResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config", async () =>
-        sysagent.deploymentNginx(
-          buildDeploymentNginxRequest({
-            deploymentId: deployment.id,
-            fqdn: serverName ?? domain.name,
-            upstreamPort: deployment.port,
-            rootPath: appPath,
-            framework: deployment.framework,
-            startCommand: deployment.startCommand,
-            publicDirectory: deployment.publicDirectory,
-            outputDirectory: deployment.outputDirectory,
-            fallbackRootPath: deploymentFallbackRootPath(domain),
-            forceSsl: false,
-            ...(await deploymentSslCertificatePathsWhenReady(domain))
-          })
-        )
-      );
-      assertLiveResult((nginxResult as { write?: unknown }).write, "Nginx proxy config write");
-      assertLiveResult((nginxResult as { enable?: unknown }).enable, "Nginx proxy config enable");
-      assertLiveResult((nginxResult as { test?: unknown }).test, "Nginx config test");
-      assertLiveResult((nginxResult as { reload?: unknown }).reload, "Nginx reload");
+      for (const routeDomain of routeDomains) {
+        await publishDeploymentNginxRoute(
+          deployment.id,
+          releaseId,
+          { ...deployment, rootPath: appPath },
+          routeDomain,
+          await deploymentHttpsReady(routeDomain),
+          `Nginx proxy config for ${routeDomain.name}`
+        );
+      }
     }
 
     if (deployment.framework === "LARAVEL" && processAction !== "stop") {
@@ -3412,6 +3458,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       throw new Error(`No runnable start command found for ${deployment.slug}. Add a package.json start script or set a manual start command.`);
     }
     let domain = deploymentDomain(deployment);
+    let routeDomains = deploymentRouteDomains(deployment);
     let envVars = deploymentEnvWithPublicUrl(await resolveEnvVars(deployment.env), domain);
     const databaseRuntime = await buildDatabaseRuntimeEnv(deployment, envVars, { releaseId });
     envVars = databaseRuntime.envVars;
@@ -3646,14 +3693,15 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           : "No public/index.php exists and public_html has no index file. The Laravel process can still run as backend-only/worker-safe."
       }, "warn");
     }
-    if (domain && !backendOnlyLaravel) {
-      const linkedDomain = domain;
-      await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Link deployment domain", () =>
-        ensureParentDomainDeploymentProxy(deployment.id, linkedDomain).then(() => ({
-          domain: linkedDomain.name,
-          domainId: linkedDomain.id,
-          fallbackRootPath: deploymentFallbackRootPath(linkedDomain)
-        }))
+    if (routeDomains.length > 0 && !backendOnlyLaravel) {
+      await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Link deployment domains", async () =>
+        Promise.all(routeDomains.map((routeDomain) =>
+          ensureParentDomainDeploymentProxy(deployment.id, routeDomain).then(() => ({
+            domain: routeDomain.name,
+            domainId: routeDomain.id,
+            fallbackRootPath: deploymentFallbackRootPath(routeDomain)
+          }))
+        ))
       );
     }
     await repairSysagentLiveCommandsForDeployment(
@@ -3664,30 +3712,27 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     let proxyHttpsReady = false;
     if (domain && !backendOnlyLaravel) {
       const tlsSync = await syncDeploymentTlsWithCertificate(domain);
-      domain = tlsSync.domain;
+      if (!tlsSync.domain) {
+        throw new Error(`Could not resolve deployment domain for ${deployment.slug}`);
+      }
+      const primaryDomain = tlsSync.domain;
+      domain = primaryDomain;
       proxyHttpsReady = tlsSync.httpsReady;
-      const serverName = deploymentServerName(domain);
-      const nginxResult = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config", async () =>
-        sysagent.deploymentNginx(
-          buildDeploymentNginxRequest({
-            deploymentId: deployment.id,
-            fqdn: serverName ?? domain!.name,
-            upstreamPort: deployment.port,
-            rootPath: appPath,
-            framework: deployment.framework,
-            startCommand: deployment.startCommand,
-            publicDirectory: deployment.publicDirectory,
-            outputDirectory: deployment.outputDirectory,
-            fallbackRootPath: deploymentFallbackRootPath(domain),
-            forceSsl: proxyHttpsReady,
-            ...(await deploymentSslCertificatePathsWhenReady(domain))
-          })
-        )
-      );
-      assertLiveResult((nginxResult as { write?: unknown }).write, "Nginx proxy config write");
-      assertLiveResult((nginxResult as { enable?: unknown }).enable, "Nginx proxy config enable");
-      assertLiveResult((nginxResult as { test?: unknown }).test, "Nginx config test");
-      assertLiveResult((nginxResult as { reload?: unknown }).reload, "Nginx reload");
+      routeDomains = [primaryDomain, ...routeDomains.filter((routeDomain) => routeDomain.name.toLowerCase() !== primaryDomain.name.toLowerCase())];
+      for (const routeDomain of routeDomains) {
+        const routeTlsSync = routeDomain.name.toLowerCase() === primaryDomain.name.toLowerCase()
+          ? { domain: primaryDomain, httpsReady: proxyHttpsReady }
+          : await syncDeploymentTlsWithCertificate(routeDomain);
+        if (!routeTlsSync.domain) continue;
+        await publishDeploymentNginxRoute(
+          deployment.id,
+          releaseId,
+          { ...deployment, rootPath: appPath },
+          routeTlsSync.domain,
+          routeTlsSync.httpsReady,
+          `Nginx proxy config for ${routeTlsSync.domain.name}`
+        );
+      }
     } else {
       await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config skipped", {
         reason: backendOnlyLaravel
