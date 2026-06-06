@@ -688,7 +688,7 @@ model PanelBackup {
   label       String
   status      PanelBackupStatus @default(QUEUED)
   archivePath String?           @map("archive_path")
-  sizeBytes   Int?              @map("size_bytes")
+  sizeBytes   BigInt?           @map("size_bytes")
   includes    String[]          @default([])
   result      Json              @default("{}")
   createdAt   DateTime          @default(now()) @map("created_at")

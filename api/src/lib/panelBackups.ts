@@ -178,6 +178,17 @@ function formatBytes(value?: number | null) {
   return `${value} B`;
 }
 
+function backupSizeForDb(value?: number | null) {
+  return value && value > 0 ? BigInt(Math.floor(value)) : null;
+}
+
+function panelBackupForJson<T extends { sizeBytes?: bigint | number | null }>(record: T): Omit<T, "sizeBytes"> & { sizeBytes: number | null } {
+  return {
+    ...record,
+    sizeBytes: typeof record.sizeBytes === "bigint" ? Number(record.sizeBytes) : record.sizeBytes ?? null
+  };
+}
+
 function rcloneTransferPercent(text: string) {
   const matches = [...text.matchAll(/Transferred:\s+.*?,\s*([0-9]+(?:\.[0-9]+)?)%/gi)];
   const last = matches.at(-1)?.[1];
@@ -338,28 +349,30 @@ export async function runPanelBackup(input: unknown, request?: any, onProgress?:
       data: {
         status: ok ? "SUCCEEDED" : "FAILED",
         archivePath: result.archivePath,
-        sizeBytes: result.sizeBytes ?? null,
+        sizeBytes: backupSizeForDb(result.sizeBytes),
         includes: result.includes,
         result: { ...result, remote: uploadResult, settings: { remoteProvider: settings.remoteProvider, remoteTarget: settings.remoteTarget } } as any,
         finishedAt: new Date()
       }
     });
+    const jsonUpdated = panelBackupForJson(updated);
     if (request) {
       await audit(request, { action: "CREATE", resource: "panel_backup", resourceId: updated.id, description: `Created panel backup ${body.label}` });
     }
-    await onProgress?.({ phase: ok ? "SUCCEEDED" : "FAILED", percent: 100, message: ok ? "Backup completed." : "Backup finished with errors.", result: updated });
-    return updated;
+    await onProgress?.({ phase: ok ? "SUCCEEDED" : "FAILED", percent: 100, message: ok ? "Backup completed." : "Backup finished with errors.", result: jsonUpdated });
+    return jsonUpdated;
   } catch (error) {
     const message = readableErrorMessage(error);
     const updated = await prisma.panelBackup.update({
       where: { id: record.id },
       data: { status: "FAILED", result: { error: message, details: (error as any).result } as any, finishedAt: new Date() }
     });
+    const jsonUpdated = panelBackupForJson(updated);
     if (request) {
       await audit(request, { action: "CREATE", resource: "panel_backup", resourceId: updated.id, description: `Panel backup ${body.label} failed` });
     }
-    await onProgress?.({ phase: "FAILED", percent: 100, message, result: updated });
-    throw Object.assign(new Error(message), { statusCode: 500, record: updated });
+    await onProgress?.({ phase: "FAILED", percent: 100, message, result: jsonUpdated });
+    throw Object.assign(new Error(message), { statusCode: 500, record: jsonUpdated });
   }
 }
 

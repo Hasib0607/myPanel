@@ -79,6 +79,10 @@ function localRestorePath(backupRoot: string, input: string) {
   return path.join(backupRoot, path.basename(input));
 }
 
+function jsonSafe<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value, (_key, item) => typeof item === "bigint" ? Number(item) : item));
+}
+
 export const backupRoutes: FastifyPluginAsync = async (app) => {
   app.addHook("preHandler", app.requireAuth);
 
@@ -89,7 +93,7 @@ export const backupRoutes: FastifyPluginAsync = async (app) => {
       prisma.panelBackup.findMany({ orderBy: { createdAt: "desc" }, take: 50 }),
       getBackupSettings()
     ]);
-    return { plan, archives: archives.items, records, settings };
+    return { plan, archives: archives.items, records: jsonSafe(records), settings };
   });
 
   app.put("/settings", async (request) => {
