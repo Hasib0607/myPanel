@@ -93,6 +93,8 @@ export const sysagent = {
   applySshHardening: (body: unknown) =>
     request("/firewall/ssh-hardening", { method: "POST", body: JSON.stringify(body) }),
   processes: () => request("/processes"),
+  repairBind: () =>
+    request("/dns/bind/repair", { method: "POST" }),
   deploymentGitSync: (body: unknown) =>
     request("/deployments/git-sync", { method: "POST", body: JSON.stringify(body) }),
   deploymentInstall: (body: unknown) =>

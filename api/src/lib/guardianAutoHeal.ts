@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "./prisma.js";
 import { sysagent } from "./sysagent.js";
 
-const safeRestartServices = new Set(["nginx", "postgres", "pgbouncer", "panel-api", "panel-frontend", "panel-workers", "panel-guardian"]);
+const safeRestartServices = new Set(["nginx", "bind9", "postgres", "pgbouncer", "panel-api", "panel-frontend", "panel-workers", "panel-guardian"]);
 const cooldownMs = Number(process.env.GUARDIAN_ACTION_COOLDOWN_MS ?? 10 * 60_000);
 const maxRetries = Number(process.env.GUARDIAN_MAX_RETRIES ?? 3);
 
@@ -169,6 +169,14 @@ export async function runGuardianAutoHeal(diagnosis: GuardianDiagnosis) {
     const incidentId = incident ? incidentFor(records, incident) : null;
     if (!safeRestartServices.has(service.key)) {
       actions.push(await recordAction({ incidentId, action: "restart-service", target: service.key, status: "SKIPPED", reason: "not in safe restart allowlist" }));
+      continue;
+    }
+    if (service.key === "bind9") {
+      actions.push(await guardedAction("repair-bind", service.key, incidentId, async () => {
+        const repair = await sysagent.repairBind();
+        const recheck = await sysagent.guardianDiagnosis();
+        return { repair, recheck };
+      }));
       continue;
     }
     actions.push(await guardedAction("restart-service", service.key, incidentId, async () => {

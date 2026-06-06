@@ -279,18 +279,30 @@ export const dnsRoutes: FastifyPluginAsync = async (app) => {
     const domainsWithRecords = await prisma.domain.findMany({
       include: { dnsRecords: { orderBy: [{ type: "asc" }, { name: "asc" }] } }
     });
-    const appliedZones = await Promise.all(domainsWithRecords.map(async (domain) => {
+    const appliedZones = [];
+    const failedZones = [];
+    for (const domain of domainsWithRecords) {
       const zone = renderZone(domain.name, domain.dnsRecords);
-      const result = await sysagent.applyDnsZone({ domain: domain.name, zone });
-      return { domain: domain.name, result };
-    }));
+      try {
+        const result = await sysagent.applyDnsZone({ domain: domain.name, zone });
+        const resultText = JSON.stringify(result);
+        if (resultText.includes('"returncode":1') || (result as any).rolledBack) {
+          failedZones.push({ domain: domain.name, result });
+        } else {
+          appliedZones.push({ domain: domain.name, result });
+        }
+      } catch (error) {
+        failedZones.push({ domain: domain.name, error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    const repair = failedZones.length ? await sysagent.repairBind().catch((error) => ({ error: error instanceof Error ? error.message : String(error) })) : null;
     await audit(request, {
       action: "APPLY",
       resource: "nameserver",
       description: "Synced nameservers into domain DNS records",
-      metadata: { domains: domains.length, nameServers: nameServers.length, created, updated, applied: appliedZones.length }
+      metadata: { domains: domains.length, nameServers: nameServers.length, created, updated, applied: appliedZones.length, failed: failedZones.length, repair } as any
     });
-    return reply.code(202).send({ domains: domains.length, nameServers: nameServers.length, created, updated, applied: appliedZones.length });
+    return reply.code(failedZones.length ? 207 : 202).send({ domains: domains.length, nameServers: nameServers.length, created, updated, applied: appliedZones.length, failed: failedZones, repair });
   });
 
   app.get("/:domainId/records", async (request) => {

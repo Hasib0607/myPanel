@@ -171,6 +171,37 @@ def restart_bind_service() -> dict:
     )
 
 
+def bind_status() -> dict:
+    return run_command(
+        ["sh", "-lc", "systemctl is-active named 2>/dev/null || systemctl is-active bind9"],
+        allow_live=True,
+        timeout=10,
+    )
+
+
+@router.post("/bind/repair")
+def repair_bind() -> dict[str, Any]:
+    zone_dir, named_conf_local, named_conf_options = effective_dns_paths(ZoneApplyRequest(domain="example.com", zone=""))
+    before = {
+        "status": bind_status(),
+        "checkconf": run_command(["named-checkconf"], allow_live=settings.allow_live_dns, timeout=30),
+    }
+    options = ensure_public_authoritative_options(named_conf_options)
+    declare = rebuild_zone_declarations(named_conf_local, zone_dir)
+    after_checkconf = run_command(["named-checkconf"], allow_live=settings.allow_live_dns, timeout=30)
+    restart = restart_bind_service() if command_ok(after_checkconf) else {"returncode": 1, "stderr": "Skipped restart because named-checkconf failed after repair."}
+    after_status = bind_status()
+    return {
+        "before": before,
+        "options": options,
+        "declare": declare,
+        "checkconf": after_checkconf,
+        "restart": restart,
+        "status": after_status,
+        "ok": command_ok(after_checkconf) and command_ok(restart) and str(after_status.get("stdout", "")).strip() == "active",
+    }
+
+
 def reload_bind_zone(domain: str) -> dict:
     reconfig = run_command(["rndc", "reconfig"], allow_live=settings.allow_live_dns, timeout=30)
     reload = (
@@ -285,12 +316,14 @@ def apply_zone(body: ZoneApplyRequest) -> dict:
         restore_conf = restore_file(conf_path, conf_backup if conf_backup.exists() else None)
         restore_options = restore_file(options_path, options_backup if options_backup.exists() else None)
         restart = restart_bind_service()
+        repair = repair_bind() if not command_ok(restart) else None
         result["rolledBack"] = True
         result["rollback"] = {
             "zone": restore_zone,
             "conf": restore_conf,
             "options": restore_options,
             "restart": restart,
+            "repair": repair,
         }
     else:
         result["rolledBack"] = False
