@@ -216,6 +216,16 @@ function rcloneTransferLine(text: string) {
   return [...lines].reverse().find((line) => /Transferred:/i.test(line)) ?? "";
 }
 
+function latestRcloneLine(text: string) {
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return [...lines].reverse().find((line) => {
+    if (/^Transferred:\s+0\s+B\s*\/\s*0\s+B/i.test(line)) return false;
+    if (/^Checks:/i.test(line)) return false;
+    if (/^Elapsed time:/i.test(line)) return false;
+    return true;
+  }) ?? "";
+}
+
 function safeBackupLabel(label: string) {
   return label.replace(/[^a-zA-Z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "manual";
 }
@@ -294,11 +304,17 @@ async function waitForUploadBackupJob(
     const transferText = `${job?.result?.stderr ?? ""}\n${job?.result?.stdout ?? ""}`;
     const transferPercent = rcloneTransferPercent(transferText);
     const transferLine = rcloneTransferLine(transferText);
+    const latestLine = latestRcloneLine(transferText);
     const percent = transferPercent === null ? 56 : Math.min(89, Math.max(56, Math.floor(56 + transferPercent * 0.33)));
+    const detail = transferLine
+      ? transferLine
+      : latestLine
+        ? `Latest rclone log: ${latestLine}`
+        : "Waiting for rclone transfer stats";
     await onProgress?.({
       phase: "UPLOADING",
       percent,
-      message: `${lastError ? "Google Drive upload is still running independently; waiting for status reconnect." : "Uploading archive to Google Drive."}${transferLine ? ` ${transferLine}.` : " Waiting for transfer stats."} Elapsed: ${formatElapsed(elapsedMs)}.`
+      message: `${lastError ? "Google Drive upload is still running independently; waiting for status reconnect." : "Google Drive upload job is running."} ${detail}. Elapsed: ${formatElapsed(elapsedMs)}.`
     });
     await new Promise((resolve) => setTimeout(resolve, 10000));
   }

@@ -546,10 +546,10 @@ set -Eeuo pipefail
 echo "Preparing Google Drive target {remote_target}" >&2
 rclone mkdir {quoted_target} --drive-acknowledge-abuse
 echo "Uploading archive to {remote_path}" >&2
-rclone copyto {quoted_archive} {quoted_remote_path} --drive-acknowledge-abuse --stats 30s
+rclone copyto {quoted_archive} {quoted_remote_path} --drive-acknowledge-abuse --stats 5s --stats-one-line
 if [ -f {quoted_checksum} ]; then
   echo "Uploading checksum to {remote_path}.sha256" >&2
-  rclone copyto {quoted_checksum} {shlex.quote(remote_path + ".sha256")} --drive-acknowledge-abuse
+  rclone copyto {quoted_checksum} {shlex.quote(remote_path + ".sha256")} --drive-acknowledge-abuse --stats 5s --stats-one-line
 fi
 """
     result = run_command(["bash", "-lc", script], env=env, allow_live=settings.allow_live_backup, timeout=7200)
@@ -574,10 +574,10 @@ set -Eeuo pipefail
 echo "Preparing Google Drive target {remote_target}" >&2
 rclone mkdir {quoted_target} --drive-acknowledge-abuse
 echo "Uploading archive to {remote_path}" >&2
-rclone copyto {quoted_archive} {quoted_remote_path} --drive-acknowledge-abuse --stats 30s
+rclone copyto {quoted_archive} {quoted_remote_path} --drive-acknowledge-abuse --stats 5s --stats-one-line
 if [ -f {quoted_checksum} ]; then
   echo "Uploading checksum to {remote_path}.sha256" >&2
-  rclone copyto {quoted_checksum} {shlex.quote(remote_path + ".sha256")} --drive-acknowledge-abuse
+  rclone copyto {quoted_checksum} {shlex.quote(remote_path + ".sha256")} --drive-acknowledge-abuse --stats 5s --stats-one-line
 fi
 """
     job_id = uuid.uuid4().hex
