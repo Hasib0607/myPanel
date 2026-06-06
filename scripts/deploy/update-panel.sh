@@ -192,7 +192,19 @@ repair_panel_permissions() {
     return 0
   fi
 
-  if [[ ! -w "$APP_DIR/.git/objects" || ! -w "$APP_DIR/frontend" || ! -w "$APP_DIR/api" ]]; then
+  local needs_repair=false
+  for path in "$APP_DIR" "$APP_DIR/.git" "$APP_DIR/.git/objects" "$APP_DIR/frontend" "$APP_DIR/api"; do
+    if [[ -e "$path" && ! -w "$path" ]]; then
+      needs_repair=true
+    fi
+  done
+  for path in "$APP_DIR/.git/FETCH_HEAD" "$APP_DIR/.git/packed-refs" "$APP_DIR/.git/refs" "$APP_DIR/.git/refs/remotes" "$APP_DIR/.git/refs/remotes/origin"; do
+    if [[ -e "$path" && ! -w "$path" ]]; then
+      needs_repair=true
+    fi
+  done
+
+  if [[ "$needs_repair" == "true" ]]; then
     log "panel checkout is not writable by $(id -un); attempting permission repair"
     if "$SUDO_BIN" -n "$repair_script" 2>&1 | tee -a "$LOG_FILE"; then
       log "panel checkout permission repair completed"
@@ -200,6 +212,34 @@ repair_panel_permissions() {
       log "panel checkout permission repair failed; git fetch may still fail"
     fi
   fi
+}
+
+fetch_origin_branch() {
+  local fetch_code=0
+  log "+ git fetch origin $BRANCH"
+  set +e
+  git fetch origin "$BRANCH" 2>&1 | tee -a "$LOG_FILE"
+  fetch_code="${PIPESTATUS[0]}"
+  set -e
+  if [[ "$fetch_code" -eq 0 ]]; then
+    return 0
+  fi
+
+  log "git fetch origin $BRANCH failed with exit code $fetch_code; attempting permission repair and retry"
+  repair_panel_permissions
+
+  log "+ git fetch origin $BRANCH (retry)"
+  set +e
+  git fetch origin "$BRANCH" 2>&1 | tee -a "$LOG_FILE"
+  fetch_code="${PIPESTATUS[0]}"
+  set -e
+  if [[ "$fetch_code" -eq 0 ]]; then
+    return 0
+  fi
+
+  write_status "failed" "git fetch origin $BRANCH failed with exit code $fetch_code; check Git token, remote access, and checkout permissions" "$(current_commit)" "$(current_commit_subject)"
+  log "git fetch origin $BRANCH failed after retry with exit code $fetch_code"
+  exit "$fetch_code"
 }
 
 normalize_known_self_update_dirty_files() {
@@ -841,7 +881,7 @@ patch_nginx_websocket() {
   fi
 }
 
-run git fetch origin "$BRANCH"
+fetch_origin_branch
 normalize_known_self_update_dirty_files
 
 DIRTY_FILES="$(git status --porcelain)"
