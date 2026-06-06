@@ -2082,12 +2082,47 @@ def nginx_inspect(body: NginxInspectRequest) -> dict:
     if available.exists():
         content = available.read_text(encoding="utf-8", errors="ignore")
     upstream = f"127.0.0.1:{body.upstreamPort}"
+    tokens = server_name_tokens(server_name)
+    claiming: list[dict] = []
+    stale_static_claims: list[str] = []
+    for scan_dir in _nginx_scan_dirs():
+        enabled_dir = Path(scan_dir)
+        if not enabled_dir.is_dir():
+            continue
+        for conf_path in enabled_dir.iterdir():
+            try:
+                target = conf_path.resolve() if conf_path.is_symlink() else conf_path
+                if not any(_config_has_server_name(target, token) for token in tokens):
+                    continue
+                claim_text = target.read_text(encoding="utf-8", errors="ignore")
+                has_expected_upstream = upstream in claim_text
+                stale_static = bool(re.search(r"try_files\s+\$uri\s+\$uri/\s+=404;", claim_text))
+                claiming.append({
+                    "file": conf_path.name,
+                    "path": str(conf_path),
+                    "target": str(target),
+                    "containsExpectedUpstream": has_expected_upstream,
+                    "staleStaticRoot": stale_static,
+                })
+                if stale_static and not has_expected_upstream:
+                    stale_static_claims.append(str(conf_path))
+            except OSError:
+                continue
+    ok = available.exists() and upstream in content and not stale_static_claims
+    if not available.exists():
+        stderr = "Generated Nginx config is missing"
+    elif upstream not in content:
+        stderr = "Generated Nginx config upstream port does not match"
+    elif stale_static_claims:
+        stderr = f"Another Nginx config claims this hostname with a static try_files root: {', '.join(stale_static_claims)}"
+    else:
+        stderr = ""
     return {
         "dryRun": False,
         "command": ["nginx-inspect", config_name],
-        "returncode": 0 if available.exists() and upstream in content else 1,
+        "returncode": 0 if ok else 1,
         "stdout": "",
-        "stderr": "" if available.exists() and upstream in content else "Generated Nginx config is missing or upstream port does not match",
+        "stderr": stderr,
         "path": info,
         "configName": config_name,
         "availablePath": str(available),
@@ -2096,6 +2131,8 @@ def nginx_inspect(body: NginxInspectRequest) -> dict:
         "enabled": enabled.exists(),
         "expectedUpstream": upstream,
         "containsExpectedUpstream": upstream in content,
+        "claimingConfigs": claiming,
+        "staleStaticClaims": stale_static_claims,
         "serverName": server_name,
     }
 

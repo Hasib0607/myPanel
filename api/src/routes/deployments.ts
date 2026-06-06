@@ -1567,7 +1567,7 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
 
   const doctorFramework = detection?.detected ?? deployment.framework;
   const doctorLaravelHasPublicIndex = doctorFramework === "LARAVEL" ? await deploymentHasLaravelPublicIndex(appPath) : true;
-  if (serverName && doctorLaravelHasPublicIndex) {
+  if (serverName) {
     let publicRoute: unknown = null;
     try {
       publicRoute = await sysagent.deploymentPublicRoute({ serverName });
@@ -1583,7 +1583,7 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
       fix: publicFailed ? "Rewrite the generated Nginx vhost, scrub stale server_name configs, then restart the process if the route still returns 502/503/504." : undefined,
       repairAction: publicFailed ? "rewrite-nginx" : undefined
     });
-    if (!publicFailed && doctorFramework === "LARAVEL" && domain?.name) {
+    if (!publicFailed && doctorFramework === "LARAVEL" && doctorLaravelHasPublicIndex && domain?.name) {
       const assetPaths = extractFirstPartyAssetPaths((publicRoute as { stdout?: string }).stdout, domain.name);
       const missingAssets: string[] = [];
       for (const assetPath of assetPaths) {
@@ -1624,7 +1624,7 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
       label: "Nginx upstream",
       status: nginxMismatch ? "warn" : "pass",
       detail: commandDetail(nginxInspect) || `Nginx config points to ${(nginxInspect as { expectedUpstream?: string }).expectedUpstream}`,
-      fix: nginxMismatch ? "Redeploy to rewrite the generated deployment vhost after reviewing the expected upstream." : undefined,
+      fix: nginxMismatch ? "Rewrite the generated deployment vhost after reviewing the expected upstream. This also removes stale static account vhosts that claim the same hostname." : undefined,
       repairAction: nginxMismatch ? "request-approval" : undefined
     });
     if (nginxMismatch) {
@@ -1636,13 +1636,6 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
         approvalRequired: true
       });
     }
-  } else if (serverName && doctorFramework === "LARAVEL") {
-    checks.push({
-      key: "public_route",
-      label: "Public website",
-      status: "pass",
-      detail: `Skipped public website probe because ${appPath} has no public/index.php. This Laravel deployment is treated as backend-only.`
-    });
   } else {
     checks.push({ key: "public_route", label: "Public website", status: "warn", detail: "No domain is linked yet.", fix: "Bind a domain to enable public route checks." });
   }
@@ -2368,6 +2361,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       const runtime = await sysagent.deploymentRuntimeLogs({
         name: deployment.slug,
         logDir: deploymentLogDir(deployment.slug),
+        rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
         lines: query.limit
       });
       const lines = [
