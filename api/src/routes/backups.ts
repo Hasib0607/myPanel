@@ -72,7 +72,8 @@ async function saveBackupJob(job: BackupJobStatus) {
 
 function remoteArchivePath(remoteTarget: string, input: string) {
   if (input.includes(":")) return input;
-  return `${remoteTarget.replace(/\/$/, "")}/${path.basename(input)}`;
+  const relativePath = input.startsWith("/") ? path.basename(input) : input.replace(/^\/+/, "");
+  return `${remoteTarget.replace(/\/$/, "")}/${relativePath}`;
 }
 
 function localRestorePath(backupRoot: string, input: string) {

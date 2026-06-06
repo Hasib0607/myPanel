@@ -528,13 +528,19 @@ def rclone_env_and_setup(google_drive: dict[str, Any] | None, remote_target: str
     return f"export RCLONE_CONFIG={shlex.quote(str(config_path))}\n", {"RCLONE_CONFIG": str(config_path)}
 
 
+def dated_remote_paths(remote_target: str, archive: Path) -> tuple[str, str]:
+    date_folder = datetime.now(timezone(timedelta(hours=6))).strftime("%Y-%m-%d")
+    dated_target = f"{remote_target}/{date_folder}"
+    return dated_target, f"{dated_target}/{archive.name}"
+
+
 @router.post("/upload-remote")
 def upload_remote(body: RemoteUploadRequest) -> dict[str, Any]:
     archive = checked_archive(body.path)
     checksum = Path(str(archive) + ".sha256")
     remote_target = body.remote_target.rstrip("/")
-    remote_path = f"{remote_target}/{archive.name}"
-    quoted_target = shlex.quote(remote_target)
+    dated_target, remote_path = dated_remote_paths(remote_target, archive)
+    quoted_target = shlex.quote(dated_target)
     quoted_archive = shlex.quote(str(archive))
     quoted_checksum = shlex.quote(str(checksum))
     quoted_remote_path = shlex.quote(remote_path)
@@ -543,7 +549,7 @@ def upload_remote(body: RemoteUploadRequest) -> dict[str, Any]:
 set -Eeuo pipefail
 {setup}
 {rclone_install_snippet()}
-echo "Preparing Google Drive target {remote_target}" >&2
+echo "Preparing Google Drive target {dated_target}" >&2
 rclone mkdir {quoted_target} --drive-acknowledge-abuse
 echo "Uploading archive to {remote_path}" >&2
 rclone copyto {quoted_archive} {quoted_remote_path} --drive-acknowledge-abuse --stats 5s --stats-one-line
@@ -561,8 +567,8 @@ def upload_remote_job(body: RemoteUploadRequest) -> dict[str, Any]:
     archive = checked_archive(body.path)
     checksum = Path(str(archive) + ".sha256")
     remote_target = body.remote_target.rstrip("/")
-    remote_path = f"{remote_target}/{archive.name}"
-    quoted_target = shlex.quote(remote_target)
+    dated_target, remote_path = dated_remote_paths(remote_target, archive)
+    quoted_target = shlex.quote(dated_target)
     quoted_archive = shlex.quote(str(archive))
     quoted_checksum = shlex.quote(str(checksum))
     quoted_remote_path = shlex.quote(remote_path)
@@ -571,7 +577,7 @@ def upload_remote_job(body: RemoteUploadRequest) -> dict[str, Any]:
 set -Eeuo pipefail
 {setup}
 {rclone_install_snippet()}
-echo "Preparing Google Drive target {remote_target}" >&2
+echo "Preparing Google Drive target {dated_target}" >&2
 rclone mkdir {quoted_target} --drive-acknowledge-abuse
 echo "Uploading archive to {remote_path}" >&2
 rclone copyto {quoted_archive} {quoted_remote_path} --drive-acknowledge-abuse --stats 5s --stats-one-line
@@ -748,7 +754,7 @@ def prune_remote(body: RemotePruneRequest) -> dict[str, Any]:
     quoted_target = shlex.quote(remote_target)
     setup, env = rclone_env_and_setup(body.google_drive, remote_target)
     list_result = run_command(
-        ["bash", "-lc", f'set -Eeuo pipefail\n{setup}rclone lsf --format "tp" {quoted_target} | grep -E "\\.tar\\.gz(\\.gpg)?$" | sort -r'],
+        ["bash", "-lc", f'set -Eeuo pipefail\n{setup}rclone lsf --recursive --format "tp" {quoted_target} | awk \'/\\.tar\\.gz(\\.gpg)?$/ {{ print }}\' | sort -r'],
         env=env,
         allow_live=settings.allow_live_backup,
         timeout=900,
@@ -758,7 +764,7 @@ def prune_remote(body: RemotePruneRequest) -> dict[str, Any]:
     script = "\n".join([
         f"rclone deletefile {shlex.quote(remote_target + '/' + name)}; rclone deletefile {shlex.quote(remote_target + '/' + name + '.sha256')} || true"
         for name in removable
-    ]) or "true"
+    ] + [f"rclone rmdirs {quoted_target} --leave-root || true"]) or "true"
     result = run_command(["bash", "-lc", f"set -Eeuo pipefail\n{setup}{script}"], env=env, allow_live=settings.allow_live_backup, timeout=1800)
     return {"remoteTarget": remote_target, "kept": names[:body.keep_last], "removed": removable, "result": result}
 
