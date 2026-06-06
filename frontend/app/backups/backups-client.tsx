@@ -460,6 +460,13 @@ export function BackupsClient() {
 
 function ProgressModal({ title, status, phase, percent, message, error, lines, onClose }: { title: string; status?: string; phase?: string; percent?: number; message?: string; error?: string; lines?: string[]; onClose: () => void }) {
   const running = status === "RUNNING" || status === "QUEUED" || !status;
+  const steps = [
+    { key: "CREATING_ARCHIVE", label: "Archive", doneAt: 55 },
+    { key: "UPLOADING", label: "Drive", doneAt: 90 },
+    { key: "PRUNING_REMOTE", label: "Remote prune", doneAt: 95 },
+    { key: "PRUNING_LOCAL", label: "Local prune", doneAt: 100 }
+  ];
+  const currentPercent = Math.max(0, Math.min(100, percent ?? 0));
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/40 p-4">
       <div className="w-full max-w-lg rounded-md bg-white shadow-xl">
@@ -471,10 +478,21 @@ function ProgressModal({ title, status, phase, percent, message, error, lines, o
           <div>
             <div className="mb-2 flex justify-between text-sm">
               <span>{phase ?? "QUEUED"}</span>
-              <span>{percent ?? 1}%</span>
+              <span>{currentPercent}%</span>
             </div>
             <div className="h-3 overflow-hidden rounded-full bg-slate-100">
-              <div className={`h-full ${status === "FAILED" ? "bg-red-500" : "bg-panel-accent"}`} style={{ width: `${percent ?? 1}%` }} />
+              <div className={`h-full transition-all duration-500 ${status === "FAILED" ? "bg-red-500" : "bg-panel-accent"}`} style={{ width: `${currentPercent}%` }} />
+            </div>
+            <div className="mt-3 grid grid-cols-4 gap-2 text-[11px]">
+              {steps.map((step) => {
+                const active = phase === step.key || (step.key === "PRUNING_REMOTE" && phase === "PRUNING_LOCAL");
+                const done = currentPercent >= step.doneAt || status === "SUCCEEDED";
+                return (
+                  <div className={`rounded border px-2 py-1 text-center ${done ? "border-emerald-200 bg-emerald-50 text-emerald-700" : active ? "border-panel-accent bg-panel-accent/10 text-panel-accent" : "border-panel-line bg-white text-panel-muted"}`} key={step.key}>
+                    {step.label}
+                  </div>
+                );
+              })}
             </div>
           </div>
           <div className="rounded-md border border-panel-line bg-slate-50 p-3 text-sm text-slate-700">

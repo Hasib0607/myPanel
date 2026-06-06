@@ -343,6 +343,7 @@ import json
 import os
 import signal
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -403,16 +404,22 @@ with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", en
         env={{**os.environ, "DATABASE_URL": os.environ.get("DATABASE_URL", "")}},
         start_new_session=True,
     )
-    try:
-        returncode = process.wait(timeout=timeout)
-        write_status(status("SUCCEEDED" if returncode == 0 else "FAILED", returncode))
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-        except ProcessLookupError:
-            process.kill()
-        process.wait()
-        write_status(status("FAILED", 124, timed_out=True))
+    deadline = time.time() + timeout
+    while True:
+        returncode = process.poll()
+        if returncode is not None:
+            write_status(status("SUCCEEDED" if returncode == 0 else "FAILED", returncode))
+            break
+        if time.time() >= deadline:
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                process.kill()
+            process.wait()
+            write_status(status("FAILED", 124, timed_out=True))
+            break
+        write_status(status("RUNNING"))
+        time.sleep(5)
 """
     runner_path.write_text(runner, encoding="utf-8")
     os.chmod(runner_path, 0o700)
@@ -606,6 +613,7 @@ import json
 import os
 import signal
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -658,16 +666,22 @@ with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", en
         env={{**os.environ, **{env!r}}},
         start_new_session=True,
     )
-    try:
-        returncode = process.wait(timeout=timeout)
-        write_status(status("SUCCEEDED" if returncode == 0 else "FAILED", returncode))
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-        except ProcessLookupError:
-            process.kill()
-        process.wait()
-        write_status(status("FAILED", 124, timed_out=True))
+    deadline = time.time() + timeout
+    while True:
+        returncode = process.poll()
+        if returncode is not None:
+            write_status(status("SUCCEEDED" if returncode == 0 else "FAILED", returncode))
+            break
+        if time.time() >= deadline:
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                process.kill()
+            process.wait()
+            write_status(status("FAILED", 124, timed_out=True))
+            break
+        write_status(status("RUNNING"))
+        time.sleep(5)
 """
     runner_path.write_text(runner, encoding="utf-8")
     os.chmod(runner_path, 0o700)

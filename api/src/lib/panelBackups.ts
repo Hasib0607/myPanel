@@ -170,6 +170,28 @@ function formatElapsed(ms: number) {
   return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
 }
 
+function formatBytes(value?: number | null) {
+  if (!value || value <= 0) return "";
+  if (value >= 1024 * 1024 * 1024) return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(2)} MB`;
+  if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${value} B`;
+}
+
+function rcloneTransferPercent(text: string) {
+  const matches = [...text.matchAll(/Transferred:\s+.*?,\s*([0-9]+(?:\.[0-9]+)?)%/gi)];
+  const last = matches.at(-1)?.[1];
+  if (!last) return null;
+  const value = Number(last);
+  if (!Number.isFinite(value)) return null;
+  return Math.max(0, Math.min(100, value));
+}
+
+function rcloneTransferLine(text: string) {
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return [...lines].reverse().find((line) => /Transferred:/i.test(line)) ?? "";
+}
+
 function safeBackupLabel(label: string) {
   return label.replace(/[^a-zA-Z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "manual";
 }
@@ -198,7 +220,6 @@ async function waitForCreateBackupJob(
   let lastError = "";
   while (Date.now() - startedAt < maxWaitMs) {
     const elapsedMs = Date.now() - startedAt;
-    const percent = Math.min(54, Math.max(10, Math.floor(10 + 44 * Math.min(0.98, elapsedMs / (90 * 60 * 1000)))));
     const job = await sysagent.backupCreateJob(jobId).catch((error) => {
       lastError = error instanceof Error ? error.message : String(error);
       return null;
@@ -212,10 +233,12 @@ async function waitForCreateBackupJob(
         result: job.result
       };
     }
+    const percent = job?.sizeBytes && job.sizeBytes > 0 ? 35 : 5;
+    const size = formatBytes(job?.sizeBytes);
     await onProgress?.({
       phase: "CREATING_ARCHIVE",
       percent,
-      message: `${lastError ? "Server backup is still running independently; waiting for status reconnect." : "Creating full server archive in isolated backup worker."} Elapsed: ${formatElapsed(elapsedMs)}.`
+      message: `${lastError ? "Server backup is still running independently; waiting for status reconnect." : "Creating archive on server."}${size ? ` Current archive size: ${size}.` : " Preparing files and database dumps."} Elapsed: ${formatElapsed(elapsedMs)}.`
     });
     await new Promise((resolve) => setTimeout(resolve, 10000));
   }
@@ -231,7 +254,6 @@ async function waitForUploadBackupJob(
   let lastError = "";
   while (Date.now() - startedAt < maxWaitMs) {
     const elapsedMs = Date.now() - startedAt;
-    const percent = Math.min(84, Math.max(70, Math.floor(70 + 14 * Math.min(0.98, elapsedMs / (90 * 60 * 1000)))));
     const job = await sysagent.backupUploadJob(jobId).catch((error) => {
       lastError = error instanceof Error ? error.message : String(error);
       return null;
@@ -244,10 +266,14 @@ async function waitForUploadBackupJob(
         result: job.result
       };
     }
+    const transferText = `${job?.result?.stderr ?? ""}\n${job?.result?.stdout ?? ""}`;
+    const transferPercent = rcloneTransferPercent(transferText);
+    const transferLine = rcloneTransferLine(transferText);
+    const percent = transferPercent === null ? 56 : Math.min(89, Math.max(56, Math.floor(56 + transferPercent * 0.33)));
     await onProgress?.({
       phase: "UPLOADING",
       percent,
-      message: `${lastError ? "Google Drive upload is still running independently; waiting for status reconnect." : "Uploading backup archive in isolated backup worker."} Elapsed: ${formatElapsed(elapsedMs)}.`
+      message: `${lastError ? "Google Drive upload is still running independently; waiting for status reconnect." : "Uploading archive to Google Drive."}${transferLine ? ` ${transferLine}.` : " Waiting for transfer stats."} Elapsed: ${formatElapsed(elapsedMs)}.`
     });
     await new Promise((resolve) => setTimeout(resolve, 10000));
   }
@@ -268,7 +294,7 @@ export async function runPanelBackup(input: unknown, request?: any, onProgress?:
     const plan = await sysagent.backupPlan();
     const target = backupTarget(plan.backupRoot, body.label, Boolean(body.encryptPassphrase));
     const createBody = { ...body, archivePath: target.archivePath, stagingDir: target.stagingDir };
-    await onProgress?.({ phase: "CREATING_ARCHIVE", percent: 10, message: "Creating full server archive." });
+    await onProgress?.({ phase: "CREATING_ARCHIVE", percent: 0, message: "Starting full server archive." });
     const createJob = await sysagent.createBackupJob(createBody);
     const result = createJob.status === "RUNNING" ? await waitForCreateBackupJob(createJob.jobId, onProgress) : {
       archivePath: createJob.archivePath,
@@ -285,10 +311,10 @@ export async function runPanelBackup(input: unknown, request?: any, onProgress?:
     if (!result.sizeBytes || result.sizeBytes <= 0) {
       throw Object.assign(new Error("Backup archive was not created or is empty. Check sysagent backup logs and available disk space."), { result });
     }
-    await onProgress?.({ phase: "ARCHIVE_CREATED", percent: 55, message: "Archive created.", result });
+    await onProgress?.({ phase: "ARCHIVE_CREATED", percent: 55, message: `Archive created${formatBytes(result.sizeBytes) ? ` (${formatBytes(result.sizeBytes)})` : ""}.`, result });
     if (settings.remoteProvider === "GOOGLE_DRIVE" && settings.remoteTarget) {
       const googleDrive = await googleDriveConfig(settings);
-      await onProgress?.({ phase: "UPLOADING", percent: 70, message: "Uploading backup archive to Google Drive." });
+      await onProgress?.({ phase: "UPLOADING", percent: 56, message: "Starting Google Drive upload." });
       const uploadJob = await sysagent.uploadBackupJob({ path: result.archivePath, remoteTarget: settings.remoteTarget, googleDrive });
       uploadResult = uploadJob.status === "RUNNING" ? await waitForUploadBackupJob(uploadJob.jobId, onProgress) : {
         archivePath: uploadJob.archivePath,
@@ -300,10 +326,10 @@ export async function runPanelBackup(input: unknown, request?: any, onProgress?:
       if (uploadError) {
         throw Object.assign(new Error(uploadError), { result: { ...result, remote: uploadResult } });
       }
-      await onProgress?.({ phase: "PRUNING_REMOTE", percent: 85, message: "Pruning old Google Drive backups.", result: uploadResult });
+      await onProgress?.({ phase: "PRUNING_REMOTE", percent: 90, message: "Google Drive upload completed. Pruning old Drive backups.", result: uploadResult });
       await sysagent.pruneRemoteBackups({ remoteTarget: settings.remoteTarget, keepLast: settings.retentionKeepLast, googleDrive });
     }
-    await onProgress?.({ phase: "PRUNING_LOCAL", percent: 92, message: "Pruning old local backups." });
+    await onProgress?.({ phase: "PRUNING_LOCAL", percent: 95, message: "Pruning old local backups." });
     await sysagent.pruneBackups({ keep_last: settings.retentionKeepLast });
 
     const ok = result.result.returncode === 0 && (!uploadResult || uploadResult.result.returncode === 0);
