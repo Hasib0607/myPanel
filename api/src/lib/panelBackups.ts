@@ -123,7 +123,7 @@ export async function googleDriveConfig(settings: BackupSettings) {
   };
 }
 
-export async function runPanelBackup(input: unknown, request?: any) {
+export async function runPanelBackup(input: unknown, request?: any, onProgress?: (progress: { phase: string; percent: number; message: string; result?: unknown }) => Promise<void> | void) {
   const body = backupSchema.parse(input ?? {});
   const settings = await getBackupSettings();
   const includes = Object.entries(body)
@@ -134,13 +134,18 @@ export async function runPanelBackup(input: unknown, request?: any) {
   });
 
   try {
+    await onProgress?.({ phase: "CREATING_ARCHIVE", percent: 10, message: "Creating full server archive." });
     const result = await sysagent.createBackup(body);
     let uploadResult: Awaited<ReturnType<typeof sysagent.uploadBackupToRemote>> | null = null;
+    await onProgress?.({ phase: "ARCHIVE_CREATED", percent: 55, message: result.result.dryRun ? "Backup dry-run completed." : "Archive created.", result });
     if (result.result.returncode === 0 && !result.result.dryRun && settings.remoteProvider === "GOOGLE_DRIVE" && settings.remoteTarget) {
       const googleDrive = await googleDriveConfig(settings);
+      await onProgress?.({ phase: "UPLOADING", percent: 70, message: "Uploading backup archive to Google Drive." });
       uploadResult = await sysagent.uploadBackupToRemote({ path: result.archivePath, remoteTarget: settings.remoteTarget, googleDrive });
+      await onProgress?.({ phase: "PRUNING_REMOTE", percent: 85, message: "Pruning old Google Drive backups.", result: uploadResult });
       await sysagent.pruneRemoteBackups({ remoteTarget: settings.remoteTarget, keepLast: settings.retentionKeepLast, googleDrive });
     }
+    await onProgress?.({ phase: "PRUNING_LOCAL", percent: 92, message: "Pruning old local backups." });
     await sysagent.pruneBackups({ keep_last: settings.retentionKeepLast });
 
     const ok = result.result.returncode === 0 && (!uploadResult || uploadResult.result.returncode === 0);
@@ -158,6 +163,7 @@ export async function runPanelBackup(input: unknown, request?: any) {
     if (request) {
       await audit(request, { action: "CREATE", resource: "panel_backup", resourceId: updated.id, description: `Created panel backup ${body.label}` });
     }
+    await onProgress?.({ phase: ok ? "SUCCEEDED" : "FAILED", percent: 100, message: ok ? "Backup completed." : "Backup finished with errors.", result: updated });
     return updated;
   } catch (error) {
     const updated = await prisma.panelBackup.update({
@@ -167,6 +173,7 @@ export async function runPanelBackup(input: unknown, request?: any) {
     if (request) {
       await audit(request, { action: "CREATE", resource: "panel_backup", resourceId: updated.id, description: `Panel backup ${body.label} failed` });
     }
+    await onProgress?.({ phase: "FAILED", percent: 100, message: error instanceof Error ? error.message : "Backup failed.", result: updated });
     throw Object.assign(new Error(error instanceof Error ? error.message : String(error)), { statusCode: 500, record: updated });
   }
 }

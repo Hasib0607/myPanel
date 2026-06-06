@@ -4,7 +4,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { audit } from "../lib/audit.js";
-import { getBackupSettings, googleDriveConfig, runPanelBackup, saveBackupSettings } from "../lib/panelBackups.js";
+import { backupSchema, getBackupSettings, googleDriveConfig, runPanelBackup, saveBackupSettings } from "../lib/panelBackups.js";
 import { prisma } from "../lib/prisma.js";
 import { sysagent } from "../lib/sysagent.js";
 
@@ -32,8 +32,26 @@ type RestoreJobStatus = {
   finishedAt?: string;
 };
 
+type BackupJobStatus = {
+  id: string;
+  status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED";
+  phase: "QUEUED" | "CREATING_ARCHIVE" | "ARCHIVE_CREATED" | "UPLOADING" | "PRUNING_REMOTE" | "PRUNING_LOCAL" | "SUCCEEDED" | "FAILED";
+  percent: number;
+  message: string;
+  backupId?: string;
+  archivePath?: string;
+  error?: string;
+  result?: unknown;
+  startedAt: string;
+  finishedAt?: string;
+};
+
 function restoreJobKey(id: string) {
   return `panel_restore_job:${id}`;
+}
+
+function backupJobKey(id: string) {
+  return `panel_backup_job:${id}`;
 }
 
 async function saveRestoreJob(job: RestoreJobStatus) {
@@ -41,6 +59,14 @@ async function saveRestoreJob(job: RestoreJobStatus) {
     where: { key: restoreJobKey(job.id) },
     update: { value: job as any },
     create: { key: restoreJobKey(job.id), value: job as any }
+  });
+}
+
+async function saveBackupJob(job: BackupJobStatus) {
+  await prisma.guardianSetting.upsert({
+    where: { key: backupJobKey(job.id) },
+    update: { value: job as any },
+    create: { key: backupJobKey(job.id), value: job as any }
   });
 }
 
@@ -78,6 +104,72 @@ export const backupRoutes: FastifyPluginAsync = async (app) => {
     } catch (error) {
       return reply.code(500).send((error as any).record ?? { error: error instanceof Error ? error.message : String(error) });
     }
+  });
+
+  app.post("/jobs", async (request, reply) => {
+    const body = backupSchema.parse(request.body ?? {});
+    const id = randomUUID();
+    const initial: BackupJobStatus = {
+      id,
+      status: "QUEUED",
+      phase: "QUEUED",
+      percent: 1,
+      message: "Backup job queued.",
+      startedAt: new Date().toISOString()
+    };
+    await saveBackupJob(initial);
+
+    void (async () => {
+      let job = initial;
+      const update = async (patch: Partial<BackupJobStatus>) => {
+        job = { ...job, ...patch };
+        await saveBackupJob(job);
+      };
+      try {
+        await update({ status: "RUNNING", phase: "CREATING_ARCHIVE", percent: 5, message: "Starting full backup on server." });
+        const record = await runPanelBackup(body, request, async (progress) => {
+          await update({
+            status: progress.phase === "FAILED" ? "FAILED" : progress.phase === "SUCCEEDED" ? "SUCCEEDED" : "RUNNING",
+            phase: progress.phase as BackupJobStatus["phase"],
+            percent: progress.percent,
+            message: progress.message,
+            result: progress.result ?? job.result
+          });
+        });
+        await update({
+          status: record.status === "SUCCEEDED" ? "SUCCEEDED" : "FAILED",
+          phase: record.status === "SUCCEEDED" ? "SUCCEEDED" : "FAILED",
+          percent: 100,
+          message: record.status === "SUCCEEDED" ? "Backup completed." : "Backup failed.",
+          backupId: record.id,
+          archivePath: record.archivePath ?? undefined,
+          result: record,
+          finishedAt: new Date().toISOString()
+        });
+      } catch (error) {
+        const record = (error as any).record;
+        await update({
+          status: "FAILED",
+          phase: "FAILED",
+          percent: 100,
+          message: "Backup failed.",
+          error: error instanceof Error ? error.message : String(error),
+          backupId: record?.id,
+          archivePath: record?.archivePath ?? undefined,
+          result: record,
+          finishedAt: new Date().toISOString()
+        });
+      }
+    })();
+
+    return reply.code(202).send(initial);
+  });
+
+  app.get("/jobs/:id", async (request, reply) => {
+    const params = z.object({ id: z.string().min(1) }).parse(request.params);
+    const row = await prisma.guardianSetting.findUnique({ where: { key: backupJobKey(params.id) } });
+    if (!row) return reply.code(404).send({ error: "Backup job not found" });
+    return row.value;
   });
 
   app.post("/restore-preview", async (request) => {

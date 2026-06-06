@@ -38,6 +38,17 @@ type RestoreJob = {
   error?: string;
 };
 
+type BackupJob = {
+  id: string;
+  status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED";
+  phase: string;
+  percent: number;
+  message: string;
+  backupId?: string;
+  archivePath?: string;
+  error?: string;
+};
+
 const initialDraft = {
   label: "manual",
   appDir: "/opt/vps-panel",
@@ -82,6 +93,7 @@ export function BackupsClient() {
   const [restore, setRestore] = useState<string[]>([]);
   const [restorePath, setRestorePath] = useState("");
   const [remoteRestorePath, setRemoteRestorePath] = useState("");
+  const [activeBackupJobId, setActiveBackupJobId] = useState("");
   const [activeRestoreJobId, setActiveRestoreJobId] = useState("");
   const [manifest, setManifest] = useState<string[]>([]);
   const [settings, setSettings] = useState(initialSettings);
@@ -114,15 +126,36 @@ export function BackupsClient() {
     });
   }, [backups.data?.settings]);
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["backups"] });
+  useEffect(() => {
+    setActiveBackupJobId(localStorage.getItem("activeBackupJobId") ?? "");
+    setActiveRestoreJobId(localStorage.getItem("activeRestoreJobId") ?? "");
+  }, []);
+  const backupJob = useQuery({
+    queryKey: ["backup-job", activeBackupJobId],
+    queryFn: () => apiGet<BackupJob>(`/backups/jobs/${activeBackupJobId}`),
+    enabled: Boolean(activeBackupJobId),
+    refetchInterval: 1000
+  });
+  useEffect(() => {
+    if (!activeBackupJobId) return;
+    localStorage.setItem("activeBackupJobId", activeBackupJobId);
+  }, [activeBackupJobId]);
+  useEffect(() => {
+    const status = backupJob.data?.status;
+    if (status === "SUCCEEDED" || status === "FAILED") {
+      void refresh();
+    }
+  }, [backupJob.data?.status]);
   const create = useMutation({
-    mutationFn: () => apiPost<BackupRecord>("/backups", {
+    mutationFn: () => apiPost<BackupJob>("/backups/jobs", {
       ...draft,
       excludePatterns: draft.excludePatterns.split("\n").map((item) => item.trim()).filter(Boolean),
       encryptPassphrase: draft.encryptPassphrase || undefined
     }),
-    onSuccess: async (record) => {
-      setNotice(record.result?.result?.dryRun ? "Backup preview created. Enable live backup on sysagent to write archives." : "Backup completed.");
-      await refresh();
+    onSuccess: (job) => {
+      setActiveBackupJobId(job.id);
+      localStorage.setItem("activeBackupJobId", job.id);
+      setNotice("");
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Backup failed.")
   });
@@ -137,10 +170,15 @@ export function BackupsClient() {
     enabled: Boolean(activeRestoreJobId),
     refetchInterval: 1000
   });
+  useEffect(() => {
+    if (!activeRestoreJobId) return;
+    localStorage.setItem("activeRestoreJobId", activeRestoreJobId);
+  }, [activeRestoreJobId]);
   const startRestore = useMutation({
     mutationFn: (body: { source: "LOCAL" | "GOOGLE_DRIVE"; path: string }) => apiPost<RestoreJob>("/backups/restore-jobs", { ...body, execute: true, mode: "full" }),
     onSuccess: (job) => {
       setActiveRestoreJobId(job.id);
+      localStorage.setItem("activeRestoreJobId", job.id);
       setNotice("");
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Restore failed.")
@@ -375,7 +413,7 @@ export function BackupsClient() {
           <div className="w-full max-w-lg rounded-md bg-white shadow-xl">
             <div className="flex items-center justify-between border-b border-panel-line px-4 py-3">
               <div className="text-sm font-semibold">Restore Progress</div>
-              <button className="rounded-md border border-panel-line px-2 py-1 text-xs disabled:opacity-50" disabled={restoreJob.data?.status === "RUNNING" || restoreJob.data?.status === "QUEUED"} onClick={() => setActiveRestoreJobId("")} type="button">Close</button>
+              <button className="rounded-md border border-panel-line px-2 py-1 text-xs disabled:opacity-50" disabled={restoreJob.data?.status === "RUNNING" || restoreJob.data?.status === "QUEUED"} onClick={() => { localStorage.removeItem("activeRestoreJobId"); setActiveRestoreJobId(""); }} type="button">Close</button>
             </div>
             <div className="space-y-4 p-4">
               <div>
@@ -398,7 +436,55 @@ export function BackupsClient() {
           </div>
         </div>
       ) : null}
+      {activeBackupJobId ? (
+        <ProgressModal
+          title="Backup Progress"
+          status={backupJob.data?.status}
+          phase={backupJob.data?.phase}
+          percent={backupJob.data?.percent}
+          message={backupJob.data?.message}
+          error={backupJob.data?.error}
+          lines={[
+            backupJob.data?.archivePath ? `Archive: ${backupJob.data.archivePath}` : "",
+            backupJob.data?.backupId ? `Backup ID: ${backupJob.data.backupId}` : ""
+          ]}
+          onClose={() => {
+            localStorage.removeItem("activeBackupJobId");
+            setActiveBackupJobId("");
+          }}
+        />
+      ) : null}
     </section>
+  );
+}
+
+function ProgressModal({ title, status, phase, percent, message, error, lines, onClose }: { title: string; status?: string; phase?: string; percent?: number; message?: string; error?: string; lines?: string[]; onClose: () => void }) {
+  const running = status === "RUNNING" || status === "QUEUED" || !status;
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/40 p-4">
+      <div className="w-full max-w-lg rounded-md bg-white shadow-xl">
+        <div className="flex items-center justify-between border-b border-panel-line px-4 py-3">
+          <div className="text-sm font-semibold">{title}</div>
+          <button className="rounded-md border border-panel-line px-2 py-1 text-xs disabled:opacity-50" disabled={running} onClick={onClose} type="button">Close</button>
+        </div>
+        <div className="space-y-4 p-4">
+          <div>
+            <div className="mb-2 flex justify-between text-sm">
+              <span>{phase ?? "QUEUED"}</span>
+              <span>{percent ?? 1}%</span>
+            </div>
+            <div className="h-3 overflow-hidden rounded-full bg-slate-100">
+              <div className={`h-full ${status === "FAILED" ? "bg-red-500" : "bg-panel-accent"}`} style={{ width: `${percent ?? 1}%` }} />
+            </div>
+          </div>
+          <div className="rounded-md border border-panel-line bg-slate-50 p-3 text-sm text-slate-700">
+            {message ?? "Starting..."}
+            {(lines ?? []).filter(Boolean).map((line) => <div className="mt-1 truncate text-xs text-panel-muted" key={line}>{line}</div>)}
+            {error ? <div className="mt-2 text-xs text-panel-danger">{error}</div> : null}
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
