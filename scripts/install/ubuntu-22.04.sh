@@ -18,7 +18,7 @@ install_ubuntu_packages() {
   echo "postfix postfix/mailname string ${PANEL_DOMAIN:-$VPS_IP}" | debconf-set-selections
   echo "postfix postfix/main_mailer_type string Internet Site" | debconf-set-selections
   apt-get update
-  apt-get install -y ca-certificates curl gnupg git nginx certbot python3-certbot-nginx postgresql postgresql-contrib redis-server bind9 bind9utils dnsutils postfix dovecot-core dovecot-imapd dovecot-lmtpd ufw python3 python3-venv python3-pip unzip zip openssl build-essential acl lsof psmisc php php-cli php-fpm php-mysql php-pgsql php-xml php-mbstring php-curl php-zip php-gd php-soap
+  apt-get install -y ca-certificates curl gnupg git nginx certbot python3-certbot-nginx postgresql postgresql-contrib redis-server bind9 bind9utils dnsutils postfix dovecot-core dovecot-imapd dovecot-lmtpd ufw python3 python3-venv python3-pip unzip zip openssl build-essential acl lsof psmisc rclone php php-cli php-fpm php-mysql php-pgsql php-xml php-mbstring php-curl php-zip php-gd php-soap
 
   if ! command -v node >/dev/null 2>&1 || ! node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 20 || (major === 20 && minor >= 9) ? 0 : 1)'; then
     log "Installing Node.js 22"

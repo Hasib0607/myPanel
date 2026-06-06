@@ -29,7 +29,7 @@ install_alma_packages() {
     ca-certificates curl gnupg2 git nginx firewalld \
     postgresql-server postgresql-contrib redis bind bind-utils postfix dovecot \
     php php-cli php-fpm php-mysqlnd php-pgsql php-xml php-mbstring php-curl php-zip php-gd php-soap \
-    python3 python3-pip unzip zip openssl \
+    python3 python3-pip unzip zip openssl rclone \
     gcc gcc-c++ make automake autoconf libtool acl lsof psmisc \
     policycoreutils-python-utils selinux-policy-targeted
 

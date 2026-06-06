@@ -267,9 +267,11 @@ def rclone_env_and_setup(google_drive: dict[str, Any] | None, remote_target: str
         service_account_path.write_text(service_account_json, encoding="utf-8")
         lines.append(f"service_account_file = {service_account_path}")
     elif auth_mode == "OAUTH_REFRESH_TOKEN":
+        if not client_id or not client_secret:
+            raise HTTPException(status_code=400, detail="Google Drive OAuth client ID and client secret are required with a refresh token")
         if not refresh_token:
             raise HTTPException(status_code=400, detail="Google Drive refresh token is not configured")
-        token = {"refresh_token": refresh_token, "token_type": "Bearer"}
+        token = {"access_token": "", "refresh_token": refresh_token, "token_type": "Bearer", "expiry": "2000-01-01T00:00:00Z"}
         token_path = root / "token.json"
         token_path.write_text(json.dumps(token), encoding="utf-8")
         lines.append(f"token = {json.dumps(token)}")
@@ -293,10 +295,18 @@ def upload_remote(body: RemoteUploadRequest) -> dict[str, Any]:
     script = f"""
 set -Eeuo pipefail
 {setup}
-command -v rclone >/dev/null 2>&1
-rclone mkdir {quoted_target}
-rclone copyto {quoted_archive} {quoted_remote_path}
-if [ -f {quoted_checksum} ]; then rclone copyto {quoted_checksum} {shlex.quote(remote_path + ".sha256")}; fi
+if ! command -v rclone >/dev/null 2>&1; then
+  echo "rclone is not installed on the server. Install rclone, then retry Google Drive backup upload." >&2
+  exit 127
+fi
+echo "Preparing Google Drive target {remote_target}" >&2
+rclone mkdir {quoted_target} --drive-acknowledge-abuse
+echo "Uploading archive to {remote_path}" >&2
+rclone copyto {quoted_archive} {quoted_remote_path} --drive-acknowledge-abuse --stats 30s
+if [ -f {quoted_checksum} ]; then
+  echo "Uploading checksum to {remote_path}.sha256" >&2
+  rclone copyto {quoted_checksum} {shlex.quote(remote_path + ".sha256")} --drive-acknowledge-abuse
+fi
 """
     result = run_command(["bash", "-lc", script], env=env, allow_live=settings.allow_live_backup, timeout=7200)
     return {"archivePath": str(archive), "remoteTarget": remote_target, "remotePath": remote_path, "result": result}

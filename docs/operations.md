@@ -20,6 +20,7 @@ BACKUP_ROOT=/var/backups/vps-panel
 ```
 
 Google Drive upload uses `rclone`. You can either paste Google credentials in the Backups page or select `Existing rclone remote`.
+Install `rclone` on existing servers before using Google Drive backup upload.
 
 Recommended service-account setup:
 

@@ -149,6 +149,19 @@ function backupCommandError(action: string, envelope: SysagentResultEnvelope) {
   return null;
 }
 
+function readableErrorMessage(error: unknown) {
+  const raw = error instanceof Error ? error.message : String(error);
+  const jsonMatch = raw.match(/:\s*(\{.*\})$/s);
+  if (!jsonMatch) return raw;
+  try {
+    const parsed = JSON.parse(jsonMatch[1]);
+    if (typeof parsed?.detail === "string") return parsed.detail;
+  } catch {
+    return raw;
+  }
+  return raw;
+}
+
 function formatElapsed(ms: number) {
   const totalSeconds = Math.max(1, Math.floor(ms / 1000));
   const minutes = Math.floor(totalSeconds / 60);
@@ -327,15 +340,16 @@ export async function runPanelBackup(input: unknown, request?: any, onProgress?:
     await onProgress?.({ phase: ok ? "SUCCEEDED" : "FAILED", percent: 100, message: ok ? "Backup completed." : "Backup finished with errors.", result: updated });
     return updated;
   } catch (error) {
+    const message = readableErrorMessage(error);
     const updated = await prisma.panelBackup.update({
       where: { id: record.id },
-      data: { status: "FAILED", result: { error: error instanceof Error ? error.message : String(error), details: (error as any).result } as any, finishedAt: new Date() }
+      data: { status: "FAILED", result: { error: message, details: (error as any).result } as any, finishedAt: new Date() }
     });
     if (request) {
       await audit(request, { action: "CREATE", resource: "panel_backup", resourceId: updated.id, description: `Panel backup ${body.label} failed` });
     }
-    await onProgress?.({ phase: "FAILED", percent: 100, message: error instanceof Error ? error.message : "Backup failed.", result: updated });
-    throw Object.assign(new Error(error instanceof Error ? error.message : String(error)), { statusCode: 500, record: updated });
+    await onProgress?.({ phase: "FAILED", percent: 100, message, result: updated });
+    throw Object.assign(new Error(message), { statusCode: 500, record: updated });
   }
 }
 
