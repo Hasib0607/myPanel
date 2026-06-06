@@ -109,7 +109,7 @@ def nginx_laravel_app_locations(
         "\n"
         f"    location / {{\n"
         f"{fallback_error_page}"
-        "        try_files $uri @deployment_upstream;\n"
+        f"{nginx_proxy_headers(upstream_port)}"
         "    }\n"
         "\n"
         "    location @deployment_upstream {\n"

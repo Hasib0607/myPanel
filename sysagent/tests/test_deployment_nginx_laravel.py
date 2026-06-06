@@ -4,14 +4,16 @@ from app.laravel_nginx import nginx_app_locations, nginx_laravel_app_locations, 
 
 
 class DeploymentNginxLaravelTests(unittest.TestCase):
-    def test_root_location_does_not_use_directory_try_files(self) -> None:
+    def test_root_location_proxies_to_laravel_without_directory_try_files(self) -> None:
         block = nginx_laravel_app_locations(
             public_root="/var/www/deployments/example/public",
             upstream_port=10002,
             fallback_error_page="",
             fallback_location="",
         )
-        self.assertIn("    location / {\n        try_files $uri @deployment_upstream;", block)
+        self.assertIn("    location / {\n        proxy_http_version 1.1;", block)
+        self.assertIn("proxy_pass http://127.0.0.1:10002;", block)
+        self.assertNotIn("    location / {\n        try_files $uri @deployment_upstream;", block)
         self.assertNotIn("try_files $uri $uri/", block)
 
     def test_legacy_public_prefixed_assets_map_to_laravel_public_root(self) -> None:
