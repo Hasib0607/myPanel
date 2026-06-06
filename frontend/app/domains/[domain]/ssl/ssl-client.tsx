@@ -115,12 +115,24 @@ export function SslClient({ domainId, subdomainId, domainApiBase = "/domains", s
   const jobIsRunning = Boolean(activeJobId && liveJobState && !["completed", "failed"].includes(liveJobState));
   const isBusy = issue.isPending || renew.isPending || update.isPending || preflight.isPending || jobIsRunning;
   const jobAgeSeconds = jobStatus.data ? Math.max(0, Math.round((Date.now() - jobStatus.data.timestamp) / 1000)) : 0;
+  const sslDomainName = status?.domain ?? domain.data?.name ?? "Domain";
+  const isWildcardDomain = sslDomainName.startsWith("*.");
 
   return (
     <>
-      <PageHeader title={`${status?.domain ?? domain.data?.name ?? "Domain"} SSL`} description="Certificate status, expiry, force HTTPS, and one-click renewal." />
+      <PageHeader title={`${sslDomainName} SSL`} description="Certificate status, expiry, force HTTPS, and one-click renewal." />
       <section className="p-8">
         <div className="space-y-5 rounded-md border border-panel-line bg-white p-5">
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-panel-line bg-slate-50 px-4 py-3">
+            <div>
+              <div className="text-xs font-semibold uppercase text-panel-muted">SSL domain</div>
+              <div className="mt-1 break-all text-xl font-semibold text-panel-ink">{sslDomainName}</div>
+            </div>
+            <span className="rounded-md border border-panel-line bg-white px-2 py-1 text-xs font-semibold text-panel-muted">
+              {isWildcardDomain ? "Wildcard" : subdomainId ? "Subdomain" : "Domain"}
+            </span>
+          </div>
+
           {actionErrorText ? (
             <div className="flex items-center gap-3 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
               <AlertTriangle size={18} />
@@ -200,7 +212,9 @@ export function SslClient({ domainId, subdomainId, domainApiBase = "/domains", s
           </div>
 
           <div className="rounded-md border border-dashed border-panel-line p-4 text-sm text-panel-muted">
-            Live SSL uses Certbot webroot validation, then writes a 443 Nginx vhost after the certificate succeeds. Subdomains get their own certificate and do not use the root domain certificate.
+            {isWildcardDomain
+              ? "Wildcard SSL uses DNS validation, then writes a 443 Nginx vhost after the certificate succeeds."
+              : "Live SSL uses Certbot webroot validation, then writes a 443 Nginx vhost after the certificate succeeds. Subdomains get their own certificate and do not use the root domain certificate."}
           </div>
         </div>
       </section>
