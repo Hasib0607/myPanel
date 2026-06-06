@@ -361,6 +361,7 @@ def deployment_cwd(root_path: str) -> str:
 
 def nginx_config_name(deployment_id: str, server_name: str) -> str:
     primary = server_name.split()[0] if server_name else deployment_id
+    primary = re.sub(r"^\*\.", "wildcard.", primary)
     safe_name = re.sub(r"[^a-zA-Z0-9_.-]+", "-", primary).strip("-") or deployment_id
     return f"domain-{safe_name}"
 

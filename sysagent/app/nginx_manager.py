@@ -109,14 +109,19 @@ def server_name_tokens(server_name: str) -> list[str]:
     return [part.strip() for part in server_name.split() if part.strip()]
 
 
+def server_name_directive_tokens(text: str) -> list[str]:
+    tokens: list[str] = []
+    for match in re.finditer(r"\bserver_name\b\s+([^;]+);", text):
+        tokens.extend(part.strip() for part in match.group(1).split() if part.strip())
+    return tokens
+
+
 def _config_has_server_name(path: Path, server_name: str) -> bool:
     """Return True if an nginx config file contains a server_name directive for server_name."""
     try:
         text = path.read_text(encoding="utf-8", errors="ignore")
-        for token in server_name_tokens(server_name):
-            if re.search(r"\bserver_name\b[^;]*\b" + re.escape(token) + r"\b", text):
-                return True
-        return False
+        claimed = set(server_name_directive_tokens(text))
+        return any(token in claimed for token in server_name_tokens(server_name))
     except OSError:
         return False
 
