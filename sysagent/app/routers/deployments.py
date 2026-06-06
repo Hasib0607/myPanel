@@ -1096,7 +1096,6 @@ def nginx(body: NginxRequest) -> dict:
         has_ssl = (
             ssl_certificate is not None
             and ssl_certificate_key is not None
-            and letsencrypt_certificate_exists(server_name.split()[0])
         )
 
         if has_ssl and settings.allow_live_nginx and (not ssl_certificate.exists() or not ssl_certificate_key.exists()):
