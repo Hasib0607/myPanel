@@ -20,7 +20,7 @@ import { prisma } from "../lib/prisma.js";
 import { resolvePublicA } from "../lib/publicDns.js";
 import { deleteSecret, getSecret, putSecret } from "../lib/secrets.js";
 import { sysagent } from "../lib/sysagent.js";
-import { certbotCertificateName, nginxResourceName } from "../lib/nginxNames.js";
+import { certbotCertificateName, isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
 import { currentVpsIp } from "../lib/serverIp.js";
 import {
   inferredLaravelManagedProcesses,
@@ -878,6 +878,75 @@ async function accountSslPreflight(request: any, domain: { id: string; name: str
   };
 }
 
+async function accountSubdomainSslTarget(request: any, subdomainId: string) {
+  const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+  const subdomain = await prisma.subdomain.findFirstOrThrow({
+    where: {
+      id: subdomainId,
+      domain: { accountId: account.id }
+    },
+    include: { domain: { select: { id: true, name: true } } }
+  });
+  const fqdn = `${subdomain.name}.${subdomain.domain.name}`;
+  const webRoot = path.join(account.homeRoot, "public_html");
+  await fs.mkdir(path.join(webRoot, ".well-known", "acme-challenge"), { recursive: true });
+  return { account, subdomain, parentDomain: subdomain.domain, fqdn, webRoot };
+}
+
+async function accountSubdomainSslPreflight(request: any, subdomainId: string) {
+  const target = await accountSubdomainSslTarget(request, subdomainId);
+  await publishDomainDnsZone(target.parentDomain.id);
+
+  if (isWildcardHostname(target.fqdn)) {
+    const certbot = await sysagent.certbotStatus();
+    const certbotFailure = failedCommand(certbot);
+    if (certbotFailure) {
+      throw Object.assign(new Error(`Certbot is not ready for ${target.fqdn}. ${certbotFailure}`), { statusCode: 400 });
+    }
+    return {
+      ...target,
+      dnsChecks: [{ host: `_acme-challenge.${target.parentDomain.name}`, records: [] as string[], ok: true, skipped: false, dns01: true }],
+      preflight: { certbot, write: certbot, checks: [], webRoot: target.webRoot },
+      includeWww: false,
+      dnsChallenge: true,
+      parentDomainName: target.parentDomain.name,
+      certName: certbotCertificateName(target.fqdn)
+    };
+  }
+
+  const vpsIp = await currentVpsIp();
+  const records = await waitForPublicA(target.fqdn, vpsIp);
+  const nginxResult = await sysagent.writeStaticNginxVhost({
+    name: `domain-${nginxResourceName(target.fqdn)}`,
+    serverName: target.fqdn,
+    rootPath: target.webRoot,
+    forceHttps: false
+  });
+  const nginxFailure = failedCommand(nginxResult.test) ?? failedCommand(nginxResult.reload);
+  if (nginxFailure) {
+    throw Object.assign(new Error(`Could not publish HTTP challenge vhost for ${target.fqdn}. ${nginxFailure}`), { statusCode: 400 });
+  }
+  const preflight = await sysagent.sslPreflight({ domain: target.fqdn, webRoot: target.webRoot, includeWww: false });
+  const certbotFailure = failedCommand(preflight.certbot);
+  if (certbotFailure) {
+    throw Object.assign(new Error(`Certbot is not ready for ${target.fqdn}. ${certbotFailure}`), { statusCode: 400 });
+  }
+  const failedCheck = preflightChallengeChecks(preflight).find((check) => failedCommand(check));
+  if (failedCheck) {
+    throw Object.assign(new Error(`HTTP ACME challenge failed for ${target.fqdn}. Publish the subdomain and keep port 80 open. ${failedCommand(failedCheck) ?? ""}`.trim()), { statusCode: 400 });
+  }
+
+  return {
+    ...target,
+    dnsChecks: [{ host: target.fqdn, records, ok: true, skipped: false }],
+    preflight,
+    includeWww: false,
+    dnsChallenge: false,
+    parentDomainName: target.parentDomain.name,
+    certName: certbotCertificateName(target.fqdn)
+  };
+}
+
 async function queueAccountBulkDomainSslJobs(account: { homeRoot: string }, domains: Array<{ id: string; name: string; documentRoot?: string | null; forceSsl: boolean }>) {
   const jobs = [];
   for (const [index, domain] of domains.entries()) {
@@ -1704,11 +1773,36 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     };
   });
 
+  app.get("/ssl/subdomains/:subdomainId/status", async (request: any) => {
+    const { subdomainId } = z.object({ subdomainId: z.string() }).parse(request.params);
+    const target = await accountSubdomainSslTarget(request, subdomainId);
+    const cert = await sysagent.certificateStatus(certbotCertificateName(target.fqdn)) as { exists?: boolean; expiry?: string | null };
+    const expiry = cert.exists && cert.expiry ? new Date(cert.expiry) : null;
+    return {
+      subdomainId,
+      domain: target.fqdn,
+      sslEnabled: target.subdomain.sslEnabled && Boolean(cert.exists),
+      sslExpiry: expiry,
+      forceSsl: target.subdomain.sslEnabled,
+      ...expiryStatus(expiry)
+    };
+  });
+
   app.post("/ssl/domains/:domainId/preflight", async (request: any) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const body = sslSchema.parse(request.body ?? {});
     const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
     const preflight = await accountSslPreflight(request, domain, body.includeWww);
+    return {
+      webRoot: preflight.webRoot,
+      includeWww: preflight.includeWww,
+      dnsChecks: preflight.dnsChecks
+    };
+  });
+
+  app.post("/ssl/subdomains/:subdomainId/preflight", async (request: any) => {
+    const { subdomainId } = z.object({ subdomainId: z.string() }).parse(request.params);
+    const preflight = await accountSubdomainSslPreflight(request, subdomainId);
     return {
       webRoot: preflight.webRoot,
       includeWww: preflight.includeWww,
@@ -1737,6 +1831,29 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       await prisma.domain.update({ where: { id: domain.id }, data: { sslEnabled: false, sslExpiry: null } });
     }
     await audit(request, { action: "APPLY", resource: "ssl", resourceId: domain.id, description: `Account queued SSL ${action} for ${domain.name}` });
+    return reply.code(202).send({ queued: true, jobId: job.id });
+  });
+
+  app.post("/ssl/subdomains/:subdomainId/:action", async (request: any, reply) => {
+    const { subdomainId, action } = z.object({ subdomainId: z.string(), action: z.enum(["issue", "renew"]) }).parse(request.params);
+    const preflight = await accountSubdomainSslPreflight(request, subdomainId);
+    const job = await sslQueue.add(action, {
+      domainId: null,
+      subdomainId,
+      domain: preflight.fqdn,
+      email: `admin@${preflight.parentDomain.name}`,
+      webRoot: preflight.webRoot,
+      includeWww: false,
+      forceSsl: true,
+      dnsChallenge: preflight.dnsChallenge,
+      parentDomain: preflight.parentDomainName,
+      certName: preflight.certName,
+      source: "account-subdomain-ssl"
+    });
+    if (action === "issue") {
+      await prisma.subdomain.update({ where: { id: subdomainId }, data: { sslEnabled: false } });
+    }
+    await audit(request, { action: "APPLY", resource: "ssl", resourceId: subdomainId, description: `Account queued SSL ${action} for ${preflight.fqdn}` });
     return reply.code(202).send({ queued: true, jobId: job.id });
   });
 
