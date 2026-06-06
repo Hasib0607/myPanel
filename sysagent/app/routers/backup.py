@@ -8,7 +8,10 @@ import json
 import subprocess
 import sys
 import uuid
-from datetime import datetime, timezone
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -137,6 +140,40 @@ if ! command -v rclone >/dev/null 2>&1; then
   exit 127
 fi
 """
+
+
+def google_oauth_token(client_id: str, client_secret: str, refresh_token: str) -> dict[str, Any]:
+    data = urllib.parse.urlencode({
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token",
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        "https://oauth2.googleapis.com/token",
+        data=data,
+        headers={"content-type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise HTTPException(status_code=400, detail=f"Google Drive OAuth refresh failed: {detail}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Google Drive OAuth refresh failed: {exc}") from exc
+
+    access_token = str(payload.get("access_token") or "")
+    expires_in = int(payload.get("expires_in") or 3600)
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Google Drive OAuth refresh did not return an access token")
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": str(payload.get("token_type") or "Bearer"),
+        "expiry": (datetime.now(timezone.utc) + timedelta(seconds=max(60, expires_in - 60))).isoformat(),
+    }
 
 
 def backup_paths(body: BackupRequest) -> list[str]:
@@ -468,10 +505,10 @@ def rclone_env_and_setup(google_drive: dict[str, Any] | None, remote_target: str
             raise HTTPException(status_code=400, detail="Google Drive OAuth client ID and client secret are required with a refresh token")
         if not refresh_token:
             raise HTTPException(status_code=400, detail="Google Drive refresh token is not configured")
-        token = {"access_token": "", "refresh_token": refresh_token, "token_type": "Bearer", "expiry": "2000-01-01T00:00:00Z"}
+        token = google_oauth_token(client_id, client_secret, refresh_token)
         token_path = root / "token.json"
         token_path.write_text(json.dumps(token), encoding="utf-8")
-        lines.append(f"token = {json.dumps(token)}")
+        lines.append(f"token = {json.dumps(token, separators=(',', ':'))}")
 
     config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     os.chmod(config_path, 0o600)
