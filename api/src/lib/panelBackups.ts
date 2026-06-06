@@ -40,6 +40,16 @@ export const backupSettingsSchema = z.object({
 
 export type BackupSettings = z.infer<typeof backupSettingsSchema>;
 
+type SysagentResultEnvelope = {
+  result?: {
+    dryRun?: boolean;
+    liveCommandsDisabled?: boolean;
+    returncode?: number;
+    stderr?: string;
+    stdout?: string;
+  };
+};
+
 const googleSecretRefs = {
   clientId: "panel-backup:google-drive:client-id",
   clientSecret: "panel-backup:google-drive:client-secret",
@@ -123,6 +133,18 @@ export async function googleDriveConfig(settings: BackupSettings) {
   };
 }
 
+function backupCommandError(action: string, envelope: SysagentResultEnvelope) {
+  const result = envelope.result;
+  if (!result) return null;
+  if (result.dryRun || result.liveCommandsDisabled) {
+    return `${action} did not run on the server. Set ALLOW_LIVE_BACKUP=true on vps-panel-sysagent, then restart vps-panel-sysagent and vps-panel-workers.`;
+  }
+  if (result.returncode !== 0) {
+    return result.stderr?.trim() || result.stdout?.trim() || `${action} failed with exit code ${result.returncode ?? "unknown"}.`;
+  }
+  return null;
+}
+
 export async function runPanelBackup(input: unknown, request?: any, onProgress?: (progress: { phase: string; percent: number; message: string; result?: unknown }) => Promise<void> | void) {
   const body = backupSchema.parse(input ?? {});
   const settings = await getBackupSettings();
@@ -137,11 +159,22 @@ export async function runPanelBackup(input: unknown, request?: any, onProgress?:
     await onProgress?.({ phase: "CREATING_ARCHIVE", percent: 10, message: "Creating full server archive." });
     const result = await sysagent.createBackup(body);
     let uploadResult: Awaited<ReturnType<typeof sysagent.uploadBackupToRemote>> | null = null;
-    await onProgress?.({ phase: "ARCHIVE_CREATED", percent: 55, message: result.result.dryRun ? "Backup dry-run completed." : "Archive created.", result });
-    if (result.result.returncode === 0 && !result.result.dryRun && settings.remoteProvider === "GOOGLE_DRIVE" && settings.remoteTarget) {
+    const createError = backupCommandError("Backup archive creation", result);
+    if (createError) {
+      throw Object.assign(new Error(createError), { result });
+    }
+    if (!result.sizeBytes || result.sizeBytes <= 0) {
+      throw Object.assign(new Error("Backup archive was not created or is empty. Check sysagent backup logs and available disk space."), { result });
+    }
+    await onProgress?.({ phase: "ARCHIVE_CREATED", percent: 55, message: "Archive created.", result });
+    if (settings.remoteProvider === "GOOGLE_DRIVE" && settings.remoteTarget) {
       const googleDrive = await googleDriveConfig(settings);
       await onProgress?.({ phase: "UPLOADING", percent: 70, message: "Uploading backup archive to Google Drive." });
       uploadResult = await sysagent.uploadBackupToRemote({ path: result.archivePath, remoteTarget: settings.remoteTarget, googleDrive });
+      const uploadError = backupCommandError("Google Drive upload", uploadResult);
+      if (uploadError) {
+        throw Object.assign(new Error(uploadError), { result: { ...result, remote: uploadResult } });
+      }
       await onProgress?.({ phase: "PRUNING_REMOTE", percent: 85, message: "Pruning old Google Drive backups.", result: uploadResult });
       await sysagent.pruneRemoteBackups({ remoteTarget: settings.remoteTarget, keepLast: settings.retentionKeepLast, googleDrive });
     }
@@ -168,7 +201,7 @@ export async function runPanelBackup(input: unknown, request?: any, onProgress?:
   } catch (error) {
     const updated = await prisma.panelBackup.update({
       where: { id: record.id },
-      data: { status: "FAILED", result: { error: error instanceof Error ? error.message : String(error) } as any, finishedAt: new Date() }
+      data: { status: "FAILED", result: { error: error instanceof Error ? error.message : String(error), details: (error as any).result } as any, finishedAt: new Date() }
     });
     if (request) {
       await audit(request, { action: "CREATE", resource: "panel_backup", resourceId: updated.id, description: `Panel backup ${body.label} failed` });

@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     allow_live_dns: bool = True
     allow_live_nginx: bool = True
     allow_live_ssl: bool = True
-    allow_live_backup: bool = False
+    allow_live_backup: bool = True
     deployment_command_timeout_seconds: int = 900
     ssl_certbot_timeout_seconds: int = 1800
     deployment_log_root: str = "/var/log/vps-panel/deployments"

@@ -148,12 +148,13 @@ export const backupRoutes: FastifyPluginAsync = async (app) => {
         });
       } catch (error) {
         const record = (error as any).record;
+        const message = error instanceof Error ? error.message : "Backup failed.";
         await update({
           status: "FAILED",
           phase: "FAILED",
           percent: 100,
-          message: "Backup failed.",
-          error: error instanceof Error ? error.message : String(error),
+          message,
+          error: message,
           backupId: record?.id,
           archivePath: record?.archivePath ?? undefined,
           result: record,

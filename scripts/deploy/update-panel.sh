@@ -570,7 +570,7 @@ ensure_live_sysagent_config() {
     changed="true"
   fi
 
-  for key in ALLOW_LIVE_FILE_MANAGER ALLOW_LIVE_NGINX ALLOW_LIVE_SSL; do
+  for key in ALLOW_LIVE_FILE_MANAGER ALLOW_LIVE_NGINX ALLOW_LIVE_SSL ALLOW_LIVE_BACKUP; do
     current="$(grep -E "^${key}=" "$file" | tail -n 1 | cut -d= -f2- || true)"
     if [[ "$current" != "true" ]]; then
       log "enabling ${key}=true for panel live operations"
