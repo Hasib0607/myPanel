@@ -99,8 +99,15 @@ const phpExtensionRepairActions: Record<string, string> = {
 function firstExecutable(command: string | null | undefined) {
   const trimmed = command?.trim();
   if (!trimmed) return null;
-  const token = trimmed.split(/\s+/)[0]?.trim();
-  return token || null;
+  const tokens = trimmed.split(/\s+/).map((token) => token.trim()).filter(Boolean);
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (/^[A-Za-z_][A-Za-z0-9_]*=.*/.test(token)) continue;
+    if (token === "env") continue;
+    if (token === "cross-env" || token === "cross-env-shell") continue;
+    return token || null;
+  }
+  return null;
 }
 
 function executablesForCommand(command: string | null | undefined) {

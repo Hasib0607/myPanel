@@ -124,6 +124,23 @@ test("runtime matrix includes Node/Next process manager requirements", () => {
   }
 });
 
+test("runtime matrix treats cross-env as a local Node package wrapper", () => {
+  const tools = requiredRuntimeExecutables({
+    framework: "NODEJS",
+    packageManager: "NPM",
+    runtime: "NODE",
+    processManager: "PM2",
+    installCommand: "npm install",
+    buildCommand: "cross-env NODE_ENV=production vite build",
+    startCommand: "npm run start"
+  });
+
+  assert.ok(tools.includes("node"));
+  assert.ok(tools.includes("npm"));
+  assert.ok(tools.includes("pm2"));
+  assert.equal(tools.includes("cross-env"), false);
+});
+
 test("runtime matrix includes Python and Go supervisor requirements", () => {
   const pythonTools = requiredRuntimeExecutables({
     framework: "PYTHON",
@@ -322,6 +339,13 @@ test("failed deploy parser treats missing Vite as project dependency repair", ()
 
 test("failed deploy parser treats missing Laravel Mix as project dependency repair", () => {
   const log = "Laravel frontend asset build failed with exit code 127: sh: line 1: mix: command not found";
+
+  assert.equal(nodePackageBinaryMissing(log), true);
+  assert.deepEqual(runtimeTargetsForFailedDeploymentLog(log), []);
+});
+
+test("failed deploy parser treats missing cross-env as project dependency repair", () => {
+  const log = "Build failed with exit code 127: sh: line 1: cross-env: command not found";
 
   assert.equal(nodePackageBinaryMissing(log), true);
   assert.deepEqual(runtimeTargetsForFailedDeploymentLog(log), []);

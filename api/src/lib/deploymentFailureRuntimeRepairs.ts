@@ -32,9 +32,9 @@ export function laravelPublicCwdMissing(text: string) {
 }
 
 export function nodePackageBinaryMissing(text: string) {
-  return /\b(vite|next|react-scripts|mix|webpack)\b(?:[^;\n\r]*:)?\s+command not found/i.test(text)
-    || /sh:\s+\d+:\s+(vite|next|react-scripts|mix|webpack):\s+not found/i.test(text)
-    || /sh:\s+line\s+\d+:\s+(vite|next|react-scripts|mix|webpack):\s+command not found/i.test(text);
+  return /\b(cross-env|cross-env-shell|vite|next|react-scripts|mix|webpack)\b(?:[^;\n\r]*:)?\s+command not found/i.test(text)
+    || /sh:\s+\d+:\s+(cross-env|cross-env-shell|vite|next|react-scripts|mix|webpack):\s+not found/i.test(text)
+    || /sh:\s+line\s+\d+:\s+(cross-env|cross-env-shell|vite|next|react-scripts|mix|webpack):\s+command not found/i.test(text);
 }
 
 export function frontendModuleNotFound(text: string) {
