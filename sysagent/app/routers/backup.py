@@ -199,7 +199,7 @@ def create_backup(body: BackupRequest) -> dict[str, Any]:
     archive_path = str(root / f"mypanel-{label}-{stamp}.tar.gz")
     staging_dir = str(root / f".staging-{label}-{stamp}")
     script = backup_script(body, archive_path, staging_dir)
-    result = run_command(["bash", "-lc", script], env={"DATABASE_URL": os.environ.get("DATABASE_URL", "")}, allow_live=settings.allow_live_backup, timeout=3600)
+    result = run_command(["bash", "-lc", script], env={"DATABASE_URL": os.environ.get("DATABASE_URL", "")}, allow_live=settings.allow_live_backup, timeout=21600)
     final_path = archive_path.replace(".tar.gz", ".tar.gz.gpg") if body.encrypt_passphrase else archive_path
     size = None
     if result.get("returncode") == 0 and not result.get("dryRun"):

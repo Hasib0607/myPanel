@@ -50,6 +50,9 @@ type SysagentResultEnvelope = {
   };
 };
 
+type BackupProgress = { phase: string; percent: number; message: string; result?: unknown };
+type BackupProgressHandler = (progress: BackupProgress) => Promise<void> | void;
+
 const googleSecretRefs = {
   clientId: "panel-backup:google-drive:client-id",
   clientSecret: "panel-backup:google-drive:client-secret",
@@ -145,7 +148,49 @@ function backupCommandError(action: string, envelope: SysagentResultEnvelope) {
   return null;
 }
 
-export async function runPanelBackup(input: unknown, request?: any, onProgress?: (progress: { phase: string; percent: number; message: string; result?: unknown }) => Promise<void> | void) {
+function formatElapsed(ms: number) {
+  const totalSeconds = Math.max(1, Math.floor(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes <= 0) return `${seconds}s`;
+  return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
+}
+
+async function waitWithProgress<T>(
+  promise: Promise<T>,
+  options: {
+    onProgress?: BackupProgressHandler;
+    phase: string;
+    from: number;
+    to: number;
+    message: string;
+    maxDurationMs: number;
+  }
+) {
+  const startedAt = Date.now();
+  let lastPercent = options.from;
+  const tick = async () => {
+    const elapsedMs = Date.now() - startedAt;
+    const ratio = Math.min(0.98, elapsedMs / options.maxDurationMs);
+    const percent = Math.max(options.from, Math.min(options.to, Math.floor(options.from + (options.to - options.from) * ratio)));
+    if (percent > lastPercent) lastPercent = percent;
+    await options.onProgress?.({
+      phase: options.phase,
+      percent: lastPercent,
+      message: `${options.message} Elapsed: ${formatElapsed(elapsedMs)}.`
+    });
+  };
+  const timer = setInterval(() => {
+    void tick().catch(() => undefined);
+  }, 5000);
+  try {
+    return await promise;
+  } finally {
+    clearInterval(timer);
+  }
+}
+
+export async function runPanelBackup(input: unknown, request?: any, onProgress?: BackupProgressHandler) {
   const body = backupSchema.parse(input ?? {});
   const settings = await getBackupSettings();
   const includes = Object.entries(body)
@@ -157,7 +202,14 @@ export async function runPanelBackup(input: unknown, request?: any, onProgress?:
 
   try {
     await onProgress?.({ phase: "CREATING_ARCHIVE", percent: 10, message: "Creating full server archive." });
-    const result = await sysagent.createBackup(body);
+    const result = await waitWithProgress(sysagent.createBackup(body), {
+      onProgress,
+      phase: "CREATING_ARCHIVE",
+      from: 10,
+      to: 54,
+      message: "Creating full server archive.",
+      maxDurationMs: 90 * 60 * 1000
+    });
     let uploadResult: Awaited<ReturnType<typeof sysagent.uploadBackupToRemote>> | null = null;
     const createError = backupCommandError("Backup archive creation", result);
     if (createError) {
@@ -170,7 +222,14 @@ export async function runPanelBackup(input: unknown, request?: any, onProgress?:
     if (settings.remoteProvider === "GOOGLE_DRIVE" && settings.remoteTarget) {
       const googleDrive = await googleDriveConfig(settings);
       await onProgress?.({ phase: "UPLOADING", percent: 70, message: "Uploading backup archive to Google Drive." });
-      uploadResult = await sysagent.uploadBackupToRemote({ path: result.archivePath, remoteTarget: settings.remoteTarget, googleDrive });
+      uploadResult = await waitWithProgress(sysagent.uploadBackupToRemote({ path: result.archivePath, remoteTarget: settings.remoteTarget, googleDrive }), {
+        onProgress,
+        phase: "UPLOADING",
+        from: 70,
+        to: 84,
+        message: "Uploading backup archive to Google Drive.",
+        maxDurationMs: 90 * 60 * 1000
+      });
       const uploadError = backupCommandError("Google Drive upload", uploadResult);
       if (uploadError) {
         throw Object.assign(new Error(uploadError), { result: { ...result, remote: uploadResult } });
