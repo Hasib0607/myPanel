@@ -2725,6 +2725,14 @@ async function prepareLaravelForStart(
     })
   );
 
+  if (!(await deploymentHasLaravelPublicIndex(appPath))) {
+    await writeLog(deploymentId, releaseId, "BUILDING", "Skipped Laravel public storage link", {
+      appPath,
+      reason: "No public/index.php exists, so Laravel storage:link has no public web root target."
+    }, "warn");
+    return;
+  }
+
   await runStep(deploymentId, releaseId, "BUILDING", "Link Laravel public storage", () =>
     sysagent.deploymentBuild({
       rootPath: appPath,
