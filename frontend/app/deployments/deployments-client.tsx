@@ -1,10 +1,10 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Clipboard, Eye, EyeOff, FolderGit2, GitBranch, Github, History, KeyRound, List, Pencil, Play, Plus, Rocket, Save, Search, Settings2, ShieldCheck, Square, ToggleLeft, ToggleRight, Trash2, Wand2, X } from "lucide-react";
+import { Activity, ArrowDownToLine, ArrowUpFromLine, CheckCircle2, Clipboard, Cpu, Database, Eye, EyeOff, FolderGit2, GitBranch, Github, HardDrive, History, KeyRound, List, MemoryStick, Network, Pencil, Play, Plus, Rocket, Save, Search, Settings2, ShieldCheck, Square, ToggleLeft, ToggleRight, Trash2, Wand2, X } from "lucide-react";
 import { ApiError, apiDelete, apiDeleteBody, apiGet, apiGetText, apiPatch, apiPost, apiPut } from "@/lib/api";
-import type { Deployment, DeploymentDomainBinding, DeploymentEnvVar, DeploymentFramework, DeploymentListResponse, DeploymentRelease, DetectionResponse, PreflightResponse, QueueResponse, DeploymentSourceProvider } from "./deployment-types";
+import type { Deployment, DeploymentDomainBinding, DeploymentEnvVar, DeploymentFramework, DeploymentListResponse, DeploymentMetrics, DeploymentRelease, DetectionResponse, PreflightResponse, QueueResponse, DeploymentSourceProvider } from "./deployment-types";
 import { frameworkOptions, sourceOptions } from "./deployment-types";
 import { ResultNotice, actionIcon, formatDate, healthBadge, queryString, statusBadge } from "./deployment-ui";
 
@@ -900,11 +900,91 @@ function Input({ label, value, onChange, readOnly }: { label: string; value: str
 
 function OverviewPanel({ deployment }: { deployment: Deployment }) {
   const latest = deployment.releases?.[0];
-  return <div className="grid grid-cols-4 gap-4"><Metric label="Source" value={deployment.sourceProvider} /><Metric label="Branch" value={deployment.branch} /><Metric label="Latest release" value={latest?.status ?? "No release"} /><Metric label="Updated" value={formatDate(deployment.updatedAt)} /></div>;
+  const metrics = useQuery({
+    queryKey: ["deployment-metrics", deployment.id],
+    queryFn: () => apiGet<DeploymentMetrics>(`/deployments/${deployment.id}/metrics`),
+    refetchInterval: 15000
+  });
+  const data = metrics.data;
+  return (
+    <div className="space-y-5">
+      <div className="grid grid-cols-4 gap-4">
+        <Metric label="Source" value={deployment.sourceProvider} />
+        <Metric label="Branch" value={deployment.branch} />
+        <Metric label="Latest release" value={latest?.status ?? "No release"} />
+        <Metric label="Updated" value={formatDate(deployment.updatedAt)} />
+      </div>
+      <div className="grid gap-3 lg:grid-cols-4">
+        <UsageMetric icon={<MemoryStick size={16} />} label="RAM" value={metrics.isLoading ? "Loading..." : formatBytes(data?.process.memoryBytes ?? 0)} detail={`${data?.process.processCount ?? 0} processes`} />
+        <UsageMetric icon={<Cpu size={16} />} label="CPU" value={`${(data?.process.cpuPercent ?? 0).toFixed(1)}%`} detail="live process usage" />
+        <UsageMetric icon={<HardDrive size={16} />} label="Storage" value={formatBytes(data?.storage.bytes ?? 0)} detail={data?.storage.rootPath ?? deployment.rootPath} />
+        <UsageMetric icon={<Database size={16} />} label="DB storage" value={formatBytes(data?.database.sizeBytes ?? 0)} detail={data?.database.name ?? "No database"} />
+        <UsageMetric icon={<ArrowDownToLine size={16} />} label="Incoming traffic" value={formatBytes(data?.traffic.incomingBytes ?? 0)} detail="last 24h" />
+        <UsageMetric icon={<ArrowUpFromLine size={16} />} label="Outgoing traffic" value={formatBytes(data?.traffic.outgoingBytes ?? 0)} detail={`${data?.traffic.requests ?? 0} requests`} />
+        <UsageMetric icon={<Network size={16} />} label="Bandwidth" value={formatBytes(data?.traffic.bandwidthBytes ?? 0)} detail={data?.traffic.note ?? "last 24h"} />
+        <UsageMetric icon={<Activity size={16} />} label="Metrics" value={data?.ok === false ? "Unavailable" : "Live"} detail={data?.generatedAt ? formatDate(data.generatedAt) : "-"} />
+      </div>
+      <LastDayLogs metrics={data} />
+    </div>
+  );
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
   return <div className="rounded-md border border-panel-line p-4"><div className="text-xs uppercase text-panel-muted">{label}</div><div className="mt-3 truncate text-sm font-semibold">{value}</div></div>;
+}
+
+function UsageMetric({ icon, label, value, detail }: { icon: ReactNode; label: string; value: ReactNode; detail: ReactNode }) {
+  return (
+    <div className="min-w-0 rounded-md border border-panel-line bg-white p-4">
+      <div className="flex items-center gap-2 text-xs font-medium uppercase text-panel-muted">
+        {icon}
+        <span className="truncate">{label}</span>
+      </div>
+      <div className="mt-3 truncate text-xl font-semibold text-panel-ink">{value}</div>
+      <div className="mt-1 truncate text-xs text-panel-muted" title={typeof detail === "string" ? detail : undefined}>{detail}</div>
+    </div>
+  );
+}
+
+function LastDayLogs({ metrics }: { metrics?: DeploymentMetrics }) {
+  const buildLogs = metrics?.buildLogs ?? [];
+  const runtimeText = metrics?.logs?.text ?? "";
+  return (
+    <div className="rounded-md border border-panel-line bg-white">
+      <div className="flex items-center justify-between border-b border-panel-line p-4">
+        <div className="text-sm font-semibold">Last 24h Logs</div>
+        <span className="text-xs text-panel-muted">{buildLogs.length} build entries</span>
+      </div>
+      <div className="grid gap-0 lg:grid-cols-2">
+        <div className="min-w-0 border-b border-panel-line p-4 lg:border-b-0 lg:border-r">
+          <div className="mb-3 text-xs font-semibold uppercase text-panel-muted">Build</div>
+          <div className="max-h-72 overflow-auto rounded-md bg-slate-950 p-3 font-mono text-xs leading-5 text-slate-100">
+            {buildLogs.length ? buildLogs.slice().reverse().map((log) => (
+              <div className="whitespace-pre-wrap" key={log.id}>
+                [{formatDate(log.createdAt)}] {log.step}: {log.message}
+              </div>
+            )) : "No build logs in the last 24h."}
+          </div>
+        </div>
+        <div className="min-w-0 p-4">
+          <div className="mb-3 text-xs font-semibold uppercase text-panel-muted">Runtime</div>
+          <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-slate-950 p-3 font-mono text-xs leading-5 text-slate-100">{runtimeText || "No runtime logs in the last 24h."}</pre>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
 }
 
 function DomainsPanel({ deployment, domains, domainsToAdd, setDomainsToAdd, addDomain, addingDomain, setPrimary, removeDomain }: { deployment: Deployment; domains: DomainOption[]; domainsToAdd: string[]; setDomainsToAdd: (ids: string[]) => void; addDomain: () => void; addingDomain?: boolean; setPrimary: (binding: DeploymentDomainBinding) => void; removeDomain: (binding: DeploymentDomainBinding) => void }) {
