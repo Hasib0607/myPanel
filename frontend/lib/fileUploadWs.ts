@@ -125,6 +125,7 @@ export async function uploadFileViaWebSocket(input: {
   ws.send(JSON.stringify({ type: "finish" }));
   const done = await waitForServerMessage(ws, ["complete", "error"]);
   if (done.type === "error") throw new Error(done.message);
+  if (done.type !== "complete") throw new Error("Upload did not complete.");
   input.onProgress(input.file.size, input.file.size);
   return done.file;
 }

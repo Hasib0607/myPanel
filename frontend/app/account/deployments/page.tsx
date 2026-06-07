@@ -1,6 +1,9 @@
 import { AccountShell } from "@/components/account-shell";
 import { DeploymentsClient } from "@/app/deployments/deployments-client";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export default function AccountDeploymentsPage() {
   return (
     <AccountShell>
