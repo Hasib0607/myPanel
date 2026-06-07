@@ -2356,8 +2356,32 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
 
   app.get("/deployments/:deploymentId/logs/export", async (request: any, reply) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const query = z.object({
+      type: z.enum(["build", "running"]).default("build"),
+      limit: z.coerce.number().int().min(1).max(1000).default(500)
+    }).parse(request.query);
     const deployment = await findAccountDeployment(request, deploymentId);
-    const logs = await prisma.deploymentLog.findMany({ where: { deploymentId: deployment.id }, orderBy: { createdAt: "asc" }, take: 500 });
+
+    if (query.type === "running") {
+      const runtime = await sysagent.deploymentRuntimeLogs({
+        name: deployment.slug,
+        logDir: accountDeploymentLogDir(deployment.slug),
+        rootPath: accountDeploymentAppPath(deployment),
+        lines: query.limit
+      });
+      reply.type("text/plain");
+      return [
+        `Deployment: ${deployment.name} (${deployment.slug})`,
+        "Log type: running",
+        `Runtime log directory: ${runtime.logDir ?? accountDeploymentLogDir(deployment.slug)}`,
+        `Status: ${deployment.status}`,
+        `Exported: ${new Date().toISOString()}`,
+        "",
+        runtime.text || "No runtime logs yet."
+      ].join("\n");
+    }
+
+    const logs = await prisma.deploymentLog.findMany({ where: { deploymentId: deployment.id }, orderBy: { createdAt: "asc" }, take: query.limit });
     reply.type("text/plain");
     return logs.map((log) => `[${log.createdAt.toISOString()}] ${log.step}: ${log.message}${logMetadataText(log.metadata)}`).join("\n") || "No logs yet.";
   });

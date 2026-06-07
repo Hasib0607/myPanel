@@ -285,6 +285,7 @@ export function DeploymentsClient({
   const [logModalOpen, setLogModalOpen] = useState(false);
   const [logText, setLogText] = useState("");
   const [logTitle, setLogTitle] = useState("");
+  const [logType, setLogType] = useState<LogType>("build");
   const [notice, setNotice] = useState("");
   const [revealedEnvValues, setRevealedEnvValues] = useState<Record<string, string>>({});
   const [runtimeModal, setRuntimeModal] = useState<RuntimeModalState | null>(null);
@@ -502,6 +503,7 @@ export function DeploymentsClient({
     },
     onSuccess: ({ deployment, text, type }) => {
       setLogTitle(`${deployment.name} ${type === "build" ? "build log" : "running log"}`);
+      setLogType(type);
       setLogText(text);
       setLogModalOpen(true);
     },
@@ -805,7 +807,7 @@ export function DeploymentsClient({
       {createOpen ? <ProjectModal title="Create Project" draft={draft} setDraft={setDraft} domains={domainOptions(domains.data?.items ?? [])} databaseOverview={databaseOverview.data} notice={notice} onClose={() => setCreateOpen(false)} onDetect={() => detect.mutate("create")} onSubmit={() => createDeployment.mutate()} submitLabel="Create" busy={createDeployment.isPending} openGithub={() => enableGithub ? setRepoPickerOpen(true) : undefined} enableGithub={enableGithub} /> : null}
       {editingOpen ? <ProjectModal title="Edit Project" draft={editDraft} setDraft={setEditDraft} domains={domainOptions(domains.data?.items ?? [])} databaseOverview={databaseOverview.data} notice={notice} onClose={() => setEditingOpen(false)} onDetect={() => detect.mutate("edit")} onSubmit={() => updateDeployment.mutate()} submitLabel="Save changes" busy={updateDeployment.isPending} openGithub={() => enableGithub ? setRepoPickerOpen(true) : undefined} enableGithub={enableGithub} /> : null}
       {enableGithub && repoPickerOpen ? <GithubModal repos={repos.data} loading={repos.isLoading} repoSearch={repoSearch} setRepoSearch={setRepoSearch} connection={githubConnection.data} githubToken={githubToken} setGithubToken={setGithubToken} githubUsername={githubUsername} setGithubUsername={setGithubUsername} saveToken={() => saveGithubToken.mutate()} savingToken={saveGithubToken.isPending} onClose={() => setRepoPickerOpen(false)} onDeploy={(repo) => selectGithubRepo.mutate(repo)} deploying={selectGithubRepo.isPending} /> : null}
-      {logModalOpen ? <LogsModal title={logTitle} text={logText} onCopy={copyLogText} onClose={() => setLogModalOpen(false)} /> : null}
+      {logModalOpen ? <LogsModal title={logTitle} type={logType} text={logText} onCopy={copyLogText} onClose={() => setLogModalOpen(false)} /> : null}
       {runtimeModal ? (
         <RuntimeInstallModal
           busy={action.isPending}
@@ -1639,7 +1641,7 @@ function RuntimeInstallModal({
   );
 }
 
-function LogsModal({ title, text, onCopy, onClose }: { title: string; text: string; onCopy: () => Promise<void> | void; onClose: () => void }) {
+function LogsModal({ title, type, text, onCopy, onClose }: { title: string; type: LogType; text: string; onCopy: () => Promise<void> | void; onClose: () => void }) {
   const [copied, setCopied] = useState(false);
   const logRef = useRef<HTMLPreElement | null>(null);
 
@@ -1667,7 +1669,7 @@ function LogsModal({ title, text, onCopy, onClose }: { title: string; text: stri
         <div className="flex items-center justify-between border-b border-panel-line p-4">
           <div>
             <div className="text-sm font-semibold text-panel-ink">{title}</div>
-            <div className="mt-1 text-xs text-panel-muted">Separate build and runtime output for sharing and debugging.</div>
+            <div className="mt-1 text-xs text-panel-muted">{type === "running" ? "Runtime stdout, stderr, and Laravel log tail from the server." : "Build and deployment event log for sharing and debugging."}</div>
           </div>
           <button className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line" onClick={onClose} type="button"><X size={16} /></button>
         </div>
