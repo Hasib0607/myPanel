@@ -59,6 +59,8 @@ def normalize_laravel_start_command(command: str | None, port: int | None, root_
     if legacy_laravel_start:
         effective_port = port or 8000
         return f"php artisan serve --host=127.0.0.1 --port {effective_port}"
+    if artisan_serve and port is not None:
+        return f"php artisan serve --host=127.0.0.1 --port {port}"
     if port is not None:
         return cleaned.replace("{PORT}", str(port)).replace("$PORT", str(port))
     return cleaned

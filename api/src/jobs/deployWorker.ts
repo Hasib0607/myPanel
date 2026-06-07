@@ -846,6 +846,9 @@ function renderStartCommand(deployment: { framework: DeploymentFramework; startC
   if (deployment.framework === "LARAVEL" && isLegacyLaravelPhpFpmCommand(deployment.startCommand)) {
     return laravelStartCommand(deployment.port);
   }
+  if (deployment.framework === "LARAVEL" && deployment.startCommand?.trim().toLowerCase().startsWith("php artisan serve")) {
+    return laravelStartCommand(deployment.port);
+  }
   return renderDeploymentCommand(deployment.startCommand, deployment.port);
 }
 

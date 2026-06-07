@@ -36,6 +36,10 @@ class DeploymentCommandTests(unittest.TestCase):
         normalized = normalize_laravel_start_command("php artisan serve --host=127.0.0.1 --port {PORT}", 12001)
         self.assertEqual(normalized, "php artisan serve --host=127.0.0.1 --port 12001")
 
+    def test_laravel_artisan_serve_literal_port_is_rewritten(self) -> None:
+        normalized = normalize_laravel_start_command("php artisan serve --host=127.0.0.1 --port 10005", 12001)
+        self.assertEqual(normalized, "php artisan serve --host=127.0.0.1 --port 12001")
+
     def test_backend_only_laravel_without_public_uses_idle_process(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
