@@ -697,7 +697,7 @@ async function runLiveDeploymentProcess(
     }, "warn");
     try {
       let repair = await runStep(deploymentId, releaseId, "PREFLIGHT", "Guardian Python runtime repair", () =>
-        sysagent.deploymentRepairPythonRuntime({ rootPath: body.rootPath })
+        sysagent.deploymentRepairPythonRuntime({ rootPath: body.rootPath, startCommand: body.startCommand })
       );
       if (liveResultFailureMessage(repair, "Guardian Python runtime repair")?.includes("Python 3.10+")) {
         const install = await runStep(deploymentId, releaseId, "PREFLIGHT", "Auto-repair Python 3.11 runtime", () =>
@@ -705,7 +705,7 @@ async function runLiveDeploymentProcess(
         );
         assertLiveResult(install, "Auto-repair Python 3.11 runtime");
         repair = await runStep(deploymentId, releaseId, "PREFLIGHT", "Guardian Python runtime repair retry", () =>
-          sysagent.deploymentRepairPythonRuntime({ rootPath: body.rootPath })
+          sysagent.deploymentRepairPythonRuntime({ rootPath: body.rootPath, startCommand: body.startCommand })
         );
       }
       assertLiveResult(repair, "Guardian Python runtime repair");
@@ -760,9 +760,9 @@ async function runLiveDeploymentProcess(
   return result;
 }
 
-async function ensurePythonVenvRuntime(deploymentId: string, releaseId: string | undefined, appPath: string) {
+async function ensurePythonVenvRuntime(deploymentId: string, releaseId: string | undefined, appPath: string, startCommand?: string | null) {
   let repair = await runStep(deploymentId, releaseId, "PREFLIGHT", "Prepare Python 3.10+ virtualenv", () =>
-    sysagent.deploymentRepairPythonRuntime({ rootPath: appPath })
+    sysagent.deploymentRepairPythonRuntime({ rootPath: appPath, startCommand })
   );
   const failure = liveResultFailureMessage(repair, "Prepare Python 3.10+ virtualenv");
   if (failure?.includes("Python 3.10+")) {
@@ -771,7 +771,7 @@ async function ensurePythonVenvRuntime(deploymentId: string, releaseId: string |
     );
     assertLiveResult(install, "Install Python 3.11 runtime");
     repair = await runStep(deploymentId, releaseId, "PREFLIGHT", "Prepare Python 3.10+ virtualenv retry", () =>
-      sysagent.deploymentRepairPythonRuntime({ rootPath: appPath })
+      sysagent.deploymentRepairPythonRuntime({ rootPath: appPath, startCommand })
     );
   }
   assertLiveResult(repair, "Prepare Python 3.10+ virtualenv");
@@ -985,10 +985,13 @@ function renderPythonStartCommand(command: string | null | undefined, port: numb
   const rendered = renderDeploymentCommand(command, port);
   if (!rendered) return rendered;
   return rendered
+    .replace(/^\.?\/?\.venv\/bin\/uvicorn\b/, ".venv/bin/python -m uvicorn")
+    .replace(/^\.?\/?\.venv\/bin\/gunicorn\b/, ".venv/bin/python -m gunicorn")
+    .replace(/^\.?\/?\.venv\/bin\/flask\b/, ".venv/bin/python -m flask")
     .replace(/^(?:python3(?:\.\d+)?|python)\b/, ".venv/bin/python")
-    .replace(/^uvicorn\b/, ".venv/bin/uvicorn")
-    .replace(/^gunicorn\b/, ".venv/bin/gunicorn")
-    .replace(/^flask\b/, ".venv/bin/flask");
+    .replace(/^uvicorn\b/, ".venv/bin/python -m uvicorn")
+    .replace(/^gunicorn\b/, ".venv/bin/python -m gunicorn")
+    .replace(/^flask\b/, ".venv/bin/python -m flask");
 }
 
 function laravelStartCommand(port: number) {
@@ -3553,7 +3556,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
       await gracefulLaravelWorkerReload(deployment, releaseId, appPath, runtimeEnvVars);
     }
     if (deployment.framework === "PYTHON" && processAction !== "stop") {
-      await ensurePythonVenvRuntime(deployment.id, releaseId, appPath);
+      await ensurePythonVenvRuntime(deployment.id, releaseId, appPath, renderStartCommand(deployment));
     }
     const result = await runLiveDeploymentProcess(
       deployment.id,
@@ -3759,7 +3762,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     }
 
     if (deployment.framework === "PYTHON") {
-      await ensurePythonVenvRuntime(deployment.id, releaseId, appPath);
+      await ensurePythonVenvRuntime(deployment.id, releaseId, appPath, renderStartCommand(deployment));
     }
 
     if (deployment.installCommand || deployment.packageManager) {

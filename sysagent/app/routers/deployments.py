@@ -219,6 +219,7 @@ class LaravelWritablePathsRequest(BaseModel):
 
 class PythonRuntimeRepairRequest(BaseModel):
     rootPath: str
+    startCommand: str | None = None
 
 
 class SyncEnvFileRequest(BaseModel):
@@ -2113,6 +2114,26 @@ def _modern_python(root_path: str) -> tuple[str | None, dict[str, dict]]:
     return None, checks
 
 
+def _python_launcher_packages(start_command: str | None) -> list[str]:
+    if not start_command:
+        return []
+    try:
+        parsed = parse_deployment_command(start_command)
+    except ValueError:
+        try:
+            parsed = shlex.split(start_command)
+        except ValueError:
+            return []
+    joined = " ".join(parsed).lower()
+    packages: list[str] = []
+    for package in ("uvicorn", "gunicorn", "flask"):
+        executable_match = parsed and Path(parsed[0]).name.lower() == package
+        module_match = f" -m {package}" in f" {joined}"
+        if executable_match or module_match:
+            packages.append(package)
+    return packages
+
+
 @router.post("/python/repair-runtime")
 def repair_python_runtime(body: PythonRuntimeRepairRequest) -> dict:
     root = Path(body.rootPath).resolve()
@@ -2159,6 +2180,9 @@ def repair_python_runtime(body: PythonRuntimeRepairRequest) -> dict:
             "stdout": "No requirements.txt or pyproject.toml found; created .venv only",
             "stderr": "",
         }
+    launcher_packages = _python_launcher_packages(body.startCommand)
+    if launcher_packages:
+        install_steps["launchers"] = guarded_command(str(root), [venv_python, "-m", "pip", "install", *launcher_packages], cwd=str(root))
 
     failed = [name for name, step in install_steps.items() if step.get("returncode", 0) != 0]
     return {
