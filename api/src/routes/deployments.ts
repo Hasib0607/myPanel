@@ -832,6 +832,13 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
     };
   }
   if (lower.includes("403 forbidden") && lower.includes("nginx")) return { message: "Nginx published a directory without a valid index or the wrong Laravel web root. Deployment Doctor will prefer a nested Laravel root containing public/index.php and will not publish an empty public_html fallback.", repairAction: "redeploy", category: "nginx_static_root_403" };
+  if (lower.includes("http 404") && lower.includes("not found") && (lower.includes("laravel") || lower.includes("x-powered-by: php") || lower.includes("laravel log tail"))) {
+    return {
+      message: "Laravel is reachable through the public domain, but GET / returns 404. Add a Laravel route or redirect for /, or set the deployment health/public check URL to an existing route such as /login, /admin, or the app's real entry path.",
+      repairAction: "request-approval",
+      category: "laravel_root_route_missing"
+    };
+  }
   if (lower.includes("502 bad gateway") || lower.includes("http 502") || lower.includes("connect() failed") || lower.includes("upstream")) return { message: "Nginx cannot reach the deployment upstream. Guardian will rewrite the deployment vhost, scrub stale server_name configs, and restart the process if the route still returns 502.", repairAction: "rewrite-nginx", category: "nginx_upstream_502" };
   if (
     lower.includes("sqlstate[hy000]")

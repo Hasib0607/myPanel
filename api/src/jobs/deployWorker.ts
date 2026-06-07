@@ -1212,6 +1212,16 @@ function isPublicRouteHttp403(warning: string) {
   return /HTTP 403/i.test(warning);
 }
 
+function isPublicRouteHttp404(result: unknown, warning: string) {
+  const route = result as { httpCode?: number; stderr?: string };
+  return route.httpCode === 404 || /HTTP 404/i.test(warning);
+}
+
+function laravelRootRouteMissingMessage(domainName: string | null | undefined) {
+  const publicUrl = domainName ? `https://${domainName}/` : "the public domain root";
+  return `Laravel is reachable on ${publicUrl}, but GET / returns HTTP 404. This is an application routing issue, not an Nginx/upstream failure. Add a Laravel route or redirect for /, or set the deployment health/public check URL to an existing route such as /login, /admin, or the app's real entry path.`;
+}
+
 function isSslProtocolPublicRouteIssue(result: unknown, warning: string | null | undefined) {
   const route = result as { returncode?: number; stderr?: string; httpCode?: number };
   const text = `${warning ?? ""} ${route.stderr ?? ""}`;
@@ -1421,6 +1431,9 @@ async function assertPublicRouteResult(result: unknown, label: string, deploymen
     const base = value.stderr ?? `${label} returned HTTP ${value.httpCode ?? "error"}`;
     if (nginxUpstreamFailure(result, base)) {
       throw new Error(`${base}. Nginx cannot reach the deployment process on its configured upstream port.${runtimeText}`);
+    }
+    if (isPublicRouteHttp404(result, base)) {
+      return `${base}\n\n${laravelRootRouteMissingMessage(deployment.domain?.name)}${runtimeText}`;
     }
     return `${base}${runtimeText}`;
   }
