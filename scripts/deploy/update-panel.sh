@@ -870,42 +870,62 @@ patch_nginx_websocket() {
   fi
   log "Patching $NGINX_CONF: adding WebSocket proxy headers"
   # Insert Upgrade + Connection headers after every proxy_set_header X-Forwarded-Port line
+  set +e
   if command -v sed >/dev/null 2>&1; then
     sed -i '/proxy_set_header X-Forwarded-Port/a\        proxy_set_header Upgrade $http_upgrade;\n        proxy_set_header Connection "upgrade";' "$NGINX_CONF"
   fi
   if nginx -t 2>&1 | tee -a "$LOG_FILE"; then
-    systemctl reload nginx 2>&1 | tee -a "$LOG_FILE" || true
+    if [[ "$(id -u)" == "0" ]]; then
+      systemctl reload nginx 2>&1 | tee -a "$LOG_FILE" || true
+    else
+      "$SUDO_BIN" -n "$SYSTEMCTL_BIN" reload nginx 2>&1 | tee -a "$LOG_FILE" || true
+    fi
     log "nginx reloaded with WebSocket headers"
   else
     log "nginx config test failed after patch; skipping reload"
   fi
+  set -e
+}
+
+run_root_maintenance_script() {
+  local label="$1"
+  local script="$2"
+  local status=0
+
+  if [[ ! -f "$script" ]]; then
+    return 0
+  fi
+
+  log "$label"
+  set +e
+  if [[ "$(id -u)" == "0" ]]; then
+    bash "$script" 2>&1 | tee -a "$LOG_FILE"
+    status=${PIPESTATUS[0]}
+  elif [[ -n "$SUDO_BIN" ]]; then
+    "$SUDO_BIN" -n bash "$script" 2>&1 | tee -a "$LOG_FILE"
+    status=${PIPESTATUS[0]}
+  else
+    log "skipping $label (not root and sudo unavailable)"
+    set -e
+    return 0
+  fi
+  set -e
+
+  if [[ "$status" != "0" ]]; then
+    log "$label failed with exit code $status; continuing self-update"
+  fi
 }
 
 patch_nginx_api_upload_limit() {
-  if [[ ! -f "$NGINX_CONF" ]]; then
-    log "Panel nginx config not found at $NGINX_CONF; skipping API upload size patch"
-    return 0
-  fi
-  if awk '/location \/api\/v1\/ \{/ { in_block = 1 } in_block && /client_max_body_size/ { found = 1 } in_block && /^\s*\}/ { in_block = 0 } END { exit found ? 0 : 1 }' "$NGINX_CONF"; then
-    log "Panel nginx API location already allows large uploads"
-    return 0
-  fi
-  log "Patching $NGINX_CONF: enabling unlimited upload size for /api/v1/"
-  sed -i '/location \/api\/v1\/ {/a\        client_max_body_size 0;' "$NGINX_CONF"
-  if nginx -t 2>&1 | tee -a "$LOG_FILE"; then
-    systemctl reload nginx 2>&1 | tee -a "$LOG_FILE" || true
-    log "nginx reloaded with API upload size override"
-  else
-    log "nginx config test failed after API upload patch; skipping reload"
-  fi
+  run_root_maintenance_script \
+    "Ensuring panel nginx API upload size override" \
+    "$APP_DIR/scripts/maintenance/patch-panel-nginx-api-upload.sh"
 }
 
 ensure_nginx_global_upload_limit() {
-  local script="$APP_DIR/scripts/maintenance/fix-nginx-upload-size.sh"
-  if [[ -x "$script" ]]; then
-    log "Ensuring global nginx upload size override"
-    bash "$script" 2>&1 | tee -a "$LOG_FILE" || true
-  fi
+  run_root_maintenance_script \
+    "Ensuring global nginx upload size override" \
+    "$APP_DIR/scripts/maintenance/fix-nginx-upload-size.sh"
 }
 
 fetch_origin_branch
