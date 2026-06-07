@@ -24,6 +24,20 @@ class DeploymentCommandTests(unittest.TestCase):
     def test_allows_backend_only_idle_command(self) -> None:
         self.assertEqual(parse_deployment_command("sleep infinity"), ["sleep", "infinity"])
 
+    def test_allows_project_venv_python_commands(self) -> None:
+        self.assertEqual(
+            parse_deployment_command(".venv/bin/python -m pip install -r requirements.txt")[:4],
+            [".venv/bin/python", "-m", "pip", "install"],
+        )
+        self.assertEqual(
+            parse_deployment_command(".venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 10007")[:2],
+            [".venv/bin/uvicorn", "app.main:app"],
+        )
+
+    def test_blocks_non_venv_path_executables(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_deployment_command("/tmp/python -m pip install -r requirements.txt")
+
     def test_normalizes_legacy_php_fpm_start_command(self) -> None:
         normalized = normalize_laravel_start_command("php-fpm", 12001)
         self.assertEqual(normalized, "php artisan serve --host=127.0.0.1 --port 12001")

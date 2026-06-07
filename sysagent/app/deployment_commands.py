@@ -37,6 +37,8 @@ SHELL_METACHARS = {"|", "||", "&", "&&", ";", ">", ">>", "<", "$(", "`"}
 def is_allowed_deploy_executable(executable: str) -> bool:
     if executable in ALLOWED_DEPLOY_EXECUTABLES:
         return True
+    if re.fullmatch(r"\.?/?\.venv/bin/(python|pip|uvicorn|gunicorn|flask)", executable):
+        return True
     return bool(re.fullmatch(r"php(\d+(?:\.\d+)?)?-fpm", executable))
 
 
