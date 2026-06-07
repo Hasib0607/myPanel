@@ -3121,7 +3121,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     return { ok: true, targetPath: target.relative, overwrite: body.overwrite };
   });
 
-  app.post("/files/upload/chunk", { bodyLimit: fileUploadChunkBodyLimitBytes }, async (request: any, reply) => {
+  app.post("/files/upload/chunk", { config: { rateLimit: false }, bodyLimit: fileUploadChunkBodyLimitBytes }, async (request: any, reply) => {
     const query = chunkUploadQuery.parse(request.query);
     const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
     const target = safeChildPath(account, query.parentPath, query.name);

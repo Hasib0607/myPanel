@@ -601,9 +601,9 @@ ensure_large_upload_config() {
   fi
 
   current="$(grep -E '^FILE_MANAGER_UPLOAD_CHUNK_BYTES=' "$file" | tail -n 1 | cut -d= -f2- || true)"
-  if ! [[ "$current" =~ ^[0-9]+$ ]] || (( current < 1048576 )) || (( current > 16777216 )); then
-    log "setting FILE_MANAGER_UPLOAD_CHUNK_BYTES=16777216 for chunked file-manager uploads"
-    set_env_value "FILE_MANAGER_UPLOAD_CHUNK_BYTES" "16777216"
+  if ! [[ "$current" =~ ^[0-9]+$ ]] || (( current < 1048576 )) || (( current <= 16777216 )); then
+    log "setting FILE_MANAGER_UPLOAD_CHUNK_BYTES=50331648 for chunked file-manager uploads"
+    set_env_value "FILE_MANAGER_UPLOAD_CHUNK_BYTES" "50331648"
     changed="true"
   fi
 
@@ -931,6 +931,12 @@ ensure_nginx_global_upload_limit() {
     "$APP_DIR/scripts/maintenance/fix-nginx-upload-size.sh"
 }
 
+repair_self_update_service_unit() {
+  run_root_maintenance_script \
+    "Ensuring self-update service runs nginx upload prep as root" \
+    "$APP_DIR/scripts/maintenance/repair-self-update-service.sh"
+}
+
 fetch_origin_branch
 normalize_known_self_update_dirty_files
 
@@ -974,6 +980,7 @@ run "$NPM_BIN" --workspace api run prisma:generate
 frontend_build_with_recovery
 
 patch_nginx_websocket
+repair_self_update_service_unit
 patch_nginx_api_upload_limit
 ensure_nginx_global_upload_limit
 

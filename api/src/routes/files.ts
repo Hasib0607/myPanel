@@ -612,7 +612,7 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
     return reply.code(201).send(await statEntry(file));
   });
 
-  app.post("/upload/chunk", { bodyLimit: uploadChunkBodyLimit }, async (request, reply) => {
+  app.post("/upload/chunk", { config: { rateLimit: false }, bodyLimit: uploadChunkBodyLimit }, async (request, reply) => {
     const query = chunkUploadQuery.parse(request.query);
     const parent = await ensureParentFolderReady(query.parentPath);
     const file = safeChild(parent, query.name);

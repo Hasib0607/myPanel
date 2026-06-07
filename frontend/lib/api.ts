@@ -192,7 +192,9 @@ export async function apiUploadWithProgress<T>(
     const bodySize = body instanceof Blob ? body.size : 1;
     xhr.open("POST", url);
     xhr.withCredentials = true;
+    xhr.timeout = 3_600_000;
     xhr.setRequestHeader("content-type", contentType);
+    xhr.setRequestHeader("connection", "close");
     for (const [key, value] of Object.entries({ ...csrf, ...(headers ?? {}) })) {
       xhr.setRequestHeader(key, value);
     }
@@ -202,7 +204,13 @@ export async function apiUploadWithProgress<T>(
       }
     };
     xhr.onload = () => {
-      const data = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+      let data: { error?: string } | null = null;
+      try {
+        data = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+      } catch {
+        reject(new Error(`Upload response was not valid JSON (${xhr.status}).`));
+        return;
+      }
       if (xhr.status >= 200 && xhr.status < 300) {
         onProgress(100, bodySize, bodySize);
         resolve(data as T);
@@ -211,6 +219,7 @@ export async function apiUploadWithProgress<T>(
       }
     };
     xhr.onerror = () => reject(new Error(`Could not reach API at ${url}. Check Nginx /api/v1 proxy and API service.`));
+    xhr.ontimeout = () => reject(new Error(`Upload timed out at ${url}. Check Nginx client_max_body_size and proxy timeouts.`));
     xhr.send(body);
   });
 }

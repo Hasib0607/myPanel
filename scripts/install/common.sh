@@ -428,7 +428,7 @@ DOMAIN_NAMESERVER_RESOLVERS=1.1.1.1,8.8.8.8,9.9.9.9
 DOMAIN_NAMESERVER_DOH_URLS=https://cloudflare-dns.com/dns-query,https://dns.google/resolve,https://dns.quad9.net/dns-query
 FILE_MANAGER_ROOT=/var/www
 FILE_MANAGER_UPLOAD_LIMIT_BYTES=1099511627776
-FILE_MANAGER_UPLOAD_CHUNK_BYTES=16777216
+FILE_MANAGER_UPLOAD_CHUNK_BYTES=50331648
 NGINX_SITES_AVAILABLE=$NGINX_SITES_AVAILABLE
 NGINX_SITES_ENABLED=$NGINX_SITES_ENABLED
 ALLOW_LIVE_SYSTEM_COMMANDS=true
@@ -594,6 +594,8 @@ User=$APP_USER
 WorkingDirectory=$APP_DIR
 EnvironmentFile=$APP_DIR/.env
 Environment=PANEL_UPDATE_ISOLATED=true
+ExecStartPre=+/usr/bin/bash $APP_DIR/scripts/maintenance/patch-panel-nginx-api-upload.sh
+ExecStartPre=+/usr/bin/bash $APP_DIR/scripts/maintenance/fix-nginx-upload-size.sh
 ExecStart=/usr/bin/env PANEL_UPDATE_ISOLATED=true /usr/bin/bash $APP_DIR/scripts/deploy/update-panel.sh
 KillMode=process
 TimeoutStopSec=30
@@ -778,7 +780,7 @@ write_update_sudoers() {
   write_file /etc/sudoers.d/vps-panel-update <<EOF
 $APP_USER ALL=(root) NOPASSWD: $SYSTEMCTL_BIN --no-block restart vps-panel-sysagent, $SYSTEMCTL_BIN is-active vps-panel-sysagent, $SYSTEMCTL_BIN status vps-panel-sysagent, $SYSTEMCTL_BIN --no-block restart vps-panel-api, $SYSTEMCTL_BIN is-active vps-panel-api, $SYSTEMCTL_BIN status vps-panel-api, $SYSTEMCTL_BIN --no-block restart vps-panel-workers, $SYSTEMCTL_BIN is-active vps-panel-workers, $SYSTEMCTL_BIN status vps-panel-workers, $SYSTEMCTL_BIN --no-block restart vps-panel-guardian, $SYSTEMCTL_BIN is-active vps-panel-guardian, $SYSTEMCTL_BIN status vps-panel-guardian, $SYSTEMCTL_BIN --no-block restart vps-panel-frontend, $SYSTEMCTL_BIN is-active vps-panel-frontend, $SYSTEMCTL_BIN status vps-panel-frontend
 $APP_USER ALL=(root) NOPASSWD: $SYSTEMCTL_BIN start vps-panel-self-update, $SYSTEMCTL_BIN is-active vps-panel-self-update, $SYSTEMCTL_BIN status vps-panel-self-update, $SYSTEMCTL_BIN daemon-reload
-$APP_USER ALL=(root) NOPASSWD: $APP_DIR/scripts/maintenance/repair-panel-permissions.sh, $APP_DIR/scripts/maintenance/fix-nginx-upload-size.sh, $APP_DIR/scripts/maintenance/patch-panel-nginx-api-upload.sh
+$APP_USER ALL=(root) NOPASSWD: $APP_DIR/scripts/maintenance/repair-panel-permissions.sh, $APP_DIR/scripts/maintenance/fix-nginx-upload-size.sh, $APP_DIR/scripts/maintenance/patch-panel-nginx-api-upload.sh, $APP_DIR/scripts/maintenance/repair-self-update-service.sh
 EOF
   chmod 0440 /etc/sudoers.d/vps-panel-update
   visudo -c -f /etc/sudoers.d/vps-panel-update

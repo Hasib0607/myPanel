@@ -42,7 +42,10 @@ export async function writeUploadChunk(input: {
   const tempFile = path.join(parentDir, `.upload-${query.uploadId}.part`);
   const expectedTempSize = query.index === 0 ? 0 : query.offset;
   const currentSize = await fs.stat(tempFile).then((stat) => stat.size).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT" && query.index === 0) return 0;
+    if (error.code === "ENOENT") {
+      if (query.index === 0) return 0;
+      throw httpErrors.conflict("Upload session expired or was interrupted. Start the upload again.");
+    }
     throw error;
   });
   if (currentSize !== expectedTempSize) {
@@ -79,7 +82,9 @@ export async function writeUploadChunk(input: {
     }
     return { ok: true as const, uploadId: query.uploadId, receivedBytes: nextOffset, complete: true as const };
   } catch (error) {
-    await fs.rm(tempFile, { force: true }).catch(() => undefined);
+    if (query.index === 0) {
+      await fs.rm(tempFile, { force: true }).catch(() => undefined);
+    }
     throw error;
   }
 }

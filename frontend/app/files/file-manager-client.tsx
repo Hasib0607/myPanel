@@ -653,7 +653,7 @@ export function FileManagerClient({
         throw new Error(`Upload is too large. Limit: ${formatBytes(uploadLimit)}.`);
       }
 
-      const chunkSize = Math.max(1024 * 1024, overview.data?.uploadChunkLimit ?? 16 * 1024 * 1024);
+      const chunkSize = Math.max(1024 * 1024, overview.data?.uploadChunkLimit ?? 48 * 1024 * 1024);
       const totalChunks = Math.max(1, Math.ceil(file.size / chunkSize));
       const uploadId = typeof crypto !== "undefined" && "randomUUID" in crypto
         ? crypto.randomUUID()
@@ -664,31 +664,44 @@ export function FileManagerClient({
       for (let index = 0; index < totalChunks; index += 1) {
         const offset = index * chunkSize;
         const chunk = file.slice(offset, Math.min(file.size, offset + chunkSize));
-        await apiUploadWithProgress(
-          `${apiBase}/upload/chunk?${queryString({
-            parentPath: currentPath,
-            name: file.name,
-            uploadId,
-            index,
-            totalChunks,
-            offset,
-            totalSize: file.size,
-            overwrite: overwrite ? "true" : "false"
-          })}`,
-          chunk,
-          "application/vnd.vps-panel.file-upload",
-          (_percent, loaded) => {
-            const uploaded = Math.min(file.size, offset + loaded);
-            const percent = file.size > 0 ? Math.min(99, Math.floor((uploaded / file.size) * 100)) : 99;
-            setUploadProgress({
-              fileName: file.name,
-              percent,
-              phase: index === totalChunks - 1 && percent >= 99 ? "processing" : "uploading",
-              uploadedBytes: uploaded,
-              totalBytes: file.size
-            });
+        let lastError: Error | null = null;
+        for (let attempt = 1; attempt <= 3; attempt += 1) {
+          try {
+            await apiUploadWithProgress(
+              `${apiBase}/upload/chunk?${queryString({
+                parentPath: currentPath,
+                name: file.name,
+                uploadId,
+                index,
+                totalChunks,
+                offset,
+                totalSize: file.size,
+                overwrite: overwrite ? "true" : "false"
+              })}`,
+              chunk,
+              "application/vnd.vps-panel.file-upload",
+              (_percent, loaded) => {
+                const uploaded = Math.min(file.size, offset + loaded);
+                const percent = file.size > 0 ? Math.min(99, Math.floor((uploaded / file.size) * 100)) : 99;
+                setUploadProgress({
+                  fileName: file.name,
+                  percent,
+                  phase: index === totalChunks - 1 && percent >= 99 ? "processing" : "uploading",
+                  uploadedBytes: uploaded,
+                  totalBytes: file.size
+                });
+              }
+            );
+            lastError = null;
+            break;
+          } catch (error) {
+            lastError = error instanceof Error ? error : new Error("Upload chunk failed");
+            if (attempt < 3) {
+              await new Promise((resolve) => window.setTimeout(resolve, attempt * 1500));
+            }
           }
-        );
+        }
+        if (lastError) throw lastError;
       }
 
       setUploadProgress({ fileName: file.name, percent: 100, phase: "done", uploadedBytes: file.size, totalBytes: file.size });
