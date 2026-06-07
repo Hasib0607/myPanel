@@ -11,7 +11,7 @@ import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { env } from "../config/env.js";
 import { chunkUploadQuery, writeUploadChunk } from "../lib/fileChunkUpload.js";
-import { fileUploadChunkBodyLimitBytes, fileUploadChunkBytes, fileUploadLimitBytes } from "../lib/fileUploadLimits.js";
+import { configuredFileUploadLimitBytes, fileUploadChunkBodyLimitBytes, fileUploadChunkBytes, fileUploadLimitBytes } from "../lib/fileUploadLimits.js";
 import { deployQueue, sslQueue } from "../jobs/queues.js";
 import { audit } from "../lib/audit.js";
 import { githubApiErrorMessage, isGithubWebhookPermissionError } from "../lib/githubApiErrors.js";
@@ -2906,7 +2906,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
   app.get("/files/overview", async (request: any) => {
     const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
     await fs.mkdir(account.homeRoot, { recursive: true });
-    return { root: account.homeRoot, platform: os.platform(), pathSeparator: path.sep, textReadLimit: 1024 * 1024, uploadLimit: fileUploadLimitBytes, uploadChunkLimit: fileUploadChunkBytes, writable: true };
+    return { root: account.homeRoot, platform: os.platform(), pathSeparator: path.sep, textReadLimit: 1024 * 1024, uploadLimit: configuredFileUploadLimitBytes, uploadChunkLimit: fileUploadChunkBytes, writable: true };
   });
 
   app.get("/files/list", async (request: any) => {

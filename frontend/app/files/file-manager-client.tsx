@@ -680,7 +680,8 @@ export function FileManagerClient({
           }
         });
       } catch (wsError) {
-        const chunkSize = Math.max(1024 * 1024, overview.data?.uploadChunkLimit ?? 48 * 1024 * 1024);
+        const configuredChunkSize = overview.data?.uploadChunkLimit ?? 16 * 1024 * 1024;
+        const chunkSize = Math.min(16 * 1024 * 1024, Math.max(1024 * 1024, configuredChunkSize));
         const totalChunks = Math.max(1, Math.ceil(file.size / chunkSize));
         for (let index = 0; index < totalChunks; index += 1) {
           const offset = index * chunkSize;

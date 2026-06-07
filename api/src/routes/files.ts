@@ -12,7 +12,7 @@ import { z } from "zod";
 import { env } from "../config/env.js";
 import { audit } from "../lib/audit.js";
 import { ensureDomainFileStructure, ensureSubdomainFileStructure } from "../lib/domainFiles.js";
-import { fileUploadChunkBodyLimitBytes, fileUploadChunkBytes, fileUploadLimitBytes } from "../lib/fileUploadLimits.js";
+import { configuredFileUploadLimitBytes, fileUploadChunkBodyLimitBytes, fileUploadChunkBytes, fileUploadLimitBytes } from "../lib/fileUploadLimits.js";
 import type { WebSocket } from "@fastify/websocket";
 import { chunkUploadQuery, writeUploadChunk } from "../lib/fileChunkUpload.js";
 import { attachFileUploadWebSocket } from "../lib/fileWebSocketUpload.js";
@@ -23,8 +23,10 @@ const execFileAsync = promisify(execFile);
 const archiveCommandMaxBuffer = 64 * 1024 * 1024;
 const textReadLimit = 1024 * 1024;
 const uploadLimit = fileUploadLimitBytes;
+const clientUploadLimit = configuredFileUploadLimitBytes;
 const uploadChunkLimit = fileUploadChunkBytes;
 const uploadChunkBodyLimit = fileUploadChunkBodyLimitBytes;
+const directUploadBodyLimit = configuredFileUploadLimitBytes === 0 ? uploadChunkBodyLimit : Math.ceil(uploadLimit * 1.02);
 const treeEntryLimit = 1500;
 const rawUploadContentType = "application/vnd.vps-panel.file-upload";
 
@@ -337,7 +339,7 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
       platform: os.platform(),
       pathSeparator: path.sep,
       textReadLimit,
-      uploadLimit,
+      uploadLimit: clientUploadLimit,
       uploadChunkLimit,
       writable: true
     };
@@ -556,7 +558,7 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
     return { ok: true, movedToTrash, permanentlyRemoved };
   });
 
-  app.post("/upload", { bodyLimit: Math.ceil(uploadLimit * 1.02) }, async (request, reply) => {
+  app.post("/upload", { bodyLimit: directUploadBodyLimit }, async (request, reply) => {
     if (String(request.headers["content-type"] ?? "").startsWith(rawUploadContentType)) {
       const query = rawUploadQuery.parse(request.query);
       const parent = await ensureParentFolderReady(query.parentPath);

@@ -594,16 +594,16 @@ ensure_large_upload_config() {
   fi
 
   current="$(grep -E '^FILE_MANAGER_UPLOAD_LIMIT_BYTES=' "$file" | tail -n 1 | cut -d= -f2- || true)"
-  if ! [[ "$current" =~ ^[0-9]+$ ]] || (( current < 1099511627776 )); then
-    log "setting FILE_MANAGER_UPLOAD_LIMIT_BYTES=1099511627776 for large file-manager uploads"
-    set_env_value "FILE_MANAGER_UPLOAD_LIMIT_BYTES" "1099511627776"
+  if [[ "$current" != "0" ]]; then
+    log "setting FILE_MANAGER_UPLOAD_LIMIT_BYTES=0 for unlimited file-manager uploads"
+    set_env_value "FILE_MANAGER_UPLOAD_LIMIT_BYTES" "0"
     changed="true"
   fi
 
   current="$(grep -E '^FILE_MANAGER_UPLOAD_CHUNK_BYTES=' "$file" | tail -n 1 | cut -d= -f2- || true)"
-  if ! [[ "$current" =~ ^[0-9]+$ ]] || (( current < 1048576 )) || (( current <= 16777216 )); then
-    log "setting FILE_MANAGER_UPLOAD_CHUNK_BYTES=50331648 for chunked file-manager uploads"
-    set_env_value "FILE_MANAGER_UPLOAD_CHUNK_BYTES" "50331648"
+  if [[ "$current" != "16777216" ]]; then
+    log "setting FILE_MANAGER_UPLOAD_CHUNK_BYTES=16777216 for proxy-safe chunked uploads"
+    set_env_value "FILE_MANAGER_UPLOAD_CHUNK_BYTES" "16777216"
     changed="true"
   fi
 
