@@ -88,6 +88,15 @@ test("detectDeploymentFiles keeps Python projects out of Laravel APP_KEY flow", 
   assert.equal(pythonWithComposer.suggestions.processManager, "SUPERVISOR");
 });
 
+test("detectDeploymentFiles chooses existing Python ASGI entrypoint", () => {
+  const appPy = detectDeploymentFiles(["requirements.txt", "app.py"], null, null);
+  assert.equal(appPy.detected, "PYTHON");
+  assert.match(appPy.suggestions.startCommand ?? "", /uvicorn app:app /);
+
+  const mainPy = detectDeploymentFiles(["requirements.txt", "main.py"], null, null);
+  assert.match(mainPy.suggestions.startCommand ?? "", /uvicorn main:app /);
+});
+
 test("deploymentHasLaravelPublicIndex distinguishes backend-only Laravel projects", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "deployment-detection-"));
   try {

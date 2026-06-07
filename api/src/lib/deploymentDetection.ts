@@ -174,6 +174,21 @@ function nodeJsDetection(
   };
 }
 
+function pythonAsgiModuleForFiles(names: Set<string>) {
+  if (names.has("app.py")) return "app:app";
+  if (names.has("main.py")) return "main:app";
+  if (names.has("server.py")) return "server:app";
+  if (names.has("api.py")) return "api:app";
+  return "app.main:app";
+}
+
+function pythonStartCommandForFiles(names: Set<string>) {
+  if (names.has("manage.py")) {
+    return ".venv/bin/python manage.py runserver 127.0.0.1:{PORT}";
+  }
+  return `.venv/bin/python -m uvicorn ${pythonAsgiModuleForFiles(names)} --host 127.0.0.1 --port {PORT}`;
+}
+
 async function readTextIfExists(filePath: string) {
   try {
     return await fs.readFile(filePath, "utf8");
@@ -280,7 +295,7 @@ export function detectDeploymentFiles(
         packageManager: names.has("pyproject.toml") ? "UV" : "PIP",
         installCommand: names.has("pyproject.toml") ? "uv sync" : ".venv/bin/python -m pip install -r requirements.txt",
         buildCommand: null,
-        startCommand: names.has("manage.py") ? ".venv/bin/python manage.py runserver 127.0.0.1:{PORT}" : ".venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port {PORT}",
+        startCommand: pythonStartCommandForFiles(names),
         outputDirectory: null,
         processManager: "SUPERVISOR"
       }

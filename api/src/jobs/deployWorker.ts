@@ -2689,6 +2689,58 @@ async function reconcileMissingStartCommand(
   return updated;
 }
 
+function isAutoManagedPythonStartCommand(command: string | null | undefined) {
+  const normalized = (command || "").trim().toLowerCase();
+  if (!normalized) return true;
+  return (
+    normalized.includes("uvicorn app.main:app")
+    || normalized.includes("uvicorn app:app")
+    || normalized.includes("uvicorn main:app")
+    || normalized.includes("uvicorn server:app")
+    || normalized.includes("uvicorn api:app")
+    || normalized.includes("manage.py runserver")
+  );
+}
+
+async function reconcilePythonStartCommand(
+  deployment: DeploymentWithWorkerRelations,
+  releaseId: string | undefined,
+  appPath: string
+) {
+  if (deployment.framework !== "PYTHON" || !isAutoManagedPythonStartCommand(deployment.startCommand)) {
+    return deployment;
+  }
+
+  const detection = await detectDeploymentSource(appPath, ".");
+  const suggested = detection.detected === "PYTHON" ? detection.suggestions.startCommand : null;
+  if (!suggested || suggested === deployment.startCommand) {
+    return deployment;
+  }
+
+  const updated = await prisma.deployment.update({
+    where: { id: deployment.id },
+    data: {
+      runtime: detection.suggestions.runtime,
+      packageManager: detection.suggestions.packageManager,
+      installCommand: detection.suggestions.installCommand,
+      buildCommand: detection.suggestions.buildCommand,
+      startCommand: suggested,
+      outputDirectory: detection.suggestions.outputDirectory,
+      processManager: detection.suggestions.processManager
+    },
+    include: deploymentWorkerInclude
+  });
+
+  await writeLog(deployment.id, releaseId, "PREFLIGHT", "Corrected Python ASGI start command", {
+    previousStartCommand: deployment.startCommand,
+    startCommand: suggested,
+    reason: detection.reason,
+    files: detection.files ?? []
+  }, "warn");
+
+  return updated;
+}
+
 async function reconcileMisdetectedLaravelFramework(
   deployment: DeploymentWithWorkerRelations,
   releaseId: string | undefined,
@@ -3502,6 +3554,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
     let appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
     ({ deployment, appPath } = await reconcileDeploymentRootDirectory(deployment, releaseId, appPath));
     ({ deployment, appPath } = await reconcileLaravelRootDirectory(deployment, releaseId, appPath));
+    deployment = await reconcilePythonStartCommand(deployment, releaseId, appPath);
     const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
     const domain = deploymentDomain(deployment);
     const routeDomains = deploymentRouteDomains(deployment);
@@ -3721,6 +3774,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     deployment = await reconcileMisdetectedLaravelFramework(deployment, releaseId, appPath);
     deployment = await reconcileMissingStartCommand(deployment, releaseId);
     deployment = await reconcileNodeProductionStartCommand(deployment, releaseId);
+    deployment = await reconcilePythonStartCommand(deployment, releaseId, appPath);
     await assertRuntimeToolsInstalled(deployment.id, releaseId, deployment);
 
     if (deployment.processManager === "NONE" && deployment.framework !== "STATIC") {
