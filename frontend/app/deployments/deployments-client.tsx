@@ -793,7 +793,7 @@ export function DeploymentsClient({
               </div>
 
               <div className="min-h-0 flex-1 overflow-auto p-5">
-                {activeTab === "overview" ? <OverviewPanel deployment={selected} /> : null}
+                {activeTab === "overview" ? <OverviewPanel apiBase={apiBase} deployment={selected} /> : null}
                 {activeTab === "domains" ? <DomainsPanel deployment={selected} domains={domainOptions(domains.data?.items ?? [])} domainsToAdd={domainsToAdd} setDomainsToAdd={setDomainsToAdd} addDomain={() => addDomain.mutate()} addingDomain={addDomain.isPending} setPrimary={(binding) => setPrimaryDomain.mutate(binding)} removeDomain={(binding) => removeDomain.mutate(binding)} /> : null}
                 {activeTab === "history" ? <HistoryPanel deployment={selected} releases={releases.data ?? selected.releases ?? []} loading={releases.isLoading} onRefresh={() => releases.refetch()} onJump={(release) => rollbackRelease.mutate({ deployment: selected, releaseId: release.id })} jumping={rollbackRelease.isPending} /> : null}
                 {activeTab === "env" ? <EnvPanel deployment={selected} envKey={envKey} envValue={envValue} envSecret={envSecret} bulkEnvText={bulkEnvText} bulkEnvSecret={bulkEnvSecret} revealedValues={revealedEnvValues} revealingKey={revealEnv.variables} savingLineKey={saveEnvLine.variables?.item.key} setEnvKey={setEnvKey} setEnvValue={setEnvValue} setEnvSecret={setEnvSecret} setBulkEnvText={setBulkEnvText} setBulkEnvSecret={setBulkEnvSecret} saveEnv={(onSuccess) => saveEnv.mutate(undefined, { onSuccess })} saveBulkEnv={(onSuccess) => saveBulkEnv.mutate(undefined, { onSuccess })} saveRawEnv={(text, onSuccess) => saveBulkEnv.mutate(text, { onSuccess })} savingEnv={saveEnv.isPending} savingBulkEnv={saveBulkEnv.isPending} revealEnv={(key) => revealEnv.mutate(key)} hideEnv={hideEnv} saveEnvLine={(item, value) => saveEnvLine.mutate({ item, value })} removeEnv={(key) => removeEnv.mutate(key)} removeBulkEnv={(keys) => removeBulkEnv.mutate(keys)} removingBulkEnv={removeBulkEnv.isPending} clearDatabaseEnvOverrides={() => clearDatabaseEnvOverrides.mutate()} clearingDatabaseEnvOverrides={clearDatabaseEnvOverrides.isPending} /> : null}
@@ -898,11 +898,11 @@ function Input({ label, value, onChange, readOnly }: { label: string; value: str
   return <label className="space-y-1 text-xs font-medium text-panel-muted">{label}<input className={`h-9 w-full rounded-md border border-panel-line px-3 text-sm text-panel-ink ${readOnly ? "bg-slate-50 text-panel-muted" : ""}`} onChange={(event) => onChange(event.target.value)} readOnly={readOnly} value={value} /></label>;
 }
 
-function OverviewPanel({ deployment }: { deployment: Deployment }) {
+function OverviewPanel({ apiBase, deployment }: { apiBase: "/deployments" | "/account/deployments"; deployment: Deployment }) {
   const latest = deployment.releases?.[0];
   const metrics = useQuery({
-    queryKey: ["deployment-metrics", deployment.id],
-    queryFn: () => apiGet<DeploymentMetrics>(`/deployments/${deployment.id}/metrics`),
+    queryKey: ["deployment-metrics", apiBase, deployment.id],
+    queryFn: () => apiGet<DeploymentMetrics>(`${apiBase}/${deployment.id}/metrics`),
     refetchInterval: 15000
   });
   const data = metrics.data;

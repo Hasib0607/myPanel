@@ -1120,6 +1120,41 @@ function accountDeploymentLogDir(slug: string) {
   return `${env.DEPLOYMENT_LOG_ROOT.replace(/\/+$/, "")}/${slug}`;
 }
 
+function accountDeploymentServerName(domain: { name: string; includeWww?: boolean } | null | undefined) {
+  if (!domain?.name) return null;
+  if (domain.includeWww === false || domain.name.startsWith("*.")) return domain.name;
+  return `${domain.name} www.${domain.name}`;
+}
+
+function accountDeploymentServerNames(deployment: { domain?: { name: string; includeWww?: boolean } | null; domainBindings?: Array<{ domain?: { name: string; includeWww?: boolean } | null; subdomain?: { name: string; domain?: { name: string } | null } | null }> }) {
+  const names = new Set<string>();
+  for (const binding of deployment.domainBindings ?? []) {
+    if (binding.subdomain?.domain?.name) {
+      const serverName = accountDeploymentServerName({ name: `${binding.subdomain.name}.${binding.subdomain.domain.name}`, includeWww: false });
+      if (serverName) names.add(serverName);
+    } else if (binding.domain?.name) {
+      const serverName = accountDeploymentServerName(binding.domain);
+      if (serverName) names.add(serverName);
+    }
+  }
+  const primary = accountDeploymentServerName(deployment.domain);
+  if (primary) names.add(primary);
+  return [...names];
+}
+
+function accountDeploymentLogCutoff() {
+  return new Date(Date.now() - 24 * 60 * 60 * 1000);
+}
+
+async function pruneAccountDeploymentLogs(deploymentId: string) {
+  await prisma.deploymentLog.deleteMany({
+    where: {
+      deploymentId,
+      createdAt: { lt: accountDeploymentLogCutoff() }
+    }
+  });
+}
+
 function safeChildPath(account: { homeRoot: string }, parentPath: string, name: string) {
   if (!name || name === "." || name === ".." || name.includes("/") || name.includes("\\") || unsafeName.test(name)) {
     const error = new Error("Unsafe file or folder name");
@@ -2246,6 +2281,42 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const deployment = await findAccountDeployment(request, deploymentId);
     return prisma.deploymentRelease.findMany({ where: { deploymentId: deployment.id }, orderBy: { createdAt: "desc" }, take: 50 });
+  });
+
+  app.get("/deployments/:deploymentId/metrics", async (request: any) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const deployment = await findAccountDeployment(request, deploymentId);
+    await pruneAccountDeploymentLogs(deployment.id);
+    const appPath = accountDeploymentAppPath(deployment);
+    const [metrics, buildLogs] = await Promise.all([
+      sysagent.deploymentMetrics({
+        deploymentId: deployment.id,
+        name: deployment.slug,
+        rootPath: appPath,
+        port: deployment.port,
+        processManager: deployment.processManager,
+        logDir: accountDeploymentLogDir(deployment.slug),
+        dbType: deployment.dbType,
+        dbName: deployment.dbName,
+        serverNames: accountDeploymentServerNames(deployment),
+        logLines: 300
+      }).catch((error) => ({
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+        process: { cpuPercent: 0, memoryBytes: 0, processes: [], processCount: 0 },
+        history: [],
+        storage: { rootPath: appPath, bytes: 0 },
+        database: { engine: deployment.dbType, name: deployment.dbName, sizeBytes: 0, available: false },
+        traffic: { incomingBytes: 0, outgoingBytes: 0, bandwidthBytes: 0, requests: 0, sources: [], windowHours: 24 },
+        logs: { ok: false, text: "", stdout: "", stderr: "", laravel: "" }
+      })),
+      prisma.deploymentLog.findMany({
+        where: { deploymentId: deployment.id, createdAt: { gte: accountDeploymentLogCutoff() } },
+        orderBy: { createdAt: "desc" },
+        take: 300
+      })
+    ]);
+    return { ...(metrics as Record<string, unknown>), buildLogs };
   });
 
   app.get("/deployments/:deploymentId/workers", async (request: any) => {

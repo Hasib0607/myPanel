@@ -554,6 +554,37 @@ def deployment_process_metrics(root_path: str, name: str, port: int | None) -> d
             })
         except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
             continue
+    matched_pids = {int(process.get("pid") or 0) for process in processes if process.get("pid")}
+    try:
+        pm2_list = json.loads(pm2_processes(root_path).get("stdout") or "[]")
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pm2_list = []
+    root_text = str(Path(root_path).resolve())
+    for item in (pm2_list if isinstance(pm2_list, list) else []):
+        pm2_env = item.get("pm2_env") if isinstance(item, dict) else {}
+        pm2_env = pm2_env if isinstance(pm2_env, dict) else {}
+        pm2_name = str(item.get("name") or "")
+        pm2_cwd = str(pm2_env.get("pm_cwd") or pm2_env.get("cwd") or "")
+        pm2_args = json.dumps(pm2_env.get("args") or "")
+        if pm2_name != name and root_text not in pm2_cwd and root_text not in pm2_args:
+            continue
+        pid = int(item.get("pid") or 0)
+        if pid and pid in matched_pids:
+            continue
+        monit = item.get("monit") if isinstance(item.get("monit"), dict) else {}
+        memory = int(monit.get("memory") or 0)
+        cpu = float(monit.get("cpu") or 0.0)
+        memory_bytes += memory
+        cpu_percent += cpu
+        if pid:
+            matched_pids.add(pid)
+        processes.append({
+            "pid": pid,
+            "name": pm2_name,
+            "status": pm2_env.get("status"),
+            "cpuPercent": cpu,
+            "memoryBytes": memory,
+        })
     return {
         "cpuPercent": round(cpu_percent, 2),
         "memoryBytes": memory_bytes,
@@ -688,11 +719,20 @@ def parse_nginx_traffic_line(line: str, cutoff: datetime) -> tuple[int, int, int
 def nginx_log_candidates(deployment_id: str, server_names: list[str]) -> tuple[list[tuple[Path, bool]], list[str]]:
     nginx_dir = Path("/var/log/nginx")
     candidates: list[tuple[Path, bool]] = []
-    hosts = [name.strip().lower() for name in server_names if name.strip()]
-    for server_name in hosts:
+    server_tokens: list[str] = []
+    hosts: list[str] = []
+    for value in server_names:
+        for token in str(value or "").split():
+            host = token.strip().lower()
+            if not host:
+                continue
+            server_tokens.append(host)
+            hosts.append(host[2:] if host.startswith("*.") else host)
+    for server_name in server_tokens:
         path = deployment_nginx_log_path(deployment_id, server_name)
         candidates.extend([(path, False), (path.with_suffix(path.suffix + ".1"), False)])
-        for pattern in (f"*{server_name}*.access.log", f"*{server_name}*.log", f"*{server_name}*.access.log.1", f"*{server_name}*.log.1"):
+        safe_pattern_name = server_name.replace("*.", "wildcard.")
+        for pattern in (f"*{safe_pattern_name}*.access.log", f"*{safe_pattern_name}*.log", f"*{safe_pattern_name}*.access.log.1", f"*{safe_pattern_name}*.log.1"):
             try:
                 candidates.extend((item, False) for item in nginx_dir.glob(pattern))
             except OSError:
