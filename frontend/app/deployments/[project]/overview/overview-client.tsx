@@ -244,7 +244,7 @@ export function DeploymentOverviewClient({ project }: { project: string }) {
                   </div>
                 </div>
 
-                <LastDayLogs metrics={metrics.data} />
+                <ResourceHistory metrics={metrics.data} />
 
                 <div className="rounded-md border border-panel-line bg-white">
                   <div className="flex items-center justify-between border-b border-panel-line p-4">
@@ -327,33 +327,65 @@ function UsageCard({ icon, label, value, detail }: { icon: ReactNode; label: str
   );
 }
 
-function LastDayLogs({ metrics }: { metrics?: DeploymentMetrics }) {
-  const buildLogs = metrics?.buildLogs ?? [];
-  const runtimeText = metrics?.logs?.text ?? "";
+function ResourceHistory({ metrics }: { metrics?: DeploymentMetrics }) {
+  const history = metrics?.history ?? [];
   return (
     <div className="rounded-md border border-panel-line bg-white">
       <div className="flex items-center justify-between border-b border-panel-line p-4">
-        <div className="text-sm font-semibold">Last 24h Logs</div>
-        <span className="text-xs text-panel-muted">{buildLogs.length} build entries</span>
+        <div className="text-sm font-semibold">Last 24h Resource Usage</div>
+        <span className="text-xs text-panel-muted">{history.length} samples</span>
       </div>
       <div className="grid gap-0 lg:grid-cols-2">
-        <div className="min-w-0 border-b border-panel-line p-4 lg:border-b-0 lg:border-r">
-          <div className="mb-3 text-xs font-semibold uppercase text-panel-muted">Build</div>
-          <div className="max-h-72 overflow-auto rounded-md bg-slate-950 p-3 font-mono text-xs leading-5 text-slate-100">
-            {buildLogs.length ? buildLogs.slice().reverse().map((log) => (
-              <div className="whitespace-pre-wrap" key={log.id}>
-                [{formatDate(log.createdAt)}] {log.step}: {log.message}
-              </div>
-            )) : "No build logs in the last 24h."}
-          </div>
-        </div>
-        <div className="min-w-0 p-4">
-          <div className="mb-3 text-xs font-semibold uppercase text-panel-muted">Runtime</div>
-          <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-slate-950 p-3 font-mono text-xs leading-5 text-slate-100">{runtimeText || "No runtime logs in the last 24h."}</pre>
-        </div>
+        <UsageTrend title="RAM" unit="bytes" values={history.map((sample) => ({ timestamp: sample.timestamp, value: sample.memoryBytes }))} />
+        <UsageTrend title="CPU" unit="percent" values={history.map((sample) => ({ timestamp: sample.timestamp, value: sample.cpuPercent }))} />
       </div>
     </div>
   );
+}
+
+function UsageTrend({ title, unit, values }: { title: string; unit: "bytes" | "percent"; values: Array<{ timestamp: string; value: number }> }) {
+  const recent = values.slice(-96);
+  const current = recent.at(-1)?.value ?? 0;
+  const peak = recent.reduce((max, item) => Math.max(max, item.value), 0);
+  const average = recent.length ? recent.reduce((total, item) => total + item.value, 0) / recent.length : 0;
+  const scale = Math.max(peak, unit === "percent" ? 100 : 1);
+  return (
+    <div className="min-w-0 border-b border-panel-line p-4 last:border-b-0 lg:border-b-0 lg:border-r lg:last:border-r-0">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div className="text-xs font-semibold uppercase text-panel-muted">{title}</div>
+        <div className="text-xs text-panel-muted">last 24h</div>
+      </div>
+      <div className="grid grid-cols-3 gap-2 text-sm">
+        <TrendStat label="Now" value={formatMetricValue(current, unit)} />
+        <TrendStat label="Peak" value={formatMetricValue(peak, unit)} />
+        <TrendStat label="Avg" value={formatMetricValue(average, unit)} />
+      </div>
+      <div className="mt-4 flex h-24 items-end gap-1 overflow-hidden rounded-md border border-panel-line bg-slate-50 px-2 py-2">
+        {recent.length ? recent.map((item, index) => (
+          <div
+            className="min-w-[3px] flex-1 rounded-t bg-panel-accent"
+            key={`${item.timestamp}-${index}`}
+            style={{ height: `${Math.max(4, Math.min(100, (item.value / scale) * 100))}%` }}
+            title={`${formatDate(item.timestamp)}: ${formatMetricValue(item.value, unit)}`}
+          />
+        )) : <div className="flex h-full w-full items-center justify-center text-xs text-panel-muted">Resource samples will appear after the next refresh.</div>}
+      </div>
+    </div>
+  );
+}
+
+function TrendStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md bg-slate-50 p-2">
+      <div className="text-[10px] uppercase text-panel-muted">{label}</div>
+      <div className="mt-1 truncate font-semibold text-panel-ink">{value}</div>
+    </div>
+  );
+}
+
+function formatMetricValue(value: number, unit: "bytes" | "percent") {
+  if (unit === "bytes") return formatBytes(value);
+  return `${Number.isFinite(value) ? value.toFixed(1) : "0.0"}%`;
 }
 
 function formatBytes(value: number) {

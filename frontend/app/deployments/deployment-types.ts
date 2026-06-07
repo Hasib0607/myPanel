@@ -155,6 +155,7 @@ export type DeploymentMetrics = {
     processCount: number;
     processes: Array<{ pid: number; name?: string | null; status?: string | null; cpuPercent?: number; memoryBytes?: number }>;
   };
+  history?: Array<{ timestamp: string; cpuPercent: number; memoryBytes: number; processCount: number }>;
   storage: { rootPath: string; bytes: number };
   database: { engine: string | null; name: string | null; sizeBytes: number; available: boolean };
   traffic: {

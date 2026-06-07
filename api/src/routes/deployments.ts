@@ -2411,6 +2411,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
         ok: false,
         error: error instanceof Error ? error.message : String(error),
         process: { cpuPercent: 0, memoryBytes: 0, processes: [], processCount: 0 },
+        history: [],
         storage: { rootPath: appPath, bytes: 0 },
         database: { engine: deployment.dbType, name: deployment.dbName, sizeBytes: 0, available: false },
         traffic: { incomingBytes: 0, outgoingBytes: 0, bandwidthBytes: 0, requests: 0, sources: [], windowHours: 24 },

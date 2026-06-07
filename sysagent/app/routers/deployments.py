@@ -558,6 +558,59 @@ def deployment_process_metrics(root_path: str, name: str, port: int | None) -> d
     }
 
 
+def metrics_history_path(deployment_name: str) -> Path:
+    safe_name = re.sub(r"[^a-zA-Z0-9_.-]+", "-", deployment_name).strip("-") or "deployment"
+    return Path("/var/log/vps-panel/deployments") / safe_name / "metrics-history.json"
+
+
+def update_metrics_history(deployment_name: str, process: dict) -> list[dict]:
+    path = metrics_history_path(deployment_name)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=1)
+    history: list[dict] = []
+    try:
+        if path.is_file():
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, list):
+                history = [item for item in raw if isinstance(item, dict)]
+    except (OSError, json.JSONDecodeError):
+        history = []
+
+    filtered: list[dict] = []
+    for item in history:
+        timestamp = str(item.get("timestamp") or "")
+        try:
+            parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if parsed >= cutoff:
+            filtered.append({
+                "timestamp": parsed.isoformat(),
+                "cpuPercent": float(item.get("cpuPercent") or 0),
+                "memoryBytes": int(item.get("memoryBytes") or 0),
+                "processCount": int(item.get("processCount") or 0),
+            })
+
+    now = datetime.now(timezone.utc)
+    sample = {
+        "timestamp": now.isoformat(),
+        "cpuPercent": float(process.get("cpuPercent") or 0),
+        "memoryBytes": int(process.get("memoryBytes") or 0),
+        "processCount": int(process.get("processCount") or 0),
+    }
+    if not filtered or (now - datetime.fromisoformat(str(filtered[-1]["timestamp"]))).total_seconds() >= 55:
+        filtered.append(sample)
+    else:
+        filtered[-1] = sample
+
+    filtered = filtered[-1440:]
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(filtered), encoding="utf-8")
+    except OSError:
+        pass
+    return filtered
+
+
 def deployment_nginx_log_path(deployment_id: str, server_name: str) -> Path:
     config_name = nginx_config_name(deployment_id, server_name)
     return Path("/var/log/nginx") / f"vps-panel-{config_name}.access.log"
@@ -570,53 +623,87 @@ def parse_nginx_log_time(value: str) -> datetime | None:
         return None
 
 
-def parse_nginx_traffic_line(line: str, cutoff: datetime) -> tuple[int, int] | None:
-    match = re.search(r"\[([^\]]+)\]\s+\"[^\"]*\"\s+\d{3}\s+(\d+|-)", line)
+def parse_nginx_traffic_line(line: str, cutoff: datetime) -> tuple[int, int, int] | None:
+    match = re.search(r"\[([^\]]+)\]\s+\"([^\"]*)\"\s+\d{3}\s+(\d+|-)(.*)$", line)
     if not match:
         return None
     timestamp = parse_nginx_log_time(match.group(1))
     if timestamp is None or timestamp < cutoff:
         return None
-    sent = 0 if match.group(2) == "-" else int(match.group(2))
-    return sent, 1
+    request_line = match.group(2)
+    sent = 0 if match.group(3) == "-" else int(match.group(3))
+    unquoted_tail = re.sub(r"\"[^\"]*\"", "", match.group(4))
+    tail_numbers = [int(value) for value in re.findall(r"(?<![\w.])(\d{2,})(?![\w.])", unquoted_tail)]
+    request_length = tail_numbers[-1] if tail_numbers else 0
+    incoming = request_length if request_length > len(request_line) else 0
+    return incoming, sent, 1
+
+
+def nginx_log_candidates(deployment_id: str, server_names: list[str]) -> tuple[list[tuple[Path, bool]], list[str]]:
+    nginx_dir = Path("/var/log/nginx")
+    candidates: list[tuple[Path, bool]] = []
+    hosts = [name.strip().lower() for name in server_names if name.strip()]
+    for server_name in hosts:
+        path = deployment_nginx_log_path(deployment_id, server_name)
+        candidates.extend([(path, False), (path.with_suffix(path.suffix + ".1"), False)])
+        for pattern in (f"*{server_name}*.access.log", f"*{server_name}*.log", f"*{server_name}*.access.log.1", f"*{server_name}*.log.1"):
+            try:
+                candidates.extend((item, False) for item in nginx_dir.glob(pattern))
+            except OSError:
+                continue
+    candidates.extend([
+        (nginx_dir / "access.log", True),
+        (nginx_dir / "access.log.1", True),
+    ])
+    return candidates, hosts
+
+
+def read_recent_log_text(path: Path, max_bytes: int = 50 * 1024 * 1024) -> str:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - max_bytes), os.SEEK_SET)
+            return handle.read().decode("utf-8", errors="ignore")
+    except OSError:
+        return ""
 
 
 def deployment_traffic_metrics(deployment_id: str, server_names: list[str]) -> dict:
     cutoff = datetime.now(timezone.utc) - timedelta(days=1)
-    candidates: list[Path] = []
-    for server_name in server_names:
-        if not server_name.strip():
-            continue
-        path = deployment_nginx_log_path(deployment_id, server_name)
-        candidates.extend([path, path.with_suffix(path.suffix + ".1")])
+    candidates, hosts = nginx_log_candidates(deployment_id, server_names)
 
     seen: set[Path] = set()
+    incoming = 0
     outgoing = 0
     requests = 0
     sources = []
-    for path in candidates:
+    for path, require_host_match in candidates:
         if path in seen or not path.is_file():
             continue
         seen.add(path)
-        sources.append(str(path))
-        try:
-            for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
-                parsed = parse_nginx_traffic_line(line, cutoff)
-                if parsed is None:
-                    continue
-                sent, count = parsed
-                outgoing += sent
-                requests += count
-        except OSError:
-            continue
+        source_requests = 0
+        for line in read_recent_log_text(path).splitlines():
+            if require_host_match and (not hosts or not any(host in line.lower() for host in hosts)):
+                continue
+            parsed = parse_nginx_traffic_line(line, cutoff)
+            if parsed is None:
+                continue
+            received, sent, count = parsed
+            incoming += received
+            outgoing += sent
+            requests += count
+            source_requests += count
+        if source_requests:
+            sources.append(str(path))
     return {
-        "incomingBytes": 0,
+        "incomingBytes": incoming,
         "outgoingBytes": outgoing,
-        "bandwidthBytes": outgoing,
+        "bandwidthBytes": incoming + outgoing,
         "requests": requests,
         "sources": sources,
         "windowHours": 24,
-        "note": None if sources else "Per-project traffic starts after this deployment's Nginx vhost is republished.",
+        "note": None if sources else "No matching Nginx traffic was found for this project's domains in the last 24h.",
     }
 
 
@@ -1055,6 +1142,7 @@ def deployment_metrics(body: DeploymentMetricsRequest) -> dict:
             "path": info,
             "error": "Path escapes configured file manager root",
             "process": {"cpuPercent": 0, "memoryBytes": 0, "processes": [], "processCount": 0},
+            "history": [],
             "storage": {"rootPath": root, "bytes": 0},
             "database": {"engine": body.dbType, "name": body.dbName, "sizeBytes": 0, "available": False},
             "traffic": {"incomingBytes": 0, "outgoingBytes": 0, "bandwidthBytes": 0, "requests": 0, "sources": [], "windowHours": 24},
@@ -1081,11 +1169,14 @@ def deployment_metrics(body: DeploymentMetricsRequest) -> dict:
         rootPath=root,
         lines=body.logLines,
     ))
+    process = deployment_process_metrics(root, body.name, body.port)
+    history = update_metrics_history(body.name, process)
     return {
         "ok": True,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "path": info,
-        "process": deployment_process_metrics(root, body.name, body.port),
+        "process": process,
+        "history": history,
         "storage": {"rootPath": root, "bytes": directory_size_bytes(root)},
         "database": {
             "engine": body.dbType,
