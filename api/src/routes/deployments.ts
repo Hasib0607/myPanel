@@ -1334,13 +1334,24 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
     livePort = { returncode: 1, stderr: error instanceof Error ? error.message : "Port check failed" };
   }
   const portBlocked = Boolean(policyError || dbOwner || ((livePort as { occupied?: boolean; reusable?: boolean }).occupied && !(livePort as { reusable?: boolean }).reusable));
+  const expectsRuntimeListener = deployment.status === "RUNNING" && deployment.framework !== "STATIC" && processManager !== "STATIC" && processManager !== "NONE";
+  const portNotListening = expectsRuntimeListener && !commandFailed(livePort) && !(livePort as { occupied?: boolean; reusable?: boolean }).occupied && !(livePort as { reusable?: boolean }).reusable;
   checks.push({
     key: "port",
     label: "Port",
-    status: portBlocked ? "fail" : "pass",
-    detail: policyError ?? (dbOwner ? `Port used by ${dbOwner.name || dbOwner.slug}` : commandDetail(livePort) || `Port ${deployment.port} is available/reusable`),
-    fix: portBlocked ? "Redeploy to let the worker move this app to a free managed port." : undefined,
-    repairAction: portBlocked ? "redeploy" : undefined
+    status: portBlocked || portNotListening ? "fail" : "pass",
+    detail: policyError
+      ?? (dbOwner
+        ? `Port used by ${dbOwner.name || dbOwner.slug}`
+        : portNotListening
+          ? `Deployment is marked RUNNING but nothing is listening on port ${deployment.port}.`
+          : commandDetail(livePort) || `Port ${deployment.port} is available/reusable`),
+    fix: portBlocked
+      ? "Redeploy to let the worker move this app to a free managed port."
+      : portNotListening
+        ? "Restart the deployment process; if the port stays closed, redeploy and inspect running logs."
+        : undefined,
+    repairAction: portBlocked ? "redeploy" : portNotListening ? "restart" : undefined
   });
 
   let health: unknown = null;
@@ -1423,7 +1434,7 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
 
   let runtimeLogs = "";
   try {
-    const logs = await sysagent.deploymentRuntimeLogs({ name: deployment.slug, logDir: deploymentLogDir(deployment.slug), lines: 160 });
+    const logs = await sysagent.deploymentRuntimeLogs({ name: deployment.slug, logDir: deploymentLogDir(deployment.slug), rootPath: appPath, lines: 160 });
     runtimeLogs = logs.text || "";
   } catch {
     runtimeLogs = "";
@@ -1443,14 +1454,20 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
     checks.push({
       key: "laravel_public_root",
       label: "Laravel public web root",
-      status: betterLaravelRoot ? "fail" : hasCurrentPublicIndex ? "pass" : "warn",
+      status: betterLaravelRoot || (serverName && !hasCurrentPublicIndex) ? "fail" : hasCurrentPublicIndex ? "pass" : "warn",
       detail: betterLaravelRoot
         ? `Current root ${appPath} has no public/index.php; web root detected at ${betterLaravelRoot}.`
         : hasCurrentPublicIndex
           ? `Found ${path.join(appPath, "public", "index.php")}`
-          : "No Laravel public/index.php exists. Deployment can still run as backend-only/worker-safe; public web routing is skipped unless an indexed public_html site is linked.",
-      fix: betterLaravelRoot ? "Redeploy so Deployment Doctor corrects rootDirectory before publishing Nginx." : undefined,
-      repairAction: betterLaravelRoot ? "redeploy" : undefined
+          : serverName
+            ? `No Laravel public/index.php exists, but ${serverName} is routed to this deployment. Nginx needs a web entrypoint or a running upstream process, otherwise it returns 502.`
+            : "No Laravel public/index.php exists. Deployment can still run as backend-only/worker-safe when no public domain is routed to it.",
+      fix: betterLaravelRoot
+        ? "Redeploy so Deployment Doctor corrects rootDirectory before publishing Nginx."
+        : serverName && !hasCurrentPublicIndex
+          ? "Add/restore Laravel public/index.php or change this deployment to a worker/API process with a real HTTP start command, then redeploy."
+          : undefined,
+      repairAction: betterLaravelRoot ? "redeploy" : serverName && !hasCurrentPublicIndex ? "redeploy" : undefined
     });
     const frontendAssets = await inspectLaravelFrontendAssets(appPath, deployment.publicDirectory);
     const frontendModuleIssue = detectFrontendModuleNotFound(recentErrors);
