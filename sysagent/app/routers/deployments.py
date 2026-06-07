@@ -1918,6 +1918,92 @@ def verify_laravel_public_index(root_path: str) -> dict:
     }
 
 
+@router.post("/laravel/ensure-public-index")
+def ensure_laravel_public_index(body: LaravelWritablePathsRequest) -> dict:
+    root = Path(body.rootPath).resolve()
+    info = path_info(str(root))
+    if not info["allowed"]:
+        return blocked_command("Path escapes configured file manager root", ["laravel-public-index", str(root)], info)
+
+    artisan = root / "artisan"
+    public = root / "public"
+    index = public / "index.php"
+    if not artisan.is_file():
+        return {
+            "dryRun": False,
+            "command": ["skipped", "laravel-public-index", str(index)],
+            "stdout": "Skipped public/index.php creation: no artisan file in deployment root",
+            "stderr": "",
+            "returncode": 0,
+            "path": info,
+            "skipped": True,
+            "created": False,
+        }
+    if index.is_file():
+        return {
+            "dryRun": False,
+            "command": ["verify-file", str(index)],
+            "stdout": "Laravel public/index.php already exists",
+            "stderr": "",
+            "returncode": 0,
+            "path": info,
+            "created": False,
+        }
+
+    content = """<?php
+
+use Illuminate\\Contracts\\Http\\Kernel;
+use Illuminate\\Http\\Request;
+
+define('LARAVEL_START', microtime(true));
+
+if (file_exists($maintenance = __DIR__.'/../storage/framework/maintenance.php')) {
+    require $maintenance;
+}
+
+require __DIR__.'/../vendor/autoload.php';
+
+$app = require_once __DIR__.'/../bootstrap/app.php';
+
+$kernel = $app->make(Kernel::class);
+
+$response = $kernel->handle(
+    $request = Request::capture()
+)->send();
+
+$kernel->terminate($request, $response);
+"""
+
+    if not DEPLOYMENT_COMMANDS_LIVE:
+        return {
+            "dryRun": True,
+            "command": ["write-file", str(index)],
+            "stdout": "Would create Laravel public/index.php",
+            "stderr": "",
+            "returncode": 0,
+            "path": info,
+            "created": False,
+        }
+
+    public.mkdir(parents=True, exist_ok=True)
+    index.write_text(content, encoding="utf-8")
+    try:
+        make_panel_owned(public)
+    except Exception:
+        pass
+    index.chmod(0o644)
+    return {
+        "dryRun": False,
+        "command": ["write-file", str(index)],
+        "stdout": f"Created Laravel public/index.php at {index}",
+        "stderr": "",
+        "returncode": 0,
+        "path": info,
+        "created": True,
+        "indexPath": str(index),
+    }
+
+
 @router.post("/laravel/repair-writable-paths")
 def repair_laravel_writable_paths(body: LaravelWritablePathsRequest) -> dict:
     root = str(Path(body.rootPath).resolve())

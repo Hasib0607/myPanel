@@ -169,6 +169,8 @@ export const sysagent = {
     request<SysagentCommandResult>("/deployments/repair-permissions", { method: "POST", body: JSON.stringify(body) }),
   deploymentRepairLaravelWritablePaths: (body: unknown) =>
     request<SysagentCommandResult>("/deployments/laravel/repair-writable-paths", { method: "POST", body: JSON.stringify(body) }),
+  deploymentEnsureLaravelPublicIndex: (body: unknown) =>
+    request<SysagentCommandResult & { created?: boolean; indexPath?: string }>("/deployments/laravel/ensure-public-index", { method: "POST", body: JSON.stringify(body) }),
   deploymentRepairPythonRuntime: (body: unknown) =>
     request<SysagentCommandResult>("/deployments/python/repair-runtime", { method: "POST", body: JSON.stringify(body) }),
   deploymentSyncLaravelEnv: (body: { rootPath: string; port?: number; env?: Record<string, string> }) =>

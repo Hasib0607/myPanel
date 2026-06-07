@@ -2706,6 +2706,27 @@ async function ensureLaravelAppKey(
   return applyLaravelAppKeyFromSync(deploymentId, envVars, syncResult);
 }
 
+async function ensureLaravelPublicIndexForDomain(
+  deploymentId: string,
+  releaseId: string | undefined,
+  appPath: string,
+  domain?: BoundDomain | null
+) {
+  if (!domain) return false;
+  if (!(await deploymentHasLaravelArtisan(appPath))) return false;
+  if (await deploymentHasLaravelPublicIndex(appPath)) return false;
+  const result = await runStep(deploymentId, releaseId, "BUILDING", "Create Laravel public entrypoint", () =>
+    sysagent.deploymentEnsureLaravelPublicIndex({ rootPath: appPath })
+  );
+  assertCommandTree(result, "Create Laravel public entrypoint");
+  await writeLog(deploymentId, releaseId, "BUILDING", "Created Laravel public entrypoint for domain routing", {
+    domain: domain.name,
+    appPath,
+    result: result as Prisma.InputJsonObject
+  }, "warn");
+  return true;
+}
+
 async function prepareLaravelForStart(
   deploymentId: string,
   releaseId: string | undefined,
@@ -3255,6 +3276,10 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
     const routeDomains = deploymentRouteDomains(deployment);
     const runtimeEnvVars = deploymentEnvWithPublicUrl(envVars, domain);
 
+    if (processAction !== "stop" && domain && await deploymentRunsLaravel(deployment.framework, appPath)) {
+      await ensureLaravelPublicIndexForDomain(deployment.id, releaseId, appPath, domain);
+    }
+
     const lifecycleBackendOnlyLaravel = Boolean(
       processAction !== "stop"
       && domain
@@ -3675,6 +3700,10 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           throw new Error(`${retryDetail}\n\nGuardian reinstalled Node dependencies with devDependencies because a local build binary was missing, but the build still failed.`);
         }
       }
+    }
+
+    if (domain && await deploymentRunsLaravel(deployment.framework, appPath)) {
+      await ensureLaravelPublicIndexForDomain(deployment.id, releaseId, appPath, domain);
     }
 
     const backendOnlyLaravel = Boolean(
