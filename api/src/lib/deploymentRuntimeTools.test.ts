@@ -155,6 +155,8 @@ test("runtime matrix includes Python and Go supervisor requirements", () => {
   for (const tool of ["python3", "python3.10+", "pip3", "python-venv", "supervisorctl"]) {
     assert.ok(pythonTools.includes(tool), `${tool} missing`);
   }
+  assert.equal(pythonTools.includes(".venv/bin/python"), false);
+  assert.equal(pythonTools.includes(".venv/bin/uvicorn"), false);
 
   const goTools = requiredRuntimeExecutables({
     framework: "GO",

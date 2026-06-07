@@ -113,6 +113,8 @@ function firstExecutable(command: string | null | undefined) {
 function executablesForCommand(command: string | null | undefined) {
   const executable = firstExecutable(command);
   if (!executable) return [];
+  if (executable.startsWith(".venv/bin/") || executable.startsWith("./.venv/bin/")) return [];
+  if (executable.includes("/")) return [];
   if (executable === "npm" || executable === "npx") return ["node", "npm"];
   if (executable === "next" || executable === "vite" || executable === "react-scripts") return ["node", "npm"];
   if (executable === "pnpm") return ["node", "pnpm"];
