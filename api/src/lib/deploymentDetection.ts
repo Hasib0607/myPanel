@@ -278,9 +278,9 @@ export function detectDeploymentFiles(
       suggestions: {
         runtime: "PYTHON",
         packageManager: names.has("pyproject.toml") ? "UV" : "PIP",
-        installCommand: names.has("pyproject.toml") ? "uv sync" : "pip3 install -r requirements.txt",
+        installCommand: names.has("pyproject.toml") ? "uv sync" : ".venv/bin/python -m pip install -r requirements.txt",
         buildCommand: null,
-        startCommand: names.has("manage.py") ? "python3 manage.py runserver 127.0.0.1:{PORT}" : "uvicorn app.main:app --host 127.0.0.1 --port {PORT}",
+        startCommand: names.has("manage.py") ? ".venv/bin/python manage.py runserver 127.0.0.1:{PORT}" : ".venv/bin/uvicorn app.main:app --host 127.0.0.1 --port {PORT}",
         outputDirectory: null,
         processManager: "SUPERVISOR"
       }

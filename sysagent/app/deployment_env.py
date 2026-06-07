@@ -17,12 +17,12 @@ LARAVEL_APP_KEY = re.compile(r"^base64:[A-Za-z0-9+/]{43}=$")
 
 def normalize_process_env(port: int | None, env: dict[str, str] | None) -> dict[str, str]:
     merged: dict[str, str] = {}
-    if port:
-        merged["PORT"] = str(port)
     if env:
         for key, value in env.items():
             if VALID_ENV_KEY.match(key):
                 merged[key] = str(value)
+    if port:
+        merged["PORT"] = str(port)
     return merged
 
 

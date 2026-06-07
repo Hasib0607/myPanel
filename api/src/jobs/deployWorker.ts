@@ -760,6 +760,24 @@ async function runLiveDeploymentProcess(
   return result;
 }
 
+async function ensurePythonVenvRuntime(deploymentId: string, releaseId: string | undefined, appPath: string) {
+  let repair = await runStep(deploymentId, releaseId, "PREFLIGHT", "Prepare Python 3.10+ virtualenv", () =>
+    sysagent.deploymentRepairPythonRuntime({ rootPath: appPath })
+  );
+  const failure = liveResultFailureMessage(repair, "Prepare Python 3.10+ virtualenv");
+  if (failure?.includes("Python 3.10+")) {
+    const install = await runStep(deploymentId, releaseId, "PREFLIGHT", "Install Python 3.11 runtime", () =>
+      sysagent.deploymentInstallRuntimeTool({ tool: "python311" })
+    );
+    assertLiveResult(install, "Install Python 3.11 runtime");
+    repair = await runStep(deploymentId, releaseId, "PREFLIGHT", "Prepare Python 3.10+ virtualenv retry", () =>
+      sysagent.deploymentRepairPythonRuntime({ rootPath: appPath })
+    );
+  }
+  assertLiveResult(repair, "Prepare Python 3.10+ virtualenv");
+  return repair;
+}
+
 function liveResultFailureMessage(result: unknown, label: string) {
   const value = result as {
     dryRun?: boolean;
@@ -953,6 +971,26 @@ function renderDeploymentCommand(command: string | null | undefined, port: numbe
   return command?.replaceAll("{PORT}", String(port)).replaceAll("$PORT", String(port)) ?? null;
 }
 
+function renderPythonInstallCommand(command: string | null | undefined, packageManager: string | null | undefined, port: number) {
+  const rendered = renderDeploymentCommand(command, port)?.trim();
+  if (!rendered) {
+    return packageManager === "PIP" ? ".venv/bin/python -m pip install -r requirements.txt" : rendered;
+  }
+  return rendered
+    .replace(/^(?:python3(?:\.\d+)?|python)\s+-m\s+pip\b/, ".venv/bin/python -m pip")
+    .replace(/^(?:pip3|pip)\b/, ".venv/bin/python -m pip");
+}
+
+function renderPythonStartCommand(command: string | null | undefined, port: number) {
+  const rendered = renderDeploymentCommand(command, port);
+  if (!rendered) return rendered;
+  return rendered
+    .replace(/^(?:python3(?:\.\d+)?|python)\b/, ".venv/bin/python")
+    .replace(/^uvicorn\b/, ".venv/bin/uvicorn")
+    .replace(/^gunicorn\b/, ".venv/bin/gunicorn")
+    .replace(/^flask\b/, ".venv/bin/flask");
+}
+
 function laravelStartCommand(port: number) {
   return `php artisan serve --host=127.0.0.1 --port ${port}`;
 }
@@ -965,6 +1003,9 @@ function isLegacyLaravelPhpFpmCommand(command: string | null | undefined) {
 function renderStartCommand(deployment: { framework: DeploymentFramework; startCommand: string | null; port: number }) {
   if (deployment.framework === "NEXTJS") {
     return `npx next start -p ${deployment.port} -H 127.0.0.1`;
+  }
+  if (deployment.framework === "PYTHON") {
+    return renderPythonStartCommand(deployment.startCommand, deployment.port);
   }
   if (deployment.framework === "LARAVEL" && isLegacyLaravelPhpFpmCommand(deployment.startCommand)) {
     return laravelStartCommand(deployment.port);
@@ -3511,6 +3552,9 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
     if (deployment.framework === "LARAVEL" && processAction !== "stop") {
       await gracefulLaravelWorkerReload(deployment, releaseId, appPath, runtimeEnvVars);
     }
+    if (deployment.framework === "PYTHON" && processAction !== "stop") {
+      await ensurePythonVenvRuntime(deployment.id, releaseId, appPath);
+    }
     const result = await runLiveDeploymentProcess(
       deployment.id,
       releaseId,
@@ -3714,9 +3758,15 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       await assertEnvRuntimeToolsInstalled(deployment.id, releaseId, envVars);
     }
 
+    if (deployment.framework === "PYTHON") {
+      await ensurePythonVenvRuntime(deployment.id, releaseId, appPath);
+    }
+
     if (deployment.installCommand || deployment.packageManager) {
       await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "BUILDING" } });
-      const installCommandText = renderDeploymentCommand(deployment.installCommand, deployment.port);
+      const installCommandText = deployment.framework === "PYTHON"
+        ? renderPythonInstallCommand(deployment.installCommand, deployment.packageManager, deployment.port)
+        : renderDeploymentCommand(deployment.installCommand, deployment.port);
       const runsComposer = deployment.packageManager === "COMPOSER" || /\bcomposer\b/i.test(installCommandText ?? "");
       if (runsComposer) {
         try {

@@ -1135,8 +1135,8 @@ def pm2_start(body: ProcessRequest, start_command: list[str]) -> dict:
         "--",
         *start_command[1:],
     ]
-    # Merge: default PM2 host/port vars first, then user-defined env vars (user wins on conflict).
-    process_env = constrained_runtime_env({**pm2_env(body.port), **(body.env or {})}, effective_resource_limits(body.resourceLimits))
+    # Runtime PORT must stay panel-owned so Nginx points at the process that actually starts.
+    process_env = constrained_runtime_env({**(body.env or {}), **pm2_env(body.port)}, effective_resource_limits(body.resourceLimits))
     start = guarded_command_with_env(body.rootPath, command, cwd=cwd, env=process_env)
     save = guarded_command(body.rootPath, ["pm2", "save"], cwd=cwd) if start.get("returncode") == 0 else {
         "dryRun": start.get("dryRun", False),
