@@ -49,7 +49,7 @@ export function DeploymentOverviewClient({ project }: { project: string }) {
     onError: (error) => setNotice(error instanceof Error ? error.message : "Action failed")
   });
   const repair = useMutation({
-    mutationFn: (name: "auto" | "sync-runtime" | "health" | "restart" | "redeploy" | "rollback" | "set-node-memory" | "sync-public-env" | "request-approval") => apiPost<any>(`/deployments/${project}/doctor/repair`, { action: name }),
+    mutationFn: (name: "auto" | "sync-runtime" | "health" | "restart" | "redeploy" | "rollback" | "set-node-memory" | "sync-public-env" | "rewrite-nginx" | "request-approval") => apiPost<any>(`/deployments/${project}/doctor/repair`, { action: name }),
     onSuccess: async (result, name) => {
       setNotice(result?.approvalRequired ? "Risky fix added to approval log." : `Doctor ${name} repair requested.`);
       await Promise.all([
@@ -120,8 +120,16 @@ export function DeploymentOverviewClient({ project }: { project: string }) {
                     </button>
                   </div>
                 </div>
-                <div className="p-4">
+                  <div className="p-4">
                   <div className="text-sm font-medium">{doctor.data.summary}</div>
+                  {doctor.data.resourceBudget ? (
+                    <div className="mt-3 grid gap-2 rounded-md border border-panel-line bg-slate-50 p-3 text-xs text-panel-muted sm:grid-cols-2 lg:grid-cols-4">
+                      <div><span className="font-semibold text-panel-ink">{doctor.data.resourceBudget.deployMemoryMb}MB</span><br />Deploy memory</div>
+                      <div><span className="font-semibold text-panel-ink">{doctor.data.resourceBudget.nodeHeapMb}MB</span><br />Node heap</div>
+                      <div><span className="font-semibold text-panel-ink">{doctor.data.resourceBudget.nextWorkers}</span><br />Next workers</div>
+                      <div><span className="font-semibold text-panel-ink">{doctor.data.resourceBudget.appReserveMb}MB</span><br />App reserve</div>
+                    </div>
+                  ) : null}
                   <div className="mt-3 grid gap-2">
                     {doctor.data.checks.map((check) => (
                       <div className="rounded-md border border-panel-line bg-slate-50 p-3 text-sm" key={check.key}>
@@ -138,7 +146,7 @@ export function DeploymentOverviewClient({ project }: { project: string }) {
                             <button
                               className="shrink-0 rounded-md border border-panel-line bg-white px-2 py-1 text-xs font-medium hover:bg-slate-50 disabled:opacity-50"
                               disabled={repair.isPending}
-                              onClick={() => repair.mutate(check.repairAction as "sync-runtime" | "health" | "restart" | "redeploy" | "rollback" | "set-node-memory" | "sync-public-env" | "request-approval")}
+                              onClick={() => repair.mutate(check.repairAction as "sync-runtime" | "health" | "restart" | "redeploy" | "rollback" | "set-node-memory" | "sync-public-env" | "rewrite-nginx" | "request-approval")}
                               type="button"
                             >
                               {check.repairAction}

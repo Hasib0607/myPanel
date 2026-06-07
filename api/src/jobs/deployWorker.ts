@@ -120,6 +120,7 @@ type DeployResourceBudget = {
 };
 
 const deploymentLocks = new Map<string, Promise<unknown>>();
+const heavyBuildLocks = new Map<string, Promise<unknown>>();
 
 async function runDeploymentExclusive<T>(deploymentId: string, task: () => Promise<T>) {
   const previous = deploymentLocks.get(deploymentId) ?? Promise.resolve();
@@ -129,6 +130,18 @@ async function runDeploymentExclusive<T>(deploymentId: string, task: () => Promi
     if (deploymentLocks.get(deploymentId) === tracked) deploymentLocks.delete(deploymentId);
   });
   deploymentLocks.set(deploymentId, tracked);
+  return next;
+}
+
+async function runHeavyBuildExclusive<T>(task: () => Promise<T>) {
+  const key = "heavy-build";
+  const previous = heavyBuildLocks.get(key) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(task);
+  let tracked: Promise<unknown>;
+  tracked = next.finally(() => {
+    if (heavyBuildLocks.get(key) === tracked) heavyBuildLocks.delete(key);
+  });
+  heavyBuildLocks.set(key, tracked);
   return next;
 }
 
@@ -3190,6 +3203,19 @@ async function ensureNodeLowMemoryBuildEnv(deploymentId: string, releaseId: stri
   return { envVars: nextEnv, changed };
 }
 
+function currentNextWorkers(envVars: Record<string, string>, budget: DeployResourceBudget) {
+  const circleTotal = Number(envVars.CIRCLE_NODE_TOTAL || 0);
+  if (circleTotal > 1) return Math.max(1, circleTotal - 1);
+  return Math.max(1, budget.summary.nextWorkers);
+}
+
+function nodeBuildEnvWithWorkers(envVars: Record<string, string>, workers: number) {
+  return {
+    ...envVars,
+    CIRCLE_NODE_TOTAL: String(Math.max(1, workers) + 1)
+  };
+}
+
 function isNodePackageManager(packageManager: DeploymentPackageManager | null) {
   return packageManager === "NPM" || packageManager === "PNPM" || packageManager === "YARN";
 }
@@ -3704,14 +3730,16 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           throw new Error(`Composer PHP extension preflight failed before dependency install: ${detail}`);
         }
       }
-      const runDependencyInstall = () => runStep(deployment.id, releaseId, "INSTALLING", "Dependency install", () =>
-        sysagent.deploymentInstall({
-          rootPath: appPath,
-          command: installCommandText,
-          packageManager: deployment.packageManager,
-          env: envVars,
-          resourceLimits: deployBudget.resourceLimits
-        })
+      const runDependencyInstall = () => runHeavyBuildExclusive(() =>
+        runStep(deployment.id, releaseId, "INSTALLING", "Dependency install", () =>
+          sysagent.deploymentInstall({
+            rootPath: appPath,
+            command: installCommandText,
+            packageManager: deployment.packageManager,
+            env: envVars,
+            resourceLimits: deployBudget.resourceLimits
+          })
+        )
       );
       let installResult = await runDependencyInstall();
       try {
@@ -3745,12 +3773,14 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       const installedGoogleDriveSupport = await ensureLaravelGoogleDriveSupport(deployment.id, releaseId, appPath, envVars);
 
       const optimizeClearResult = await runStep(deployment.id, releaseId, "INSTALLING", "Laravel cache clear", () =>
-        sysagent.deploymentBuild({
-          rootPath: appPath,
-          command: "php artisan optimize:clear",
-          env: envVars,
-          resourceLimits: deployBudget.resourceLimits
-        })
+        runHeavyBuildExclusive(() =>
+          sysagent.deploymentBuild({
+            rootPath: appPath,
+            command: "php artisan optimize:clear",
+            env: envVars,
+            resourceLimits: deployBudget.resourceLimits
+          })
+        )
       );
       try {
         assertCommandTree(optimizeClearResult, "Laravel cache clear");
@@ -3762,12 +3792,14 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
 
       if (installedGoogleDriveSupport) {
         const googleCacheClearResult = await runStep(deployment.id, releaseId, "INSTALLING", "Laravel cache clear after Google Drive dependency install", () =>
-          sysagent.deploymentBuild({
-            rootPath: appPath,
-            command: "php artisan optimize:clear",
-            env: envVars,
-            resourceLimits: deployBudget.resourceLimits
-          })
+          runHeavyBuildExclusive(() =>
+            sysagent.deploymentBuild({
+              rootPath: appPath,
+              command: "php artisan optimize:clear",
+              env: envVars,
+              resourceLimits: deployBudget.resourceLimits
+            })
+          )
         );
         try {
           assertCommandTree(googleCacheClearResult, "Laravel cache clear after Google Drive dependency install");
@@ -3779,12 +3811,14 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       }
 
       const runLaravelPackageDiscovery = () => runStep(deployment.id, releaseId, "INSTALLING", "Laravel package discovery", () =>
-        sysagent.deploymentBuild({
-          rootPath: appPath,
-          command: "php artisan package:discover --ansi -vvv",
-          env: envVars,
-          resourceLimits: deployBudget.resourceLimits
-        })
+        runHeavyBuildExclusive(() =>
+          sysagent.deploymentBuild({
+            rootPath: appPath,
+            command: "php artisan package:discover --ansi -vvv",
+            env: envVars,
+            resourceLimits: deployBudget.resourceLimits
+          })
+        )
       );
       let packageDiscoverResult = await runLaravelPackageDiscovery();
       try {
@@ -3799,12 +3833,14 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
 
       if (await shouldRunDatabaseMigration(deployment, releaseId, envVars)) {
         const runDatabaseMigration = () => runStep(deployment.id, releaseId, "MIGRATING", "Database migration", () =>
-          sysagent.deploymentMigrate({
-            rootPath: appPath,
-            command: "php artisan migrate --force",
-            env: envVars,
-            resourceLimits: deployBudget.resourceLimits
-          })
+          runHeavyBuildExclusive(() =>
+            sysagent.deploymentMigrate({
+              rootPath: appPath,
+              command: "php artisan migrate --force",
+              env: envVars,
+              resourceLimits: deployBudget.resourceLimits
+            })
+          )
         );
         let migrateResult = await runDatabaseMigration();
         try {
@@ -3832,14 +3868,45 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     }
 
     if (deployment.buildCommand) {
-      const runBuild = () => runStep(deployment.id, releaseId, "BUILDING", "Build", () =>
-        sysagent.deploymentBuild({
-          rootPath: appPath,
-          command: renderDeploymentCommand(deployment.buildCommand, deployment.port),
-          env: envVars,
-          resourceLimits: deployBudget.resourceLimits
-        })
+      const runBuild = (label = "Build") => runHeavyBuildExclusive(() =>
+        runStep(deployment.id, releaseId, label === "Build" ? "BUILDING" : "BUILDING", label, () =>
+          sysagent.deploymentBuild({
+            rootPath: appPath,
+            command: renderDeploymentCommand(deployment.buildCommand, deployment.port),
+            env: envVars,
+            resourceLimits: deployBudget.resourceLimits
+          })
+        )
       );
+      const retryBuildAfterSigterm = async (detail: string, context: string) => {
+        const startingWorkers = currentNextWorkers(envVars, deployBudget);
+        const workerTargets = [...new Set([
+          Math.max(1, Math.floor(startingWorkers / 2)),
+          1
+        ])].filter((workers) => workers < startingWorkers || workers === 1);
+        let lastDetail = detail;
+        for (const workers of workerTargets) {
+          envVars = nodeBuildEnvWithWorkers(envVars, workers);
+          await writeLog(deployment.id, releaseId, "BUILDING", "Retrying Node build with reduced workers", {
+            context,
+            workers,
+            CIRCLE_NODE_TOTAL: envVars.CIRCLE_NODE_TOTAL,
+            memoryMaxMb: deployBudget.summary.deployMemoryMb,
+            nodeHeapMb: deployBudget.summary.nodeHeapMb
+          }, "warn");
+          const retryResult = await runBuild(`Build retry after SIGTERM with ${workers} worker${workers === 1 ? "" : "s"}`);
+          try {
+            assertCommandTree(retryResult, `Build retry after SIGTERM with ${workers} worker${workers === 1 ? "" : "s"}`);
+            return true;
+          } catch (retryError) {
+            lastDetail = retryError instanceof Error ? retryError.message : String(retryError);
+            if (!nodeBuildTerminatedBySigterm(lastDetail)) {
+              throw retryError;
+            }
+          }
+        }
+        throw new Error(`${lastDetail}\n\nNode build is still being terminated with SIGTERM/143 after the retry ladder. Deploy budget: ${deployBudget.summary.deployMemoryMb}MB memory, ${deployBudget.summary.cpuQuotaPercent}% CPU, Node heap ${deployBudget.summary.nodeHeapMb}MB, apps reserved ${deployBudget.summary.appReserveMb}MB, system reserved ${deployBudget.summary.systemReserveMb}MB. Increase DEPLOY_MAX_MEMORY_MB or add swap if running apps have enough reserve.`);
+      };
       let buildResult = await runBuild();
       try {
         assertCommandTree(buildResult, "Build");
@@ -3851,20 +3918,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           : frontendAssets.hasPackageJson ? frontendAssets.packageManager : null;
         let buildRecovered = false;
         if (nodeBuildTerminatedBySigterm(detail) && repairPackageManager) {
-          const memoryCap = await ensureNodeLowMemoryBuildEnv(deployment.id, releaseId, envVars);
-          if (memoryCap.changed) {
-            envVars = memoryCap.envVars;
-            buildResult = await runBuild();
-            try {
-              assertCommandTree(buildResult, "Build retry after low-memory Node env");
-              buildRecovered = true;
-            } catch (memoryRetryError) {
-              const retryDetail = memoryRetryError instanceof Error ? memoryRetryError.message : String(memoryRetryError);
-              throw new Error(`${retryDetail}\n\nGuardian retried with NODE_OPTIONS=--max-old-space-size=512 and CIRCLE_NODE_TOTAL=2 because the Node build was terminated with SIGTERM/143, but the build still failed. Add swap on the VPS if this repeats.`);
-            }
-          } else {
-            throw new Error(`${detail}\n\nNode build is still being terminated with SIGTERM/143 even with low-memory build env already applied. Add swap on the VPS, then redeploy.`);
-          }
+          buildRecovered = await retryBuildAfterSigterm(detail, "initial build");
         }
         if (!buildRecovered) {
           if (!nodePackageBinaryMissing(detail) || !repairPackageManager) {
@@ -3874,14 +3928,16 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
             packageManager: repairPackageManager,
             evidence: detail.slice(0, 2000)
           }, "warn");
-          const repairInstall = await runStep(deployment.id, releaseId, "INSTALLING", "Repair Node build dependencies", () =>
-            sysagent.deploymentInstall({
-              rootPath: appPath,
-              command: nodeDependencyRepairCommand(repairPackageManager),
-              packageManager: repairPackageManager,
-              env: envVars,
-              resourceLimits: deployBudget.resourceLimits
-            })
+          const repairInstall = await runHeavyBuildExclusive(() =>
+            runStep(deployment.id, releaseId, "INSTALLING", "Repair Node build dependencies", () =>
+              sysagent.deploymentInstall({
+                rootPath: appPath,
+                command: nodeDependencyRepairCommand(repairPackageManager),
+                packageManager: repairPackageManager,
+                env: envVars,
+                resourceLimits: deployBudget.resourceLimits
+              })
+            )
           );
           assertCommandTree(repairInstall, "Repair Node build dependencies");
           buildResult = await runBuild();
@@ -3891,20 +3947,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
             const retryDetail = retryError instanceof Error ? retryError.message : String(retryError);
             let dependencyRepairRecovered = false;
             if (nodeBuildTerminatedBySigterm(retryDetail)) {
-              const memoryCap = await ensureNodeLowMemoryBuildEnv(deployment.id, releaseId, envVars);
-              if (memoryCap.changed) {
-                envVars = memoryCap.envVars;
-                buildResult = await runBuild();
-                try {
-                  assertCommandTree(buildResult, "Build retry after Node dependency repair and low-memory env");
-                  dependencyRepairRecovered = true;
-                } catch (memoryRetryError) {
-                  const memoryRetryDetail = memoryRetryError instanceof Error ? memoryRetryError.message : String(memoryRetryError);
-                  throw new Error(`${memoryRetryDetail}\n\nGuardian reinstalled Node dependencies and retried with NODE_OPTIONS=--max-old-space-size=512 plus CIRCLE_NODE_TOTAL=2 after SIGTERM/143, but the build still failed. Add swap on the VPS if this repeats.`);
-                }
-              } else {
-                throw new Error(`${retryDetail}\n\nNode build is still being terminated with SIGTERM/143 even with low-memory build env already applied. Add swap on the VPS, then redeploy.`);
-              }
+              dependencyRepairRecovered = await retryBuildAfterSigterm(retryDetail, "dependency repair");
             }
             if (!dependencyRepairRecovered) {
               throw new Error(`${retryDetail}\n\nGuardian reinstalled Node dependencies with devDependencies because a local build binary was missing, but the build still failed.`);

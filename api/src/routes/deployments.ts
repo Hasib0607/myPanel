@@ -947,7 +947,7 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
   if (lower.includes("no runnable start command")) return { message: "Vite/React apps need preview or static serve. Sync runtime from package.json, then redeploy.", repairAction: "sync-runtime", category: "missing_start_command" };
   if (lower.includes("cannot find module") || lower.includes("module_not_found")) return { message: "Missing package or wrong build output. Run dependency install, verify package.json, then redeploy.", repairAction: "redeploy", category: "missing_module" };
   if (lower.includes("eaddrinuse") || lower.includes("address already in use")) return { message: "Port conflict. Let the doctor redeploy so the worker can move the app to a free managed port.", repairAction: "redeploy", category: "port_conflict" };
-  if (lower.includes("heap out of memory") || lower.includes("javascript heap out of memory") || lower.includes("sigkill") || lower.includes("sigterm") || lower.includes("exit code 143") || lower.includes("killed")) return { message: "Server memory pressure. Add a Node memory cap and redeploy; if it repeats, add swap on the VPS.", repairAction: "set-node-memory", category: "memory" };
+  if (lower.includes("heap out of memory") || lower.includes("javascript heap out of memory") || lower.includes("sigkill") || lower.includes("sigterm") || lower.includes("exit code 143") || lower.includes("killed")) return { message: "Server memory pressure. Deployment Doctor will show the dynamic deploy budget; increase DEPLOY_MAX_MEMORY_MB or add swap if the protected budget is still too small.", repairAction: "set-node-memory", category: "memory" };
   if (lower.includes("dubious ownership") || lower.includes("source sync safe.directory") || lower.includes("safe.directory")) {
     return { message: "Git safe.directory failed inside the deployment runtime. Guardian/sysagent now injects a safe Git config for deployment and Composer commands; retry deploy.", repairAction: "redeploy", category: "git_safe_directory" };
   }
@@ -1252,6 +1252,54 @@ async function syncDeploymentRuntime(deployment: Awaited<ReturnType<typeof findD
   return { detection, updated };
 }
 
+function doctorBytesToMb(value: unknown) {
+  const bytes = typeof value === "number" && Number.isFinite(value) ? value : 0;
+  return Math.max(0, Math.round(bytes / 1024 / 1024));
+}
+
+function doctorClampNumber(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function calculateDoctorDeployBudget(snapshot: any) {
+  const totalMemoryMb = doctorBytesToMb(snapshot?.memory?.totalBytes);
+  const availableMemoryMb = doctorBytesToMb(snapshot?.memory?.availableBytes);
+  const runningAppsMemoryMb = doctorBytesToMb(snapshot?.runningApps?.memoryBytes);
+  const cpuCount = Math.max(1, Number(snapshot?.cpu?.count || 1));
+  const defaults = snapshot?.defaults?.resourceLimits ?? {};
+  const systemReserveMb = Number(env.DEPLOY_SYSTEM_RESERVE_MB || 4096);
+  const minAppReserveMb = Number(env.DEPLOY_MIN_APP_RESERVE_MB || 8192);
+  const appReserveMultiplier = Number(env.DEPLOY_APP_RESERVE_MULTIPLIER || 2);
+  const minDeployMemoryMb = Number(env.DEPLOY_MIN_MEMORY_MB || 3072);
+  const maxDeployMemoryMb = Number(env.DEPLOY_MAX_MEMORY_MB || 12288);
+  const freeCpuCores = Number(env.DEPLOY_FREE_CPU_CORES || 2);
+  const appReserveMb = Math.max(minAppReserveMb, Math.ceil(runningAppsMemoryMb * appReserveMultiplier));
+  const budgetByTotal = totalMemoryMb > 0 ? totalMemoryMb - appReserveMb - systemReserveMb : Number(defaults.memoryMaxMb || 4096);
+  const budgetByAvailable = availableMemoryMb > 0 ? availableMemoryMb - systemReserveMb : budgetByTotal;
+  const rawDeployMemoryMb = Math.min(budgetByTotal, budgetByAvailable);
+  const deployMemoryMb = rawDeployMemoryMb >= minDeployMemoryMb
+    ? doctorClampNumber(Math.floor(rawDeployMemoryMb), minDeployMemoryMb, maxDeployMemoryMb)
+    : Math.max(1536, Math.floor(rawDeployMemoryMb || Number(defaults.memoryMaxMb || 4096)));
+  const usableCpuCores = Math.max(1, cpuCount - freeCpuCores);
+  const cpuQuotaPercent = doctorClampNumber(usableCpuCores * 100, 100, Math.min(600, cpuCount * 100));
+  const nodeHeapMb = Math.max(512, deployMemoryMb - 1536);
+  const nextWorkers = doctorClampNumber(Math.floor(deployMemoryMb / 2048), 1, usableCpuCores);
+  return {
+    totalMemoryMb,
+    availableMemoryMb,
+    runningAppsMemoryMb,
+    appReserveMb,
+    systemReserveMb,
+    deployMemoryMb,
+    cpuCount,
+    cpuQuotaPercent,
+    nodeHeapMb,
+    nextWorkers,
+    swapFreeMb: doctorBytesToMb(snapshot?.swap?.freeBytes),
+    runningProcessCount: Number(snapshot?.runningApps?.processCount || 0)
+  };
+}
+
 async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeployment>>) {
   const checks: Array<{ key: string; label: string; status: "pass" | "warn" | "fail"; detail: string; fix?: string; repairAction?: string }> = [];
   const envSuggestions: Array<{ key: string; value: string; reason: string; repairAction: string }> = [];
@@ -1260,6 +1308,27 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
   const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
   const domain = deployment.domainBindings?.find((binding) => binding.role === "primary")?.domain ?? deployment.domainBindings?.[0]?.domain ?? deployment.domain;
   const serverName = deploymentServerName(domain);
+  let resourceBudget: ReturnType<typeof calculateDoctorDeployBudget> | null = null;
+  try {
+    const resourceSnapshot = await sysagent.deploymentResourceSnapshot({ rootPath: appPath });
+    resourceBudget = calculateDoctorDeployBudget(resourceSnapshot);
+    checks.push({
+      key: "deploy_resource_budget",
+      label: "Deploy resource budget",
+      status: resourceBudget.deployMemoryMb < Number(env.DEPLOY_MIN_MEMORY_MB || 3072) ? "warn" : "pass",
+      detail: `Deploy gets ${resourceBudget.deployMemoryMb}MB RAM, ${resourceBudget.cpuQuotaPercent}% CPU, Node heap ${resourceBudget.nodeHeapMb}MB, Next workers ${resourceBudget.nextWorkers}. Running apps use ${resourceBudget.runningAppsMemoryMb}MB and reserve is ${resourceBudget.appReserveMb}MB; system reserve is ${resourceBudget.systemReserveMb}MB.`,
+      fix: resourceBudget.deployMemoryMb < Number(env.DEPLOY_MIN_MEMORY_MB || 3072) ? "Increase DEPLOY_MAX_MEMORY_MB, lower app reserve only if safe, or add swap before redeploying heavy Next builds." : undefined,
+      repairAction: resourceBudget.deployMemoryMb < Number(env.DEPLOY_MIN_MEMORY_MB || 3072) ? "set-node-memory" : undefined
+    });
+  } catch (error) {
+    checks.push({
+      key: "deploy_resource_budget",
+      label: "Deploy resource budget",
+      status: "warn",
+      detail: error instanceof Error ? error.message : "Could not read deploy resource budget.",
+      fix: "Restart sysagent and rerun Deployment Doctor."
+    });
+  }
 
   const rootExists = await fs.stat(appPath).then((stats) => stats.isDirectory()).catch(() => false);
   checks.push({
@@ -1720,6 +1789,7 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
     evidence: evidenceLines(recentErrors),
     envSuggestions,
     riskyActions: uniqueRiskyActions(riskyActions),
+    resourceBudget,
     generatedAt: new Date().toISOString()
   };
 }

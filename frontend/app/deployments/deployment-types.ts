@@ -174,7 +174,7 @@ export type DeploymentMetrics = {
 export type DeploymentDoctorResponse = {
   status: "pass" | "warn" | "fail";
   summary: string;
-  recommendedAction: "sync-runtime" | "health" | "restart" | "redeploy" | "rollback" | "set-node-memory" | "sync-public-env" | "request-approval" | null;
+  recommendedAction: "sync-runtime" | "health" | "restart" | "redeploy" | "rollback" | "set-node-memory" | "sync-public-env" | "rewrite-nginx" | "request-approval" | null;
   checks: Array<{
     key: string;
     label: string;
@@ -186,6 +186,20 @@ export type DeploymentDoctorResponse = {
   evidence: string[];
   envSuggestions: Array<{ key: string; value: string; reason: string; repairAction: string }>;
   riskyActions: Array<{ key: string; label: string; command: string; reason: string; approvalRequired: true }>;
+  resourceBudget?: {
+    totalMemoryMb: number;
+    availableMemoryMb: number;
+    runningAppsMemoryMb: number;
+    appReserveMb: number;
+    systemReserveMb: number;
+    deployMemoryMb: number;
+    cpuCount: number;
+    cpuQuotaPercent: number;
+    nodeHeapMb: number;
+    nextWorkers: number;
+    swapFreeMb: number;
+    runningProcessCount: number;
+  } | null;
   generatedAt: string;
 };
 
