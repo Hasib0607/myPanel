@@ -653,7 +653,7 @@ export function FileManagerClient({
         throw new Error(`Upload is too large. Limit: ${formatBytes(uploadLimit)}.`);
       }
 
-      const chunkSize = Math.max(1024 * 1024, overview.data?.uploadChunkLimit ?? 64 * 1024 * 1024);
+      const chunkSize = Math.max(1024 * 1024, overview.data?.uploadChunkLimit ?? 16 * 1024 * 1024);
       const totalChunks = Math.max(1, Math.ceil(file.size / chunkSize));
       const uploadId = typeof crypto !== "undefined" && "randomUUID" in crypto
         ? crypto.randomUUID()

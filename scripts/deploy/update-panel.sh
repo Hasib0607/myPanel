@@ -601,9 +601,9 @@ ensure_large_upload_config() {
   fi
 
   current="$(grep -E '^FILE_MANAGER_UPLOAD_CHUNK_BYTES=' "$file" | tail -n 1 | cut -d= -f2- || true)"
-  if ! [[ "$current" =~ ^[0-9]+$ ]] || (( current < 1048576 )); then
-    log "setting FILE_MANAGER_UPLOAD_CHUNK_BYTES=67108864 for chunked file-manager uploads"
-    set_env_value "FILE_MANAGER_UPLOAD_CHUNK_BYTES" "67108864"
+  if ! [[ "$current" =~ ^[0-9]+$ ]] || (( current < 1048576 )) || (( current > 16777216 )); then
+    log "setting FILE_MANAGER_UPLOAD_CHUNK_BYTES=16777216 for chunked file-manager uploads"
+    set_env_value "FILE_MANAGER_UPLOAD_CHUNK_BYTES" "16777216"
     changed="true"
   fi
 
@@ -881,6 +881,33 @@ patch_nginx_websocket() {
   fi
 }
 
+patch_nginx_api_upload_limit() {
+  if [[ ! -f "$NGINX_CONF" ]]; then
+    log "Panel nginx config not found at $NGINX_CONF; skipping API upload size patch"
+    return 0
+  fi
+  if awk '/location \/api\/v1\/ \{/ { in_block = 1 } in_block && /client_max_body_size/ { found = 1 } in_block && /^\s*\}/ { in_block = 0 } END { exit found ? 0 : 1 }' "$NGINX_CONF"; then
+    log "Panel nginx API location already allows large uploads"
+    return 0
+  fi
+  log "Patching $NGINX_CONF: enabling unlimited upload size for /api/v1/"
+  sed -i '/location \/api\/v1\/ {/a\        client_max_body_size 0;' "$NGINX_CONF"
+  if nginx -t 2>&1 | tee -a "$LOG_FILE"; then
+    systemctl reload nginx 2>&1 | tee -a "$LOG_FILE" || true
+    log "nginx reloaded with API upload size override"
+  else
+    log "nginx config test failed after API upload patch; skipping reload"
+  fi
+}
+
+ensure_nginx_global_upload_limit() {
+  local script="$APP_DIR/scripts/maintenance/fix-nginx-upload-size.sh"
+  if [[ -x "$script" ]]; then
+    log "Ensuring global nginx upload size override"
+    bash "$script" 2>&1 | tee -a "$LOG_FILE" || true
+  fi
+}
+
 fetch_origin_branch
 normalize_known_self_update_dirty_files
 
@@ -924,6 +951,8 @@ run "$NPM_BIN" --workspace api run prisma:generate
 frontend_build_with_recovery
 
 patch_nginx_websocket
+patch_nginx_api_upload_limit
+ensure_nginx_global_upload_limit
 
 for service in $SERVICES; do
   write_status "running" "restarting $service" "$NEW_COMMIT" "$NEW_COMMIT_SUBJECT"

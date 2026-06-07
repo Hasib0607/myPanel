@@ -7,6 +7,7 @@ import websocket from "@fastify/websocket";
 import Fastify from "fastify";
 import { ZodError } from "zod";
 import { env } from "./config/env.js";
+import { fileUploadChunkBodyLimitBytes } from "./lib/fileUploadLimits.js";
 import { csrfCookieName, csrfHeaderName, validCsrfPair } from "./lib/csrf.js";
 import { prisma } from "./lib/prisma.js";
 import { authRoutes } from "./routes/auth.js";
@@ -32,7 +33,11 @@ import { twoFactorRoutes } from "./routes/twoFactor.js";
 import { whmMigrationRoutes } from "./routes/whmMigration.js";
 
 export function buildApp() {
-  const app = Fastify({ logger: true, requestTimeout: 0 });
+  const app = Fastify({
+    logger: true,
+    requestTimeout: 0,
+    bodyLimit: fileUploadChunkBodyLimitBytes
+  });
 
   app.register(cors, {
     origin: env.FRONTEND_URL,

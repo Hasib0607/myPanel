@@ -5,10 +5,13 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
+import type { Readable } from "node:stream";
 import { DeploymentFramework, Prisma } from "@prisma/client";
 import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { env } from "../config/env.js";
+import { chunkUploadQuery, writeUploadChunk } from "../lib/fileChunkUpload.js";
+import { fileUploadChunkBodyLimitBytes, fileUploadChunkBytes, fileUploadLimitBytes } from "../lib/fileUploadLimits.js";
 import { deployQueue, sslQueue } from "../jobs/queues.js";
 import { audit } from "../lib/audit.js";
 import { githubApiErrorMessage, isGithubWebhookPermissionError } from "../lib/githubApiErrors.js";
@@ -1286,7 +1289,7 @@ async function writeDatabaseUploadToTemp(payload: NodeJS.ReadableStream, filenam
 }
 
 export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
-  app.addContentTypeParser("application/vnd.vps-panel.file-upload", (_request, payload, done) => {
+  app.addContentTypeParser("application/vnd.vps-panel.file-upload", { bodyLimit: fileUploadChunkBodyLimitBytes }, (_request, payload, done) => {
     done(null, payload);
   });
   if (!app.hasContentTypeParser(importUploadContentType)) {
@@ -2903,7 +2906,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
   app.get("/files/overview", async (request: any) => {
     const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
     await fs.mkdir(account.homeRoot, { recursive: true });
-    return { root: account.homeRoot, platform: os.platform(), pathSeparator: path.sep, textReadLimit: 1024 * 1024, uploadLimit: 3 * 1024 * 1024 * 1024, uploadChunkLimit: 64 * 1024 * 1024, writable: true };
+    return { root: account.homeRoot, platform: os.platform(), pathSeparator: path.sep, textReadLimit: 1024 * 1024, uploadLimit: fileUploadLimitBytes, uploadChunkLimit: fileUploadChunkBytes, writable: true };
   });
 
   app.get("/files/list", async (request: any) => {
@@ -3118,25 +3121,28 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     return { ok: true, targetPath: target.relative, overwrite: body.overwrite };
   });
 
-  app.post("/files/upload/chunk", { bodyLimit: 70 * 1024 * 1024 }, async (request: any, reply) => {
-    const query = z.object({
-      parentPath: z.string(),
-      name: z.string().min(1).max(180),
-      uploadId: z.string(),
-      index: z.coerce.number().int().min(0),
-      totalChunks: z.coerce.number().int().min(1),
-      overwrite: z.enum(["true", "false"]).default("false")
-    }).parse(request.query);
+  app.post("/files/upload/chunk", { bodyLimit: fileUploadChunkBodyLimitBytes }, async (request: any, reply) => {
+    const query = chunkUploadQuery.parse(request.query);
     const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
     const target = safeChildPath(account, query.parentPath, query.name);
-    if (query.index === 0 && query.overwrite !== "true") {
+    if (query.index === 0 && !query.overwrite) {
       await fs.access(target.resolved).then(() => { throw app.httpErrors.conflict("Target already exists"); }).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
     }
-    const buffer = Buffer.isBuffer(request.body) ? request.body : Buffer.from(request.body ?? "");
     await fs.mkdir(path.dirname(target.resolved), { recursive: true });
-    await fs.writeFile(target.resolved, buffer, { flag: query.index === 0 ? "w" : "a" });
+    const result = await writeUploadChunk({
+      body: request.body as Readable,
+      parentDir: path.dirname(target.resolved),
+      filePath: target.resolved,
+      query,
+      httpErrors: app.httpErrors,
+      uploadLimit: fileUploadLimitBytes,
+      uploadChunkLimit: fileUploadChunkBytes
+    });
     const file = await fileEntry(account, target.resolved);
-    return reply.code(query.index + 1 === query.totalChunks ? 201 : 202).send({ ok: true, uploadId: query.uploadId, file });
+    if (!result.complete) {
+      return reply.code(202).send({ ok: true, uploadId: result.uploadId, receivedBytes: result.receivedBytes, complete: false });
+    }
+    return reply.code(201).send({ ok: true, uploadId: result.uploadId, receivedBytes: result.receivedBytes, complete: true, file });
   });
 
   app.post("/password", async (request: any) => {

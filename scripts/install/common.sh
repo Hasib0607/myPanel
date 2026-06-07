@@ -428,7 +428,7 @@ DOMAIN_NAMESERVER_RESOLVERS=1.1.1.1,8.8.8.8,9.9.9.9
 DOMAIN_NAMESERVER_DOH_URLS=https://cloudflare-dns.com/dns-query,https://dns.google/resolve,https://dns.quad9.net/dns-query
 FILE_MANAGER_ROOT=/var/www
 FILE_MANAGER_UPLOAD_LIMIT_BYTES=1099511627776
-FILE_MANAGER_UPLOAD_CHUNK_BYTES=67108864
+FILE_MANAGER_UPLOAD_CHUNK_BYTES=16777216
 NGINX_SITES_AVAILABLE=$NGINX_SITES_AVAILABLE
 NGINX_SITES_ENABLED=$NGINX_SITES_ENABLED
 ALLOW_LIVE_SYSTEM_COMMANDS=true
@@ -638,6 +638,7 @@ fi)
     }
 
     location /api/v1/ {
+        client_max_body_size 0;
         proxy_pass http://127.0.0.1:$PANEL_PORT/api/v1/;
         proxy_http_version 1.1;
         proxy_set_header Host \$http_host;
@@ -688,6 +689,7 @@ fi)
     }
 
     location /api/v1/ {
+        client_max_body_size 0;
         proxy_pass http://127.0.0.1:$PANEL_PORT/api/v1/;
         proxy_http_version 1.1;
         proxy_set_header Host \$http_host;
