@@ -12,7 +12,7 @@ import { z } from "zod";
 import { env } from "../config/env.js";
 import { audit } from "../lib/audit.js";
 import { ensureDomainFileStructure, ensureSubdomainFileStructure } from "../lib/domainFiles.js";
-import { configuredFileUploadLimitBytes, fileUploadChunkBodyLimitBytes, fileUploadChunkBytes, fileUploadLimitBytes } from "../lib/fileUploadLimits.js";
+import { configuredFileUploadLimitBytes, fileUploadBodyLimitBytes, fileUploadChunkBodyLimitBytes, fileUploadChunkBytes, fileUploadLimitBytes } from "../lib/fileUploadLimits.js";
 import type { WebSocket } from "@fastify/websocket";
 import { chunkUploadQuery, writeUploadChunk } from "../lib/fileChunkUpload.js";
 import { attachFileUploadWebSocket } from "../lib/fileWebSocketUpload.js";
@@ -26,7 +26,7 @@ const uploadLimit = fileUploadLimitBytes;
 const clientUploadLimit = configuredFileUploadLimitBytes;
 const uploadChunkLimit = fileUploadChunkBytes;
 const uploadChunkBodyLimit = fileUploadChunkBodyLimitBytes;
-const directUploadBodyLimit = configuredFileUploadLimitBytes === 0 ? uploadChunkBodyLimit : Math.ceil(uploadLimit * 1.02);
+const directUploadBodyLimit = fileUploadBodyLimitBytes;
 const treeEntryLimit = 1500;
 const rawUploadContentType = "application/vnd.vps-panel.file-upload";
 
@@ -325,7 +325,7 @@ function commandTreeFailure(value: unknown): string | null {
 }
 
 export const fileRoutes: FastifyPluginAsync = async (app) => {
-  app.addContentTypeParser(rawUploadContentType, { bodyLimit: uploadChunkBodyLimit }, (_request, payload, done) => {
+  app.addContentTypeParser(rawUploadContentType, { bodyLimit: directUploadBodyLimit }, (_request, payload, done) => {
     done(null, payload);
   });
 

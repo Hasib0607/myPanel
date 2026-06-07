@@ -11,3 +11,4 @@ export const fileUploadChunkBodyLimitBytes = Math.max(
   Math.ceil(fileUploadChunkBytes * 1.5) + 16 * 1024 * 1024,
   128 * 1024 * 1024
 );
+export const fileUploadBodyLimitBytes = Math.min(fileUploadLimitBytes, unlimitedFileUploadBytes);

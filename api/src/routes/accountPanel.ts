@@ -11,7 +11,7 @@ import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { env } from "../config/env.js";
 import { chunkUploadQuery, writeUploadChunk } from "../lib/fileChunkUpload.js";
-import { configuredFileUploadLimitBytes, fileUploadChunkBodyLimitBytes, fileUploadChunkBytes, fileUploadLimitBytes } from "../lib/fileUploadLimits.js";
+import { configuredFileUploadLimitBytes, fileUploadBodyLimitBytes, fileUploadChunkBodyLimitBytes, fileUploadChunkBytes, fileUploadLimitBytes } from "../lib/fileUploadLimits.js";
 import { deployQueue, sslQueue } from "../jobs/queues.js";
 import { audit } from "../lib/audit.js";
 import { githubApiErrorMessage, isGithubWebhookPermissionError } from "../lib/githubApiErrors.js";
@@ -1289,7 +1289,7 @@ async function writeDatabaseUploadToTemp(payload: NodeJS.ReadableStream, filenam
 }
 
 export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
-  app.addContentTypeParser("application/vnd.vps-panel.file-upload", { bodyLimit: fileUploadChunkBodyLimitBytes }, (_request, payload, done) => {
+  app.addContentTypeParser("application/vnd.vps-panel.file-upload", { bodyLimit: fileUploadBodyLimitBytes }, (_request, payload, done) => {
     done(null, payload);
   });
   if (!app.hasContentTypeParser(importUploadContentType)) {
@@ -3119,6 +3119,51 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const target = safeAccountPath(account, body.targetPath);
     await fs.mkdir(target.resolved, { recursive: true });
     return { ok: true, targetPath: target.relative, overwrite: body.overwrite };
+  });
+
+  app.post("/files/upload", { config: { rateLimit: false }, bodyLimit: fileUploadBodyLimitBytes }, async (request: any, reply) => {
+    const query = z.object({
+      parentPath: z.string().default("."),
+      name: z.string(),
+      overwrite: z.coerce.boolean().default(false)
+    }).parse(request.query);
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    const target = safeChildPath(account, query.parentPath, query.name);
+    const contentLength = Number(request.headers["content-length"] ?? 0);
+    if (contentLength > fileUploadLimitBytes) throw app.httpErrors.payloadTooLarge("Upload is too large");
+    if (!query.overwrite) {
+      await fs.access(target.resolved).then(() => {
+        throw app.httpErrors.conflict("Target already exists");
+      }).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+    }
+    await fs.mkdir(path.dirname(target.resolved), { recursive: true });
+    const tempFile = path.join(path.dirname(target.resolved), `.upload-${process.pid}-${randomUUID()}.tmp`);
+    let bytes = 0;
+    try {
+      await pipeline(
+        request.body as Readable,
+        async function* (source: AsyncIterable<Buffer>) {
+          for await (const chunk of source) {
+            bytes += chunk.byteLength;
+            if (bytes > fileUploadLimitBytes) throw app.httpErrors.payloadTooLarge("Upload is too large");
+            yield chunk;
+          }
+        },
+        createWriteStream(tempFile, { flags: "wx" })
+      );
+      if (query.overwrite) {
+        await fs.rename(tempFile, target.resolved);
+      } else {
+        await fs.link(tempFile, target.resolved);
+        await fs.rm(tempFile, { force: true });
+      }
+    } catch (error) {
+      await fs.rm(tempFile, { force: true }).catch(() => undefined);
+      throw error;
+    }
+    return reply.code(201).send({ ok: true, file: await fileEntry(account, target.resolved) });
   });
 
   app.post("/files/upload/chunk", { config: { rateLimit: false }, bodyLimit: fileUploadChunkBodyLimitBytes }, async (request: any, reply) => {
