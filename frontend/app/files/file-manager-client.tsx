@@ -227,14 +227,18 @@ export function FileManagerClient({
   githubReposApiBase = "/deployments/github/repos",
   editorBase = "/files/editor",
   rootHintPrefix = "/var/www",
-  enableGithubPull = true
+  enableGithubPull = true,
+  fixedRoot,
+  embedded = false
 }: {
   apiBase?: "/files" | "/account/files";
   domainsApiBase?: "/domains" | "/account/domains";
   githubReposApiBase?: string;
-  editorBase?: string;
+  editorBase?: string | null;
   rootHintPrefix?: string;
   enableGithubPull?: boolean;
+  fixedRoot?: FileRootOption;
+  embedded?: boolean;
 } = {}) {
   const queryClient = useQueryClient();
   const [currentPath, setCurrentPath] = useState(".");
@@ -266,9 +270,11 @@ export function FileManagerClient({
 
   const domains = useQuery({
     queryKey: ["domains", domainsApiBase, "file-manager"],
-    queryFn: () => apiGet<DomainListResponse>(`${domainsApiBase}?page=1&pageSize=100`)
+    queryFn: () => apiGet<DomainListResponse>(`${domainsApiBase}?page=1&pageSize=100`),
+    enabled: !fixedRoot
   });
   const rootOptions = useMemo<FileRootOption[]>(() => {
+    if (fixedRoot) return [fixedRoot];
     const items = domains.data?.items ?? [];
     const roots = items.flatMap((domain) => [
       { id: `domain:${domain.id}`, label: domain.name, path: domain.name, hint: `${rootHintPrefix}/${domain.name}` },
@@ -281,7 +287,7 @@ export function FileManagerClient({
     ]);
     roots.push({ id: "trash:global", label: "Trash", path: ".trash", hint: `${rootHintPrefix}/.trash` });
     return roots;
-  }, [domains.data?.items]);
+  }, [domains.data?.items, fixedRoot]);
   const selectedRoot = rootOptions.find((item) => item.id === selectedDomainId) ?? null;
   const domainRootPath = selectedRoot?.path ?? ".";
 
@@ -310,6 +316,14 @@ export function FileManagerClient({
     setCurrentPath(firstRoot.path);
     setSelectedPath(null);
   }, [rootOptions, selectedDomainId]);
+
+  useEffect(() => {
+    if (!fixedRoot) return;
+    setSelectedDomainId(fixedRoot.id);
+    setCurrentPath(fixedRoot.path);
+    setSelectedPath(null);
+    setSelectedPaths(new Set());
+  }, [fixedRoot]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -716,6 +730,19 @@ export function FileManagerClient({
     setLastResult("");
   }
 
+  function pathWithinFixedRoot(pathValue: string) {
+    if (!fixedRoot) return true;
+    const root = fixedRoot.path.replace(/\/+$/, "");
+    const target = pathValue.replace(/\\/g, "/").replace(/\/+$/, "") || ".";
+    return target === root || target.startsWith(`${root}/`);
+  }
+
+  function guardFixedRootPath(pathValue: string) {
+    if (pathWithinFixedRoot(pathValue)) return true;
+    setLastResult("This project file manager is locked to the selected project storage.");
+    return false;
+  }
+
   function setSingleSelection(item: FileEntry) {
     setSelectedPath(item.path);
     setSelectedPaths(new Set([item.path]));
@@ -748,7 +775,7 @@ export function FileManagerClient({
       setCurrentPath(item.path);
       setSelectedPath(null);
       setSelectedPaths(new Set());
-    } else if (item.kind === "text") {
+    } else if (item.kind === "text" && editorBase) {
       window.location.href = editorHref(item.path, editorBase);
     }
   }
@@ -775,7 +802,7 @@ export function FileManagerClient({
   const selectedZipPaths = useMemo(() => (list.data?.items ?? []).filter((item) => selectedPaths.has(item.path) && isZipEntry(item)).map((item) => item.path), [list.data?.items, selectedPaths]);
 
   return (
-    <section className="grid h-[calc(100vh-64px)] grid-cols-[300px_minmax(0,1fr)] overflow-hidden p-6 lg:h-screen xl:p-8">
+    <section className={`grid overflow-hidden ${embedded ? "h-[720px] grid-cols-[260px_minmax(0,1fr)] p-0" : "h-[calc(100vh-64px)] grid-cols-[300px_minmax(0,1fr)] p-6 lg:h-screen xl:p-8"}`}>
       <aside className="min-h-0 rounded-l-md border border-panel-line bg-white">
         <div className="border-b border-panel-line p-4">
           <div className="truncate text-sm font-semibold">{selectedRoot ? selectedRoot.label : "Web roots"}</div>
@@ -808,16 +835,18 @@ export function FileManagerClient({
       <main className="min-w-0 min-h-0 rounded-r-md border-y border-r border-panel-line bg-white flex flex-col">
         <div className="space-y-3 border-b border-panel-line p-4">
           <div className="flex flex-wrap items-center gap-2">
-            <select
-              className="h-9 min-w-64 rounded-md border border-panel-line px-2 text-sm"
-              onChange={(event) => selectDomain(event.target.value)}
-              value={selectedDomainId}
-            >
-              <option value="" disabled>{domains.isLoading ? "Loading roots..." : "Select web root"}</option>
-              {rootOptions.map((root) => (
-                <option key={root.id} value={root.id}>{root.label}</option>
-              ))}
-            </select>
+            {!fixedRoot ? (
+              <select
+                className="h-9 min-w-64 rounded-md border border-panel-line px-2 text-sm"
+                onChange={(event) => selectDomain(event.target.value)}
+                value={selectedDomainId}
+              >
+                <option value="" disabled>{domains.isLoading ? "Loading roots..." : "Select web root"}</option>
+                {rootOptions.map((root) => (
+                  <option key={root.id} value={root.id}>{root.label}</option>
+                ))}
+              </select>
+            ) : null}
             {selectedRoot ? (
               <span className="text-xs text-panel-muted">Showing {selectedRoot.hint}</span>
             ) : (
@@ -829,7 +858,7 @@ export function FileManagerClient({
             <button
               aria-label="Git pull"
               className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
-              disabled={!gitStatus.data?.isRepo || gitPull.isPending}
+              disabled={!enableGithubPull || !gitStatus.data?.isRepo || gitPull.isPending}
               onClick={() => gitPull.mutate()}
               title={gitStatus.data?.isRepo ? "Pull latest changes from git remote" : "Current folder is not a git repository"}
               type="button"
@@ -849,7 +878,7 @@ export function FileManagerClient({
             <button
               aria-label="Toggle auto pull"
               className={`flex h-9 w-9 items-center justify-center rounded-md border text-sm ${autoPullEnabled ? "border-emerald-300 bg-emerald-50 text-emerald-700" : "border-panel-line hover:bg-slate-50"} disabled:cursor-not-allowed disabled:opacity-40`}
-              disabled={!gitStatus.data?.isRepo}
+              disabled={!enableGithubPull || !gitStatus.data?.isRepo}
               onClick={() => setAutoPullEnabled((current) => !current)}
               title={gitStatus.data?.isRepo ? `Auto pull ${autoPullEnabled ? "ON" : "OFF"} (every 1 minute)` : "Current folder is not a git repository"}
               type="button"
@@ -880,6 +909,7 @@ export function FileManagerClient({
                   confirmLabel: "Copy"
                 }))?.trim();
                 if (!targetPath) return;
+                if (!guardFixedRootPath(targetPath)) return;
                 copySelected.mutate({ sourcePaths: [...selectedPaths], targetPath });
               }}
               title={selectedCount > 0 ? `Copy ${selectedCount} selected` : "Copy selected"}
@@ -899,6 +929,7 @@ export function FileManagerClient({
                   confirmLabel: "Move"
                 }))?.trim();
                 if (!targetPath) return;
+                if (!guardFixedRootPath(targetPath)) return;
                 moveSelected.mutate({ sourcePaths: [...selectedPaths], targetPath });
               }}
               title={selectedCount > 0 ? `Move ${selectedCount} selected` : "Move selected"}
@@ -917,7 +948,7 @@ export function FileManagerClient({
                   defaultValue: joinPath(currentPath, "selected.zip"),
                   confirmLabel: "Create"
                 }))?.trim();
-                if (archivePath) archiveCreate.mutate({ sourcePaths: [...selectedPaths], archivePath });
+                if (archivePath && guardFixedRootPath(archivePath)) archiveCreate.mutate({ sourcePaths: [...selectedPaths], archivePath });
               }}
               title={selectedCount > 0 ? `Zip ${selectedCount} selected` : "Zip selected"}
               type="button"
@@ -1099,7 +1130,7 @@ export function FileManagerClient({
               <Folder size={15} /> Open
             </button>
           ) : null}
-          {contextCanEdit ? (
+          {contextCanEdit && editorBase ? (
             <Link className="flex h-9 w-full items-center gap-2 px-3 hover:bg-slate-50" href={editorHref(contextItem.path, editorBase)} onClick={() => setContextMenu(null)}>
               <Edit3 size={15} /> Edit
             </Link>
@@ -1168,7 +1199,7 @@ export function FileManagerClient({
               defaultValue: joinPath(parentPath(contextItem.path), `${contextItem.name}.zip`),
               confirmLabel: "Create"
             }))?.trim();
-            if (archivePath) archiveCreate.mutate({ sourcePaths: [contextItem.path], archivePath });
+            if (archivePath && guardFixedRootPath(archivePath)) archiveCreate.mutate({ sourcePaths: [contextItem.path], archivePath });
             setContextMenu(null);
           }} type="button">
             <Archive size={15} /> Zip

@@ -4,6 +4,7 @@ import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "reac
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, ArrowDownToLine, ArrowUpFromLine, CheckCircle2, Clipboard, Cpu, Database, Eye, EyeOff, FolderGit2, GitBranch, Github, HardDrive, History, KeyRound, List, MemoryStick, Network, Pencil, Play, Plus, Rocket, Save, Search, Settings2, ShieldCheck, Square, ToggleLeft, ToggleRight, Trash2, Wand2, X } from "lucide-react";
 import { ApiError, apiDelete, apiDeleteBody, apiGet, apiGetText, apiPatch, apiPost, apiPut } from "@/lib/api";
+import { FileManagerClient } from "@/app/files/file-manager-client";
 import type { Deployment, DeploymentDomainBinding, DeploymentEnvVar, DeploymentFramework, DeploymentListResponse, DeploymentMetrics, DeploymentRelease, DetectionResponse, PreflightResponse, QueueResponse, DeploymentSourceProvider } from "./deployment-types";
 import { frameworkOptions, sourceOptions } from "./deployment-types";
 import { ResultNotice, actionIcon, formatDate, healthBadge, queryString, statusBadge } from "./deployment-ui";
@@ -264,7 +265,7 @@ export function DeploymentsClient({
   const [draftSearch, setDraftSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [sourceFilter, setSourceFilter] = useState("");
-  const [activeTab, setActiveTab] = useState<"overview" | "domains" | "history" | "env" | "settings">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "domains" | "history" | "env" | "files" | "settings">("overview");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [repoPickerOpen, setRepoPickerOpen] = useState(false);
@@ -713,8 +714,9 @@ export function DeploymentsClient({
     { key: "domains", label: "Domains" },
     { key: "history", label: "Deploy History" },
     { key: "env", label: "Environment" },
+    { key: "files", label: "File Manager" },
     { key: "settings", label: "Settings" }
-  ] as const;
+  ] satisfies Array<{ key: typeof activeTab; label: string }>;
 
   return (
     <section className="flex h-[calc(100vh-81px)] flex-col overflow-hidden bg-slate-50">
@@ -797,6 +799,7 @@ export function DeploymentsClient({
                 {activeTab === "domains" ? <DomainsPanel deployment={selected} domains={domainOptions(domains.data?.items ?? [])} domainsToAdd={domainsToAdd} setDomainsToAdd={setDomainsToAdd} addDomain={() => addDomain.mutate()} addingDomain={addDomain.isPending} setPrimary={(binding) => setPrimaryDomain.mutate(binding)} removeDomain={(binding) => removeDomain.mutate(binding)} /> : null}
                 {activeTab === "history" ? <HistoryPanel deployment={selected} releases={releases.data ?? selected.releases ?? []} loading={releases.isLoading} onRefresh={() => releases.refetch()} onJump={(release) => rollbackRelease.mutate({ deployment: selected, releaseId: release.id })} jumping={rollbackRelease.isPending} /> : null}
                 {activeTab === "env" ? <EnvPanel deployment={selected} envKey={envKey} envValue={envValue} envSecret={envSecret} bulkEnvText={bulkEnvText} bulkEnvSecret={bulkEnvSecret} revealedValues={revealedEnvValues} revealingKey={revealEnv.variables} savingLineKey={saveEnvLine.variables?.item.key} setEnvKey={setEnvKey} setEnvValue={setEnvValue} setEnvSecret={setEnvSecret} setBulkEnvText={setBulkEnvText} setBulkEnvSecret={setBulkEnvSecret} saveEnv={(onSuccess) => saveEnv.mutate(undefined, { onSuccess })} saveBulkEnv={(onSuccess) => saveBulkEnv.mutate(undefined, { onSuccess })} saveRawEnv={(text, onSuccess) => saveBulkEnv.mutate(text, { onSuccess })} savingEnv={saveEnv.isPending} savingBulkEnv={saveBulkEnv.isPending} revealEnv={(key) => revealEnv.mutate(key)} hideEnv={hideEnv} saveEnvLine={(item, value) => saveEnvLine.mutate({ item, value })} removeEnv={(key) => removeEnv.mutate(key)} removeBulkEnv={(keys) => removeBulkEnv.mutate(keys)} removingBulkEnv={removeBulkEnv.isPending} clearDatabaseEnvOverrides={() => clearDatabaseEnvOverrides.mutate()} clearingDatabaseEnvOverrides={clearDatabaseEnvOverrides.isPending} /> : null}
+                {activeTab === "files" ? <DeploymentFileManagerPanel accountRoot={accountRoot} apiBase={apiBase} deployment={selected} /> : null}
                 {activeTab === "settings" ? <SettingsPanel deployment={selected} deleteText={deleteText} setDeleteText={setDeleteText} onEdit={openEdit} onDelete={() => deleteProject.mutate()} deleting={deleteProject.isPending} /> : null}
               </div>
             </div>
@@ -896,6 +899,52 @@ function DeploymentFormFields({ value, onChange, domains, databaseOverview }: { 
 
 function Input({ label, value, onChange, readOnly }: { label: string; value: string; onChange: (value: string) => void; readOnly?: boolean }) {
   return <label className="space-y-1 text-xs font-medium text-panel-muted">{label}<input className={`h-9 w-full rounded-md border border-panel-line px-3 text-sm text-panel-ink ${readOnly ? "bg-slate-50 text-panel-muted" : ""}`} onChange={(event) => onChange(event.target.value)} readOnly={readOnly} value={value} /></label>;
+}
+
+function DeploymentFileManagerPanel({ accountRoot, apiBase, deployment }: { accountRoot?: string; apiBase: "/deployments" | "/account/deployments"; deployment: Deployment }) {
+  const fileApiBase = apiBase === "/account/deployments" ? "/account/files" : "/files";
+  const rootPrefix = apiBase === "/account/deployments" ? accountRoot : "/var/www";
+  const projectPath = deploymentAppStoragePath(deployment);
+  const relativePath = projectStorageRelativePath(projectPath, rootPrefix);
+  if (!relativePath) {
+    return (
+      <div className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+        Project storage is outside the configured file manager root.
+      </div>
+    );
+  }
+  return (
+    <div className="overflow-hidden rounded-md border border-panel-line bg-white">
+      <FileManagerClient
+        apiBase={fileApiBase}
+        domainsApiBase={apiBase === "/account/deployments" ? "/account/domains" : "/domains"}
+        editorBase={null}
+        embedded
+        enableGithubPull={false}
+        fixedRoot={{
+          id: `deployment:${deployment.id}`,
+          label: deployment.name,
+          path: relativePath,
+          hint: projectPath
+        }}
+        rootHintPrefix={rootPrefix ?? "/var/www"}
+      />
+    </div>
+  );
+}
+
+function deploymentAppStoragePath(deployment: Deployment) {
+  const cleanRoot = deployment.rootPath.replace(/\/+$/, "");
+  const cleanDirectory = (deployment.rootDirectory || ".").replace(/^\/+|\/+$/g, "");
+  return cleanDirectory && cleanDirectory !== "." ? `${cleanRoot}/${cleanDirectory}` : cleanRoot;
+}
+
+function projectStorageRelativePath(projectPath: string, rootPrefix?: string) {
+  const cleanPath = projectPath.replace(/\\/g, "/").replace(/\/+$/, "");
+  const cleanRoot = (rootPrefix || "/var/www").replace(/\\/g, "/").replace(/\/+$/, "");
+  if (cleanPath === cleanRoot) return ".";
+  if (!cleanPath.startsWith(`${cleanRoot}/`)) return null;
+  return cleanPath.slice(cleanRoot.length + 1) || ".";
 }
 
 function OverviewPanel({ apiBase, deployment }: { apiBase: "/deployments" | "/account/deployments"; deployment: Deployment }) {
