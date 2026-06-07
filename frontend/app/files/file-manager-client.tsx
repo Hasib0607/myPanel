@@ -24,7 +24,6 @@ import {
   X
 } from "lucide-react";
 import { apiDeleteBody, apiGet, apiPatch, apiPost, apiUploadWithProgress } from "@/lib/api";
-import { uploadFileViaWebSocket } from "@/lib/fileUploadWs";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { InputModal } from "@/components/input-modal";
 import Link from "next/link";
@@ -660,28 +659,9 @@ export function FileManagerClient({
 
       setUploadProgress({ fileName: file.name, percent: 0, phase: "uploading", uploadedBytes: 0, totalBytes: file.size });
 
-      try {
-        await uploadFileViaWebSocket({
-          apiBase,
-          parentPath: currentPath,
-          name: file.name,
-          file,
-          uploadId,
-          overwrite,
-          onProgress: (uploaded, total) => {
-            const percent = total > 0 ? Math.min(99, Math.floor((uploaded / total) * 100)) : 99;
-            setUploadProgress({
-              fileName: file.name,
-              percent,
-              phase: uploaded >= total ? "processing" : "uploading",
-              uploadedBytes: uploaded,
-              totalBytes: total
-            });
-          }
-        });
-      } catch (wsError) {
-        const configuredChunkSize = overview.data?.uploadChunkLimit ?? 16 * 1024 * 1024;
-        const chunkSize = Math.min(16 * 1024 * 1024, Math.max(1024 * 1024, configuredChunkSize));
+      {
+        const configuredChunkSize = overview.data?.uploadChunkLimit ?? 8 * 1024 * 1024;
+        const chunkSize = Math.min(8 * 1024 * 1024, Math.max(1024 * 1024, configuredChunkSize));
         const totalChunks = Math.max(1, Math.ceil(file.size / chunkSize));
         for (let index = 0; index < totalChunks; index += 1) {
           const offset = index * chunkSize;
@@ -698,6 +678,7 @@ export function FileManagerClient({
                   totalChunks,
                   offset,
                   totalSize: file.size,
+                  chunkSize: chunk.size,
                   overwrite: overwrite ? "true" : "false"
                 })}`,
                 chunk,
@@ -712,7 +693,9 @@ export function FileManagerClient({
                     uploadedBytes: uploaded,
                     totalBytes: file.size
                   });
-                }
+                },
+                undefined,
+                90_000
               );
               lastError = null;
               break;
@@ -724,8 +707,7 @@ export function FileManagerClient({
             }
           }
           if (lastError) {
-            const hint = wsError instanceof Error ? wsError.message : "WebSocket upload failed";
-            throw new Error(lastError.message || hint);
+            throw lastError;
           }
         }
       }

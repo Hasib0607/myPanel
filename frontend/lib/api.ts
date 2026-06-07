@@ -183,7 +183,8 @@ export async function apiUploadWithProgress<T>(
   body: XMLHttpRequestBodyInit | Document,
   contentType: string,
   onProgress: (percent: number, loaded: number, total: number) => void,
-  headers?: Record<string, string>
+  headers?: Record<string, string>,
+  timeoutMs = 3_600_000
 ): Promise<T> {
   const url = apiUrl(path);
   const csrf = await csrfHeader();
@@ -192,9 +193,8 @@ export async function apiUploadWithProgress<T>(
     const bodySize = body instanceof Blob ? body.size : 1;
     xhr.open("POST", url);
     xhr.withCredentials = true;
-    xhr.timeout = 3_600_000;
+    xhr.timeout = timeoutMs;
     xhr.setRequestHeader("content-type", contentType);
-    xhr.setRequestHeader("connection", "close");
     for (const [key, value] of Object.entries({ ...csrf, ...(headers ?? {}) })) {
       xhr.setRequestHeader(key, value);
     }

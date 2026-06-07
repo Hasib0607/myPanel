@@ -14,6 +14,7 @@ export const chunkUploadQuery = z.object({
   totalChunks: z.coerce.number().int().min(1).max(100000),
   offset: z.coerce.number().int().min(0),
   totalSize: z.coerce.number().int().min(1),
+  chunkSize: z.coerce.number().int().min(1).optional(),
   overwrite: z.coerce.boolean().default(false)
 });
 
@@ -41,13 +42,49 @@ export async function writeUploadChunk(input: {
   if (query.totalSize > uploadLimit) throw httpErrors.payloadTooLarge("Upload is too large");
   const tempFile = path.join(parentDir, `.upload-${query.uploadId}.part`);
   const expectedTempSize = query.index === 0 ? 0 : query.offset;
+  const finishUpload = async (receivedBytes: number) => {
+    if (receivedBytes !== query.totalSize) {
+      throw httpErrors.badRequest(`Final upload size mismatch. Expected ${query.totalSize}, received ${receivedBytes}.`);
+    }
+    if (query.overwrite) {
+      await fs.rename(tempFile, filePath);
+    } else {
+      await fs.link(tempFile, filePath);
+      await fs.rm(tempFile, { force: true });
+    }
+    return { ok: true as const, uploadId: query.uploadId, receivedBytes, complete: true as const };
+  };
   const currentSize = await fs.stat(tempFile).then((stat) => stat.size).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") {
       if (query.index === 0) return 0;
-      throw httpErrors.conflict("Upload session expired or was interrupted. Start the upload again.");
+      return fs.stat(filePath).then((stat) => {
+        if (stat.size === query.totalSize) return query.totalSize;
+        throw httpErrors.conflict("Upload session expired or was interrupted. Start the upload again.");
+      }).catch((statError: NodeJS.ErrnoException) => {
+        if (statError.code === "ENOENT") {
+          throw httpErrors.conflict("Upload session expired or was interrupted. Start the upload again.");
+        }
+        throw statError;
+      });
     }
     throw error;
   });
+  if (currentSize === query.totalSize) {
+    return { ok: true as const, uploadId: query.uploadId, receivedBytes: currentSize, complete: true as const };
+  }
+  const expectedChunkEnd = query.chunkSize ? query.offset + query.chunkSize : null;
+  if (expectedChunkEnd && currentSize === expectedChunkEnd) {
+    if (currentSize === query.totalSize || query.index === query.totalChunks - 1) {
+      return finishUpload(currentSize);
+    }
+    return { ok: true as const, uploadId: query.uploadId, receivedBytes: currentSize, complete: false as const };
+  }
+  if (currentSize > expectedTempSize) {
+    if (expectedChunkEnd && currentSize < expectedChunkEnd) {
+      throw httpErrors.conflict(`Upload chunk is still being written. Expected ${expectedChunkEnd}, received ${currentSize}. Retry this chunk.`);
+    }
+    throw httpErrors.conflict(`Upload offset mismatch. Expected ${currentSize}, received ${query.offset}.`);
+  }
   if (currentSize !== expectedTempSize) {
     throw httpErrors.conflict(`Upload offset mismatch. Expected ${currentSize}, received ${query.offset}.`);
   }
@@ -71,16 +108,7 @@ export async function writeUploadChunk(input: {
     if (!complete) {
       return { ok: true as const, uploadId: query.uploadId, receivedBytes: nextOffset, complete: false as const };
     }
-    if (nextOffset !== query.totalSize) {
-      throw httpErrors.badRequest(`Final upload size mismatch. Expected ${query.totalSize}, received ${nextOffset}.`);
-    }
-    if (query.overwrite) {
-      await fs.rename(tempFile, filePath);
-    } else {
-      await fs.link(tempFile, filePath);
-      await fs.rm(tempFile, { force: true });
-    }
-    return { ok: true as const, uploadId: query.uploadId, receivedBytes: nextOffset, complete: true as const };
+    return finishUpload(nextOffset);
   } catch (error) {
     if (query.index === 0) {
       await fs.rm(tempFile, { force: true }).catch(() => undefined);
