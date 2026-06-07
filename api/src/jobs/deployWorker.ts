@@ -3046,6 +3046,29 @@ function nodeDependencyRepairCommand(packageManager: DeploymentPackageManager | 
   return "npm install --include=dev --production=false";
 }
 
+function nodeBuildTerminatedBySigterm(message: string) {
+  return /exit code 143|exit code -15|\bSIGTERM\b|terminated by SIGTERM/i.test(message);
+}
+
+async function ensureNodeBuildMemoryCap(deploymentId: string, releaseId: string | undefined, envVars: Record<string, string>) {
+  const current = envVars.NODE_OPTIONS ?? "";
+  if (current.includes("--max-old-space-size=")) {
+    return { envVars, changed: false };
+  }
+  const value = [current, "--max-old-space-size=512"].filter(Boolean).join(" ").trim();
+  await prisma.deploymentEnvVar.upsert({
+    where: { deploymentId_key: { deploymentId, key: "NODE_OPTIONS" } },
+    update: { value, isSecret: false, secretRef: null },
+    create: { deploymentId, key: "NODE_OPTIONS", value, isSecret: false, secretRef: null }
+  });
+  await writeLog(deploymentId, releaseId, "BUILDING", "Applied Node build memory cap after SIGTERM", {
+    key: "NODE_OPTIONS",
+    value,
+    reason: "Node build exited with SIGTERM/143, usually from memory pressure on small VPS instances."
+  }, "warn");
+  return { envVars: { ...envVars, NODE_OPTIONS: value }, changed: true };
+}
+
 function isNodePackageManager(packageManager: DeploymentPackageManager | null) {
   return packageManager === "NPM" || packageManager === "PNPM" || packageManager === "YARN";
 }
@@ -3693,28 +3716,62 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         const repairPackageManager = isNodePackageManager(deployment.packageManager)
           ? deployment.packageManager
           : frontendAssets.hasPackageJson ? frontendAssets.packageManager : null;
-        if (!nodePackageBinaryMissing(detail) || !repairPackageManager) {
-          throw error;
+        let buildRecovered = false;
+        if (nodeBuildTerminatedBySigterm(detail) && repairPackageManager) {
+          const memoryCap = await ensureNodeBuildMemoryCap(deployment.id, releaseId, envVars);
+          if (memoryCap.changed) {
+            envVars = memoryCap.envVars;
+            buildResult = await runBuild();
+            try {
+              assertCommandTree(buildResult, "Build retry after Node memory cap");
+              buildRecovered = true;
+            } catch (memoryRetryError) {
+              const retryDetail = memoryRetryError instanceof Error ? memoryRetryError.message : String(memoryRetryError);
+              throw new Error(`${retryDetail}\n\nGuardian added NODE_OPTIONS=--max-old-space-size=512 because the Node build was terminated with SIGTERM/143, but the build still failed. Add swap on the VPS if this repeats.`);
+            }
+          }
         }
-        await writeLog(deployment.id, releaseId, "BUILDING", "Node build package binary missing; reinstalling dependencies with devDependencies", {
-          packageManager: repairPackageManager,
-          evidence: detail.slice(0, 2000)
-        }, "warn");
-        const repairInstall = await runStep(deployment.id, releaseId, "INSTALLING", "Repair Node build dependencies", () =>
-          sysagent.deploymentInstall({
-            rootPath: appPath,
-            command: nodeDependencyRepairCommand(repairPackageManager),
+        if (!buildRecovered) {
+          if (!nodePackageBinaryMissing(detail) || !repairPackageManager) {
+            throw error;
+          }
+          await writeLog(deployment.id, releaseId, "BUILDING", "Node build package binary missing; reinstalling dependencies with devDependencies", {
             packageManager: repairPackageManager,
-            env: envVars
-          })
-        );
-        assertCommandTree(repairInstall, "Repair Node build dependencies");
-        buildResult = await runBuild();
-        try {
-          assertCommandTree(buildResult, "Build retry after Node dependency repair");
-        } catch (retryError) {
-          const retryDetail = retryError instanceof Error ? retryError.message : String(retryError);
-          throw new Error(`${retryDetail}\n\nGuardian reinstalled Node dependencies with devDependencies because a local build binary was missing, but the build still failed.`);
+            evidence: detail.slice(0, 2000)
+          }, "warn");
+          const repairInstall = await runStep(deployment.id, releaseId, "INSTALLING", "Repair Node build dependencies", () =>
+            sysagent.deploymentInstall({
+              rootPath: appPath,
+              command: nodeDependencyRepairCommand(repairPackageManager),
+              packageManager: repairPackageManager,
+              env: envVars
+            })
+          );
+          assertCommandTree(repairInstall, "Repair Node build dependencies");
+          buildResult = await runBuild();
+          try {
+            assertCommandTree(buildResult, "Build retry after Node dependency repair");
+          } catch (retryError) {
+            const retryDetail = retryError instanceof Error ? retryError.message : String(retryError);
+            let dependencyRepairRecovered = false;
+            if (nodeBuildTerminatedBySigterm(retryDetail)) {
+              const memoryCap = await ensureNodeBuildMemoryCap(deployment.id, releaseId, envVars);
+              if (memoryCap.changed) {
+                envVars = memoryCap.envVars;
+                buildResult = await runBuild();
+                try {
+                  assertCommandTree(buildResult, "Build retry after Node dependency repair and memory cap");
+                  dependencyRepairRecovered = true;
+                } catch (memoryRetryError) {
+                  const memoryRetryDetail = memoryRetryError instanceof Error ? memoryRetryError.message : String(memoryRetryError);
+                  throw new Error(`${memoryRetryDetail}\n\nGuardian reinstalled Node dependencies and added NODE_OPTIONS=--max-old-space-size=512 after SIGTERM/143, but the build still failed. Add swap on the VPS if this repeats.`);
+                }
+              }
+            }
+            if (!dependencyRepairRecovered) {
+              throw new Error(`${retryDetail}\n\nGuardian reinstalled Node dependencies with devDependencies because a local build binary was missing, but the build still failed.`);
+            }
+          }
         }
       }
     }
