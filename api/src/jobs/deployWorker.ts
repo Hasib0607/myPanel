@@ -3050,23 +3050,35 @@ function nodeBuildTerminatedBySigterm(message: string) {
   return /exit code 143|exit code -15|\bSIGTERM\b|terminated by SIGTERM/i.test(message);
 }
 
-async function ensureNodeBuildMemoryCap(deploymentId: string, releaseId: string | undefined, envVars: Record<string, string>) {
+async function ensureNodeLowMemoryBuildEnv(deploymentId: string, releaseId: string | undefined, envVars: Record<string, string>) {
   const current = envVars.NODE_OPTIONS ?? "";
-  if (current.includes("--max-old-space-size=")) {
-    return { envVars, changed: false };
+  let value = current;
+  let changed = false;
+  if (!value.includes("--max-old-space-size=")) {
+    value = [value, "--max-old-space-size=512"].filter(Boolean).join(" ").trim();
+    await prisma.deploymentEnvVar.upsert({
+      where: { deploymentId_key: { deploymentId, key: "NODE_OPTIONS" } },
+      update: { value, isSecret: false, secretRef: null },
+      create: { deploymentId, key: "NODE_OPTIONS", value, isSecret: false, secretRef: null }
+    });
+    changed = true;
   }
-  const value = [current, "--max-old-space-size=512"].filter(Boolean).join(" ").trim();
-  await prisma.deploymentEnvVar.upsert({
-    where: { deploymentId_key: { deploymentId, key: "NODE_OPTIONS" } },
-    update: { value, isSecret: false, secretRef: null },
-    create: { deploymentId, key: "NODE_OPTIONS", value, isSecret: false, secretRef: null }
-  });
-  await writeLog(deploymentId, releaseId, "BUILDING", "Applied Node build memory cap after SIGTERM", {
+  const nextEnv = {
+    ...envVars,
+    NODE_OPTIONS: value || envVars.NODE_OPTIONS,
+    // Next.js derives its default build worker count from this CI variable.
+    // Setting it to 2 makes Next use 1 worker, which prevents small VPS builds
+    // from spawning enough parallel workers to get SIGTERM/143 from memory pressure.
+    CIRCLE_NODE_TOTAL: "2"
+  };
+  if (envVars.CIRCLE_NODE_TOTAL !== "2") changed = true;
+  if (changed) await writeLog(deploymentId, releaseId, "BUILDING", "Applied low-memory Node build env after SIGTERM", {
     key: "NODE_OPTIONS",
-    value,
-    reason: "Node build exited with SIGTERM/143, usually from memory pressure on small VPS instances."
+    value: nextEnv.NODE_OPTIONS,
+    CIRCLE_NODE_TOTAL: nextEnv.CIRCLE_NODE_TOTAL,
+    reason: "Node build exited with SIGTERM/143, usually from memory pressure on small VPS instances. Next.js will retry with a single build worker."
   }, "warn");
-  return { envVars: { ...envVars, NODE_OPTIONS: value }, changed: true };
+  return { envVars: nextEnv, changed };
 }
 
 function isNodePackageManager(packageManager: DeploymentPackageManager | null) {
@@ -3718,17 +3730,19 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           : frontendAssets.hasPackageJson ? frontendAssets.packageManager : null;
         let buildRecovered = false;
         if (nodeBuildTerminatedBySigterm(detail) && repairPackageManager) {
-          const memoryCap = await ensureNodeBuildMemoryCap(deployment.id, releaseId, envVars);
+          const memoryCap = await ensureNodeLowMemoryBuildEnv(deployment.id, releaseId, envVars);
           if (memoryCap.changed) {
             envVars = memoryCap.envVars;
             buildResult = await runBuild();
             try {
-              assertCommandTree(buildResult, "Build retry after Node memory cap");
+              assertCommandTree(buildResult, "Build retry after low-memory Node env");
               buildRecovered = true;
             } catch (memoryRetryError) {
               const retryDetail = memoryRetryError instanceof Error ? memoryRetryError.message : String(memoryRetryError);
-              throw new Error(`${retryDetail}\n\nGuardian added NODE_OPTIONS=--max-old-space-size=512 because the Node build was terminated with SIGTERM/143, but the build still failed. Add swap on the VPS if this repeats.`);
+              throw new Error(`${retryDetail}\n\nGuardian retried with NODE_OPTIONS=--max-old-space-size=512 and CIRCLE_NODE_TOTAL=2 because the Node build was terminated with SIGTERM/143, but the build still failed. Add swap on the VPS if this repeats.`);
             }
+          } else {
+            throw new Error(`${detail}\n\nNode build is still being terminated with SIGTERM/143 even with low-memory build env already applied. Add swap on the VPS, then redeploy.`);
           }
         }
         if (!buildRecovered) {
@@ -3755,17 +3769,19 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
             const retryDetail = retryError instanceof Error ? retryError.message : String(retryError);
             let dependencyRepairRecovered = false;
             if (nodeBuildTerminatedBySigterm(retryDetail)) {
-              const memoryCap = await ensureNodeBuildMemoryCap(deployment.id, releaseId, envVars);
+              const memoryCap = await ensureNodeLowMemoryBuildEnv(deployment.id, releaseId, envVars);
               if (memoryCap.changed) {
                 envVars = memoryCap.envVars;
                 buildResult = await runBuild();
                 try {
-                  assertCommandTree(buildResult, "Build retry after Node dependency repair and memory cap");
+                  assertCommandTree(buildResult, "Build retry after Node dependency repair and low-memory env");
                   dependencyRepairRecovered = true;
                 } catch (memoryRetryError) {
                   const memoryRetryDetail = memoryRetryError instanceof Error ? memoryRetryError.message : String(memoryRetryError);
-                  throw new Error(`${memoryRetryDetail}\n\nGuardian reinstalled Node dependencies and added NODE_OPTIONS=--max-old-space-size=512 after SIGTERM/143, but the build still failed. Add swap on the VPS if this repeats.`);
+                  throw new Error(`${memoryRetryDetail}\n\nGuardian reinstalled Node dependencies and retried with NODE_OPTIONS=--max-old-space-size=512 plus CIRCLE_NODE_TOTAL=2 after SIGTERM/143, but the build still failed. Add swap on the VPS if this repeats.`);
                 }
+              } else {
+                throw new Error(`${retryDetail}\n\nNode build is still being terminated with SIGTERM/143 even with low-memory build env already applied. Add swap on the VPS, then redeploy.`);
               }
             }
             if (!dependencyRepairRecovered) {
