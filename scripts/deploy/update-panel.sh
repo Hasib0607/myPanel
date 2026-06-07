@@ -891,25 +891,28 @@ run_root_maintenance_script() {
   local label="$1"
   local script="$2"
   local status=0
+  local output_file=""
 
   if [[ ! -f "$script" ]]; then
     return 0
   fi
 
-  log "$label"
-  set +e
-  if [[ "$(id -u)" == "0" ]]; then
-    bash "$script" 2>&1 | tee -a "$LOG_FILE"
-    status=${PIPESTATUS[0]}
-  elif [[ -n "$SUDO_BIN" ]]; then
-    "$SUDO_BIN" -n bash "$script" 2>&1 | tee -a "$LOG_FILE"
-    status=${PIPESTATUS[0]}
-  else
-    log "skipping $label (not root and sudo unavailable)"
-    set -e
-    return 0
+  if [[ "$(id -u)" != "0" ]]; then
+    if ! "$SUDO_BIN" -n -l 2>/dev/null | grep -Fq "$script"; then
+      log "skipping $label (panel user lacks passwordless sudo for $script)"
+      return 0
+    fi
   fi
-  set -e
+
+  log "$label"
+  output_file="$(mktemp)"
+  if [[ "$(id -u)" == "0" ]]; then
+    bash "$script" >"$output_file" 2>&1 || status=$?
+  else
+    "$SUDO_BIN" -n bash "$script" >"$output_file" 2>&1 || status=$?
+  fi
+  tee -a "$LOG_FILE" <"$output_file" >/dev/null
+  rm -f "$output_file"
 
   if [[ "$status" != "0" ]]; then
     log "$label failed with exit code $status; continuing self-update"
