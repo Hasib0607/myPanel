@@ -301,7 +301,7 @@ export function DeploymentsClient({
   const accountInfo = useQuery({
     enabled: apiBase === "/account/deployments",
     queryKey: ["account-info", "deployments"],
-    queryFn: () => apiGet<AccountInfo>("/account")
+    queryFn: () => apiGet<AccountInfo>("/account/me")
   });
   const nextPort = useQuery({ queryKey: ["deployments-next-port", apiBase], queryFn: () => apiGet<{ port: number }>(`${apiBase}/ports/next`) });
   const repos = useQuery({ enabled: enableGithub && repoPickerOpen, queryKey: ["deployments-github-repos", githubApiBase, repoSearch], queryFn: () => apiGet<GithubRepoResponse>(`${githubApiBase}/repos?${queryString({ search: repoSearch })}`) });
@@ -903,15 +903,16 @@ function Input({ label, value, onChange, readOnly }: { label: string; value: str
 
 function DeploymentFileManagerPanel({ accountRoot, apiBase, deployment }: { accountRoot?: string; apiBase: "/deployments" | "/account/deployments"; deployment: Deployment }) {
   const fileApiBase = apiBase === "/account/deployments" ? "/account/files" : "/files";
-  if (apiBase === "/account/deployments" && !accountRoot) {
+  const projectPath = deploymentAppStoragePath(deployment);
+  const derivedAccountRoot = accountRoot ?? deriveAccountRootFromDeploymentPath(projectPath);
+  if (apiBase === "/account/deployments" && !derivedAccountRoot) {
     return (
       <div className="rounded-md border border-panel-line bg-white p-4 text-sm text-panel-muted">
         Loading account file root...
       </div>
     );
   }
-  const rootPrefix = apiBase === "/account/deployments" ? accountRoot! : "/var/www";
-  const projectPath = deploymentAppStoragePath(deployment);
+  const rootPrefix = apiBase === "/account/deployments" ? derivedAccountRoot! : "/var/www";
   const relativePath = projectStorageRelativePath(projectPath, rootPrefix);
   if (!relativePath) {
     return (
@@ -938,6 +939,14 @@ function DeploymentFileManagerPanel({ accountRoot, apiBase, deployment }: { acco
       />
     </div>
   );
+}
+
+function deriveAccountRootFromDeploymentPath(projectPath: string) {
+  const normalized = projectPath.replace(/\\/g, "/");
+  const marker = "/deployments/";
+  const index = normalized.indexOf(marker);
+  if (index === -1) return null;
+  return normalized.slice(0, index);
 }
 
 function deploymentAppStoragePath(deployment: Deployment) {
