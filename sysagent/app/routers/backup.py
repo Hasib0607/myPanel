@@ -74,6 +74,13 @@ class RemoteDownloadRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class RemoteDeleteRequest(BaseModel):
+    remote_path: str = Field(alias="remotePath")
+    google_drive: dict[str, Any] | None = Field(default=None, alias="googleDrive")
+
+    model_config = {"populate_by_name": True}
+
+
 class RemotePruneRequest(BaseModel):
     remote_target: str = Field(alias="remoteTarget")
     keep_last: int = Field(default=2, ge=1, le=500, alias="keepLast")
@@ -829,8 +836,23 @@ def manifest(path: str) -> dict[str, Any]:
 @router.delete("/archive")
 def delete_archive(path: str) -> dict[str, Any]:
     archive = checked_archive(path)
-    result = run_command(["bash", "-lc", f"rm -f '{archive}' '{archive}.sha256'"], allow_live=settings.allow_live_backup, timeout=300)
+    result = run_command(["bash", "-lc", f"rm -f {shlex.quote(str(archive))} {shlex.quote(str(archive) + '.sha256')}"], allow_live=settings.allow_live_backup, timeout=300)
     return {"archivePath": str(archive), "result": result}
+
+
+@router.post("/delete-remote")
+def delete_remote(body: RemoteDeleteRequest) -> dict[str, Any]:
+    setup, env = rclone_env_and_setup(body.google_drive, body.remote_path)
+    remote_path = body.remote_path.rstrip("/")
+    script = f"""
+set -Eeuo pipefail
+{setup}
+command -v rclone >/dev/null 2>&1
+rclone deletefile {shlex.quote(remote_path)}
+rclone deletefile {shlex.quote(remote_path + ".sha256")} || true
+"""
+    result = run_command(["bash", "-lc", script], env=env, allow_live=settings.allow_live_backup, timeout=900)
+    return {"remotePath": remote_path, "result": result}
 
 
 @router.post("/prune")

@@ -9,6 +9,10 @@ import { prisma } from "../lib/prisma.js";
 import { sysagent } from "../lib/sysagent.js";
 
 const pathSchema = z.object({ path: z.string().min(1) });
+const deleteArchiveSchema = z.object({
+  id: z.string().min(1).optional(),
+  path: z.string().min(1).optional()
+}).refine((value) => value.id || value.path, { message: "id or path is required" });
 const restoreJobSchema = z.object({
   source: z.enum(["LOCAL", "GOOGLE_DRIVE"]).default("LOCAL"),
   path: z.string().min(1),
@@ -82,6 +86,11 @@ function localRestorePath(backupRoot: string, input: string) {
 
 function jsonSafe<T>(value: T): T {
   return JSON.parse(JSON.stringify(value, (_key, item) => typeof item === "bigint" ? item.toString() : item));
+}
+
+function backupRemotePath(record?: { result: unknown } | null) {
+  const result = record?.result as any;
+  return typeof result?.remote?.remotePath === "string" ? result.remote.remotePath : undefined;
 }
 
 export const backupRoutes: FastifyPluginAsync = async (app) => {
@@ -282,10 +291,29 @@ export const backupRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.delete("/archive", async (request) => {
-    const body = pathSchema.parse(request.body);
-    const result = await sysagent.deleteBackupArchive(body.path);
-    await prisma.panelBackup.updateMany({ where: { archivePath: body.path }, data: { result: { deleted: true, deleteResult: result } as any } });
-    await audit(request, { action: "DELETE", resource: "panel_backup_archive", description: `Deleted backup archive ${body.path}` });
+    const body = deleteArchiveSchema.parse(request.body);
+    const record = body.id
+      ? await prisma.panelBackup.findUnique({ where: { id: body.id } })
+      : await prisma.panelBackup.findFirst({ where: { archivePath: body.path } });
+    const archivePath = body.path ?? record?.archivePath ?? undefined;
+    const remotePath = backupRemotePath(record);
+    const settings = remotePath ? await getBackupSettings() : null;
+    const googleDrive = remotePath && settings ? await googleDriveConfig(settings) : null;
+    const remoteDelete = remotePath ? await sysagent.deleteRemoteBackup({ remotePath, googleDrive }) : null;
+    if (remoteDelete?.result.returncode && remoteDelete.result.returncode !== 0) {
+      throw new Error(remoteDelete.result.stderr || "Google Drive delete failed.");
+    }
+    const localDelete = archivePath ? await sysagent.deleteBackupArchive(archivePath) : null;
+    if (localDelete?.result.returncode && localDelete.result.returncode !== 0) {
+      throw new Error(localDelete.result.stderr || "Local archive delete failed.");
+    }
+    if (record) {
+      await prisma.panelBackup.delete({ where: { id: record.id } });
+    } else if (archivePath) {
+      await prisma.panelBackup.deleteMany({ where: { archivePath } });
+    }
+    const result = { archivePath, remotePath, localDelete, remoteDelete, deletedRecordId: record?.id ?? null };
+    await audit(request, { action: "DELETE", resource: "panel_backup_archive", description: `Deleted backup archive ${archivePath ?? remotePath ?? body.id}`, metadata: result as any });
     return result;
   });
 

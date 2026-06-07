@@ -12,7 +12,7 @@ type BackupRecord = {
   archivePath: string | null;
   sizeBytes: number | string | null;
   includes: string[];
-  result: { result?: { dryRun?: boolean; command?: string[]; stdout?: string; stderr?: string; returncode?: number } };
+  result: { result?: { dryRun?: boolean; command?: string[]; stdout?: string; stderr?: string; returncode?: number }; remote?: { remotePath?: string } };
   createdAt: string;
   finishedAt: string | null;
 };
@@ -195,9 +195,9 @@ export function BackupsClient() {
     onError: (error) => setNotice(error instanceof Error ? error.message : "Manifest failed.")
   });
   const deleteArchive = useMutation({
-    mutationFn: (path: string) => apiDeleteBody("/backups/archive", { path }),
+    mutationFn: (body: { id?: string; path?: string }) => apiDeleteBody("/backups/archive", body),
     onSuccess: async () => {
-      setNotice("Archive delete requested.");
+      setNotice("Backup deleted from history, local disk, and Drive when linked.");
       await refresh();
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Delete failed.")
@@ -357,14 +357,16 @@ export function BackupsClient() {
                     <div className="mt-1 truncate text-xs text-panel-muted">{item.archivePath ?? "No archive path yet"}</div>
                     <div className="mt-1 text-xs text-panel-muted">{formatBytes(item.sizeBytes)} · {new Date(item.createdAt).toLocaleString()}</div>
                   </div>
-                  {item.archivePath ? <div className="flex gap-2">
-                    <a className="rounded-md border border-panel-line p-2 hover:bg-slate-50" href={`/api/v1/backups/download?path=${encodeURIComponent(item.archivePath)}`} title="Download"><Download size={15} /></a>
-                    <button className="rounded-md border border-panel-line p-2 hover:bg-slate-50" onClick={() => verify.mutate(item.archivePath!)} type="button" title="Verify"><ShieldCheck size={15} /></button>
-                    <button className="rounded-md border border-panel-line p-2 hover:bg-slate-50" onClick={() => loadManifest.mutate(item.archivePath!)} type="button" title="Manifest"><Archive size={15} /></button>
-                    <button className="rounded-md border border-panel-line p-2 hover:bg-slate-50" onClick={() => previewRestore.mutate(item.archivePath!)} type="button" title="Restore preview"><Eye size={15} /></button>
-                    <button className="rounded-md border border-red-200 p-2 text-panel-danger hover:bg-red-50" onClick={() => runLocalRestore(item.archivePath!, item.label)} type="button" title="Restore now"><RotateCcw size={15} /></button>
-                    <button className="rounded-md border border-red-200 p-2 text-panel-danger hover:bg-red-50" onClick={() => deleteArchive.mutate(item.archivePath!)} type="button" title="Delete"><Trash2 size={15} /></button>
-                  </div> : null}
+                  <div className="flex gap-2">
+                    {item.archivePath ? <>
+                      <a className="rounded-md border border-panel-line p-2 hover:bg-slate-50" href={`/api/v1/backups/download?path=${encodeURIComponent(item.archivePath)}`} title="Download"><Download size={15} /></a>
+                      <button className="rounded-md border border-panel-line p-2 hover:bg-slate-50" onClick={() => verify.mutate(item.archivePath!)} type="button" title="Verify"><ShieldCheck size={15} /></button>
+                      <button className="rounded-md border border-panel-line p-2 hover:bg-slate-50" onClick={() => loadManifest.mutate(item.archivePath!)} type="button" title="Manifest"><Archive size={15} /></button>
+                      <button className="rounded-md border border-panel-line p-2 hover:bg-slate-50" onClick={() => previewRestore.mutate(item.archivePath!)} type="button" title="Restore preview"><Eye size={15} /></button>
+                      <button className="rounded-md border border-red-200 p-2 text-panel-danger hover:bg-red-50" onClick={() => runLocalRestore(item.archivePath!, item.label)} type="button" title="Restore now"><RotateCcw size={15} /></button>
+                    </> : null}
+                    <button className="rounded-md border border-red-200 p-2 text-panel-danger hover:bg-red-50" onClick={() => deleteArchive.mutate({ id: item.id })} type="button" title="Delete from history, local disk, and Drive"><Trash2 size={15} /></button>
+                  </div>
                 </div>
               ))}
               {!backups.isLoading && !(backups.data?.records ?? []).length ? <div className="p-6 text-sm text-panel-muted">No backup records yet.</div> : null}
@@ -387,7 +389,7 @@ export function BackupsClient() {
                     <button className="rounded-md border border-panel-line p-2 hover:bg-slate-50" onClick={() => loadManifest.mutate(item.path)} type="button" title="Manifest"><Archive size={15} /></button>
                     <button className="rounded-md border border-panel-line p-2 hover:bg-slate-50" onClick={() => previewRestore.mutate(item.path)} type="button" title="Restore preview"><Eye size={15} /></button>
                     <button className="rounded-md border border-red-200 p-2 text-panel-danger hover:bg-red-50" onClick={() => runLocalRestore(item.path, item.name)} type="button" title="Restore now"><RotateCcw size={15} /></button>
-                    <button className="rounded-md border border-red-200 p-2 text-panel-danger hover:bg-red-50" onClick={() => deleteArchive.mutate(item.path)} type="button" title="Delete"><Trash2 size={15} /></button>
+                    <button className="rounded-md border border-red-200 p-2 text-panel-danger hover:bg-red-50" onClick={() => deleteArchive.mutate({ path: item.path })} type="button" title="Delete"><Trash2 size={15} /></button>
                   </div>
                 </div>
               ))}

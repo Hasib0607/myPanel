@@ -88,6 +88,8 @@ export const sysagent = {
     request<{ archivePath: string; result: SysagentCommandResult; entries: string[] }>(`/backup/manifest?path=${encodeURIComponent(path)}`, { method: "POST" }),
   deleteBackupArchive: (path: string) =>
     request<{ archivePath: string; result: SysagentCommandResult }>(`/backup/archive?path=${encodeURIComponent(path)}`, { method: "DELETE" }),
+  deleteRemoteBackup: (body: unknown) =>
+    request<{ remotePath: string; result: SysagentCommandResult }>("/backup/delete-remote", { method: "POST", body: JSON.stringify(body) }),
   pruneBackups: (body: unknown) =>
     request<{ kept: number; removed: string[]; result: SysagentCommandResult }>("/backup/prune", { method: "POST", body: JSON.stringify(body) }),
   guardianDiagnosis: () => request("/guardian/diagnosis"),
