@@ -1,11 +1,12 @@
 "use client";
 
 import Link from "next/link";
+import type { ReactNode } from "react";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Database, FolderGit2, Globe2, HeartPulse, KeyRound, ListChecks, RefreshCw, TerminalSquare, Wrench } from "lucide-react";
+import { Activity, ArrowDownToLine, ArrowUpFromLine, CheckCircle2, Cpu, Database, FolderGit2, Globe2, HardDrive, HeartPulse, KeyRound, ListChecks, MemoryStick, Network, RefreshCw, TerminalSquare, Wrench } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
-import type { Deployment, DeploymentDoctorApproval, DeploymentDoctorResponse, PreflightResponse, QueueResponse } from "../../deployment-types";
+import type { Deployment, DeploymentDoctorApproval, DeploymentDoctorResponse, DeploymentMetrics, PreflightResponse, QueueResponse } from "../../deployment-types";
 import { ActionButton, DeploymentSummary, EmptyState, Metric, ProjectTabs, ResultNotice, actionIcon, formatDate, formatDuration, statusBadge } from "../../deployment-ui";
 
 export function DeploymentOverviewClient({ project }: { project: string }) {
@@ -20,6 +21,12 @@ export function DeploymentOverviewClient({ project }: { project: string }) {
     queryFn: () => apiGet<DeploymentDoctorResponse>(`/deployments/${project}/doctor`),
     enabled: Boolean(detail.data),
     refetchInterval: 20_000
+  });
+  const metrics = useQuery({
+    queryKey: ["deployment-metrics", project],
+    queryFn: () => apiGet<DeploymentMetrics>(`/deployments/${project}/metrics`),
+    enabled: Boolean(detail.data),
+    refetchInterval: 15000
   });
   const approvals = useQuery({
     queryKey: ["deployment-doctor-approvals", project],
@@ -76,6 +83,7 @@ export function DeploymentOverviewClient({ project }: { project: string }) {
         {deployment ? (
           <>
             <DeploymentSummary deployment={deployment} />
+            <ResourceOverview metrics={metrics.data} loading={metrics.isLoading || metrics.isFetching} />
 
             <div className="flex flex-wrap items-center gap-2">
               {(["deploy", "redeploy", "pull", "rollback", "start", "stop", "restart"] as const).map((name) => (
@@ -236,6 +244,8 @@ export function DeploymentOverviewClient({ project }: { project: string }) {
                   </div>
                 </div>
 
+                <LastDayLogs metrics={metrics.data} />
+
                 <div className="rounded-md border border-panel-line bg-white">
                   <div className="flex items-center justify-between border-b border-panel-line p-4">
                     <div className="text-sm font-semibold">Latest Releases</div>
@@ -285,6 +295,77 @@ function Command({ label, value }: { label: string; value: string | null }) {
       <div className="mt-2 break-words font-mono text-xs">{value || "-"}</div>
     </div>
   );
+}
+
+function ResourceOverview({ metrics, loading }: { metrics?: DeploymentMetrics; loading: boolean }) {
+  const process = metrics?.process;
+  const traffic = metrics?.traffic;
+  return (
+    <div className="grid gap-3 lg:grid-cols-4">
+      <UsageCard icon={<MemoryStick size={17} />} label="RAM" value={loading && !metrics ? "Loading..." : formatBytes(process?.memoryBytes ?? 0)} detail={`${process?.processCount ?? 0} processes`} />
+      <UsageCard icon={<Cpu size={17} />} label="CPU" value={`${(process?.cpuPercent ?? 0).toFixed(1)}%`} detail="live process usage" />
+      <UsageCard icon={<HardDrive size={17} />} label="Storage" value={formatBytes(metrics?.storage.bytes ?? 0)} detail={metrics?.storage.rootPath ?? "-"} />
+      <UsageCard icon={<Database size={17} />} label="DB storage" value={formatBytes(metrics?.database.sizeBytes ?? 0)} detail={metrics?.database.name ?? "No database"} />
+      <UsageCard icon={<ArrowDownToLine size={17} />} label="Incoming traffic" value={formatBytes(traffic?.incomingBytes ?? 0)} detail="last 24h" />
+      <UsageCard icon={<ArrowUpFromLine size={17} />} label="Outgoing traffic" value={formatBytes(traffic?.outgoingBytes ?? 0)} detail={`${traffic?.requests ?? 0} requests`} />
+      <UsageCard icon={<Network size={17} />} label="Bandwidth" value={formatBytes(traffic?.bandwidthBytes ?? 0)} detail={traffic?.note ?? "last 24h"} />
+      <UsageCard icon={<Activity size={17} />} label="Metrics" value={metrics?.ok === false ? "Unavailable" : "Live"} detail={metrics?.generatedAt ? formatDate(metrics.generatedAt) : "-"} />
+    </div>
+  );
+}
+
+function UsageCard({ icon, label, value, detail }: { icon: ReactNode; label: string; value: ReactNode; detail: ReactNode }) {
+  return (
+    <div className="min-w-0 rounded-md border border-panel-line bg-white p-4">
+      <div className="flex items-center gap-2 text-xs font-medium uppercase text-panel-muted">
+        {icon}
+        <span className="truncate">{label}</span>
+      </div>
+      <div className="mt-3 truncate text-xl font-semibold text-panel-ink">{value}</div>
+      <div className="mt-1 truncate text-xs text-panel-muted" title={typeof detail === "string" ? detail : undefined}>{detail}</div>
+    </div>
+  );
+}
+
+function LastDayLogs({ metrics }: { metrics?: DeploymentMetrics }) {
+  const buildLogs = metrics?.buildLogs ?? [];
+  const runtimeText = metrics?.logs?.text ?? "";
+  return (
+    <div className="rounded-md border border-panel-line bg-white">
+      <div className="flex items-center justify-between border-b border-panel-line p-4">
+        <div className="text-sm font-semibold">Last 24h Logs</div>
+        <span className="text-xs text-panel-muted">{buildLogs.length} build entries</span>
+      </div>
+      <div className="grid gap-0 lg:grid-cols-2">
+        <div className="min-w-0 border-b border-panel-line p-4 lg:border-b-0 lg:border-r">
+          <div className="mb-3 text-xs font-semibold uppercase text-panel-muted">Build</div>
+          <div className="max-h-72 overflow-auto rounded-md bg-slate-950 p-3 font-mono text-xs leading-5 text-slate-100">
+            {buildLogs.length ? buildLogs.slice().reverse().map((log) => (
+              <div className="whitespace-pre-wrap" key={log.id}>
+                [{formatDate(log.createdAt)}] {log.step}: {log.message}
+              </div>
+            )) : "No build logs in the last 24h."}
+          </div>
+        </div>
+        <div className="min-w-0 p-4">
+          <div className="mb-3 text-xs font-semibold uppercase text-panel-muted">Runtime</div>
+          <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-slate-950 p-3 font-mono text-xs leading-5 text-slate-100">{runtimeText || "No runtime logs in the last 24h."}</pre>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
 }
 
 function doctorBadge(status: "pass" | "warn" | "fail") {

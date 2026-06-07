@@ -24,6 +24,7 @@ import { prisma } from "../lib/prisma.js";
 import { deleteSecret, getSecret, putSecret } from "../lib/secrets.js";
 import { sysagent } from "../lib/sysagent.js";
 import {
+  deploymentWorkerMax,
   inferredLaravelManagedProcesses,
   laravelManagedProcessesSchema,
   laravelManagedProgramName,
@@ -41,16 +42,16 @@ const deploymentPortSchema = z.number().int().min(1).max(65535);
 const laravelWorkerConfigSchema = z.object({
   enabled: z.boolean().default(false),
   autoscale: z.boolean().default(false),
-  desiredWorkers: z.number().int().min(0).max(64).default(0),
-  minWorkers: z.number().int().min(0).max(64).default(0),
-  maxWorkers: z.number().int().min(1).max(64).default(8),
+  desiredWorkers: z.number().int().min(0).max(deploymentWorkerMax).default(0),
+  minWorkers: z.number().int().min(0).max(deploymentWorkerMax).default(0),
+  maxWorkers: z.number().int().min(1).max(deploymentWorkerMax).default(deploymentWorkerMax),
   queueCommand: z.string().trim().min(1).max(500).default("php artisan queue:work --sleep=3 --tries=3 --timeout=90"),
-  currentWorkers: z.number().int().min(0).max(64).optional(),
+  currentWorkers: z.number().int().min(0).max(deploymentWorkerMax).optional(),
   lastScaledAt: z.string().datetime().optional(),
   lastScaleReason: z.string().max(500).optional()
 }).transform((value) => ({
   ...value,
-  maxWorkers: Math.max(value.maxWorkers, value.minWorkers, value.desiredWorkers),
+  maxWorkers: Math.min(deploymentWorkerMax, Math.max(value.maxWorkers, value.minWorkers, value.desiredWorkers)),
   desiredWorkers: value.enabled ? Math.max(value.minWorkers, Math.min(value.desiredWorkers, Math.max(value.maxWorkers, value.minWorkers))) : 0
 }));
 const processConfigSchema = z.object({
@@ -482,6 +483,7 @@ async function preflight(body: z.infer<typeof preflightSchema>, deploymentId?: s
 }
 
 async function addLog(deploymentId: string, step: "QUEUED" | "PREFLIGHT" | "STARTING" | "ROLLBACK" | "HEALTH_CHECK", message: string, releaseId?: string, metadata: Prisma.InputJsonObject = {}) {
+  await pruneDeploymentLogs(deploymentId);
   return prisma.deploymentLog.create({
     data: {
       deploymentId,
@@ -489,6 +491,19 @@ async function addLog(deploymentId: string, step: "QUEUED" | "PREFLIGHT" | "STAR
       step,
       message,
       metadata
+    }
+  });
+}
+
+function deploymentLogCutoff() {
+  return new Date(Date.now() - 24 * 60 * 60 * 1000);
+}
+
+async function pruneDeploymentLogs(deploymentId: string) {
+  await prisma.deploymentLog.deleteMany({
+    where: {
+      deploymentId,
+      createdAt: { lt: deploymentLogCutoff() }
     }
   });
 }
@@ -780,6 +795,19 @@ function deploymentServerName(domain: { name: string; includeWww?: boolean } | n
   if (!domain?.name) return null;
   if (domain.includeWww === false) return domain.name;
   return `${domain.name} www.${domain.name}`;
+}
+
+function deploymentServerNames(deployment: Awaited<ReturnType<typeof findDeployment>>) {
+  const names = new Set<string>();
+  for (const binding of deployment.domainBindings ?? []) {
+    if (binding.subdomain?.domain?.name) {
+      names.add(deploymentServerName({ name: `${binding.subdomain.name}.${binding.subdomain.domain.name}`, includeWww: false })!);
+    } else if (binding.domain?.name) {
+      names.add(deploymentServerName({ name: binding.domain.name })!);
+    }
+  }
+  if (deployment.domain?.name) names.add(deploymentServerName({ name: deployment.domain.name })!);
+  return [...names];
 }
 
 function commandFailed(value: unknown) {
@@ -2362,12 +2390,48 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     return prisma.deploymentRelease.findMany({ where: { deploymentId: deployment.id }, orderBy: { createdAt: "desc" }, include: { logs: { orderBy: { createdAt: "asc" } } } });
   });
 
+  app.get("/:deploymentId/metrics", async (request) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const deployment = await findDeployment(deploymentId);
+    await pruneDeploymentLogs(deployment.id);
+    const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
+    const [metrics, buildLogs] = await Promise.all([
+      sysagent.deploymentMetrics({
+        deploymentId: deployment.id,
+        name: deployment.slug,
+        rootPath: appPath,
+        port: deployment.port,
+        processManager: deployment.processManager,
+        logDir: deploymentLogDir(deployment.slug),
+        dbType: deployment.dbType,
+        dbName: deployment.dbName,
+        serverNames: deploymentServerNames(deployment),
+        logLines: 300
+      }).catch((error) => ({
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+        process: { cpuPercent: 0, memoryBytes: 0, processes: [], processCount: 0 },
+        storage: { rootPath: appPath, bytes: 0 },
+        database: { engine: deployment.dbType, name: deployment.dbName, sizeBytes: 0, available: false },
+        traffic: { incomingBytes: 0, outgoingBytes: 0, bandwidthBytes: 0, requests: 0, sources: [], windowHours: 24 },
+        logs: { ok: false, text: "", stdout: "", stderr: "", laravel: "" }
+      })),
+      prisma.deploymentLog.findMany({
+        where: { deploymentId: deployment.id, createdAt: { gte: deploymentLogCutoff() } },
+        orderBy: { createdAt: "desc" },
+        take: 300
+      })
+    ]);
+    return { ...(metrics as Record<string, unknown>), buildLogs };
+  });
+
   app.get("/:deploymentId/logs", async (request) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const query = z.object({ releaseId: z.string().optional(), step: z.string().optional(), limit: z.coerce.number().int().min(1).max(500).default(200) }).parse(request.query);
     const deployment = await findDeployment(deploymentId);
+    await pruneDeploymentLogs(deployment.id);
     return prisma.deploymentLog.findMany({
-      where: { deploymentId: deployment.id, ...(query.releaseId ? { releaseId: query.releaseId } : {}), ...(query.step ? { step: query.step as any } : {}) },
+      where: { deploymentId: deployment.id, createdAt: { gte: deploymentLogCutoff() }, ...(query.releaseId ? { releaseId: query.releaseId } : {}), ...(query.step ? { step: query.step as any } : {}) },
       orderBy: { createdAt: "asc" },
       take: query.limit
     });
@@ -2381,6 +2445,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       limit: z.coerce.number().int().min(1).max(1000).default(500)
     }).parse(request.query);
     const deployment = await findDeployment(deploymentId);
+    await pruneDeploymentLogs(deployment.id);
 
     if (query.type === "running") {
       const runtime = await sysagent.deploymentRuntimeLogs({
@@ -2403,7 +2468,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     }
 
     const logs = await prisma.deploymentLog.findMany({
-      where: { deploymentId: deployment.id, ...(query.releaseId ? { releaseId: query.releaseId } : {}) },
+      where: { deploymentId: deployment.id, createdAt: { gte: deploymentLogCutoff() }, ...(query.releaseId ? { releaseId: query.releaseId } : {}) },
       orderBy: { createdAt: "asc" },
       take: query.limit
     });
@@ -2425,7 +2490,8 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const query = z.object({ step: z.string().optional(), limit: z.coerce.number().int().min(1).max(500).default(200) }).parse(request.query);
     const deployment = await findDeployment(deploymentId);
-    let lastCreatedAt = new Date(0);
+    await pruneDeploymentLogs(deployment.id);
+    let lastCreatedAt = deploymentLogCutoff();
 
     reply.raw.writeHead(200, {
       "content-type": "text/event-stream",

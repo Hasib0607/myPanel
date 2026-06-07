@@ -145,6 +145,31 @@ export type QueueResponse = {
   reason?: string;
 };
 
+export type DeploymentMetrics = {
+  ok: boolean;
+  generatedAt?: string;
+  error?: string;
+  process: {
+    cpuPercent: number;
+    memoryBytes: number;
+    processCount: number;
+    processes: Array<{ pid: number; name?: string | null; status?: string | null; cpuPercent?: number; memoryBytes?: number }>;
+  };
+  storage: { rootPath: string; bytes: number };
+  database: { engine: string | null; name: string | null; sizeBytes: number; available: boolean };
+  traffic: {
+    incomingBytes: number;
+    outgoingBytes: number;
+    bandwidthBytes: number;
+    requests: number;
+    sources: string[];
+    windowHours: number;
+    note?: string | null;
+  };
+  logs: { ok: boolean; text: string; stdout: string; stderr: string; laravel?: string; logDir?: string; error?: string };
+  buildLogs: DeploymentLog[];
+};
+
 export type DeploymentDoctorResponse = {
   status: "pass" | "warn" | "fail";
   summary: string;

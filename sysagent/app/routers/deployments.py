@@ -7,12 +7,14 @@ import time
 import shutil
 import os
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import psutil
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.command import run_command, run_install_plan
+from app.command import constrained_runtime_env, deployment_resource_limits, run_command, run_install_plan
 from app.config import DEPLOYMENT_COMMANDS_LIVE, settings
 from app.deployment_env import (
     clear_laravel_bootstrap_config_cache,
@@ -63,6 +65,7 @@ class GitSyncRequest(BaseModel):
     branch: str = "main"
     commitSha: str | None = None
     gitToken: str | None = None
+    resourceLimits: dict[str, int] | None = None
 
 
 class CommandRequest(BaseModel):
@@ -70,6 +73,7 @@ class CommandRequest(BaseModel):
     command: str | None = None
     packageManager: str | None = None
     env: dict[str, str] | None = None
+    resourceLimits: dict[str, int] | None = None
 
 
 class ProcessRequest(BaseModel):
@@ -83,6 +87,7 @@ class ProcessRequest(BaseModel):
     env: dict[str, str] | None = None
     logDir: str | None = None
     framework: str | None = None
+    resourceLimits: dict[str, int] | None = None
 
 
 class LaravelWorkersRequest(BaseModel):
@@ -94,6 +99,7 @@ class LaravelWorkersRequest(BaseModel):
     env: dict[str, str] | None = None
     logDir: str | None = None
     logPrefix: str = Field(default="worker", pattern="^[a-zA-Z0-9_.-]+$")
+    resourceLimits: dict[str, int] | None = None
 
 
 def normalize_process_root(body: ProcessRequest) -> ProcessRequest:
@@ -156,6 +162,7 @@ class GuardianRepairRequest(BaseModel):
     rootPath: str
     framework: str | None = None
     env: dict[str, str] | None = None
+    resourceLimits: dict[str, int] | None = None
 
 
 class RuntimeLogsRequest(BaseModel):
@@ -163,6 +170,19 @@ class RuntimeLogsRequest(BaseModel):
     logDir: str | None = None
     rootPath: str | None = None
     lines: int = Field(default=300, ge=1, le=2000)
+
+
+class DeploymentMetricsRequest(BaseModel):
+    deploymentId: str
+    name: str
+    rootPath: str
+    port: int | None = Field(default=None, ge=1, le=65535)
+    processManager: str | None = None
+    logDir: str | None = None
+    dbType: str | None = None
+    dbName: str | None = None
+    serverNames: list[str] = Field(default_factory=list, max_length=50)
+    logLines: int = Field(default=300, ge=1, le=2000)
 
 
 class RuntimeToolsRequest(BaseModel):
@@ -239,20 +259,28 @@ def blocked_command(reason: str, command: list[str], info: dict | None = None) -
     return result
 
 
-def guarded_command(root_path: str, command: list[str], cwd: str | None = None) -> dict:
+def effective_resource_limits(resource_limits: dict[str, int] | None = None) -> dict[str, int] | None:
+    return resource_limits if resource_limits is not None else deployment_resource_limits()
+
+
+def clamp_worker_count(value: int) -> int:
+    return max(0, min(value, max(1, settings.deployment_worker_max)))
+
+
+def guarded_command(root_path: str, command: list[str], cwd: str | None = None, resource_limits: dict[str, int] | None = None) -> dict:
     info = path_info(root_path)
     if not info["allowed"]:
         return blocked_command("Path escapes configured file manager root", command, info)
-    result = run_command(command, cwd=cwd, allow_live=DEPLOYMENT_COMMANDS_LIVE)
+    result = run_command(command, cwd=cwd, allow_live=DEPLOYMENT_COMMANDS_LIVE, resource_limits=resource_limits)
     result["path"] = info
     return result
 
 
-def guarded_command_with_env(root_path: str, command: list[str], cwd: str | None = None, env: dict[str, str] | None = None) -> dict:
+def guarded_command_with_env(root_path: str, command: list[str], cwd: str | None = None, env: dict[str, str] | None = None, resource_limits: dict[str, int] | None = None) -> dict:
     info = path_info(root_path)
     if not info["allowed"]:
         return blocked_command("Path escapes configured file manager root", command, info)
-    result = run_command(command, cwd=cwd, env=env, allow_live=DEPLOYMENT_COMMANDS_LIVE)
+    result = run_command(command, cwd=cwd, env=env, allow_live=DEPLOYMENT_COMMANDS_LIVE, resource_limits=resource_limits)
     result["path"] = info
     return result
 
@@ -324,12 +352,12 @@ def git_safe_directory(root_path: str, target: Path) -> dict:
     )
 
 
-def git_command_with_safe_directory(root_path: str, target: Path, command: list[str], env: dict[str, str] | None = None) -> dict:
-    result = guarded_command_with_env(root_path, command, env=env)
+def git_command_with_safe_directory(root_path: str, target: Path, command: list[str], env: dict[str, str] | None = None, resource_limits: dict[str, int] | None = None) -> dict:
+    result = guarded_command_with_env(root_path, command, env=env, resource_limits=effective_resource_limits(resource_limits))
     text = f"{result.get('stderr') or ''}\n{result.get('stdout') or ''}".lower()
     if result.get("returncode") == 128 and "dubious ownership" in text:
         safe = git_safe_directory(root_path, target)
-        retry = guarded_command_with_env(root_path, command, env=env) if safe.get("returncode") == 0 else {
+        retry = guarded_command_with_env(root_path, command, env=env, resource_limits=effective_resource_limits(resource_limits)) if safe.get("returncode") == 0 else {
             "returncode": 1,
             "stderr": "Skipped because safe.directory repair failed",
             "safeDirectory": safe,
@@ -366,7 +394,7 @@ def nginx_config_name(deployment_id: str, server_name: str) -> str:
     return f"domain-{safe_name}"
 
 
-def guarded_deployment_command(root_path: str, command: str, env: dict[str, str] | None = None) -> dict:
+def guarded_deployment_command(root_path: str, command: str, env: dict[str, str] | None = None, resource_limits: dict[str, int] | None = None) -> dict:
     info = path_info(root_path)
     try:
         parsed = parse_deployment_command(command)
@@ -375,7 +403,7 @@ def guarded_deployment_command(root_path: str, command: str, env: dict[str, str]
     effective_env = dict(env or {})
     if parsed and parsed[0] == "composer":
         effective_env = composer_git_env(root_path, effective_env)
-    return guarded_command_with_env(root_path, parsed, cwd=deployment_cwd(root_path), env=effective_env or None)
+    return guarded_command_with_env(root_path, parsed, cwd=deployment_cwd(root_path), env=effective_env or None, resource_limits=effective_resource_limits(resource_limits))
 
 
 def pm2_env(port: int | None) -> dict[str, str]:
@@ -456,6 +484,140 @@ def reset_runtime_logs(log_dir: Path) -> None:
         file_path.write_text("", encoding="utf-8")
         file_path.chmod(0o664)
     make_panel_owned(log_dir)
+
+
+def directory_size_bytes(root_path: str) -> int:
+    root = Path(root_path).resolve()
+    info = path_info(str(root))
+    if not info["allowed"] or not root.exists():
+        return 0
+    total = 0
+    for current, dirs, files in os.walk(root):
+        dirs[:] = [name for name in dirs if name not in {".git"}]
+        for filename in files:
+            try:
+                total += (Path(current) / filename).stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def process_matches(proc: psutil.Process, root_path: str, name: str, port_pids: set[int]) -> bool:
+    if proc.pid in port_pids:
+        return True
+    root = str(Path(root_path).resolve())
+    try:
+        cwd = proc.cwd()
+        if cwd == root or cwd.startswith(f"{root}{os.sep}"):
+            return True
+    except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+        pass
+    try:
+        text = " ".join(proc.cmdline())
+        return root in text or name in text
+    except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+        return False
+
+
+def deployment_process_metrics(root_path: str, name: str, port: int | None) -> dict:
+    port_pids: set[int] = set()
+    if port:
+        try:
+            for conn in psutil.net_connections(kind="inet"):
+                if conn.laddr and conn.laddr.port == port and conn.pid:
+                    port_pids.add(conn.pid)
+        except (psutil.AccessDenied, OSError):
+            port_pids = set()
+
+    processes = []
+    cpu_percent = 0.0
+    memory_bytes = 0
+    for proc in psutil.process_iter(["pid", "name", "status", "memory_info", "cpu_percent"]):
+        try:
+            if not process_matches(proc, root_path, name, port_pids):
+                continue
+            memory = proc.info.get("memory_info")
+            rss = int(getattr(memory, "rss", 0) or 0)
+            cpu = float(proc.info.get("cpu_percent") or 0.0)
+            memory_bytes += rss
+            cpu_percent += cpu
+            processes.append({
+                "pid": proc.pid,
+                "name": proc.info.get("name"),
+                "status": proc.info.get("status"),
+                "cpuPercent": cpu,
+                "memoryBytes": rss,
+            })
+        except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+            continue
+    return {
+        "cpuPercent": round(cpu_percent, 2),
+        "memoryBytes": memory_bytes,
+        "processes": processes[:20],
+        "processCount": len(processes),
+    }
+
+
+def deployment_nginx_log_path(deployment_id: str, server_name: str) -> Path:
+    config_name = nginx_config_name(deployment_id, server_name)
+    return Path("/var/log/nginx") / f"vps-panel-{config_name}.access.log"
+
+
+def parse_nginx_log_time(value: str) -> datetime | None:
+    try:
+        return datetime.strptime(value, "%d/%b/%Y:%H:%M:%S %z")
+    except ValueError:
+        return None
+
+
+def parse_nginx_traffic_line(line: str, cutoff: datetime) -> tuple[int, int] | None:
+    match = re.search(r"\[([^\]]+)\]\s+\"[^\"]*\"\s+\d{3}\s+(\d+|-)", line)
+    if not match:
+        return None
+    timestamp = parse_nginx_log_time(match.group(1))
+    if timestamp is None or timestamp < cutoff:
+        return None
+    sent = 0 if match.group(2) == "-" else int(match.group(2))
+    return sent, 1
+
+
+def deployment_traffic_metrics(deployment_id: str, server_names: list[str]) -> dict:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=1)
+    candidates: list[Path] = []
+    for server_name in server_names:
+        if not server_name.strip():
+            continue
+        path = deployment_nginx_log_path(deployment_id, server_name)
+        candidates.extend([path, path.with_suffix(path.suffix + ".1")])
+
+    seen: set[Path] = set()
+    outgoing = 0
+    requests = 0
+    sources = []
+    for path in candidates:
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        sources.append(str(path))
+        try:
+            for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                parsed = parse_nginx_traffic_line(line, cutoff)
+                if parsed is None:
+                    continue
+                sent, count = parsed
+                outgoing += sent
+                requests += count
+        except OSError:
+            continue
+    return {
+        "incomingBytes": 0,
+        "outgoingBytes": outgoing,
+        "bandwidthBytes": outgoing,
+        "requests": requests,
+        "sources": sources,
+        "windowHours": 24,
+        "note": None if sources else "Per-project traffic starts after this deployment's Nginx vhost is republished.",
+    }
 
 
 def make_panel_owned(path: Path) -> None:
@@ -630,7 +792,13 @@ def laravel_workers_apply(body: LaravelWorkersRequest) -> dict:
     wrapper_path: Path | None = None
     try:
         start_command = parse_deployment_command(body.queueCommand)
-        wrapper_path, runtime_env_path, laravel_env_path = prepare_supervisor_runtime(body.rootPath, start_command, None, body.env)
+        wrapper_path, runtime_env_path, laravel_env_path = prepare_supervisor_runtime(
+            body.rootPath,
+            start_command,
+            None,
+            body.env,
+            effective_resource_limits(body.resourceLimits),
+        )
         make_panel_owned(wrapper_path.parent)
         remove_stale_supervisor_program_configs(body.name, config_path)
         config_path.write_text(supervisor_laravel_worker_config(body, wrapper_path, log_dir), encoding="utf-8")
@@ -709,6 +877,7 @@ def supervisor_start(body: ProcessRequest, start_command: list[str]) -> dict:
             start_command,
             body.port,
             body.env,
+            effective_resource_limits(body.resourceLimits),
         )
         make_panel_owned(wrapper_path.parent)
         remove_stale_supervisor_program_configs(body.name, config_path)
@@ -784,6 +953,8 @@ def pm2_start(body: ProcessRequest, start_command: list[str]) -> dict:
         "--error",
         str(log_dir / "running-error.log"),
         "--merge-logs",
+        "--max-memory-restart",
+        f"{(effective_resource_limits(body.resourceLimits) or {}).get('memoryMaxMb', settings.deployment_memory_max_mb)}M",
         # 3 s between crash-restarts so port is released before PM2 retries, preventing
         # a tight loop that exhausts the restart counter and leaves the app permanently down.
         "--restart-delay",
@@ -792,7 +963,7 @@ def pm2_start(body: ProcessRequest, start_command: list[str]) -> dict:
         *start_command[1:],
     ]
     # Merge: default PM2 host/port vars first, then user-defined env vars (user wins on conflict).
-    process_env = {**pm2_env(body.port), **(body.env or {})}
+    process_env = constrained_runtime_env({**pm2_env(body.port), **(body.env or {})}, effective_resource_limits(body.resourceLimits))
     start = guarded_command_with_env(body.rootPath, command, cwd=cwd, env=process_env)
     save = guarded_command(body.rootPath, ["pm2", "save"], cwd=cwd) if start.get("returncode") == 0 else {
         "dryRun": start.get("dryRun", False),
@@ -874,6 +1045,59 @@ def runtime_logs(body: RuntimeLogsRequest) -> dict:
     return {"ok": True, "logDir": str(log_dir), "stdout": stdout, "stderr": stderr, "laravel": laravel, "text": text}
 
 
+@router.post("/metrics")
+def deployment_metrics(body: DeploymentMetricsRequest) -> dict:
+    root = str(Path(body.rootPath).resolve())
+    info = path_info(root)
+    if not info["allowed"]:
+        return {
+            "ok": False,
+            "path": info,
+            "error": "Path escapes configured file manager root",
+            "process": {"cpuPercent": 0, "memoryBytes": 0, "processes": [], "processCount": 0},
+            "storage": {"rootPath": root, "bytes": 0},
+            "database": {"engine": body.dbType, "name": body.dbName, "sizeBytes": 0, "available": False},
+            "traffic": {"incomingBytes": 0, "outgoingBytes": 0, "bandwidthBytes": 0, "requests": 0, "sources": [], "windowHours": 24},
+            "logs": {"ok": False, "text": "", "stdout": "", "stderr": "", "laravel": ""},
+        }
+
+    db_size = 0
+    db_available = False
+    if body.dbType and body.dbName:
+        try:
+            from app.routers.database import mysql_overview, postgres_overview
+            overview = postgres_overview() if body.dbType.upper() == "POSTGRESQL" else mysql_overview()
+            db_available = bool(overview.get("installed"))
+            for database in overview.get("databases", []):
+                if database.get("name") == body.dbName:
+                    db_size = int(database.get("sizeBytes") or 0)
+                    break
+        except Exception:
+            db_available = False
+
+    logs = runtime_logs(RuntimeLogsRequest(
+        name=body.name,
+        logDir=body.logDir,
+        rootPath=root,
+        lines=body.logLines,
+    ))
+    return {
+        "ok": True,
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "path": info,
+        "process": deployment_process_metrics(root, body.name, body.port),
+        "storage": {"rootPath": root, "bytes": directory_size_bytes(root)},
+        "database": {
+            "engine": body.dbType,
+            "name": body.dbName,
+            "sizeBytes": db_size,
+            "available": db_available,
+        },
+        "traffic": deployment_traffic_metrics(body.deploymentId, body.serverNames),
+        "logs": logs,
+    }
+
+
 def guarded_write_file(root_path: str, target_path: str, content: str) -> dict:
     info = path_info(root_path)
     command = ["write-file", target_path]
@@ -897,22 +1121,22 @@ def git_sync(body: GitSyncRequest) -> dict:
     env = git_auth_env(body.gitToken)
     safe = git_safe_directory(body.rootPath, target)
     if target.joinpath(".git").exists():
-        remote = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "remote", "set-url", "origin", body.gitUrl], env=env) if body.gitUrl else None
-        fetch = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "fetch", "origin", body.branch, "--prune"], env=env)
+        remote = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "remote", "set-url", "origin", body.gitUrl], env=env, resource_limits=body.resourceLimits) if body.gitUrl else None
+        fetch = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "fetch", "origin", body.branch, "--prune"], env=env, resource_limits=body.resourceLimits)
         reset_target = body.commitSha or "FETCH_HEAD"
-        reset = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "reset", "--hard", reset_target], env=env)
-        clean = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "clean", "-fd"], env=env)
+        reset = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "reset", "--hard", reset_target], env=env, resource_limits=body.resourceLimits)
+        clean = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "clean", "-fd"], env=env, resource_limits=body.resourceLimits)
         return {"safeDirectory": safe, "remote": remote, "sync": fetch, "reset": reset, "clean": clean, "commit": git_commit_info(body.rootPath, target, env)}
     if body.gitUrl:
         command = ["git", "clone", "--branch", body.branch, body.gitUrl, str(target)]
     else:
         command = ["git", "-C", str(target), "fetch", "--all", "--prune"]
-    result = git_command_with_safe_directory(body.rootPath, target, command, env=env)
+    result = git_command_with_safe_directory(body.rootPath, target, command, env=env, resource_limits=body.resourceLimits)
     checkout = None
     if body.commitSha:
-        checkout = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "checkout", body.commitSha], env=env)
+        checkout = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "checkout", body.commitSha], env=env, resource_limits=body.resourceLimits)
     elif not body.gitUrl:
-        checkout = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "checkout", body.branch], env=env)
+        checkout = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "checkout", body.branch], env=env, resource_limits=body.resourceLimits)
     return {"safeDirectory": safe, "sync": result, "checkout": checkout, "commit": git_commit_info(body.rootPath, target, env) if target.joinpath(".git").exists() else None}
 
 
@@ -931,19 +1155,19 @@ def install(body: CommandRequest) -> dict:
     env = dict(body.env or {})
     if (body.packageManager or "").upper() == "COMPOSER":
         env.setdefault("COMPOSER_ALLOW_SUPERUSER", "1")
-    return guarded_deployment_command(body.rootPath, command, env=env or None)
+    return guarded_deployment_command(body.rootPath, command, env=env or None, resource_limits=body.resourceLimits)
 
 
 @router.post("/build")
 def build(body: CommandRequest) -> dict:
     command = body.command or "true"
-    return guarded_deployment_command(body.rootPath, command, env=body.env)
+    return guarded_deployment_command(body.rootPath, command, env=body.env, resource_limits=body.resourceLimits)
 
 
 @router.post("/migrate")
 def migrate(body: CommandRequest) -> dict:
     command = body.command or "true"
-    return guarded_deployment_command(body.rootPath, command, env=body.env)
+    return guarded_deployment_command(body.rootPath, command, env=body.env, resource_limits=body.resourceLimits)
 
 
 @router.post("/process")
@@ -976,18 +1200,24 @@ def process(body: ProcessRequest) -> dict:
     elif manager == "SYSTEMD":
         command = ["systemctl", body.action, body.name]
     else:
-        return guarded_deployment_command(body.rootPath, body.startCommand or "true")
+        return guarded_deployment_command(body.rootPath, body.startCommand or "true", resource_limits=body.resourceLimits)
     return guarded_command(body.rootPath, command)
 
 
 @router.post("/laravel-workers")
 def laravel_workers(body: LaravelWorkersRequest) -> dict:
     body.name = re.sub(r"[^a-zA-Z0-9_.-]+", "-", body.name).strip("-") or "laravel-queue"
+    original_workers = body.desiredWorkers
+    body.desiredWorkers = clamp_worker_count(body.desiredWorkers)
     if body.action == "status":
         return laravel_worker_status(body)
     if body.action == "stop":
         body.desiredWorkers = 0
-    return laravel_workers_apply(body)
+    result = laravel_workers_apply(body)
+    if original_workers != body.desiredWorkers:
+        result["requestedWorkers"] = original_workers
+        result["workerLimit"] = settings.deployment_worker_max
+    return result
 
 
 def _nginx_scan_dirs() -> list[str]:
@@ -1133,10 +1363,14 @@ def nginx(body: NginxRequest) -> dict:
         else:
             http_location = f"{acme_location(server_name, public_root)}{app_locations}"
 
+        access_log = Path("/var/log/nginx") / f"vps-panel-{config_name}.access.log"
+        error_log = Path("/var/log/nginx") / f"vps-panel-{config_name}.error.log"
         config = f"""
 server {{
     listen 80;
     server_name {server_name};
+    access_log {access_log} combined;
+    error_log {error_log} warn;
 
 {http_location}}}
 """.lstrip()
@@ -1146,6 +1380,8 @@ server {{
 server {{
     listen 443 ssl http2;
     server_name {server_name};
+    access_log {access_log} combined;
+    error_log {error_log} warn;
     ssl_certificate {ssl_certificate};
     ssl_certificate_key {ssl_certificate_key};
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -2090,6 +2326,7 @@ def guardian_repair(body: GuardianRepairRequest) -> dict:
                 body.rootPath,
                 "composer install --no-dev --optimize-autoloader --no-interaction",
                 env=env or None,
+                resource_limits=body.resourceLimits,
             )
             if steps["vendorInstall"].get("returncode") != 0:
                 failed = [name for name, step in steps.items() if step.get("returncode", 0) != 0]
@@ -2105,13 +2342,13 @@ def guardian_repair(body: GuardianRepairRequest) -> dict:
         if steps["env"].get("appKey"):
             env["APP_KEY"] = steps["env"]["appKey"]
         steps["writablePaths"] = repair_laravel_writable_paths(LaravelWritablePathsRequest(rootPath=body.rootPath))
-        steps["optimizeClear"] = guarded_deployment_command(body.rootPath, "php artisan optimize:clear", env=env or None)
-        steps["configClear"] = guarded_deployment_command(body.rootPath, "php artisan config:clear", env=env or None)
-        steps["cacheClear"] = guarded_deployment_command(body.rootPath, "php artisan cache:clear", env=env or None)
-        steps["routeClear"] = guarded_deployment_command(body.rootPath, "php artisan route:clear", env=env or None)
-        steps["viewClear"] = guarded_deployment_command(body.rootPath, "php artisan view:clear", env=env or None)
+        steps["optimizeClear"] = guarded_deployment_command(body.rootPath, "php artisan optimize:clear", env=env or None, resource_limits=body.resourceLimits)
+        steps["configClear"] = guarded_deployment_command(body.rootPath, "php artisan config:clear", env=env or None, resource_limits=body.resourceLimits)
+        steps["cacheClear"] = guarded_deployment_command(body.rootPath, "php artisan cache:clear", env=env or None, resource_limits=body.resourceLimits)
+        steps["routeClear"] = guarded_deployment_command(body.rootPath, "php artisan route:clear", env=env or None, resource_limits=body.resourceLimits)
+        steps["viewClear"] = guarded_deployment_command(body.rootPath, "php artisan view:clear", env=env or None, resource_limits=body.resourceLimits)
         if laravel_has_public_web_root(body.rootPath):
-            steps["storageLink"] = guarded_deployment_command(body.rootPath, "php artisan storage:link", env=env or None)
+            steps["storageLink"] = guarded_deployment_command(body.rootPath, "php artisan storage:link", env=env or None, resource_limits=body.resourceLimits)
             if steps["storageLink"].get("returncode") != 0:
                 stderr = (steps["storageLink"].get("stderr") or "").lower()
                 if "already exists" in stderr or "exists" in stderr:

@@ -23,6 +23,7 @@ import { sysagent } from "../lib/sysagent.js";
 import { certbotCertificateName, isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
 import { currentVpsIp } from "../lib/serverIp.js";
 import {
+  deploymentWorkerMax,
   inferredLaravelManagedProcesses,
   laravelManagedProcessesSchema,
   laravelManagedProgramName,
@@ -154,9 +155,9 @@ const runtimeInstallSelectionSchema = z.object({
 const accountLaravelWorkersSchema = z.object({
   enabled: z.boolean().default(false),
   autoscale: z.boolean().default(false),
-  desiredWorkers: z.number().int().min(0).max(64).default(0),
-  minWorkers: z.number().int().min(0).max(64).default(0),
-  maxWorkers: z.number().int().min(1).max(64).default(8),
+  desiredWorkers: z.number().int().min(0).max(deploymentWorkerMax).default(0),
+  minWorkers: z.number().int().min(0).max(deploymentWorkerMax).default(0),
+  maxWorkers: z.number().int().min(1).max(deploymentWorkerMax).default(deploymentWorkerMax),
   queueCommand: z.string().trim().min(1).max(500).default("php artisan queue:work --sleep=3 --tries=3 --timeout=90")
 });
 const githubConnectionSchema = z.object({

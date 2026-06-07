@@ -32,6 +32,7 @@ import { deleteSecret, getSecret, putSecret } from "../lib/secrets.js";
 import { sysagent } from "../lib/sysagent.js";
 import { currentVpsIp } from "../lib/serverIp.js";
 import {
+  deploymentWorkerMax,
   inferredLaravelManagedProcesses,
   laravelManagedProgramName,
   queueGroupCommand,
@@ -139,17 +140,17 @@ function deploymentProcessConfig(value: unknown): Record<string, any> {
 function laravelWorkerConfig(value: unknown) {
   const raw = value && typeof value === "object" ? value as Record<string, any> : {};
   const enabled = Boolean(raw.enabled);
-  const minWorkers = Math.max(0, Math.min(64, Number(raw.minWorkers ?? 0) || 0));
-  const maxWorkers = Math.max(1, Math.min(64, Number(raw.maxWorkers ?? 8) || 8));
+  const minWorkers = Math.max(0, Math.min(deploymentWorkerMax, Number(raw.minWorkers ?? 0) || 0));
+  const maxWorkers = Math.max(1, Math.min(deploymentWorkerMax, Number(raw.maxWorkers ?? deploymentWorkerMax) || deploymentWorkerMax));
   const desiredWorkers = enabled ? Math.max(minWorkers, Math.min(maxWorkers, Number(raw.desiredWorkers ?? raw.currentWorkers ?? minWorkers) || 0)) : 0;
   return {
     enabled,
     autoscale: Boolean(raw.autoscale),
     desiredWorkers,
     minWorkers,
-    maxWorkers: Math.max(maxWorkers, minWorkers, desiredWorkers),
+    maxWorkers: Math.min(deploymentWorkerMax, Math.max(maxWorkers, minWorkers, desiredWorkers)),
     queueCommand: typeof raw.queueCommand === "string" && raw.queueCommand.trim() ? raw.queueCommand.trim() : "php artisan queue:work --sleep=3 --tries=3 --timeout=90",
-    currentWorkers: Math.max(0, Math.min(64, Number(raw.currentWorkers ?? 0) || 0)),
+    currentWorkers: Math.max(0, Math.min(deploymentWorkerMax, Number(raw.currentWorkers ?? 0) || 0)),
     lastScaledAt: typeof raw.lastScaledAt === "string" ? raw.lastScaledAt : undefined,
     lastScaleReason: typeof raw.lastScaleReason === "string" ? raw.lastScaleReason : undefined
   };

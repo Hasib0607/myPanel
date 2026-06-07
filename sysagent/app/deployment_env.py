@@ -5,6 +5,7 @@ import shlex
 import subprocess
 import base64
 import os
+import shutil
 from pathlib import Path
 from urllib.parse import quote_plus
 
@@ -241,8 +242,35 @@ def is_laravel_artisan_command(start_command: list[str]) -> bool:
     return len(start_command) >= 2 and start_command[0] == "php" and start_command[1] == "artisan"
 
 
-def write_supervisor_wrapper(wrapper_path: Path, env_path: Path, cwd: str, start_command: list[str]) -> None:
+def _positive_int(value: object, fallback: int | None = None) -> int | None:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if parsed > 0 else fallback
+
+
+def resource_limited_shell_command(start_command: list[str], resource_limits: dict[str, object] | None = None) -> str:
     command = shlex.join(start_command)
+    if not resource_limits:
+        return command
+
+    memory_mb = _positive_int(resource_limits.get("memoryMaxMb"))
+    nice = _positive_int(resource_limits.get("nice"))
+
+    args = list(start_command)
+    if shutil.which("prlimit") and memory_mb:
+        prlimit = ["prlimit"]
+        memory_bytes = memory_mb * 1024 * 1024
+        prlimit.append(f"--as={memory_bytes}:{memory_bytes}")
+        args = [*prlimit, "--", *args]
+    if nice and shutil.which("nice"):
+        args = ["nice", "-n", str(min(19, max(0, nice))), *args]
+    return " ".join(shlex.quote(part) for part in args)
+
+
+def write_supervisor_wrapper(wrapper_path: Path, env_path: Path, cwd: str, start_command: list[str], resource_limits: dict[str, object] | None = None) -> None:
+    command = resource_limited_shell_command(start_command, resource_limits)
     script = (
         "#!/bin/bash\n"
         "set -euo pipefail\n"
@@ -262,6 +290,7 @@ def prepare_supervisor_runtime(
     start_command: list[str],
     port: int | None,
     env: dict[str, str] | None,
+    resource_limits: dict[str, object] | None = None,
 ) -> tuple[Path, Path, Path | None]:
     cwd = Path(root_path).resolve()
     if is_laravel_artisan_command(start_command) and cwd.name == "public" and (cwd.parent / "artisan").is_file():
@@ -283,5 +312,5 @@ def prepare_supervisor_runtime(
             existing_path = process_env.get("PATH") or os.environ.get("PATH") or "/usr/local/bin:/usr/bin:/bin"
             process_env["PATH"] = f"{venv_bin}:{existing_path}"
         write_env_file(runtime_env, process_env)
-    write_supervisor_wrapper(wrapper, runtime_env, str(cwd), start_command)
+    write_supervisor_wrapper(wrapper, runtime_env, str(cwd), start_command, resource_limits)
     return wrapper, runtime_env, laravel_env_path

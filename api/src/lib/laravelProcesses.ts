@@ -1,9 +1,12 @@
 import { z } from "zod";
 
+const configuredWorkerMax = Number(process.env.DEPLOYMENT_WORKER_MAX ?? 3);
+export const deploymentWorkerMax = Math.max(1, Math.min(64, Number.isFinite(configuredWorkerMax) ? configuredWorkerMax : 3));
+
 export const laravelProcessSchema = z.object({
   enabled: z.boolean().default(false),
   command: z.string().trim().min(1).max(500),
-  instances: z.number().int().min(1).max(64).default(1)
+  instances: z.number().int().min(1).max(deploymentWorkerMax).default(1)
 });
 
 export const laravelQueueGroupSchema = z.object({
@@ -11,15 +14,15 @@ export const laravelQueueGroupSchema = z.object({
   name: z.string().trim().min(1).max(100),
   enabled: z.boolean().default(true),
   autoscale: z.boolean().default(false),
-  desiredWorkers: z.number().int().min(0).max(64).default(1),
-  minWorkers: z.number().int().min(0).max(64).default(0),
-  maxWorkers: z.number().int().min(1).max(64).default(8),
+  desiredWorkers: z.number().int().min(0).max(deploymentWorkerMax).default(1),
+  minWorkers: z.number().int().min(0).max(deploymentWorkerMax).default(0),
+  maxWorkers: z.number().int().min(1).max(deploymentWorkerMax).default(deploymentWorkerMax),
   queueNames: z.array(z.string().trim().min(1).max(100)).min(1).default(["default"]),
   command: z.string().trim().min(1).max(500).optional()
 }).transform((value) => ({
   ...value,
-  maxWorkers: Math.max(value.maxWorkers, value.minWorkers, value.desiredWorkers),
-  desiredWorkers: value.enabled ? Math.max(value.minWorkers, Math.min(value.desiredWorkers, Math.max(value.maxWorkers, value.minWorkers))) : 0
+  maxWorkers: Math.min(deploymentWorkerMax, Math.max(value.maxWorkers, value.minWorkers, value.desiredWorkers)),
+  desiredWorkers: value.enabled ? Math.max(value.minWorkers, Math.min(value.desiredWorkers, Math.max(value.maxWorkers, value.minWorkers, deploymentWorkerMax))) : 0
 }));
 
 export const laravelManagedProcessesSchema = z.object({
