@@ -903,7 +903,14 @@ function Input({ label, value, onChange, readOnly }: { label: string; value: str
 
 function DeploymentFileManagerPanel({ accountRoot, apiBase, deployment }: { accountRoot?: string; apiBase: "/deployments" | "/account/deployments"; deployment: Deployment }) {
   const fileApiBase = apiBase === "/account/deployments" ? "/account/files" : "/files";
-  const rootPrefix = apiBase === "/account/deployments" ? accountRoot : "/var/www";
+  if (apiBase === "/account/deployments" && !accountRoot) {
+    return (
+      <div className="rounded-md border border-panel-line bg-white p-4 text-sm text-panel-muted">
+        Loading account file root...
+      </div>
+    );
+  }
+  const rootPrefix = apiBase === "/account/deployments" ? accountRoot! : "/var/www";
   const projectPath = deploymentAppStoragePath(deployment);
   const relativePath = projectStorageRelativePath(projectPath, rootPrefix);
   if (!relativePath) {
@@ -927,7 +934,7 @@ function DeploymentFileManagerPanel({ accountRoot, apiBase, deployment }: { acco
           path: relativePath,
           hint: projectPath
         }}
-        rootHintPrefix={rootPrefix ?? "/var/www"}
+        rootHintPrefix={rootPrefix}
       />
     </div>
   );
@@ -939,9 +946,9 @@ function deploymentAppStoragePath(deployment: Deployment) {
   return cleanDirectory && cleanDirectory !== "." ? `${cleanRoot}/${cleanDirectory}` : cleanRoot;
 }
 
-function projectStorageRelativePath(projectPath: string, rootPrefix?: string) {
+function projectStorageRelativePath(projectPath: string, rootPrefix: string) {
   const cleanPath = projectPath.replace(/\\/g, "/").replace(/\/+$/, "");
-  const cleanRoot = (rootPrefix || "/var/www").replace(/\\/g, "/").replace(/\/+$/, "");
+  const cleanRoot = rootPrefix.replace(/\\/g, "/").replace(/\/+$/, "");
   if (cleanPath === cleanRoot) return ".";
   if (!cleanPath.startsWith(`${cleanRoot}/`)) return null;
   return cleanPath.slice(cleanRoot.length + 1) || ".";
