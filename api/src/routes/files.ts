@@ -13,7 +13,9 @@ import { env } from "../config/env.js";
 import { audit } from "../lib/audit.js";
 import { ensureDomainFileStructure, ensureSubdomainFileStructure } from "../lib/domainFiles.js";
 import { fileUploadChunkBodyLimitBytes, fileUploadChunkBytes, fileUploadLimitBytes } from "../lib/fileUploadLimits.js";
+import type { WebSocket } from "@fastify/websocket";
 import { chunkUploadQuery, writeUploadChunk } from "../lib/fileChunkUpload.js";
+import { attachFileUploadWebSocket } from "../lib/fileWebSocketUpload.js";
 import { getSecret } from "../lib/secrets.js";
 import { sysagent } from "../lib/sysagent.js";
 
@@ -644,6 +646,16 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
       receivedBytes: result.receivedBytes,
       complete: true,
       file: await statEntry(file)
+    });
+  });
+
+  app.get("/upload/ws", { websocket: true, config: { rateLimit: false }, preHandler: app.requireAuth }, async (socket: WebSocket) => {
+    attachFileUploadWebSocket(socket, {
+      uploadLimit,
+      ensureParentFolderReady,
+      safeChild: (parentPath, name) => safeChild(parentPath, name),
+      statEntry,
+      httpErrors: app.httpErrors
     });
   });
 

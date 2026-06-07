@@ -24,6 +24,7 @@ import {
   X
 } from "lucide-react";
 import { apiDeleteBody, apiGet, apiPatch, apiPost, apiUploadWithProgress } from "@/lib/api";
+import { uploadFileViaWebSocket } from "@/lib/fileUploadWs";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { InputModal } from "@/components/input-modal";
 import Link from "next/link";
@@ -653,55 +654,79 @@ export function FileManagerClient({
         throw new Error(`Upload is too large. Limit: ${formatBytes(uploadLimit)}.`);
       }
 
-      const chunkSize = Math.max(1024 * 1024, overview.data?.uploadChunkLimit ?? 48 * 1024 * 1024);
-      const totalChunks = Math.max(1, Math.ceil(file.size / chunkSize));
       const uploadId = typeof crypto !== "undefined" && "randomUUID" in crypto
         ? crypto.randomUUID()
         : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
       setUploadProgress({ fileName: file.name, percent: 0, phase: "uploading", uploadedBytes: 0, totalBytes: file.size });
 
-      for (let index = 0; index < totalChunks; index += 1) {
-        const offset = index * chunkSize;
-        const chunk = file.slice(offset, Math.min(file.size, offset + chunkSize));
-        let lastError: Error | null = null;
-        for (let attempt = 1; attempt <= 3; attempt += 1) {
-          try {
-            await apiUploadWithProgress(
-              `${apiBase}/upload/chunk?${queryString({
-                parentPath: currentPath,
-                name: file.name,
-                uploadId,
-                index,
-                totalChunks,
-                offset,
-                totalSize: file.size,
-                overwrite: overwrite ? "true" : "false"
-              })}`,
-              chunk,
-              "application/vnd.vps-panel.file-upload",
-              (_percent, loaded) => {
-                const uploaded = Math.min(file.size, offset + loaded);
-                const percent = file.size > 0 ? Math.min(99, Math.floor((uploaded / file.size) * 100)) : 99;
-                setUploadProgress({
-                  fileName: file.name,
-                  percent,
-                  phase: index === totalChunks - 1 && percent >= 99 ? "processing" : "uploading",
-                  uploadedBytes: uploaded,
-                  totalBytes: file.size
-                });
+      try {
+        await uploadFileViaWebSocket({
+          apiBase,
+          parentPath: currentPath,
+          name: file.name,
+          file,
+          uploadId,
+          overwrite,
+          onProgress: (uploaded, total) => {
+            const percent = total > 0 ? Math.min(99, Math.floor((uploaded / total) * 100)) : 99;
+            setUploadProgress({
+              fileName: file.name,
+              percent,
+              phase: uploaded >= total ? "processing" : "uploading",
+              uploadedBytes: uploaded,
+              totalBytes: total
+            });
+          }
+        });
+      } catch (wsError) {
+        const chunkSize = Math.max(1024 * 1024, overview.data?.uploadChunkLimit ?? 48 * 1024 * 1024);
+        const totalChunks = Math.max(1, Math.ceil(file.size / chunkSize));
+        for (let index = 0; index < totalChunks; index += 1) {
+          const offset = index * chunkSize;
+          const chunk = file.slice(offset, Math.min(file.size, offset + chunkSize));
+          let lastError: Error | null = null;
+          for (let attempt = 1; attempt <= 3; attempt += 1) {
+            try {
+              await apiUploadWithProgress(
+                `${apiBase}/upload/chunk?${queryString({
+                  parentPath: currentPath,
+                  name: file.name,
+                  uploadId,
+                  index,
+                  totalChunks,
+                  offset,
+                  totalSize: file.size,
+                  overwrite: overwrite ? "true" : "false"
+                })}`,
+                chunk,
+                "application/vnd.vps-panel.file-upload",
+                (_percent, loaded) => {
+                  const uploaded = Math.min(file.size, offset + loaded);
+                  const percent = file.size > 0 ? Math.min(99, Math.floor((uploaded / file.size) * 100)) : 99;
+                  setUploadProgress({
+                    fileName: file.name,
+                    percent,
+                    phase: index === totalChunks - 1 && percent >= 99 ? "processing" : "uploading",
+                    uploadedBytes: uploaded,
+                    totalBytes: file.size
+                  });
+                }
+              );
+              lastError = null;
+              break;
+            } catch (error) {
+              lastError = error instanceof Error ? error : new Error("Upload chunk failed");
+              if (attempt < 3) {
+                await new Promise((resolve) => window.setTimeout(resolve, attempt * 1500));
               }
-            );
-            lastError = null;
-            break;
-          } catch (error) {
-            lastError = error instanceof Error ? error : new Error("Upload chunk failed");
-            if (attempt < 3) {
-              await new Promise((resolve) => window.setTimeout(resolve, attempt * 1500));
             }
           }
+          if (lastError) {
+            const hint = wsError instanceof Error ? wsError.message : "WebSocket upload failed";
+            throw new Error(lastError.message || hint);
+          }
         }
-        if (lastError) throw lastError;
       }
 
       setUploadProgress({ fileName: file.name, percent: 100, phase: "done", uploadedBytes: file.size, totalBytes: file.size });

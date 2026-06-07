@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.command import run_command
 from app.config import settings
 from app.nginx_paths import nginx_sites_available, nginx_sites_enabled
 from app.nginx_manager import (
@@ -207,3 +210,23 @@ def write_redirect_vhost(body: RedirectVhostRequest) -> dict:
         "redirectUrl": body.redirectUrl,
         "sslEnabled": has_ssl,
     }
+
+
+@router.post("/panel-upload-limits")
+def ensure_panel_upload_limits() -> dict:
+    app_dir = Path(__file__).resolve().parents[3]
+    scripts = [
+        app_dir / "scripts" / "maintenance" / "patch-panel-nginx-api-upload.sh",
+        app_dir / "scripts" / "maintenance" / "fix-nginx-upload-size.sh",
+    ]
+    results: list[dict] = []
+    for script in scripts:
+        if not script.exists():
+            results.append({"script": str(script), "ok": False, "reason": "missing"})
+            continue
+        if not settings.allow_live_nginx:
+            results.append({"script": str(script), "dryRun": True})
+            continue
+        result = run_command(["bash", str(script)], allow_live=True, timeout=120)
+        results.append({"script": str(script), "result": result})
+    return {"ok": True, "results": results}

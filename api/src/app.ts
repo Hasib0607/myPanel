@@ -56,7 +56,11 @@ export function buildApp() {
     timeWindow: "1 minute"
   });
   app.register(sensible);
-  app.register(websocket);
+  app.register(websocket, {
+    options: {
+      maxPayload: 8 * 1024 * 1024
+    }
+  });
 
   app.addHook("onRequest", async (_request, reply) => {
     reply.header("x-content-type-options", "nosniff");
