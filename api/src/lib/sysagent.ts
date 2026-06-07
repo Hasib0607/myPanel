@@ -138,6 +138,8 @@ export const sysagent = {
     request("/dns/bind/repair", { method: "POST" }),
   deploymentGitSync: (body: unknown) =>
     request("/deployments/git-sync", { method: "POST", body: JSON.stringify(body) }),
+  deploymentResourceSnapshot: (body: unknown) =>
+    request("/deployments/resource-snapshot", { method: "POST", body: JSON.stringify(body) }),
   deploymentInstall: (body: unknown) =>
     request("/deployments/install", { method: "POST", body: JSON.stringify(body) }),
   deploymentBuild: (body: unknown) =>

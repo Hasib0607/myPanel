@@ -76,6 +76,10 @@ class CommandRequest(BaseModel):
     resourceLimits: dict[str, int] | None = None
 
 
+class ResourceSnapshotRequest(BaseModel):
+    rootPath: str | None = None
+
+
 class ProcessRequest(BaseModel):
     deploymentId: str
     name: str
@@ -555,6 +559,48 @@ def deployment_process_metrics(root_path: str, name: str, port: int | None) -> d
         "memoryBytes": memory_bytes,
         "processes": processes[:20],
         "processCount": len(processes),
+    }
+
+
+def deployment_resource_process_snapshot(current_root_path: str | None = None) -> dict:
+    file_root = str(Path(settings.file_manager_root).resolve())
+    current_root = str(Path(current_root_path).resolve()) if current_root_path else None
+    processes = []
+    memory_bytes = 0
+    cpu_percent = 0.0
+    for proc in psutil.process_iter(["pid", "name", "status", "memory_info", "cpu_percent"]):
+        try:
+            cwd = ""
+            cmdline = " ".join(proc.cmdline())
+            try:
+                cwd = proc.cwd()
+            except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+                cwd = ""
+            text = f"{cwd} {cmdline}"
+            if file_root not in text:
+                continue
+            memory = proc.info.get("memory_info")
+            rss = int(getattr(memory, "rss", 0) or 0)
+            cpu = float(proc.info.get("cpu_percent") or 0.0)
+            memory_bytes += rss
+            cpu_percent += cpu
+            processes.append({
+                "pid": proc.pid,
+                "name": proc.info.get("name"),
+                "status": proc.info.get("status"),
+                "cpuPercent": cpu,
+                "memoryBytes": rss,
+                "cwd": cwd,
+                "currentDeployment": bool(current_root and current_root in text),
+            })
+        except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+            continue
+    processes.sort(key=lambda item: int(item.get("memoryBytes") or 0), reverse=True)
+    return {
+        "memoryBytes": memory_bytes,
+        "cpuPercent": round(cpu_percent, 2),
+        "processCount": len(processes),
+        "processes": processes[:20],
     }
 
 
@@ -2097,6 +2143,39 @@ def install_runtime_tool(body: RuntimeInstallRequest) -> dict:
     except KeyError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     return run_install_plan(plan, timeout=300, allow_live=DEPLOYMENT_COMMANDS_LIVE)
+
+
+@router.post("/resource-snapshot")
+def resource_snapshot(body: ResourceSnapshotRequest) -> dict:
+    memory = psutil.virtual_memory()
+    swap = psutil.swap_memory()
+    cpu_count = psutil.cpu_count() or 1
+    running_apps = deployment_resource_process_snapshot(body.rootPath)
+    active_limits = deployment_resource_limits()
+    return {
+        "memory": {
+            "totalBytes": memory.total,
+            "availableBytes": memory.available,
+            "usedBytes": memory.used,
+            "percent": memory.percent,
+        },
+        "swap": {
+            "totalBytes": swap.total,
+            "freeBytes": swap.free,
+            "usedBytes": swap.used,
+            "percent": swap.percent,
+        },
+        "cpu": {
+            "count": cpu_count,
+            "percent": psutil.cpu_percent(interval=0.1),
+            "loadAverage": psutil.getloadavg() if hasattr(psutil, "getloadavg") else [0, 0, 0],
+        },
+        "runningApps": running_apps,
+        "defaults": {
+            "resourceIsolationEnabled": settings.deployment_resource_isolation_enabled,
+            "resourceLimits": active_limits,
+        },
+    }
 
 
 @router.post("/repair-permissions")

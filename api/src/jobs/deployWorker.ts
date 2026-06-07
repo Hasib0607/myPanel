@@ -93,6 +93,32 @@ type DeploymentDatabaseRuntime = {
   dbPasswordSecretRef?: string | null;
 };
 
+type DeployResourceLimits = {
+  memoryMaxMb: number;
+  cpuQuotaPercent: number;
+  tasksMax: number;
+  nice: number;
+  ioWeight: number;
+};
+
+type DeployResourceBudget = {
+  resourceLimits: DeployResourceLimits;
+  env: Record<string, string>;
+  snapshot: unknown;
+  summary: {
+    totalMemoryMb: number;
+    availableMemoryMb: number;
+    runningAppsMemoryMb: number;
+    appReserveMb: number;
+    systemReserveMb: number;
+    deployMemoryMb: number;
+    cpuCount: number;
+    cpuQuotaPercent: number;
+    nodeHeapMb: number;
+    nextWorkers: number;
+  };
+};
+
 const deploymentLocks = new Map<string, Promise<unknown>>();
 
 async function runDeploymentExclusive<T>(deploymentId: string, task: () => Promise<T>) {
@@ -768,6 +794,89 @@ function liveResultFailureMessage(result: unknown, label: string) {
     return `${label} failed with exit code ${value.returncode}${signal ? ` (${signal})` : ""}${detailText ? `: ${detailText}` : ""}${signalHint}`;
   }
   return null;
+}
+
+function bytesToMb(value: unknown) {
+  const bytes = typeof value === "number" && Number.isFinite(value) ? value : 0;
+  return Math.max(0, Math.round(bytes / 1024 / 1024));
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function calculateDeployResourceBudget(snapshot: any): DeployResourceBudget {
+  const totalMemoryMb = bytesToMb(snapshot?.memory?.totalBytes);
+  const availableMemoryMb = bytesToMb(snapshot?.memory?.availableBytes);
+  const runningAppsMemoryMb = bytesToMb(snapshot?.runningApps?.memoryBytes);
+  const cpuCount = Math.max(1, Number(snapshot?.cpu?.count || 1));
+  const defaults = snapshot?.defaults?.resourceLimits ?? {};
+  const systemReserveMb = Number(env.DEPLOY_SYSTEM_RESERVE_MB || 4096);
+  const minAppReserveMb = Number(env.DEPLOY_MIN_APP_RESERVE_MB || 8192);
+  const appReserveMultiplier = Number(env.DEPLOY_APP_RESERVE_MULTIPLIER || 2);
+  const minDeployMemoryMb = Number(env.DEPLOY_MIN_MEMORY_MB || 3072);
+  const maxDeployMemoryMb = Number(env.DEPLOY_MAX_MEMORY_MB || 12288);
+  const freeCpuCores = Number(env.DEPLOY_FREE_CPU_CORES || 2);
+  const appReserveMb = Math.max(minAppReserveMb, Math.ceil(runningAppsMemoryMb * appReserveMultiplier));
+  const budgetByTotal = totalMemoryMb > 0 ? totalMemoryMb - appReserveMb - systemReserveMb : Number(defaults.memoryMaxMb || 4096);
+  const budgetByAvailable = availableMemoryMb > 0 ? availableMemoryMb - systemReserveMb : budgetByTotal;
+  const rawDeployMemoryMb = Math.min(budgetByTotal, budgetByAvailable);
+  const deployMemoryMb = rawDeployMemoryMb >= minDeployMemoryMb
+    ? clampNumber(Math.floor(rawDeployMemoryMb), minDeployMemoryMb, maxDeployMemoryMb)
+    : Math.max(1536, Math.floor(rawDeployMemoryMb || Number(defaults.memoryMaxMb || 4096)));
+  const usableCpuCores = Math.max(1, cpuCount - freeCpuCores);
+  const cpuQuotaPercent = clampNumber(usableCpuCores * 100, 100, Math.min(600, cpuCount * 100));
+  const nodeHeapMb = Math.max(512, deployMemoryMb - 1536);
+  const nextWorkers = clampNumber(Math.floor(deployMemoryMb / 2048), 1, usableCpuCores);
+  return {
+    resourceLimits: {
+      memoryMaxMb: deployMemoryMb,
+      cpuQuotaPercent,
+      tasksMax: Number(defaults.tasksMax || 384),
+      nice: Number(defaults.nice || 10),
+      ioWeight: Number(defaults.ioWeight || 100)
+    },
+    env: {
+      NODE_OPTIONS: `--max-old-space-size=${nodeHeapMb}`,
+      CIRCLE_NODE_TOTAL: String(nextWorkers + 1)
+    },
+    snapshot,
+    summary: {
+      totalMemoryMb,
+      availableMemoryMb,
+      runningAppsMemoryMb,
+      appReserveMb,
+      systemReserveMb,
+      deployMemoryMb,
+      cpuCount,
+      cpuQuotaPercent,
+      nodeHeapMb,
+      nextWorkers
+    }
+  };
+}
+
+async function prepareDeployResourceBudget(deploymentId: string, releaseId: string | undefined, rootPath: string) {
+  try {
+    const snapshot = await sysagent.deploymentResourceSnapshot({ rootPath });
+    const budget = calculateDeployResourceBudget(snapshot);
+    await writeLog(deploymentId, releaseId, "PREFLIGHT", "Dynamic deploy resource budget", budget.summary as unknown as Prisma.InputJsonObject);
+    return budget;
+  } catch (error) {
+    const fallbackSnapshot = {
+      memory: { totalBytes: 0, availableBytes: 0 },
+      runningApps: { memoryBytes: 0 },
+      cpu: { count: 2 },
+      defaults: { resourceLimits: { memoryMaxMb: 4096, cpuQuotaPercent: 300, tasksMax: 256, nice: 10, ioWeight: 100 } },
+      error: error instanceof Error ? error.message : String(error)
+    };
+    const budget = calculateDeployResourceBudget(fallbackSnapshot);
+    await writeLog(deploymentId, releaseId, "PREFLIGHT", "Dynamic deploy resource budget fallback", {
+      ...budget.summary,
+      error: fallbackSnapshot.error
+    } as unknown as Prisma.InputJsonObject, "warn");
+    return budget;
+  }
 }
 
 async function markRelease(releaseId: string | undefined, status: "RUNNING" | "SUCCEEDED" | "FAILED" | "ROLLED_BACK", startedAt?: Date) {
@@ -3492,6 +3601,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     await runStep(deployment.id, releaseId, "PREFLIGHT", "Sysagent live command preflight", () =>
       assertSysagentLiveCommandsEnabled(deployment.id, releaseId)
     );
+    let deployBudget = await prepareDeployResourceBudget(deployment.id, releaseId, deployment.rootPath);
 
     if (deployment.gitUrl || action === "pull") {
       const gitToken = await githubCloneToken(deployment.sourceProvider, deployment.gitUrl, deployment.accountId);
@@ -3502,7 +3612,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           gitUrl: action === "pull" ? null : deployment.gitUrl,
           branch: deployment.branch,
           commitSha,
-          gitToken
+          gitToken,
+          resourceLimits: deployBudget.resourceLimits
         })
       );
       assertCommandTree(syncResult, "Source sync");
@@ -3542,9 +3653,13 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     if (deployment.processManager === "NONE" && deployment.framework !== "STATIC") {
       throw new Error(`No runnable start command found for ${deployment.slug}. Add a package.json start script or set a manual start command.`);
     }
+    deployBudget = await prepareDeployResourceBudget(deployment.id, releaseId, appPath);
     let domain = deploymentDomain(deployment);
     let routeDomains = deploymentRouteDomains(deployment);
-    let envVars = deploymentEnvWithPublicUrl(await resolveEnvVars(deployment.env), domain);
+    let envVars = {
+      ...deploymentEnvWithPublicUrl(await resolveEnvVars(deployment.env), domain),
+      ...deployBudget.env
+    };
     const databaseRuntime = await buildDatabaseRuntimeEnv(deployment, envVars, { releaseId });
     envVars = databaseRuntime.envVars;
     if (databaseRuntime.changed) {
@@ -3594,7 +3709,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           rootPath: appPath,
           command: installCommandText,
           packageManager: deployment.packageManager,
-          env: envVars
+          env: envVars,
+          resourceLimits: deployBudget.resourceLimits
         })
       );
       let installResult = await runDependencyInstall();
@@ -3632,7 +3748,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         sysagent.deploymentBuild({
           rootPath: appPath,
           command: "php artisan optimize:clear",
-          env: envVars
+          env: envVars,
+          resourceLimits: deployBudget.resourceLimits
         })
       );
       try {
@@ -3648,7 +3765,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           sysagent.deploymentBuild({
             rootPath: appPath,
             command: "php artisan optimize:clear",
-            env: envVars
+            env: envVars,
+            resourceLimits: deployBudget.resourceLimits
           })
         );
         try {
@@ -3664,7 +3782,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         sysagent.deploymentBuild({
           rootPath: appPath,
           command: "php artisan package:discover --ansi -vvv",
-          env: envVars
+          env: envVars,
+          resourceLimits: deployBudget.resourceLimits
         })
       );
       let packageDiscoverResult = await runLaravelPackageDiscovery();
@@ -3683,7 +3802,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           sysagent.deploymentMigrate({
             rootPath: appPath,
             command: "php artisan migrate --force",
-            env: envVars
+            env: envVars,
+            resourceLimits: deployBudget.resourceLimits
           })
         );
         let migrateResult = await runDatabaseMigration();
@@ -3716,7 +3836,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         sysagent.deploymentBuild({
           rootPath: appPath,
           command: renderDeploymentCommand(deployment.buildCommand, deployment.port),
-          env: envVars
+          env: envVars,
+          resourceLimits: deployBudget.resourceLimits
         })
       );
       let buildResult = await runBuild();
@@ -3758,7 +3879,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
               rootPath: appPath,
               command: nodeDependencyRepairCommand(repairPackageManager),
               packageManager: repairPackageManager,
-              env: envVars
+              env: envVars,
+              resourceLimits: deployBudget.resourceLimits
             })
           );
           assertCommandTree(repairInstall, "Repair Node build dependencies");
