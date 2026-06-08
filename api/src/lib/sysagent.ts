@@ -231,6 +231,12 @@ export const sysagent = {
     request<{ engine: string; database: string; table: string; format: string; content: string; result: SysagentCommandResult }>("/database/table/export-csv", { method: "POST", body: JSON.stringify(body) }),
   databaseTableImport: (body: unknown) =>
     request("/database/table/import", { method: "POST", body: JSON.stringify(body) }),
+  databaseRowCreate: (body: unknown) =>
+    request("/database/row", { method: "POST", body: JSON.stringify(body) }),
+  databaseRowUpdate: (body: unknown) =>
+    request("/database/row", { method: "PATCH", body: JSON.stringify(body) }),
+  databaseRowDelete: (body: unknown) =>
+    request("/database/row", { method: "DELETE", body: JSON.stringify(body) }),
   deleteFiles: (body: unknown) =>
     request<{ ok: true; removed: string[]; dryRun?: boolean }>("/files/delete", { method: "DELETE", body: JSON.stringify(body) }),
   trashFiles: (body: unknown) =>

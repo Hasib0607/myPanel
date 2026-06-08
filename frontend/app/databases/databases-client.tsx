@@ -3,6 +3,7 @@
 import type React from "react";
 import { useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import Link from "next/link";
 import { Columns3, Copy, Database, Download, Eye, KeyRound, Plus, RefreshCw, ShieldCheck, Table2, Trash2, Upload, UserRound } from "lucide-react";
 import { apiDeleteBody, apiGet, apiPost, apiUploadWithProgress } from "@/lib/api";
 
@@ -249,6 +250,11 @@ export function DatabasesClient({ apiBase = "/databases" }: DatabasesClientProps
     rowImportInputRef.current?.click();
   }
 
+  function browserHref(engine: Engine, database: string) {
+    const scope = apiBase.startsWith("/account") ? "/account/databases" : "/databases";
+    return `${scope}/${encodeURIComponent(engine)}/${encodeURIComponent(database)}`;
+  }
+
   async function handleRowImportSelection(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file || !rowImportTarget) return;
@@ -310,17 +316,13 @@ export function DatabasesClient({ apiBase = "/databases" }: DatabasesClientProps
                           ) : null}
                         </div>
                         <div className="flex items-center gap-2">
-                          <button
+                          <Link
                             className="rounded-md border border-panel-line p-2 hover:bg-slate-50"
-                            onClick={() => {
-                              setTransfer({ ...transfer, engine, database: database.name });
-                              setTableTools({ ...tableTools, engine, database: database.name });
-                            }}
-                            type="button"
-                            title="Use in tools"
+                            href={browserHref(engine, database.name)}
+                            title="Browse database"
                           >
                             <Database size={15} />
-                          </button>
+                          </Link>
                           <button className="rounded-md border border-panel-line p-2 hover:bg-slate-50" disabled={exportDatabase.isPending} onClick={() => exportDatabase.mutate({ engine, database: database.name })} type="button" title="Export SQL">
                             <Download size={15} />
                           </button>

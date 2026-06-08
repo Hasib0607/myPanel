@@ -235,6 +235,17 @@ const databaseTableImportSchema = databaseTableSchema.extend({
   format: z.enum(["SQL", "CSV"]),
   content: z.string().min(1).max(20_000_000)
 });
+const databaseRowValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
+const databaseRowCreateSchema = databaseTableSchema.extend({
+  values: z.record(z.string().regex(/^[a-zA-Z0-9_]+$/), databaseRowValueSchema)
+});
+const databaseRowTargetSchema = databaseTableSchema.extend({
+  keyColumn: z.string().regex(/^[a-zA-Z0-9_]+$/),
+  keyValue: z.union([z.string(), z.number(), z.boolean()])
+});
+const databaseRowUpdateSchema = databaseRowTargetSchema.extend({
+  values: z.record(z.string().regex(/^[a-zA-Z0-9_]+$/), databaseRowValueSchema)
+});
 const sslSchema = z.object({
   email: z.string().email().optional(),
   includeWww: z.boolean().default(true)
@@ -2831,6 +2842,33 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const result = await sysagent.databaseTableImport(body);
     assertDatabaseResult((result as { result?: unknown }).result, "Table import");
     await audit(request, { action: "APPLY", resource: "database-table", resourceId: `${body.database}.${body.table}`, description: `Account imported ${body.format} into ${body.engine} table ${body.database}.${body.table}` });
+    return result;
+  });
+
+  app.post("/databases/row", async (request: any) => {
+    const body = databaseRowCreateSchema.parse(request.body);
+    await findAccountDatabase(request, body.engine, body.database);
+    const result = await sysagent.databaseRowCreate(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Row create");
+    await audit(request, { action: "CREATE", resource: "database-row", resourceId: `${body.database}.${body.table}`, description: `Account inserted row into ${body.engine} table ${body.database}.${body.table}` });
+    return result;
+  });
+
+  app.patch("/databases/row", async (request: any) => {
+    const body = databaseRowUpdateSchema.parse(request.body);
+    await findAccountDatabase(request, body.engine, body.database);
+    const result = await sysagent.databaseRowUpdate(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Row update");
+    await audit(request, { action: "UPDATE", resource: "database-row", resourceId: `${body.database}.${body.table}`, description: `Account updated row in ${body.engine} table ${body.database}.${body.table}` });
+    return result;
+  });
+
+  app.delete("/databases/row", async (request: any) => {
+    const body = databaseRowTargetSchema.parse(request.body);
+    await findAccountDatabase(request, body.engine, body.database);
+    const result = await sysagent.databaseRowDelete(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Row delete");
+    await audit(request, { action: "DELETE", resource: "database-row", resourceId: `${body.database}.${body.table}`, description: `Account deleted row from ${body.engine} table ${body.database}.${body.table}` });
     return result;
   });
 

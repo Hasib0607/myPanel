@@ -79,6 +79,19 @@ class DatabaseTableImportRequest(DatabaseTableRequest):
     content: str = Field(min_length=1, max_length=20_000_000)
 
 
+class DatabaseRowCreateRequest(DatabaseTableRequest):
+    values: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
+
+
+class DatabaseRowTargetRequest(DatabaseTableRequest):
+    keyColumn: str = Field(pattern=IDENTIFIER_PATTERN)
+    keyValue: str | int | float | bool
+
+
+class DatabaseRowUpdateRequest(DatabaseRowTargetRequest):
+    values: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
+
+
 def sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
@@ -89,6 +102,14 @@ def postgres_identifier(value: str) -> str:
 
 def mysql_identifier(value: str) -> str:
     return "`" + value.replace("`", "``") + "`"
+
+
+def generic_literal(value: str | int | float | bool | None) -> str:
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    return sql_literal(str(value))
 
 
 def generated_password() -> str:
@@ -400,15 +421,20 @@ def list_tables(body: DatabaseDumpRequest) -> dict:
 def list_columns(body: DatabaseTableRequest) -> dict:
     if body.engine == "POSTGRESQL":
         sql = (
-            "SELECT column_name || '|' || data_type || '|' || is_nullable "
-            "FROM information_schema.columns "
-            f"WHERE table_schema = 'public' AND table_name = {sql_literal(body.table)} "
-            "ORDER BY ordinal_position;"
+            "SELECT c.column_name || '|' || c.data_type || '|' || c.is_nullable || '|' || "
+            "CASE WHEN tc.constraint_type = 'PRIMARY KEY' THEN 'YES' ELSE 'NO' END "
+            "FROM information_schema.columns c "
+            "LEFT JOIN information_schema.key_column_usage kcu "
+            "ON kcu.table_schema = c.table_schema AND kcu.table_name = c.table_name AND kcu.column_name = c.column_name "
+            "LEFT JOIN information_schema.table_constraints tc "
+            "ON tc.constraint_schema = kcu.constraint_schema AND tc.constraint_name = kcu.constraint_name AND tc.table_name = kcu.table_name "
+            f"WHERE c.table_schema = 'public' AND c.table_name = {sql_literal(body.table)} "
+            "ORDER BY c.ordinal_position;"
         )
         result = run_command(["sudo", "-u", "postgres", "psql", "-d", body.database, "-At", "-c", sql])
     else:
         sql = (
-            "SELECT CONCAT(COLUMN_NAME, '|', COLUMN_TYPE, '|', IS_NULLABLE) "
+            "SELECT CONCAT(COLUMN_NAME, '|', COLUMN_TYPE, '|', IS_NULLABLE, '|', IF(COLUMN_KEY='PRI','YES','NO')) "
             "FROM information_schema.COLUMNS "
             f"WHERE TABLE_SCHEMA = {sql_literal(body.database)} AND TABLE_NAME = {sql_literal(body.table)} "
             "ORDER BY ORDINAL_POSITION;"
@@ -418,7 +444,8 @@ def list_columns(body: DatabaseTableRequest) -> dict:
     for line in parse_lines(result.get("stdout")):
         name, _, rest = line.partition("|")
         data_type, _, nullable = rest.partition("|")
-        columns.append({"name": name, "type": data_type, "nullable": nullable})
+        nullable, _, primary = nullable.partition("|")
+        columns.append({"name": name, "type": data_type, "nullable": nullable, "primary": primary == "YES"})
     return {"engine": body.engine, "database": body.database, "table": body.table, "columns": columns, "result": result}
 
 
@@ -485,3 +512,47 @@ def import_table(body: DatabaseTableImportRequest) -> dict:
         return {"engine": body.engine, "database": body.database, "table": body.table, "format": body.format, "result": result}
     finally:
         Path(path).unlink(missing_ok=True)
+
+
+@router.post("/row")
+def create_row(body: DatabaseRowCreateRequest) -> dict:
+    values = {key: value for key, value in body.values.items() if re.match(IDENTIFIER_PATTERN, key)}
+    if not values:
+        return {"engine": body.engine, "database": body.database, "table": body.table, "result": {"returncode": 2, "stdout": "", "stderr": "No row values supplied"}}
+    if body.engine == "POSTGRESQL":
+        columns = ", ".join(postgres_identifier(key) for key in values)
+        literals = ", ".join(generic_literal(value) for value in values.values())
+        sql = f"INSERT INTO {postgres_identifier(body.table)} ({columns}) VALUES ({literals});"
+        result = run_command(["sudo", "-u", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-d", body.database, "-c", sql])
+    else:
+        columns = ", ".join(mysql_identifier(key) for key in values)
+        literals = ", ".join(generic_literal(value) for value in values.values())
+        result = run_command(["mysql", body.database, "-e", f"INSERT INTO {mysql_identifier(body.table)} ({columns}) VALUES ({literals});"])
+    return {"engine": body.engine, "database": body.database, "table": body.table, "result": result}
+
+
+@router.patch("/row")
+def update_row(body: DatabaseRowUpdateRequest) -> dict:
+    values = {key: value for key, value in body.values.items() if re.match(IDENTIFIER_PATTERN, key) and key != body.keyColumn}
+    if not values:
+        return {"engine": body.engine, "database": body.database, "table": body.table, "result": {"returncode": 2, "stdout": "", "stderr": "No editable row values supplied"}}
+    if body.engine == "POSTGRESQL":
+        assignments = ", ".join(f"{postgres_identifier(key)} = {generic_literal(value)}" for key, value in values.items())
+        sql = f"UPDATE {postgres_identifier(body.table)} SET {assignments} WHERE {postgres_identifier(body.keyColumn)} = {generic_literal(body.keyValue)};"
+        result = run_command(["sudo", "-u", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-d", body.database, "-c", sql])
+    else:
+        assignments = ", ".join(f"{mysql_identifier(key)} = {generic_literal(value)}" for key, value in values.items())
+        sql = f"UPDATE {mysql_identifier(body.table)} SET {assignments} WHERE {mysql_identifier(body.keyColumn)} = {generic_literal(body.keyValue)};"
+        result = run_command(["mysql", body.database, "-e", sql])
+    return {"engine": body.engine, "database": body.database, "table": body.table, "result": result}
+
+
+@router.delete("/row")
+def delete_row(body: DatabaseRowTargetRequest) -> dict:
+    if body.engine == "POSTGRESQL":
+        sql = f"DELETE FROM {postgres_identifier(body.table)} WHERE {postgres_identifier(body.keyColumn)} = {generic_literal(body.keyValue)};"
+        result = run_command(["sudo", "-u", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-d", body.database, "-c", sql])
+    else:
+        sql = f"DELETE FROM {mysql_identifier(body.table)} WHERE {mysql_identifier(body.keyColumn)} = {generic_literal(body.keyValue)};"
+        result = run_command(["mysql", body.database, "-e", sql])
+    return {"engine": body.engine, "database": body.database, "table": body.table, "result": result}

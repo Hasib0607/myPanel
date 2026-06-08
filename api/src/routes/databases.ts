@@ -65,6 +65,17 @@ const tableImportSchema = tableSchema.extend({
   format: z.enum(["SQL", "CSV"]),
   content: z.string().min(1).max(20_000_000)
 });
+const rowValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
+const rowCreateSchema = tableSchema.extend({
+  values: z.record(identifierSchema, rowValueSchema)
+});
+const rowTargetSchema = tableSchema.extend({
+  keyColumn: identifierSchema,
+  keyValue: z.union([z.string(), z.number(), z.boolean()])
+});
+const rowUpdateSchema = rowTargetSchema.extend({
+  values: z.record(identifierSchema, rowValueSchema)
+});
 
 function failedCommand(result: unknown) {
   const value = result as { returncode?: number; stderr?: string };
@@ -287,6 +298,45 @@ export const databaseRoutes: FastifyPluginAsync = async (app) => {
       resource: "database-table",
       resourceId: `${body.database}.${body.table}`,
       description: `Imported ${body.format} into ${body.engine} table ${body.database}.${body.table}`
+    });
+    return result;
+  });
+
+  app.post("/row", async (request) => {
+    const body = rowCreateSchema.parse(request.body);
+    const result = await sysagent.databaseRowCreate(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Row create");
+    await audit(request, {
+      action: "CREATE",
+      resource: "database-row",
+      resourceId: `${body.database}.${body.table}`,
+      description: `Inserted row into ${body.engine} table ${body.database}.${body.table}`
+    });
+    return result;
+  });
+
+  app.patch("/row", async (request) => {
+    const body = rowUpdateSchema.parse(request.body);
+    const result = await sysagent.databaseRowUpdate(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Row update");
+    await audit(request, {
+      action: "UPDATE",
+      resource: "database-row",
+      resourceId: `${body.database}.${body.table}`,
+      description: `Updated row in ${body.engine} table ${body.database}.${body.table}`
+    });
+    return result;
+  });
+
+  app.delete("/row", async (request) => {
+    const body = rowTargetSchema.parse(request.body);
+    const result = await sysagent.databaseRowDelete(body);
+    assertDatabaseResult((result as { result?: unknown }).result, "Row delete");
+    await audit(request, {
+      action: "DELETE",
+      resource: "database-row",
+      resourceId: `${body.database}.${body.table}`,
+      description: `Deleted row from ${body.engine} table ${body.database}.${body.table}`
     });
     return result;
   });
