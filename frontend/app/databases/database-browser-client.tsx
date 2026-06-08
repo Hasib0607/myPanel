@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { ChevronLeft, Database, Edit3, Plus, RefreshCw, Save, Table2, Trash2, X } from "lucide-react";
+import { ChevronLeft, Database, Edit3, Plus, RefreshCw, Save, Search, Table2, Trash2, X } from "lucide-react";
 import Link from "next/link";
 import { apiDeleteBody, apiGet, apiPatch, apiPost } from "@/lib/api";
 
@@ -24,6 +24,8 @@ type DatabaseBrowserClientProps = {
   database: string;
   backHref?: string;
 };
+
+type TableTab = "data" | "columns" | "editor";
 
 function parseCsvLine(line: string) {
   const values: string[] = [];
@@ -75,10 +77,24 @@ function humanBytes(value: number) {
   return `${value} B`;
 }
 
+function matchesSearch(value: string, query: string) {
+  return value.toLowerCase().includes(query.trim().toLowerCase());
+}
+
+function rowMatchesSearch(row: Record<string, string>, headers: string[], query: string) {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return true;
+  return headers.some((header) => (row[header] ?? "").toLowerCase().includes(needle));
+}
+
 export function DatabaseBrowserClient({ apiBase = "/databases", engine, database, backHref = "/databases" }: DatabaseBrowserClientProps) {
   const [selectedTable, setSelectedTable] = useState("");
   const [offset, setOffset] = useState(0);
   const [limit, setLimit] = useState(100);
+  const [tableSearch, setTableSearch] = useState("");
+  const [columnSearch, setColumnSearch] = useState("");
+  const [rowSearch, setRowSearch] = useState("");
+  const [activeTab, setActiveTab] = useState<TableTab>("data");
   const [notice, setNotice] = useState<{ text: string; tone: "success" | "error" } | null>(null);
   const [editing, setEditing] = useState<Record<string, string> | null>(null);
   const [creating, setCreating] = useState(false);
@@ -108,8 +124,31 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
     if (!selectedTable && (tables.data?.tables.length ?? 0) > 0) setSelectedTable(tables.data?.tables[0] ?? "");
   }, [selectedTable, tables.data?.tables]);
 
+  useEffect(() => {
+    setColumnSearch("");
+    setRowSearch("");
+    setActiveTab("data");
+  }, [selectedTable]);
+
   const databaseInfo = overview.data?.engines.find((item) => item.engine === engine)?.databases.find((item) => item.name === database);
   const parsed = useMemo(() => parseRows(rows.data?.rows ?? "", rows.data?.format ?? "TSV"), [rows.data]);
+  const filteredTables = useMemo(
+    () => (tables.data?.tables ?? []).filter((table) => matchesSearch(table, tableSearch)),
+    [tables.data?.tables, tableSearch]
+  );
+  const filteredColumns = useMemo(
+    () => (columns.data?.columns ?? []).filter((column) =>
+      matchesSearch(column.name, columnSearch)
+      || matchesSearch(column.type, columnSearch)
+      || matchesSearch(column.nullable, columnSearch)
+      || (column.primary && matchesSearch("primary", columnSearch))
+    ),
+    [columns.data?.columns, columnSearch]
+  );
+  const filteredRows = useMemo(
+    () => parsed.rows.filter((row) => rowMatchesSearch(row, parsed.headers, rowSearch)),
+    [parsed.headers, parsed.rows, rowSearch]
+  );
   const primaryColumn = columns.data?.columns.find((column) => column.primary)?.name ?? null;
   const editableColumns = columns.data?.columns ?? [];
 
@@ -158,12 +197,14 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
     setEditing(null);
     setCreating(true);
     setDraft(Object.fromEntries(editableColumns.map((column) => [column.name, ""])));
+    setActiveTab("editor");
   }
 
   function openEdit(row: Record<string, string>) {
     setCreating(false);
     setEditing(row);
     setDraft({ ...row });
+    setActiveTab("editor");
   }
 
   return (
@@ -197,8 +238,30 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
       <div className="grid grid-cols-[280px_1fr]">
         <aside className="min-h-[calc(100vh-150px)] border-r border-panel-line bg-white">
           <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Tables</div>
-          <div className="max-h-[calc(100vh-200px)] overflow-auto p-3">
-            {(tables.data?.tables ?? []).map((table) => (
+          <div className="border-b border-panel-line px-3 py-2">
+            <label className="relative block">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-panel-muted" size={14} />
+              <input
+                className="h-9 w-full rounded-md border border-panel-line bg-white pl-8 pr-8 text-sm outline-none ring-panel-accent focus:ring-2"
+                onChange={(event) => setTableSearch(event.target.value)}
+                placeholder="Search tables..."
+                type="search"
+                value={tableSearch}
+              />
+              {tableSearch ? (
+                <button
+                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-panel-muted hover:bg-slate-100 hover:text-panel-ink"
+                  onClick={() => setTableSearch("")}
+                  title="Clear search"
+                  type="button"
+                >
+                  <X size={14} />
+                </button>
+              ) : null}
+            </label>
+          </div>
+          <div className="max-h-[calc(100vh-250px)] overflow-auto p-3">
+            {filteredTables.map((table) => (
               <button
                 className={`mb-1 flex h-10 w-full items-center gap-2 rounded-md px-3 text-left text-sm ${selectedTable === table ? "bg-slate-900 text-white" : "hover:bg-slate-50"}`}
                 key={table}
@@ -216,6 +279,9 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
             ))}
             {tables.isLoading ? <div className="p-3 text-sm text-panel-muted">Loading tables...</div> : null}
             {!tables.isLoading && (tables.data?.tables.length ?? 0) === 0 ? <div className="p-3 text-sm text-panel-muted">No tables found.</div> : null}
+            {!tables.isLoading && (tables.data?.tables.length ?? 0) > 0 && filteredTables.length === 0 ? (
+              <div className="p-3 text-sm text-panel-muted">No tables match &quot;{tableSearch}&quot;.</div>
+            ) : null}
           </div>
         </aside>
 
@@ -230,38 +296,173 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-panel-line px-4 py-3">
               <div>
                 <div className="font-semibold">{selectedTable || "Select a table"}</div>
-                <div className="text-xs text-panel-muted">{editableColumns.length} columns · showing {parsed.rows.length} rows</div>
-              </div>
-              <div className="flex items-center gap-2">
-                <select className="h-9 rounded-md border border-panel-line px-2 text-sm" onChange={(event) => setLimit(Number(event.target.value))} value={limit}>
-                  {[50, 100, 250, 500].map((value) => <option key={value} value={value}>{value} rows</option>)}
-                </select>
-                <button className="inline-flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-semibold hover:bg-slate-50 disabled:opacity-50" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - limit))} type="button">Prev</button>
-                <button className="inline-flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-semibold hover:bg-slate-50" onClick={() => setOffset(offset + limit)} type="button">Next</button>
-                <button className="inline-flex h-9 items-center gap-2 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white disabled:opacity-50" disabled={!selectedTable || editableColumns.length === 0} onClick={openCreate} type="button">
-                  <Plus size={15} /> Row
-                </button>
+                <div className="text-xs text-panel-muted">
+                  {editableColumns.length} columns · showing {rowSearch ? `${filteredRows.length} of ` : ""}{parsed.rows.length} rows
+                </div>
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-0 border-b border-panel-line">
-              <div className="border-r border-panel-line p-4">
-                <div className="mb-2 text-xs font-semibold uppercase text-panel-muted">Columns</div>
-                <div className="max-h-48 overflow-auto rounded-md border border-panel-line">
-                  {editableColumns.map((column) => (
-                    <div className="grid grid-cols-[1fr_1fr_80px] gap-2 border-b border-panel-line px-3 py-2 text-xs last:border-b-0" key={column.name}>
+            <div className="flex gap-1 border-b border-panel-line px-4 pt-3">
+              {([
+                { id: "data" as const, label: "Data" },
+                { id: "columns" as const, label: "Columns" },
+                { id: "editor" as const, label: "Row Editor" }
+              ]).map((tab) => (
+                <button
+                  className={`rounded-t-md border border-b-0 px-4 py-2 text-sm font-semibold transition-colors ${
+                    activeTab === tab.id
+                      ? "border-panel-line bg-white text-panel-ink"
+                      : "border-transparent bg-transparent text-panel-muted hover:text-panel-ink"
+                  }`}
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id)}
+                  type="button"
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
+            {activeTab === "data" ? (
+              <>
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-panel-line px-4 py-3">
+                  <label className="relative block min-w-[220px] flex-1 max-w-xl">
+                    <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-panel-muted" size={14} />
+                    <input
+                      className="h-9 w-full rounded-md border border-panel-line bg-white pl-8 pr-8 text-sm outline-none ring-panel-accent focus:ring-2 disabled:bg-slate-50"
+                      disabled={!selectedTable}
+                      onChange={(event) => setRowSearch(event.target.value)}
+                      placeholder="Search rows in current page..."
+                      type="search"
+                      value={rowSearch}
+                    />
+                    {rowSearch ? (
+                      <button
+                        className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-panel-muted hover:bg-slate-100 hover:text-panel-ink"
+                        onClick={() => setRowSearch("")}
+                        title="Clear search"
+                        type="button"
+                      >
+                        <X size={14} />
+                      </button>
+                    ) : null}
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <select className="h-9 rounded-md border border-panel-line px-2 text-sm" onChange={(event) => setLimit(Number(event.target.value))} value={limit}>
+                      {[50, 100, 250, 500].map((value) => <option key={value} value={value}>{value} rows</option>)}
+                    </select>
+                    <button className="inline-flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-semibold hover:bg-slate-50 disabled:opacity-50" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - limit))} type="button">Prev</button>
+                    <button className="inline-flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-semibold hover:bg-slate-50" onClick={() => setOffset(offset + limit)} type="button">Next</button>
+                    <button className="inline-flex h-9 items-center gap-2 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white disabled:opacity-50" disabled={!selectedTable || editableColumns.length === 0} onClick={openCreate} type="button">
+                      <Plus size={15} /> Row
+                    </button>
+                  </div>
+                </div>
+
+                <div className="overflow-auto">
+                  <table className="min-w-full text-left text-sm">
+                    <thead className="bg-slate-50 text-xs uppercase text-panel-muted">
+                      <tr>
+                        <th className="sticky left-0 z-10 w-24 bg-slate-50 px-3 py-3">Actions</th>
+                        {parsed.headers.map((header) => <th className="whitespace-nowrap px-3 py-3" key={header}>{header}</th>)}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredRows.map((row, index) => (
+                        <tr className="border-t border-panel-line bg-white hover:bg-slate-50" key={`${row[primaryColumn ?? ""] ?? index}-${index}`}>
+                          <td className="sticky left-0 z-10 bg-inherit px-3 py-2">
+                            <div className="flex gap-1">
+                              <button className="rounded-md border border-panel-line p-1.5 hover:bg-white disabled:opacity-40" disabled={!primaryColumn} onClick={() => openEdit(row)} title="Edit row" type="button"><Edit3 size={14} /></button>
+                              <button
+                                className="rounded-md border border-panel-line p-1.5 text-panel-danger hover:bg-red-50 disabled:opacity-40"
+                                disabled={!primaryColumn || deleteRow.isPending}
+                                onClick={() => window.confirm("Delete this row?") && deleteRow.mutate(row)}
+                                title="Delete row"
+                                type="button"
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            </div>
+                          </td>
+                          {parsed.headers.map((header) => (
+                            <td className="max-w-80 truncate px-3 py-2 font-mono text-xs" key={header} title={row[header] ?? ""}>{row[header] ?? ""}</td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {rows.isLoading ? <div className="p-6 text-sm text-panel-muted">Loading rows...</div> : null}
+                  {!rows.isLoading && selectedTable && parsed.rows.length === 0 ? <div className="p-6 text-sm text-panel-muted">No rows found in this page.</div> : null}
+                  {!rows.isLoading && selectedTable && parsed.rows.length > 0 && filteredRows.length === 0 ? (
+                    <div className="p-6 text-sm text-panel-muted">No rows match &quot;{rowSearch}&quot; on this page.</div>
+                  ) : null}
+                </div>
+              </>
+            ) : null}
+
+            {activeTab === "columns" ? (
+              <div className="p-4">
+                <div className="mb-3 flex items-center justify-between gap-2">
+                  <div className="text-sm font-semibold text-panel-ink">Table columns</div>
+                  {columnSearch ? <span className="text-xs text-panel-muted">{filteredColumns.length} shown</span> : null}
+                </div>
+                <label className="relative mb-3 block max-w-xl">
+                  <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-panel-muted" size={14} />
+                  <input
+                    className="h-9 w-full rounded-md border border-panel-line bg-white pl-8 pr-8 text-sm outline-none ring-panel-accent focus:ring-2"
+                    onChange={(event) => setColumnSearch(event.target.value)}
+                    placeholder="Search columns..."
+                    type="search"
+                    value={columnSearch}
+                  />
+                  {columnSearch ? (
+                    <button
+                      className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-panel-muted hover:bg-slate-100 hover:text-panel-ink"
+                      onClick={() => setColumnSearch("")}
+                      title="Clear search"
+                      type="button"
+                    >
+                      <X size={14} />
+                    </button>
+                  ) : null}
+                </label>
+                <div className="overflow-auto rounded-md border border-panel-line">
+                  <div className="grid grid-cols-[1fr_1fr_100px] gap-2 border-b border-panel-line bg-slate-50 px-3 py-2 text-xs font-semibold uppercase text-panel-muted">
+                    <span>Name</span>
+                    <span>Type</span>
+                    <span>Nullable</span>
+                  </div>
+                  {filteredColumns.map((column) => (
+                    <div className="grid grid-cols-[1fr_1fr_100px] gap-2 border-b border-panel-line px-3 py-2 text-sm last:border-b-0" key={column.name}>
                       <span className="truncate font-mono font-semibold">{column.name}</span>
                       <span className="truncate text-panel-muted">{column.type}</span>
-                      <span className={column.primary ? "text-emerald-700" : "text-panel-muted"}>{column.primary ? "primary" : column.nullable}</span>
+                      <span className={column.primary ? "font-medium text-emerald-700" : "text-panel-muted"}>{column.primary ? "primary" : column.nullable}</span>
                     </div>
                   ))}
+                  {selectedTable && editableColumns.length > 0 && filteredColumns.length === 0 ? (
+                    <div className="px-3 py-6 text-sm text-panel-muted">No columns match &quot;{columnSearch}&quot;.</div>
+                  ) : null}
+                  {!selectedTable ? <div className="px-3 py-6 text-sm text-panel-muted">Select a table to view columns.</div> : null}
                 </div>
               </div>
+            ) : null}
+
+            {activeTab === "editor" ? (
               <div className="p-4">
-                <div className="mb-2 text-xs font-semibold uppercase text-panel-muted">{creating ? "Add row" : editing ? "Edit row" : "Row editor"}</div>
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                  <div className="text-sm font-semibold text-panel-ink">{creating ? "Add row" : editing ? "Edit row" : "Row editor"}</div>
+                  <button
+                    className="inline-flex h-9 items-center gap-2 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white disabled:opacity-50"
+                    disabled={!selectedTable || editableColumns.length === 0}
+                    onClick={openCreate}
+                    type="button"
+                  >
+                    <Plus size={15} /> New row
+                  </button>
+                </div>
                 {creating || editing ? (
-                  <div className="space-y-3">
-                    <div className="grid max-h-48 grid-cols-2 gap-3 overflow-auto pr-1">
+                  <div className="space-y-4">
+                    <div className="grid max-h-[calc(100vh-360px)] grid-cols-1 gap-3 overflow-auto pr-1 md:grid-cols-2 xl:grid-cols-3">
                       {editableColumns.map((column) => (
                         <label className="space-y-1 text-xs font-medium text-panel-muted" key={column.name}>
                           {column.name}
@@ -284,46 +485,12 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
                     </div>
                   </div>
                 ) : (
-                  <div className="rounded-md border border-dashed border-panel-line p-6 text-sm text-panel-muted">Select a row to edit, or add a new row.</div>
+                  <div className="rounded-md border border-dashed border-panel-line p-8 text-sm text-panel-muted">
+                    Select a row from the Data tab to edit, or click New row to insert one.
+                  </div>
                 )}
               </div>
-            </div>
-
-            <div className="overflow-auto">
-              <table className="min-w-full text-left text-sm">
-                <thead className="bg-slate-50 text-xs uppercase text-panel-muted">
-                  <tr>
-                    <th className="sticky left-0 z-10 w-24 bg-slate-50 px-3 py-3">Actions</th>
-                    {parsed.headers.map((header) => <th className="whitespace-nowrap px-3 py-3" key={header}>{header}</th>)}
-                  </tr>
-                </thead>
-                <tbody>
-                  {parsed.rows.map((row, index) => (
-                    <tr className="border-t border-panel-line bg-white hover:bg-slate-50" key={`${row[primaryColumn ?? ""] ?? index}-${index}`}>
-                      <td className="sticky left-0 z-10 bg-inherit px-3 py-2">
-                        <div className="flex gap-1">
-                          <button className="rounded-md border border-panel-line p-1.5 hover:bg-white disabled:opacity-40" disabled={!primaryColumn} onClick={() => openEdit(row)} title="Edit row" type="button"><Edit3 size={14} /></button>
-                          <button
-                            className="rounded-md border border-panel-line p-1.5 text-panel-danger hover:bg-red-50 disabled:opacity-40"
-                            disabled={!primaryColumn || deleteRow.isPending}
-                            onClick={() => window.confirm("Delete this row?") && deleteRow.mutate(row)}
-                            title="Delete row"
-                            type="button"
-                          >
-                            <Trash2 size={14} />
-                          </button>
-                        </div>
-                      </td>
-                      {parsed.headers.map((header) => (
-                        <td className="max-w-80 truncate px-3 py-2 font-mono text-xs" key={header} title={row[header] ?? ""}>{row[header] ?? ""}</td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {rows.isLoading ? <div className="p-6 text-sm text-panel-muted">Loading rows...</div> : null}
-              {!rows.isLoading && selectedTable && parsed.rows.length === 0 ? <div className="p-6 text-sm text-panel-muted">No rows found in this page.</div> : null}
-            </div>
+            ) : null}
           </div>
         </main>
       </div>
