@@ -213,16 +213,20 @@ def opcache_status() -> dict[str, Any]:
 
 
 def nginx_runtime_config() -> dict[str, Any]:
-    result = shell_output("nginx -T 2>/dev/null | grep -i 'gzip\\|brotli\\|application/json\\|proxy_cache\\|fastcgi_cache' || true", timeout=10)
+    result = shell_output("nginx -T 2>/dev/null | grep -i 'gzip\\|brotli\\|application/json\\|proxy_cache\\|fastcgi_cache\\|cache-control\\|vps_panel_static_cache_control\\|max-age=31536000\\|immutable' || true", timeout=10)
     text = (result.get("stdout") or "").lower()
     gzip_on = re.search(r"^\s*gzip\s+on\s*;", text, re.MULTILINE) is not None
     brotli_on = re.search(r"^\s*brotli\s+on\s*;", text, re.MULTILINE) is not None
     json_compressed = "application/json" in text and (gzip_on or brotli_on)
+    has_proxy_cache = "proxy_cache" in text or "fastcgi_cache" in text
+    has_static_cache = "cache-control" in text and ("max-age=31536000" in text or "immutable" in text)
     return {
         "gzipOn": gzip_on,
         "brotliOn": brotli_on,
         "jsonCompressed": json_compressed,
-        "hasProxyCache": "proxy_cache" in text or "fastcgi_cache" in text,
+        "hasProxyCache": has_proxy_cache,
+        "hasStaticCache": has_static_cache or "vps_panel_static_cache_control" in text,
+        "hasCacheConfig": has_proxy_cache or has_static_cache or "vps_panel_static_cache_control" in text,
         "raw": result.get("stdout") or "",
         "result": result,
     }
@@ -413,9 +417,9 @@ def performance_guard(memory: Any, disk: Any, cpu_percent: float, load_average: 
         {
             "key": "nginx_cache_config",
             "label": "Nginx cache config",
-            "status": "pass" if nginx_runtime.get("hasProxyCache") else "warn",
-            "detail": "proxy_cache or fastcgi_cache appears in nginx config." if nginx_runtime.get("hasProxyCache") else "No proxy_cache/fastcgi_cache directive found in nginx -T.",
-            "safeAction": None if nginx_runtime.get("hasProxyCache") else "Add static asset cache headers first; add proxy/FastCGI cache only for safe public routes.",
+            "status": "pass" if nginx_runtime.get("hasCacheConfig") else "warn",
+            "detail": "Static cache headers or proxy/FastCGI cache config appears in nginx config." if nginx_runtime.get("hasCacheConfig") else "No static cache headers or proxy/FastCGI cache directive found in nginx -T.",
+            "safeAction": None if nginx_runtime.get("hasCacheConfig") else "Add static asset cache headers first; add proxy/FastCGI cache only for safe public routes.",
         },
         {
             "key": "deploy_isolation",

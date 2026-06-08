@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -18,6 +19,7 @@ from app.nginx_manager import (
 )
 
 router = APIRouter()
+PHP_FPM_POOL_GLOBS = ["/etc/php-fpm.d/*.conf", "/etc/php/*/fpm/pool.d/*.conf"]
 
 
 class VhostRequest(BaseModel):
@@ -229,4 +231,122 @@ def ensure_panel_upload_limits() -> dict:
             continue
         result = run_command(["bash", str(script)], allow_live=True, timeout=120)
         results.append({"script": str(script), "result": result})
+    return {"ok": True, "results": results}
+
+
+def set_pool_directive(text: str, key: str, value: str) -> str:
+    pattern = re.compile(rf"^\s*;?\s*{re.escape(key)}\s*=.*$", re.MULTILINE)
+    line = f"{key} = {value}"
+    if pattern.search(text):
+        return pattern.sub(line, text, count=1)
+    return f"{text.rstrip()}\n{line}\n"
+
+
+def php_fpm_pool_paths() -> list[Path]:
+    paths: list[Path] = []
+    for glob in PHP_FPM_POOL_GLOBS:
+        paths.extend(Path("/").glob(glob.lstrip("/")))
+    return sorted(set(path for path in paths if path.is_file()))
+
+
+def reload_php_fpm() -> dict:
+    return run_command([
+        "sh",
+        "-lc",
+        "systemctl reload php-fpm 2>/dev/null || systemctl reload php8.3-fpm 2>/dev/null || systemctl reload php8.2-fpm 2>/dev/null || systemctl restart php-fpm 2>/dev/null || true"
+    ], allow_live=True, timeout=60)
+
+
+def write_text_if_changed(path: Path, content: str) -> bool:
+    if path.exists() and path.read_text(encoding="utf-8", errors="ignore") == content:
+        return False
+    path.write_text(content, encoding="utf-8")
+    return True
+
+
+@router.post("/web-runtime-optimizations")
+def ensure_web_runtime_optimizations() -> dict:
+    compression_path = Path("/etc/nginx/conf.d/vps-panel-compression.conf")
+    static_cache_path = Path("/etc/nginx/conf.d/vps-panel-static-cache.conf")
+    compression_config = """gzip on;
+gzip_vary on;
+gzip_proxied any;
+gzip_comp_level 5;
+gzip_min_length 1024;
+gzip_types
+  text/plain
+  text/css
+  text/xml
+  application/json
+  application/javascript
+  application/xml
+  application/rss+xml
+  image/svg+xml;
+"""
+    static_cache_config = """map $sent_http_content_type $vps_panel_static_cache_control {
+    default "";
+    "~*text/css" "public, max-age=31536000, immutable";
+    "~*application/javascript" "public, max-age=31536000, immutable";
+    "~*font/" "public, max-age=31536000, immutable";
+    "~*image/" "public, max-age=31536000, immutable";
+}
+
+add_header Cache-Control $vps_panel_static_cache_control always;
+"""
+    results: dict[str, object] = {"dryRun": not settings.allow_live_nginx}
+
+    if not settings.allow_live_nginx:
+        results["nginx"] = {
+            "compressionPath": str(compression_path),
+            "staticCachePath": str(static_cache_path),
+            "compressionConfig": compression_config,
+            "staticCacheConfig": static_cache_config,
+        }
+    else:
+        compression_path.parent.mkdir(parents=True, exist_ok=True)
+        compression_changed = write_text_if_changed(compression_path, compression_config)
+        static_cache_changed = write_text_if_changed(static_cache_path, static_cache_config)
+        nginx_changed = compression_changed or static_cache_changed
+        test = run_command(["nginx", "-t"], allow_live=True, timeout=30) if nginx_changed else None
+        reload = (
+            run_command(["systemctl", "reload", "nginx"], allow_live=True, timeout=30)
+            if test and test.get("returncode") == 0
+            else (
+                {"returncode": 1, "stdout": "", "stderr": "Skipped because nginx -t failed", "command": ["systemctl", "reload", "nginx"]}
+                if test
+                else None
+            )
+        )
+        results["nginx"] = {
+            "compressionPath": str(compression_path),
+            "staticCachePath": str(static_cache_path),
+            "changed": nginx_changed,
+            "test": test,
+            "reload": reload,
+        }
+
+    pool_results = []
+    pool_changed = False
+    if not settings.allow_live_system_commands:
+        pool_results.append({"dryRun": True, "reason": "live system commands disabled"})
+    else:
+        Path("/var/log/php-fpm").mkdir(parents=True, exist_ok=True)
+        for pool_path in php_fpm_pool_paths():
+            try:
+                original = pool_path.read_text(encoding="utf-8", errors="ignore")
+                updated = set_pool_directive(original, "pm.status_path", "/fpm-status")
+                updated = set_pool_directive(updated, "slowlog", "/var/log/php-fpm/www-slow.log")
+                updated = set_pool_directive(updated, "request_slowlog_timeout", "5s")
+                changed = updated != original
+                if changed:
+                    backup = pool_path.with_suffix(f"{pool_path.suffix}.vps-panel.bak")
+                    if not backup.exists():
+                        backup.write_text(original, encoding="utf-8")
+                    pool_path.write_text(updated, encoding="utf-8")
+                    pool_changed = True
+                pool_results.append({"path": str(pool_path), "changed": changed})
+            except OSError as error:
+                pool_results.append({"path": str(pool_path), "error": str(error)})
+    results["phpFpmPools"] = pool_results
+    results["phpFpmReload"] = reload_php_fpm() if settings.allow_live_system_commands and pool_changed else None
     return {"ok": True, "results": results}

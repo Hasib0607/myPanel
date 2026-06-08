@@ -263,6 +263,8 @@ export const sysagent = {
     request("/nginx/vhost", { method: "POST", body: JSON.stringify(body) }),
   ensurePanelUploadLimits: () =>
     request<{ ok: boolean; results: Array<Record<string, unknown>> }>("/nginx/panel-upload-limits", { method: "POST", body: "{}" }),
+  ensureWebRuntimeOptimizations: () =>
+    request<{ ok: boolean; results: Record<string, unknown> }>("/nginx/web-runtime-optimizations", { method: "POST", body: "{}" }),
   writeStaticNginxVhost: (body: unknown) =>
     request<{ write: SysagentCommandResult; enable: SysagentCommandResult; test: SysagentCommandResult; reload: SysagentCommandResult; configPath: string; rootPath: string; sslEnabled?: boolean; forceHttps?: boolean }>("/nginx/static-vhost", { method: "POST", body: JSON.stringify(body) }),
   writeRedirectNginxVhost: (body: unknown) =>

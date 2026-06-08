@@ -3727,6 +3727,11 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     await runStep(deployment.id, releaseId, "PREFLIGHT", "Sysagent live command preflight", () =>
       assertSysagentLiveCommandsEnabled(deployment.id, releaseId)
     );
+    if (env.DEPLOY_WEB_RUNTIME_OPTIMIZATION_ENABLED) {
+      await runStep(deployment.id, releaseId, "PREFLIGHT", "Server web runtime optimization", () =>
+        sysagent.ensureWebRuntimeOptimizations()
+      );
+    }
     let deployBudget = await prepareDeployResourceBudget(deployment.id, releaseId, deployment.rootPath);
 
     if (deployment.gitUrl || action === "pull") {
