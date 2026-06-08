@@ -158,6 +158,7 @@ export async function runGuardianAutoHeal(diagnosis: GuardianDiagnosis) {
   const setting = await prisma.guardianSetting.findUnique({ where: { key: "security" } });
   const autoBlockMode = ((setting?.value as any)?.autoBlockMode ?? process.env.GUARDIAN_AUTO_BLOCK_MODE ?? "suggest") as string;
   const blockDurationMinutes = Number((setting?.value as any)?.blockDurationMinutes ?? process.env.GUARDIAN_BLOCK_DURATION_MINUTES ?? 60);
+  const autoHealPm2 = process.env.GUARDIAN_AUTO_HEAL_PM2 === "true";
   const allowlist = await prisma.guardianIpAllowlist.findMany({
     where: { OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }
   });
@@ -189,6 +190,16 @@ export async function runGuardianAutoHeal(diagnosis: GuardianDiagnosis) {
   for (const app of diagnosis.pm2?.items ?? []) {
     if (app.healthy) continue;
     const incident = (diagnosis.incidents ?? []).find((item) => item.category === "pm2" && item.title?.includes(app.name));
+    if (!autoHealPm2) {
+      actions.push(await recordAction({
+        incidentId: incident ? incidentFor(records, incident) : null,
+        action: "restart-pm2",
+        target: app.pmId !== undefined ? String(app.pmId) : app.name,
+        status: "SKIPPED",
+        reason: "project PM2 auto-restart is disabled by default to avoid impacting running deployments"
+      }));
+      continue;
+    }
     actions.push(await guardedAction("restart-pm2", app.pmId !== undefined ? String(app.pmId) : app.name, incident ? incidentFor(records, incident) : null, async () => {
       const restart = await sysagent.guardianRestartPm2(app.pmId !== undefined ? { pmId: app.pmId } : { name: app.name });
       const recheck = await sysagent.guardianDiagnosis();

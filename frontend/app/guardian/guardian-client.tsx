@@ -56,10 +56,18 @@ type GuardianOverview = {
           detail?: string;
           online?: number;
           total?: number;
-          items: Array<{ name: string; pmId?: number; pid?: number; status: string; healthy: boolean; restarts: number; unstableRestarts: number; cpuPercent?: number; memoryBytes?: number }>;
+          items: Array<{ name: string; pmId?: number; pid?: number; status: string; healthy: boolean; restarts: number; unstableRestarts: number; cpuPercent?: number; memoryBytes?: number; memoryLimitBytes?: number }>;
         };
       }
     | { unavailable: true; incidents: []; services: []; ports: [] };
+  performanceGuard?: {
+    mode: string;
+    impactPolicy: string;
+    status: "pass" | "warn" | "fail";
+    counts: { runningDeployments: number; domains: number };
+    priorityProjects: string[];
+    checks: PerformanceCheck[];
+  };
   incidents: Incident[];
   storedIncidents: Array<{ id: string; title: string; detail: string; severity: string; status: string; lastSeenAt: string }>;
   recentActions: Array<{
@@ -111,6 +119,14 @@ type CommandOutput = {
   returncode?: number;
 };
 
+type PerformanceCheck = {
+  key: string;
+  label: string;
+  status: "pass" | "warn" | "fail";
+  detail: string;
+  safeAction?: string | null;
+};
+
 function formatBytes(value: number) {
   const units = ["B", "KB", "MB", "GB", "TB"];
   let size = value;
@@ -148,6 +164,12 @@ function actionStatusClass(status: string) {
   if (status === "SUCCEEDED") return "bg-emerald-50 text-emerald-700";
   if (status === "FAILED") return "bg-red-50 text-panel-danger";
   return "bg-slate-100 text-slate-700";
+}
+
+function performanceCheckClass(status: string) {
+  if (status === "pass") return "bg-emerald-50 text-emerald-700";
+  if (status === "fail") return "bg-red-50 text-panel-danger";
+  return "bg-amber-50 text-amber-700";
 }
 
 function actionDetail(action: GuardianOverview["recentActions"][number]) {
@@ -465,6 +487,40 @@ export function GuardianClient() {
             <Meter detail={`load ${resources.loadAverage.map((item) => item.toFixed(2)).join(" / ")}`} icon={RadioTower} label="CPU" value={resources.cpuPercent} />
             <Meter detail={`${formatBytes(resources.memory.used)} of ${formatBytes(resources.memory.total)}`} icon={MemoryStick} label="Memory" value={resources.memory.percent} />
             <Meter detail={`${formatBytes(resources.disk.free)} free`} icon={HardDrive} label="Disk" value={resources.disk.percent} />
+          </div>
+        ) : null}
+
+        {overview.data?.performanceGuard ? (
+          <div className="rounded-md border border-panel-line bg-white">
+            <div className="flex items-center justify-between border-b border-panel-line px-4 py-3">
+              <div>
+                <div className="text-sm font-semibold">Performance Guard</div>
+                <div className="mt-1 text-xs text-panel-muted">{overview.data.performanceGuard.impactPolicy}</div>
+              </div>
+              <span className={`rounded-md px-2 py-1 text-xs font-semibold ${performanceCheckClass(overview.data.performanceGuard.status)}`}>
+                {overview.data.performanceGuard.status}
+              </span>
+            </div>
+            <div className="grid grid-cols-4 gap-3 border-b border-panel-line px-4 py-3 text-sm">
+              <div><span className="text-panel-muted">Running</span><br /><span className="font-semibold">{overview.data.performanceGuard.counts.runningDeployments}</span></div>
+              <div><span className="text-panel-muted">Domains</span><br /><span className="font-semibold">{overview.data.performanceGuard.counts.domains}</span></div>
+              <div><span className="text-panel-muted">Mode</span><br /><span className="font-semibold">{overview.data.performanceGuard.mode}</span></div>
+              <div><span className="text-panel-muted">Priority</span><br /><span className="font-semibold">{overview.data.performanceGuard.priorityProjects.length || "unset"}</span></div>
+            </div>
+            <div className="grid grid-cols-2 gap-3 p-4">
+              {overview.data.performanceGuard.checks.map((check) => (
+                <div className="rounded-md border border-panel-line p-3 text-sm" key={check.key}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="font-medium">{check.label}</div>
+                      <div className="mt-1 text-xs text-panel-muted">{check.detail}</div>
+                      {check.safeAction ? <div className="mt-2 text-xs text-panel-muted">{check.safeAction}</div> : null}
+                    </div>
+                    <span className={`shrink-0 rounded-md px-2 py-1 text-xs font-semibold ${performanceCheckClass(check.status)}`}>{check.status}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         ) : null}
 

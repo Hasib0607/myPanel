@@ -207,6 +207,7 @@ def pm2_status() -> dict[str, Any]:
             "uptimeMs": max(0, int(datetime.now(timezone.utc).timestamp() * 1000) - int(env.get("pm_uptime") or 0)) if env.get("pm_uptime") else None,
             "cpuPercent": monit.get("cpu"),
             "memoryBytes": monit.get("memory"),
+            "memoryLimitBytes": env.get("max_memory_restart"),
         })
 
     return {
@@ -276,6 +277,101 @@ def suspicious_ip_candidates(auth_lines: list[str], access_summary: dict[str, An
         item["recommendation"] = "auto-block" if item["score"] >= 80 else "suggest-block" if item["score"] >= 40 else "monitor"
         candidates.append(item)
     return sorted(candidates, key=lambda item: item["score"], reverse=True)[:20]
+
+
+def performance_guard(memory: Any, disk: Any, cpu_percent: float, load_average: list[float] | tuple[float, ...], pm2: dict[str, Any]) -> dict[str, Any]:
+    cpu_count = psutil.cpu_count() or 1
+    swap = psutil.swap_memory()
+    load_per_core = (load_average[0] / cpu_count) if load_average else 0
+    pm2_items = pm2.get("items", []) if isinstance(pm2, dict) else []
+    pm2_uncapped = [
+        item for item in pm2_items
+        if item.get("healthy") and not item.get("memoryLimitBytes")
+    ]
+    checks = [
+        {
+            "key": "deploy_isolation",
+            "label": "Deployment isolation",
+            "status": "pass" if settings.deployment_resource_isolation_enabled else "fail",
+            "detail": "Deploy commands run with resource limits before touching project runtime." if settings.deployment_resource_isolation_enabled else "Deploy commands can use unrestricted host resources.",
+            "safeAction": None if settings.deployment_resource_isolation_enabled else "Enable DEPLOYMENT_RESOURCE_ISOLATION_ENABLED=true and restart sysagent/workers during maintenance.",
+        },
+        {
+            "key": "deploy_memory_cap",
+            "label": "Deploy RAM cap",
+            "status": "pass" if settings.deployment_memory_max_mb <= 4096 else "warn",
+            "detail": f"Deploy/Guardian command cap is {settings.deployment_memory_max_mb}MB.",
+            "safeAction": None if settings.deployment_memory_max_mb <= 4096 else "Set DEPLOYMENT_MEMORY_MAX_MB=4096 so one deploy cannot starve live projects.",
+        },
+        {
+            "key": "deploy_cpu_cap",
+            "label": "Deploy CPU cap",
+            "status": "pass" if settings.deployment_cpu_quota_percent <= 300 else "warn",
+            "detail": f"Deploy/Guardian command cap is {settings.deployment_cpu_quota_percent}% CPU.",
+            "safeAction": None if settings.deployment_cpu_quota_percent <= 300 else "Set DEPLOYMENT_CPU_QUOTA_PERCENT=300 to keep spare cores for live traffic.",
+        },
+        {
+            "key": "worker_cap",
+            "label": "Deploy worker cap",
+            "status": "pass" if settings.deployment_worker_max <= 3 else "warn",
+            "detail": f"Per-project worker limit is {settings.deployment_worker_max}.",
+            "safeAction": None if settings.deployment_worker_max <= 3 else "Set DEPLOYMENT_WORKER_MAX=3 before heavy deploy periods.",
+        },
+        {
+            "key": "deploy_nice",
+            "label": "Deploy process priority",
+            "status": "pass" if settings.deployment_nice >= 5 else "warn",
+            "detail": f"Deploy commands run with nice={settings.deployment_nice}.",
+            "safeAction": None if settings.deployment_nice >= 5 else "Raise DEPLOYMENT_NICE to 10 so deploy work yields to live traffic.",
+        },
+        {
+            "key": "pm2_runtime_caps",
+            "label": "PM2 runtime memory caps",
+            "status": "pass" if len(pm2_uncapped) == 0 else "warn",
+            "detail": f"{len(pm2_uncapped)} online PM2 app(s) do not expose a max-memory-restart cap.",
+            "safeAction": None if len(pm2_uncapped) == 0 else "Redeploy or restart those apps during a maintenance window so PM2 picks up max-memory-restart.",
+        },
+        {
+            "key": "swap",
+            "label": "Swap safety",
+            "status": "pass" if swap.total >= 2 * 1024 ** 3 else "warn",
+            "detail": f"Swap available: {swap.total // (1024 ** 3)}GB.",
+            "safeAction": None if swap.total >= 2 * 1024 ** 3 else "Add 2-4GB swap to absorb build spikes without killing live processes.",
+        },
+        {
+            "key": "load",
+            "label": "Load pressure",
+            "status": "pass" if load_per_core < 0.8 and cpu_percent < 85 else "warn",
+            "detail": f"CPU {cpu_percent:.0f}%, 1m load/core {load_per_core:.2f}.",
+            "safeAction": None if load_per_core < 0.8 and cpu_percent < 85 else "Delay heavy deploys and inspect top PM2 apps before starting another build.",
+        },
+        {
+            "key": "memory_pressure",
+            "label": "Memory pressure",
+            "status": "pass" if memory.percent < 85 else "warn",
+            "detail": f"RAM usage is {memory.percent:.0f}%.",
+            "safeAction": None if memory.percent < 85 else "Pause deploys, review PM2 memory usage, or add RAM/swap before another heavy build.",
+        },
+        {
+            "key": "disk_pressure",
+            "label": "Disk pressure",
+            "status": "pass" if (disk.used / disk.total) < 0.85 else "warn",
+            "detail": f"Disk usage is {(disk.used / disk.total * 100):.0f}%.",
+            "safeAction": None if (disk.used / disk.total) < 0.85 else "Run Guardian log cleanup and prune unused releases/backups.",
+        },
+    ]
+    return {
+        "mode": "safe-monitor",
+        "impactPolicy": "Guardian performance checks do not restart, stop, or kill customer project processes automatically.",
+        "summary": {
+            "cpuCount": cpu_count,
+            "loadPerCore": load_per_core,
+            "swapTotalBytes": swap.total,
+            "pm2Online": pm2.get("online", 0) if isinstance(pm2, dict) else 0,
+            "pm2Uncapped": len(pm2_uncapped),
+        },
+        "checks": checks,
+    }
 
 
 def file_watch_scan() -> dict[str, Any]:
@@ -563,7 +659,15 @@ def diagnosis() -> dict[str, Any]:
             "liveFileManagerEnabled": settings.allow_live_file_manager,
             "liveNginxEnabled": settings.allow_live_nginx,
             "liveSslEnabled": settings.allow_live_ssl,
+            "deploymentResourceIsolationEnabled": settings.deployment_resource_isolation_enabled,
+            "deploymentMemoryMaxMb": settings.deployment_memory_max_mb,
+            "deploymentCpuQuotaPercent": settings.deployment_cpu_quota_percent,
+            "deploymentTasksMax": settings.deployment_tasks_max,
+            "deploymentNice": settings.deployment_nice,
+            "deploymentIoWeight": settings.deployment_io_weight,
+            "deploymentWorkerMax": settings.deployment_worker_max,
         },
+        "performanceGuard": performance_guard(memory, disk, cpu_percent, load_average, pm2),
         "services": services,
         "ports": [{"port": port, "listening": port in ports, "owner": ports.get(port)} for port in WATCHED_PORTS],
         "pm2": pm2,

@@ -141,6 +141,68 @@ function serviceStatusAfter(diagnosis: GuardianDiagnosis | null, serviceKey: str
   return diagnosis?.services?.find((service) => service.key === serviceKey) ?? null;
 }
 
+type PerformanceCheck = {
+  key: string;
+  label: string;
+  status: "pass" | "warn" | "fail";
+  detail: string;
+  safeAction?: string | null;
+};
+
+function performanceStatus(checks: PerformanceCheck[]) {
+  if (checks.some((check) => check.status === "fail")) return "fail";
+  if (checks.some((check) => check.status === "warn")) return "warn";
+  return "pass";
+}
+
+function buildPerformanceGuard(diagnosis: any, counts: { runningDeployments: number; domains: number }) {
+  const hostGuard = diagnosis?.performanceGuard ?? {};
+  const hostChecks = Array.isArray(hostGuard.checks) ? hostGuard.checks as PerformanceCheck[] : [];
+  const priorityProjects = (process.env.GUARDIAN_PRIORITY_PROJECTS ?? "").split(",").map((item) => item.trim()).filter(Boolean);
+  const checks: PerformanceCheck[] = [
+    ...hostChecks,
+    {
+      key: "api_deploy_memory_budget",
+      label: "Dynamic deploy RAM budget",
+      status: Number(env.DEPLOY_MAX_MEMORY_MB) <= 4096 ? "pass" : "warn",
+      detail: `API deploy budget may allow up to ${env.DEPLOY_MAX_MEMORY_MB}MB RAM per build.`,
+      safeAction: Number(env.DEPLOY_MAX_MEMORY_MB) <= 4096 ? null : "Set DEPLOY_MAX_MEMORY_MB=4096 if live projects must always have first priority over heavy builds."
+    },
+    {
+      key: "api_deploy_concurrency",
+      label: "Deploy queue concurrency",
+      status: counts.runningDeployments >= 5 && Number(env.DEPLOY_WORKER_CONCURRENCY) > 1 ? "warn" : "pass",
+      detail: `${env.DEPLOY_WORKER_CONCURRENCY} deploy worker(s), ${counts.runningDeployments} running deployment(s).`,
+      safeAction: counts.runningDeployments >= 5 && Number(env.DEPLOY_WORKER_CONCURRENCY) > 1 ? "Set DEPLOY_WORKER_CONCURRENCY=1 for strongest live-project protection during busy hours." : null
+    },
+    {
+      key: "api_cpu_reserve",
+      label: "CPU reserve",
+      status: Number(env.DEPLOY_FREE_CPU_CORES) >= 2 ? "pass" : "warn",
+      detail: `${env.DEPLOY_FREE_CPU_CORES} core(s) reserved away from deploy builds.`,
+      safeAction: Number(env.DEPLOY_FREE_CPU_CORES) >= 2 ? null : "Set DEPLOY_FREE_CPU_CORES=2 so deploys leave CPU headroom for live traffic."
+    },
+    {
+      key: "priority_policy",
+      label: "Priority project policy",
+      status: priorityProjects.length > 0 || counts.runningDeployments < 5 ? "pass" : "warn",
+      detail: priorityProjects.length > 0
+        ? `${priorityProjects.length} priority project(s) configured.`
+        : `No GUARDIAN_PRIORITY_PROJECTS list configured for ${counts.runningDeployments} running project(s) and ${counts.domains} domain(s).`,
+      safeAction: priorityProjects.length > 0 || counts.runningDeployments < 5 ? null : "Add critical slugs to GUARDIAN_PRIORITY_PROJECTS, then use those names when deciding isolated/dedicated runtime pools."
+    }
+  ];
+
+  return {
+    mode: "safe-monitor",
+    impactPolicy: "Guardian performance checks are read-only. Auto-Heal will not restart, stop, kill, or redeploy customer projects for performance tuning.",
+    status: performanceStatus(checks),
+    counts,
+    priorityProjects,
+    checks
+  };
+}
+
 async function syncFileFindings() {
   const scan = await sysagent.guardianFileWatch();
   const activeFingerprints: string[] = [];
@@ -240,7 +302,7 @@ export const guardianRoutes: FastifyPluginAsync = async (app) => {
   app.addHook("preHandler", app.requireAuth);
 
   app.get("/overview", async () => {
-    const [diagnosis, deployments, sslDomains, recentActions, storedIncidents, allowlist, activeBlocks, fileFindings, anomalies, securitySetting] = await Promise.all([
+    const [diagnosis, deployments, runningDeployments, domainCount, sslDomains, recentActions, storedIncidents, allowlist, activeBlocks, fileFindings, anomalies, securitySetting] = await Promise.all([
       trySysagent({ unavailable: true, incidents: [], services: [], ports: [] }, () => sysagent.guardianDiagnosis()),
       prisma.deployment.findMany({
         orderBy: { updatedAt: "desc" },
@@ -256,6 +318,8 @@ export const guardianRoutes: FastifyPluginAsync = async (app) => {
           updatedAt: true
         }
       }),
+      prisma.deployment.count({ where: { status: "RUNNING" } }),
+      prisma.domain.count(),
       prisma.domain.findMany({
         where: { sslEnabled: true },
         orderBy: { sslExpiry: "asc" },
@@ -278,6 +342,7 @@ export const guardianRoutes: FastifyPluginAsync = async (app) => {
       loginAnomalies(),
       prisma.guardianSetting.findUnique({ where: { key: "security" } })
     ]);
+    const performanceGuard = buildPerformanceGuard(diagnosis as any, { runningDeployments, domains: domainCount });
 
     const sslProbes = await Promise.all(
       sslDomains.map(async (domain) => ({
@@ -310,11 +375,21 @@ export const guardianRoutes: FastifyPluginAsync = async (app) => {
     const incidents = [
       ...((diagnosis as any).incidents ?? []),
       ...sslIncidents,
-      ...deploymentIncidents
+      ...deploymentIncidents,
+      ...performanceGuard.checks
+        .filter((check) => check.status === "fail")
+        .map((check) => ({
+          severity: "warning",
+          category: "performance",
+          title: check.label,
+          detail: check.detail,
+          safeAction: check.safeAction ?? undefined
+        }))
     ];
 
     return {
       diagnosis,
+      performanceGuard,
       incidents,
       deployments,
       sslDomains: sslDomains.map((domain) => ({
