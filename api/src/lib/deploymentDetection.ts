@@ -182,11 +182,32 @@ function pythonAsgiModuleForFiles(names: Set<string>) {
   return "app.main:app";
 }
 
+function pythonWsgiModuleForFiles(names: Set<string>) {
+  if (names.has("wsgi.py")) return "wsgi:app";
+  return pythonAsgiModuleForFiles(names);
+}
+
 function pythonStartCommandForFiles(names: Set<string>) {
   if (names.has("manage.py")) {
     return ".venv/bin/python manage.py runserver 127.0.0.1:{PORT}";
   }
   return `.venv/bin/python -m uvicorn ${pythonAsgiModuleForFiles(names)} --host 127.0.0.1 --port {PORT}`;
+}
+
+function isFlaskSource(text: string | null | undefined) {
+  return Boolean(text && /(?:from\s+flask\s+import|import\s+flask|Flask\s*\()/i.test(text));
+}
+
+function isFlaskRequirement(text: string | null | undefined) {
+  return Boolean(text && /^flask(?:[=\[<>\s]|$)/im.test(text));
+}
+
+function pythonStartCommandForSource(names: Set<string>, requirementsText: string | null, sourceTexts: Array<string | null>) {
+  if (names.has("manage.py")) return pythonStartCommandForFiles(names);
+  if (isFlaskRequirement(requirementsText) || sourceTexts.some(isFlaskSource)) {
+    return `.venv/bin/python -m gunicorn ${pythonWsgiModuleForFiles(names)} --bind 127.0.0.1:{PORT}`;
+  }
+  return pythonStartCommandForFiles(names);
 }
 
 async function readTextIfExists(filePath: string) {
@@ -356,7 +377,22 @@ export async function detectDeploymentSource(rootPath: string, rootDirectory = "
   const files = await fs.readdir(sourceRoot);
   const packageJson = await readTextIfExists(path.join(sourceRoot, "package.json"));
   const composerJson = await readTextIfExists(path.join(sourceRoot, "composer.json"));
-  return { ...(detectDeploymentFiles(files, packageJson, composerJson)), rootPath: sourceRoot };
+  const detection = detectDeploymentFiles(files, packageJson, composerJson);
+  if (detection.detected !== "PYTHON") return { ...detection, rootPath: sourceRoot };
+
+  const names = new Set(files.map((file) => file.toLowerCase()));
+  const requirementsText = await readTextIfExists(path.join(sourceRoot, "requirements.txt"));
+  const sourceTexts = await Promise.all(["app.py", "main.py", "server.py", "api.py", "wsgi.py"].map((file) =>
+    readTextIfExists(path.join(sourceRoot, file))
+  ));
+  return {
+    ...detection,
+    rootPath: sourceRoot,
+    suggestions: {
+      ...detection.suggestions,
+      startCommand: pythonStartCommandForSource(names, requirementsText, sourceTexts)
+    }
+  };
 }
 
 export async function deploymentHasLaravelArtisan(appPath: string) {

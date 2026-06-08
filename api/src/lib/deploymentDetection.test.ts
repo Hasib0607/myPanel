@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { detectDeploymentFiles, deploymentHasLaravelPublicIndex, findDeploymentAppRoot, findLaravelAppRoot } from "./deploymentDetection.js";
+import { detectDeploymentFiles, detectDeploymentSource, deploymentHasLaravelPublicIndex, findDeploymentAppRoot, findLaravelAppRoot } from "./deploymentDetection.js";
 
 test("detectDeploymentFiles prefers React package.json over composer.json", () => {
   const detection = detectDeploymentFiles(
@@ -95,6 +95,20 @@ test("detectDeploymentFiles chooses existing Python ASGI entrypoint", () => {
 
   const mainPy = detectDeploymentFiles(["requirements.txt", "main.py"], null, null);
   assert.match(mainPy.suggestions.startCommand ?? "", /uvicorn main:app /);
+});
+
+test("detectDeploymentSource uses Gunicorn for Flask apps", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "deployment-detection-"));
+  try {
+    await fs.writeFile(path.join(root, "requirements.txt"), "Flask==3.0.0\ngunicorn\n");
+    await fs.writeFile(path.join(root, "app.py"), "from flask import Flask\napp = Flask(__name__)\n");
+
+    const detection = await detectDeploymentSource(root);
+    assert.equal(detection.detected, "PYTHON");
+    assert.match(detection.suggestions.startCommand ?? "", /gunicorn app:app --bind 127\.0\.0\.1:\{PORT\}/);
+  } finally {
+    await fs.rm(root, { force: true, recursive: true });
+  }
 });
 
 test("deploymentHasLaravelPublicIndex distinguishes backend-only Laravel projects", async () => {
