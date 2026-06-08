@@ -155,12 +155,87 @@ function performanceStatus(checks: PerformanceCheck[]) {
   return "pass";
 }
 
-function buildPerformanceGuard(diagnosis: any, counts: { runningDeployments: number; domains: number }) {
+type HeaderProbe = {
+  domain: string;
+  status: number | null;
+  location: string | null;
+  cacheStatus: string | null;
+  age: string | null;
+  error: string | null;
+};
+
+async function probeDomainHeaders(domain: string): Promise<HeaderProbe> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 3500);
+  try {
+    const response = await fetch(`https://${domain}`, {
+      method: "HEAD",
+      redirect: "manual",
+      headers: { "accept-encoding": "gzip, br" },
+      signal: controller.signal
+    });
+    clearTimeout(timer);
+    return {
+      domain,
+      status: response.status,
+      location: response.headers.get("location"),
+      cacheStatus: response.headers.get("cf-cache-status") ?? response.headers.get("x-cache") ?? response.headers.get("x-proxy-cache"),
+      age: response.headers.get("age"),
+      error: null
+    };
+  } catch (error) {
+    clearTimeout(timer);
+    return {
+      domain,
+      status: null,
+      location: null,
+      cacheStatus: null,
+      age: null,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+async function domainHeaderChecks(domains: Array<{ name: string }>): Promise<{ checks: PerformanceCheck[]; probes: HeaderProbe[] }> {
+  const sample = domains.slice(0, 8);
+  const probes = await Promise.all(sample.map((domain) => probeDomainHeaders(domain.name)));
+  const insecureRedirects = probes.filter((probe) => probe.location?.startsWith("http://"));
+  const cacheHits = probes.filter((probe) => {
+    const cache = (probe.cacheStatus ?? "").toLowerCase();
+    return cache.includes("hit") || Boolean(probe.age);
+  });
+  return {
+    probes,
+    checks: [
+      {
+        key: "https_redirect_integrity",
+        label: "HTTPS redirect integrity",
+        status: insecureRedirects.length === 0 ? "pass" : "warn",
+        detail: insecureRedirects.length === 0
+          ? `${probes.length} sampled HTTPS domain(s) did not redirect to http://.`
+          : `${insecureRedirects.length} sampled domain(s) redirect from https:// to http://.`,
+        safeAction: insecureRedirects.length === 0 ? null : "Fix APP_URL/trusted proxy/X-Forwarded-Proto for affected apps before enabling stronger cache."
+      },
+      {
+        key: "cache_hit_evidence",
+        label: "CDN/Nginx cache hit evidence",
+        status: cacheHits.length > 0 ? "pass" : "warn",
+        detail: cacheHits.length > 0
+          ? `${cacheHits.length} sampled domain(s) returned Age or HIT cache headers.`
+          : "No sampled domain returned Age, cf-cache-status HIT, x-cache HIT, or x-proxy-cache HIT.",
+        safeAction: cacheHits.length > 0 ? null : "Dynamic private pages should stay uncached, but static assets should expose long cache headers and HIT/Age evidence."
+      }
+    ]
+  };
+}
+
+function buildPerformanceGuard(diagnosis: any, counts: { runningDeployments: number; domains: number }, webChecks: PerformanceCheck[] = [], webProbes: HeaderProbe[] = []) {
   const hostGuard = diagnosis?.performanceGuard ?? {};
   const hostChecks = Array.isArray(hostGuard.checks) ? hostGuard.checks as PerformanceCheck[] : [];
   const priorityProjects = (process.env.GUARDIAN_PRIORITY_PROJECTS ?? "").split(",").map((item) => item.trim()).filter(Boolean);
   const checks: PerformanceCheck[] = [
     ...hostChecks,
+    ...webChecks,
     {
       key: "api_deploy_memory_budget",
       label: "Dynamic deploy RAM budget",
@@ -199,6 +274,7 @@ function buildPerformanceGuard(diagnosis: any, counts: { runningDeployments: num
     status: performanceStatus(checks),
     counts,
     priorityProjects,
+    webProbes,
     checks
   };
 }
@@ -342,16 +418,16 @@ export const guardianRoutes: FastifyPluginAsync = async (app) => {
       loginAnomalies(),
       prisma.guardianSetting.findUnique({ where: { key: "security" } })
     ]);
-    const performanceGuard = buildPerformanceGuard(diagnosis as any, { runningDeployments, domains: domainCount });
-
-    const sslProbes = await Promise.all(
-      sslDomains.map(async (domain) => ({
+    const [sslProbes, headerProbeResult] = await Promise.all([
+      Promise.all(sslDomains.map(async (domain) => ({
         domainId: domain.id,
         name: domain.name,
         probe: await probeSsl(domain.name)
-      }))
-    );
+      }))),
+      domainHeaderChecks(sslDomains)
+    ]);
     const sslProbeByDomain = new Map(sslProbes.map((item) => [item.domainId, item.probe]));
+    const performanceGuard = buildPerformanceGuard(diagnosis as any, { runningDeployments, domains: domainCount }, headerProbeResult.checks, headerProbeResult.probes);
 
     const sslIncidents = sslDomains
       .map((domain) => ({ domain, liveDays: sslProbeByDomain.get(domain.id)?.daysRemaining }))

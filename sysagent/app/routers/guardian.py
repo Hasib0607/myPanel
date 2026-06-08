@@ -94,6 +94,7 @@ RATE_LIMIT_TEMPLATES = {
     "balanced": "limit_req_zone $binary_remote_addr zone=vps_panel_guardian:10m rate=10r/s;\nlimit_conn_zone $binary_remote_addr zone=vps_panel_conn:10m;\n",
     "strict": "limit_req_zone $binary_remote_addr zone=vps_panel_guardian:10m rate=3r/s;\nlimit_conn_zone $binary_remote_addr zone=vps_panel_conn:10m;\n",
 }
+PHP_FPM_POOL_GLOBS = ["/etc/php-fpm.d/*.conf", "/etc/php/*/fpm/pool.d/*.conf"]
 
 
 def command_output(command: list[str], timeout: int = 4) -> dict[str, Any]:
@@ -103,6 +104,19 @@ def command_output(command: list[str], timeout: int = 4) -> dict[str, Any]:
         completed = subprocess.run(command, capture_output=True, text=True, check=False, timeout=timeout)
     except subprocess.TimeoutExpired:
         return {"available": True, "stdout": "", "stderr": f"{' '.join(command)} timed out", "returncode": 124}
+    return {
+        "available": True,
+        "stdout": completed.stdout[-8000:],
+        "stderr": completed.stderr[-4000:],
+        "returncode": completed.returncode,
+    }
+
+
+def shell_output(command: str, timeout: int = 6) -> dict[str, Any]:
+    try:
+        completed = subprocess.run(["sh", "-lc", command], capture_output=True, text=True, check=False, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {"available": True, "stdout": "", "stderr": f"{command} timed out", "returncode": 124}
     return {
         "available": True,
         "stdout": completed.stdout[-8000:],
@@ -148,6 +162,70 @@ def tail_file(path: str, lines: int = 80) -> list[str]:
             return handle.readlines()[-lines:]
     except OSError:
         return []
+
+
+def active_config_value(text: str, key: str) -> str | None:
+    pattern = re.compile(rf"^\s*{re.escape(key)}\s*=\s*(?P<value>.+?)\s*$", re.MULTILINE)
+    match = pattern.search(text)
+    return match.group("value").strip() if match else None
+
+
+def php_fpm_pool_config() -> dict[str, Any]:
+    configs = []
+    for glob in PHP_FPM_POOL_GLOBS:
+        configs.extend(Path("/").glob(glob.lstrip("/")))
+    pools = []
+    for path in sorted(set(configs)):
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        pools.append({
+            "path": str(path),
+            "maxChildren": active_config_value(text, "pm.max_children"),
+            "statusPath": active_config_value(text, "pm.status_path"),
+            "slowlog": active_config_value(text, "slowlog"),
+            "slowlogTimeout": active_config_value(text, "request_slowlog_timeout"),
+        })
+    return {"pools": pools}
+
+
+def php_fpm_max_children_hits() -> dict[str, Any]:
+    units = ["php-fpm", "php8.3-fpm", "php8.2-fpm", "php8.1-fpm", "php8.0-fpm"]
+    hits = []
+    for unit in units:
+        result = shell_output(f"journalctl -u {unit} --since '24 hours ago' --no-pager 2>/dev/null | grep -i 'max_children\\|server reached' || true")
+        lines = [line for line in (result.get("stdout") or "").splitlines() if line.strip()]
+        if lines:
+            hits.append({"unit": unit, "count": len(lines), "sample": lines[-3:]})
+    return {"hits": hits}
+
+
+def opcache_status() -> dict[str, Any]:
+    result = shell_output("php -i 2>/dev/null | grep -i 'opcache.enable\\|opcache.memory_consumption\\|opcache.validate_timestamps' || true")
+    stdout = result.get("stdout") or ""
+    return {
+        "enabled": "opcache.enable => On => On" in stdout,
+        "validateTimestamps": "opcache.validate_timestamps => On => On" in stdout,
+        "raw": stdout,
+        "result": result,
+    }
+
+
+def nginx_runtime_config() -> dict[str, Any]:
+    result = shell_output("nginx -T 2>/dev/null | grep -i 'gzip\\|brotli\\|application/json\\|proxy_cache\\|fastcgi_cache' || true", timeout=10)
+    text = (result.get("stdout") or "").lower()
+    gzip_on = re.search(r"^\s*gzip\s+on\s*;", text, re.MULTILINE) is not None
+    brotli_on = re.search(r"^\s*brotli\s+on\s*;", text, re.MULTILINE) is not None
+    json_compressed = "application/json" in text and (gzip_on or brotli_on)
+    return {
+        "gzipOn": gzip_on,
+        "brotliOn": brotli_on,
+        "jsonCompressed": json_compressed,
+        "hasProxyCache": "proxy_cache" in text or "fastcgi_cache" in text,
+        "raw": result.get("stdout") or "",
+        "result": result,
+    }
 
 
 def matching_log_lines(ip: str) -> dict[str, Any]:
@@ -288,7 +366,57 @@ def performance_guard(memory: Any, disk: Any, cpu_percent: float, load_average: 
         item for item in pm2_items
         if item.get("healthy") and not item.get("memoryLimitBytes")
     ]
+    fpm_config = php_fpm_pool_config()
+    fpm_hits = php_fpm_max_children_hits()
+    opcache = opcache_status()
+    nginx_runtime = nginx_runtime_config()
+    fpm_pools = fpm_config.get("pools", [])
+    fpm_slowlog_ready = any(pool.get("slowlog") and pool.get("slowlogTimeout") not in {None, "0", "0s"} for pool in fpm_pools)
+    fpm_status_ready = any(pool.get("statusPath") for pool in fpm_pools)
+    fpm_max_child_hit_count = sum(int(item.get("count") or 0) for item in fpm_hits.get("hits", []))
     checks = [
+        {
+            "key": "php_fpm_max_children",
+            "label": "PHP-FPM max_children saturation",
+            "status": "pass" if fpm_max_child_hit_count == 0 else "warn",
+            "detail": "No max_children warnings found in the last 24h." if fpm_max_child_hit_count == 0 else f"{fpm_max_child_hit_count} max_children warning(s) found in PHP-FPM logs.",
+            "safeAction": None if fpm_max_child_hit_count == 0 else "Increase pm.max_children only after checking RAM headroom, or reduce slow PHP requests.",
+        },
+        {
+            "key": "php_fpm_slowlog",
+            "label": "PHP-FPM slowlog",
+            "status": "pass" if fpm_slowlog_ready else "warn",
+            "detail": "Slowlog and request_slowlog_timeout are enabled." if fpm_slowlog_ready else "Slowlog path or request_slowlog_timeout is not active in any PHP-FPM pool.",
+            "safeAction": None if fpm_slowlog_ready else "Enable slowlog plus request_slowlog_timeout=5s, then reload PHP-FPM during a quiet window.",
+        },
+        {
+            "key": "php_fpm_status",
+            "label": "PHP-FPM status endpoint",
+            "status": "pass" if fpm_status_ready else "warn",
+            "detail": "pm.status_path is enabled in a PHP-FPM pool." if fpm_status_ready else "pm.status_path is not active, so listen queue and saturation cannot be monitored.",
+            "safeAction": None if fpm_status_ready else "Enable pm.status_path=/fpm-status and add an internal Nginx status location.",
+        },
+        {
+            "key": "opcache",
+            "label": "PHP OPcache",
+            "status": "pass" if opcache.get("enabled") else "warn",
+            "detail": "OPcache is enabled." if opcache.get("enabled") else "OPcache is not enabled for PHP CLI/FPM checks.",
+            "safeAction": None if opcache.get("enabled") else "Enable OPcache for PHP-FPM. For production, consider validate_timestamps=0 only with deploy-time PHP-FPM reload.",
+        },
+        {
+            "key": "nginx_json_compression",
+            "label": "Nginx JSON compression",
+            "status": "pass" if nginx_runtime.get("jsonCompressed") else "warn",
+            "detail": "gzip/Brotli config includes application/json." if nginx_runtime.get("jsonCompressed") else "gzip/Brotli JSON compression is not visible in nginx -T.",
+            "safeAction": None if nginx_runtime.get("jsonCompressed") else "Enable gzip on and include application/json in gzip_types; add Brotli only if the module is installed.",
+        },
+        {
+            "key": "nginx_cache_config",
+            "label": "Nginx cache config",
+            "status": "pass" if nginx_runtime.get("hasProxyCache") else "warn",
+            "detail": "proxy_cache or fastcgi_cache appears in nginx config." if nginx_runtime.get("hasProxyCache") else "No proxy_cache/fastcgi_cache directive found in nginx -T.",
+            "safeAction": None if nginx_runtime.get("hasProxyCache") else "Add static asset cache headers first; add proxy/FastCGI cache only for safe public routes.",
+        },
         {
             "key": "deploy_isolation",
             "label": "Deployment isolation",
@@ -369,7 +497,12 @@ def performance_guard(memory: Any, disk: Any, cpu_percent: float, load_average: 
             "swapTotalBytes": swap.total,
             "pm2Online": pm2.get("online", 0) if isinstance(pm2, dict) else 0,
             "pm2Uncapped": len(pm2_uncapped),
+            "phpFpmPools": len(fpm_pools),
+            "phpFpmMaxChildrenHits": fpm_max_child_hit_count,
         },
+        "phpFpm": {"config": fpm_config, "maxChildren": fpm_hits},
+        "opcache": opcache,
+        "nginx": nginx_runtime,
         "checks": checks,
     }
 
