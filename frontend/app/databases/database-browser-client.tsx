@@ -26,6 +26,7 @@ type DatabaseBrowserClientProps = {
 };
 
 type TableTab = "data" | "columns" | "editor";
+type RowValue = string | number | boolean | null;
 
 function parseCsvLine(line: string) {
   const values: string[] = [];
@@ -85,6 +86,27 @@ function rowMatchesSearch(row: Record<string, string>, headers: string[], query:
   const needle = query.trim().toLowerCase();
   if (!needle) return true;
   return headers.some((header) => (row[header] ?? "").toLowerCase().includes(needle));
+}
+
+function nullable(column: Column) {
+  return column.nullable.toUpperCase() === "YES";
+}
+
+function normalizeDraftValue(column: Column, value: string): RowValue {
+  if (nullable(column) && value.trim().toUpperCase() === "NULL") return null;
+  return value;
+}
+
+function createValues(columns: Column[], draft: Record<string, string>) {
+  return Object.fromEntries(columns.map((column) => [column.name, normalizeDraftValue(column, draft[column.name] ?? "")]));
+}
+
+function changedValues(columns: Column[], before: Record<string, string>, draft: Record<string, string>, primaryColumn: string) {
+  return Object.fromEntries(
+    columns
+      .filter((column) => column.name !== primaryColumn && (draft[column.name] ?? "") !== (before[column.name] ?? ""))
+      .map((column) => [column.name, normalizeDraftValue(column, draft[column.name] ?? "")])
+  );
 }
 
 export function DatabaseBrowserClient({ apiBase = "/databases", engine, database, backHref = "/databases" }: DatabaseBrowserClientProps) {
@@ -157,7 +179,7 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
   };
 
   const createRow = useMutation({
-    mutationFn: () => apiPost(`${apiBase}/row`, { ...target, table: selectedTable, values: draft }),
+    mutationFn: () => apiPost(`${apiBase}/row`, { ...target, table: selectedTable, values: createValues(editableColumns, draft) }),
     onSuccess: async () => {
       setNotice({ text: "Row inserted.", tone: "success" });
       setCreating(false);
@@ -170,7 +192,9 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
   const updateRow = useMutation({
     mutationFn: () => {
       if (!primaryColumn || !editing) throw new Error("Primary key is required for row edit.");
-      return apiPatch(`${apiBase}/row`, { ...target, table: selectedTable, keyColumn: primaryColumn, keyValue: editing[primaryColumn], values: draft });
+      const values = changedValues(editableColumns, editing, draft, primaryColumn);
+      if (Object.keys(values).length === 0) throw new Error("No changed values to save.");
+      return apiPatch(`${apiBase}/row`, { ...target, table: selectedTable, keyColumn: primaryColumn, keyValue: editing[primaryColumn], values });
     },
     onSuccess: async () => {
       setNotice({ text: "Row updated.", tone: "success" });
