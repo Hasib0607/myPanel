@@ -40,6 +40,12 @@ function accountId(request: any) {
   return request.user.accountId as string;
 }
 
+function bearerToken(value: unknown) {
+  if (typeof value !== "string") return null;
+  const match = value.match(/^Bearer\s+(.+)$/i);
+  return match?.[1]?.trim() || null;
+}
+
 function safeAccount(account: any) {
   const { passwordHash: _passwordHash, ...rest } = account;
   return rest;
@@ -251,6 +257,16 @@ const databaseRowUpdateSchema = databaseRowTargetSchema.extend({
 const sslSchema = z.object({
   email: z.string().email().optional(),
   includeWww: z.boolean().default(true)
+});
+const projectDomainApiTokenSchema = z.object({
+  expiresInSeconds: z.coerce.number().int().min(3600).max(60 * 60 * 24 * 365).default(env.JWT_EXPIRY)
+});
+const projectDomainApiCreateSchema = z.object({
+  name: domainNameSchema,
+  forceSsl: z.boolean().default(true),
+  autoSsl: z.boolean().default(true),
+  autoSslIncludeWww: z.boolean().default(true),
+  primary: z.boolean().default(true)
 });
 const unsafeName = /[<>:"|?*\x00-\x1F]/;
 const maxImportUploadBytes = 3 * 1024 * 1024 * 1024;
@@ -1068,6 +1084,86 @@ async function publishAccountDomainRoute(request: any, account: { id: string; ho
   return { domain, dnsResult, nginxResult };
 }
 
+async function createAndBindAccountDeploymentDomain(
+  request: any,
+  account: { id: string; homeRoot: string; domainLimit?: number | null; _count?: { domains: number } },
+  deployment: {
+    id: string;
+    slug: string;
+    domainId?: string | null;
+  },
+  input: z.infer<typeof projectDomainApiCreateSchema>
+) {
+  if (input.name.startsWith("*.")) {
+    throw Object.assign(new Error("Project domain API does not accept wildcard domains."), { statusCode: 400 });
+  }
+
+  const vpsIp = await currentVpsIp();
+  const nameServers = await activeNameServers();
+  let domain = await prisma.domain.findUnique({ where: { name: input.name }, include: domainInclude() });
+  let created = false;
+
+  if (domain && domain.accountId !== account.id) {
+    throw Object.assign(new Error("Domain already belongs to another account."), { statusCode: 409 });
+  }
+
+  if (!domain) {
+    const domainCount = account._count?.domains ?? await prisma.domain.count({ where: { accountId: account.id } });
+    assertLimit(domainCount, account.domainLimit ?? null, "Domain");
+    domain = await prisma.$transaction(async (tx) => {
+      const createdDomain = await tx.domain.create({
+        data: {
+          name: input.name,
+          accountId: account.id,
+          status: "ACTIVE",
+          forceSsl: input.forceSsl,
+          hostingMode: "DEPLOYMENT_PROXY",
+          documentRoot: "public_html",
+          hostingDeploymentId: deployment.id
+        }
+      });
+      await tx.dnsRecord.createMany({ data: defaultRecords(createdDomain.id, createdDomain.name, nameServers, vpsIp), skipDuplicates: true });
+      return tx.domain.findUniqueOrThrow({ where: { id: createdDomain.id }, include: domainInclude() });
+    });
+    created = true;
+  } else {
+    domain = await prisma.domain.update({
+      where: { id: domain.id },
+      data: {
+        status: "ACTIVE",
+        forceSsl: input.forceSsl,
+        hostingMode: "DEPLOYMENT_PROXY",
+        hostingDeploymentId: deployment.id
+      },
+      include: domainInclude()
+    });
+    await prisma.dnsRecord.createMany({ data: defaultRecords(domain.id, domain.name, nameServers, vpsIp), skipDuplicates: true });
+  }
+
+  await prisma.deploymentDomain.upsert({
+    where: { deploymentId_domainId: { deploymentId: deployment.id, domainId: domain.id } },
+    update: { role: input.primary ? "primary" : "alias" },
+    create: { deploymentId: deployment.id, domainId: domain.id, role: input.primary ? "primary" : "alias" }
+  });
+  if (input.primary || !deployment.domainId) {
+    await syncAccountPrimaryBinding(deployment.id, account.id, domain.id);
+  }
+
+  const publishResult = await publishAccountDomainRoute(request, account, domain.id);
+  const sslJob = env.ACCOUNT_DOMAIN_AUTO_SSL_ENABLED && input.autoSsl && input.forceSsl
+    ? await queueAccountAutoDomainSslJob(account, domain, input.autoSslIncludeWww)
+    : null;
+
+  return {
+    domain,
+    created,
+    binding: { deploymentId: deployment.id, role: input.primary || !deployment.domainId ? "primary" : "alias" },
+    publishResult: { dnsResult: publishResult.dnsResult, nginxResult: publishResult.nginxResult },
+    autoSslQueued: Boolean(sslJob),
+    sslJob
+  };
+}
+
 async function queueAccountBulkDomainSslJobs(account: { homeRoot: string }, domains: Array<{ id: string; name: string; documentRoot?: string | null; forceSsl: boolean }>) {
   const jobs = [];
   for (const [index, domain] of domains.entries()) {
@@ -1392,7 +1488,54 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       return writeDatabaseUploadToTemp(payload, query.filename);
     });
   }
-  app.addHook("preHandler", app.requireAccount);
+  async function requireAccountOrProjectDomainApi(request: any, reply: any) {
+    const path = request.url.split("?")[0] ?? "";
+    const isProjectDomainApi = path === "/project-domain/domains" || path.endsWith("/account/project-domain/domains");
+    if (!isProjectDomainApi) return app.requireAccount(request, reply);
+
+    try {
+      const token = bearerToken(request.headers.authorization);
+      if (!token) return reply.code(401).send({ error: "Project domain API token is required" });
+      request.user = app.jwt.verify(token);
+      if (request.user?.role !== "project_domain" || !request.user?.accountId || !request.user?.deploymentId) {
+        return reply.code(403).send({ error: "Project domain API access required" });
+      }
+      const [account, deployment] = await Promise.all([
+        prisma.account.findUnique({ where: { id: request.user.accountId }, select: { status: true } }),
+        prisma.deployment.findFirst({ where: { id: request.user.deploymentId, accountId: request.user.accountId }, select: { id: true } })
+      ]);
+      if (!account || account.status !== "ACTIVE" || !deployment) {
+        return reply.code(403).send({ error: "Project domain API target is unavailable" });
+      }
+    } catch {
+      return reply.code(401).send({ error: "Unauthorized" });
+    }
+  }
+
+  app.addHook("preHandler", requireAccountOrProjectDomainApi);
+
+  app.post("/project-domain/domains", async (request: any, reply) => {
+    const body = projectDomainApiCreateSchema.parse(request.body ?? {});
+    const [account, deployment] = await Promise.all([
+      prisma.account.findUniqueOrThrow({
+        where: { id: accountId(request) },
+        include: { _count: { select: { domains: true } } }
+      }),
+      prisma.deployment.findFirstOrThrow({
+        where: { id: request.user.deploymentId, accountId: accountId(request) },
+        include: includeAccountDeployment()
+      })
+    ]);
+    const result = await createAndBindAccountDeploymentDomain(request, account, serializeAccountDeployment(deployment), body);
+    await audit(request, {
+      action: "CREATE",
+      resource: "project_domain_api_domain",
+      resourceId: result.domain.id,
+      description: `Project domain API added ${result.domain.name} to ${deployment.slug}`,
+      metadata: { deploymentId: deployment.id, created: result.created, autoSslQueued: result.autoSslQueued } as Prisma.InputJsonObject
+    });
+    return reply.code(result.created ? 201 : 200).send(result);
+  });
 
   app.get("/me", async (request: any) => {
     const account = await prisma.account.findUniqueOrThrow({
@@ -2359,6 +2502,35 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     return serializeAccountDeployment(updated);
   });
 
+  app.post("/deployments/:deploymentId/domain-api-token", async (request: any) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const body = projectDomainApiTokenSchema.parse(request.body ?? {});
+    const deployment = await findAccountDeployment(request, deploymentId);
+    const token = app.jwt.sign(
+      {
+        sub: deployment.slug,
+        role: "project_domain",
+        accountId: accountId(request),
+        deploymentId: deployment.id
+      },
+      { expiresIn: body.expiresInSeconds }
+    );
+    await audit(request, {
+      action: "CREATE",
+      resource: "project_domain_api_token",
+      resourceId: deployment.id,
+      description: `Account generated project domain API token for ${deployment.slug}`
+    });
+    return {
+      token,
+      tokenType: "Bearer",
+      expiresInSeconds: body.expiresInSeconds,
+      apiBaseUrl: `http://${env.VPS_IP}:${env.PANEL_PORT}/api/v1/account/project-domain`,
+      endpoint: "POST /domains",
+      deployment: { id: deployment.id, slug: deployment.slug, name: deployment.name }
+    };
+  });
+
   app.get("/deployments/:deploymentId/releases", async (request: any) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const deployment = await findAccountDeployment(request, deploymentId);
@@ -2562,6 +2734,10 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     if (target.domainId) await prisma.domain.update({ where: { id: target.domainId }, data: { hostingMode: "DEPLOYMENT_PROXY", hostingDeploymentId: deployment.id } });
     if (body.primary || !deployment.domainId) {
       await syncAccountPrimaryBinding(deployment.id, accountId(request), body.domainId);
+    }
+    if (target.domainId) {
+      const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+      await publishAccountDomainRoute(request, account, target.domainId);
     }
     await audit(request, { action: "UPDATE", resource: "deployment", resourceId: deployment.id, description: `Account bound domain ${target.displayName} to ${deployment.slug}` });
     return reply.code(201).send(serializeAccountDeploymentBinding(binding));

@@ -71,6 +71,9 @@ const processConfigSchema = z.object({
   laravelWorkers: laravelWorkerConfigSchema.optional(),
   laravelManagedProcesses: laravelManagedProcessesSchema.optional()
 }).passthrough().default({});
+const projectDomainApiTokenSchema = z.object({
+  expiresInSeconds: z.coerce.number().int().min(3600).max(60 * 60 * 24 * 365).default(env.JWT_EXPIRY)
+});
 
 const baseDeploymentSchema = z.object({
   domainId: z.string().nullable().optional(),
@@ -2325,6 +2328,38 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     await publishPublicHtmlNginxVhost(removedDomain);
     await audit(request, { action: "UPDATE", resource: "deployment", resourceId: deployment.id, description: `Removed a domain from ${deployment.slug}` });
     return { ok: true };
+  });
+
+  app.post("/:deploymentId/domain-api-token", async (request) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const body = projectDomainApiTokenSchema.parse(request.body ?? {});
+    const deployment = await findDeployment(deploymentId);
+    if (!deployment.accountId) {
+      throw app.httpErrors.badRequest("Project domain API tokens are available only for account-owned projects.");
+    }
+    const token = app.jwt.sign(
+      {
+        sub: deployment.slug,
+        role: "project_domain",
+        accountId: deployment.accountId,
+        deploymentId: deployment.id
+      },
+      { expiresIn: body.expiresInSeconds }
+    );
+    await audit(request, {
+      action: "CREATE",
+      resource: "project_domain_api_token",
+      resourceId: deployment.id,
+      description: `Generated project domain API token for ${deployment.slug}`
+    });
+    return {
+      token,
+      tokenType: "Bearer",
+      expiresInSeconds: body.expiresInSeconds,
+      apiBaseUrl: `http://${env.VPS_IP}:${env.PANEL_PORT}/api/v1/account/project-domain`,
+      endpoint: "POST /domains",
+      deployment: { id: deployment.id, slug: deployment.slug, name: deployment.name }
+    };
   });
 
   app.patch("/:deploymentId/status", async (request) => {

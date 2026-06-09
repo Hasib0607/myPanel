@@ -33,6 +33,14 @@ type WebhookStatus = {
 type WebhookSecretResponse = WebhookStatus & {
   secret: string;
 };
+type ProjectDomainApiToken = {
+  token: string;
+  tokenType: "Bearer";
+  expiresInSeconds: number;
+  apiBaseUrl: string;
+  endpoint: string;
+  deployment: { id: string; slug: string; name: string };
+};
 
 type LaravelWorkerConfig = {
   enabled: boolean;
@@ -249,35 +257,46 @@ function numberFromString(value: string) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-export function DeploymentSettingsClient({ project }: { project: string }) {
+export function DeploymentSettingsClient({
+  project,
+  apiBase = "/deployments",
+  domainsApiBase = "/domains",
+  projectRouteBase = "/deployments"
+}: {
+  project: string;
+  apiBase?: "/deployments" | "/account/deployments";
+  domainsApiBase?: "/domains" | "/account/domains";
+  projectRouteBase?: "/deployments" | "/account/deployments";
+}) {
   const router = useRouter();
   const queryClient = useQueryClient();
   const [form, setForm] = useState<SettingsForm>(emptyForm);
   const [notice, setNotice] = useState("");
   const [deleteText, setDeleteText] = useState("");
   const [newWebhookSecret, setNewWebhookSecret] = useState("");
+  const [projectDomainToken, setProjectDomainToken] = useState<ProjectDomainApiToken | null>(null);
   const [laravelProcessesJson, setLaravelProcessesJson] = useState("");
 
   const detail = useQuery({
-    queryKey: ["deployment", project],
-    queryFn: () => apiGet<Deployment>(`/deployments/${project}`)
+    queryKey: ["deployment", apiBase, project],
+    queryFn: () => apiGet<Deployment>(`${apiBase}/${project}`)
   });
   const domains = useQuery({
-    queryKey: ["domains", "deployment-settings"],
-    queryFn: () => apiGet<DomainListResponse>("/domains?page=1&pageSize=100")
+    queryKey: ["domains", domainsApiBase, "deployment-settings"],
+    queryFn: () => apiGet<DomainListResponse>(`${domainsApiBase}?page=1&pageSize=100`)
   });
   const webhook = useQuery({
-    queryKey: ["deployment", project, "webhook"],
-    queryFn: () => apiGet<WebhookStatus>(`/deployments/${project}/webhook`)
+    queryKey: ["deployment", apiBase, project, "webhook"],
+    queryFn: () => apiGet<WebhookStatus>(`${apiBase}/${project}/webhook`)
   });
   const workers = useQuery({
-    queryKey: ["deployment", project, "workers"],
-    queryFn: () => apiGet<WorkerStatusResponse>(`/deployments/${project}/workers`),
+    queryKey: ["deployment", apiBase, project, "workers"],
+    queryFn: () => apiGet<WorkerStatusResponse>(`${apiBase}/${project}/workers`),
     enabled: detail.data?.framework === "LARAVEL"
   });
   const laravelProcesses = useQuery({
-    queryKey: ["deployment", project, "laravel-processes"],
-    queryFn: () => apiGet<Record<string, unknown>>(`/deployments/${project}/laravel-processes`),
+    queryKey: ["deployment", apiBase, project, "laravel-processes"],
+    queryFn: () => apiGet<Record<string, unknown>>(`${apiBase}/${project}/laravel-processes`),
     enabled: detail.data?.framework === "LARAVEL"
   });
 
@@ -332,38 +351,38 @@ export function DeploymentSettingsClient({ project }: { project: string }) {
   }), [detail.data?.processConfig, form]);
 
   const save = useMutation({
-    mutationFn: () => apiPatch<Deployment>(`/deployments/${project}`, payload),
+    mutationFn: () => apiPatch<Deployment>(`${apiBase}/${project}`, payload),
     onSuccess: async (deployment) => {
       setNotice("Settings saved.");
-      await queryClient.invalidateQueries({ queryKey: ["deployment", project] });
-      if (deployment.slug !== project) router.replace(`/deployments/${deployment.slug}/settings`);
+      await queryClient.invalidateQueries({ queryKey: ["deployment", apiBase, project] });
+      if (deployment.slug !== project) router.replace(`${projectRouteBase}/${deployment.slug}/settings`);
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not save settings")
   });
 
   const remove = useMutation({
-    mutationFn: () => apiDeleteBody<{ ok: true }>(`/deployments/${project}`, { confirmSlug: deleteText }),
+    mutationFn: () => apiDeleteBody<{ ok: true }>(`${apiBase}/${project}`, { confirmSlug: deleteText }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["deployments"] });
-      router.replace("/deployments");
+      router.replace(projectRouteBase);
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not delete project")
   });
 
   const generateWebhookSecret = useMutation({
-    mutationFn: () => apiPost<WebhookSecretResponse>(`/deployments/${project}/webhook-secret`),
+    mutationFn: () => apiPost<WebhookSecretResponse>(`${apiBase}/${project}/webhook-secret`),
     onSuccess: async (result) => {
       setNewWebhookSecret(result.secret);
       setField("autoDeployEnabled", true);
       setNotice("Webhook secret generated. Copy it now; it will only be shown once.");
-      await queryClient.invalidateQueries({ queryKey: ["deployment", project, "webhook"] });
-      await queryClient.invalidateQueries({ queryKey: ["deployment", project] });
+      await queryClient.invalidateQueries({ queryKey: ["deployment", apiBase, project, "webhook"] });
+      await queryClient.invalidateQueries({ queryKey: ["deployment", apiBase, project] });
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not generate webhook secret")
   });
 
   const saveWorkers = useMutation({
-    mutationFn: () => apiPatch<{ config: LaravelWorkerConfig }>(`/deployments/${project}/workers`, {
+    mutationFn: () => apiPatch<{ config: LaravelWorkerConfig }>(`${apiBase}/${project}/workers`, {
       laravelWorkers: {
         enabled: form.workersEnabled,
         autoscale: form.workersAutoscale,
@@ -375,21 +394,29 @@ export function DeploymentSettingsClient({ project }: { project: string }) {
     }),
     onSuccess: async (result) => {
       setNotice(`Laravel workers saved. Running: ${result.config.currentWorkers ?? result.config.desiredWorkers}.`);
-      await queryClient.invalidateQueries({ queryKey: ["deployment", project] });
-      await queryClient.invalidateQueries({ queryKey: ["deployment", project, "workers"] });
+      await queryClient.invalidateQueries({ queryKey: ["deployment", apiBase, project] });
+      await queryClient.invalidateQueries({ queryKey: ["deployment", apiBase, project, "workers"] });
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not save Laravel workers")
   });
   const saveLaravelProcesses = useMutation({
-    mutationFn: () => apiPatch(`/deployments/${project}/laravel-processes`, {
+    mutationFn: () => apiPatch(`${apiBase}/${project}/laravel-processes`, {
       laravelManagedProcesses: JSON.parse(laravelProcessesJson)
     }),
     onSuccess: async () => {
       setNotice("Laravel scheduler, Horizon, Reverb, Octane, and queue groups saved.");
-      await queryClient.invalidateQueries({ queryKey: ["deployment", project, "laravel-processes"] });
-      await queryClient.invalidateQueries({ queryKey: ["deployment", project] });
+      await queryClient.invalidateQueries({ queryKey: ["deployment", apiBase, project, "laravel-processes"] });
+      await queryClient.invalidateQueries({ queryKey: ["deployment", apiBase, project] });
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not save Laravel managed processes")
+  });
+  const generateProjectDomainToken = useMutation({
+    mutationFn: () => apiPost<ProjectDomainApiToken>(`${apiBase}/${project}/domain-api-token`, {}),
+    onSuccess: (result) => {
+      setProjectDomainToken(result);
+      setNotice("Project domain API token generated. Copy it now and keep it private.");
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not generate project domain API token")
   });
 
   function setField<K extends keyof SettingsForm>(key: K, value: SettingsForm[K]) {
@@ -403,6 +430,22 @@ export function DeploymentSettingsClient({ project }: { project: string }) {
 
   const domainLabels = (domains.data?.items ?? []).reduce<Record<string, string>>((acc, domain) => ({ ...acc, [domain.id]: domain.name }), { "": "No domain" });
   const deleteMatches = detail.data ? deleteText === detail.data.slug : false;
+  const projectDomainEnv = projectDomainToken
+    ? [
+        `PROJECT_DOMAIN_API_BASE_URL=${projectDomainToken.apiBaseUrl}`,
+        `PROJECT_DOMAIN_API_TOKEN=${projectDomainToken.token}`,
+        "PROJECT_DOMAIN_FORCE_SSL=true",
+        "PROJECT_DOMAIN_AUTO_SSL=true"
+      ].join("\n")
+    : "";
+  const projectDomainCurl = projectDomainToken
+    ? [
+        `curl -X POST "${projectDomainToken.apiBaseUrl}/domains" \\`,
+        `  -H "Authorization: Bearer ${projectDomainToken.token}" \\`,
+        `  -H "Content-Type: application/json" \\`,
+        `  -d '{"name":"example.com","forceSsl":true,"autoSsl":true}'`
+      ].join("\n")
+    : "";
 
   return (
     <>
@@ -510,6 +553,49 @@ export function DeploymentSettingsClient({ project }: { project: string }) {
                   <Copy size={15} />
                   Copy
                 </button>
+              </div>
+            ) : null}
+          </div>
+        </Section>
+
+        <Section icon={<Globe2 size={16} />} title="Project Domain API">
+          <div className="grid gap-4">
+            <div className="rounded-md border border-panel-line bg-slate-50 p-3 text-xs text-panel-muted">
+              This token can add domains only to this project. New domains are bound to this project, DNS/vhost is published immediately, and SSL auto-retry is queued when enabled.
+            </div>
+            <div className="flex items-center justify-between gap-3 rounded-md border border-panel-line p-3">
+              <div>
+                <div className="text-sm font-semibold">Scoped domain token</div>
+                <div className="mt-1 text-xs text-panel-muted">Use it from your admin app to connect account project domains without redeploying.</div>
+              </div>
+              <button
+                className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-4 text-sm font-semibold text-white disabled:opacity-60"
+                disabled={generateProjectDomainToken.isPending}
+                onClick={() => generateProjectDomainToken.mutate()}
+                type="button"
+              >
+                <KeyRound size={15} />
+                Generate Token
+              </button>
+            </div>
+            {projectDomainToken ? (
+              <div className="grid gap-3 rounded-md border border-emerald-200 bg-emerald-50 p-3">
+                <div className="grid grid-cols-[1fr_auto] gap-3">
+                  <ReadOnlyValue label="API base URL" value={projectDomainToken.apiBaseUrl} />
+                  <button className="mt-6 flex h-10 items-center gap-2 rounded-md border border-emerald-300 bg-white px-3 text-sm font-semibold text-emerald-900" onClick={() => navigator.clipboard.writeText(projectDomainToken.apiBaseUrl)} type="button">
+                    <Copy size={15} />
+                    Copy
+                  </button>
+                </div>
+                <div className="grid grid-cols-[1fr_auto] gap-3">
+                  <ReadOnlyValue label="Bearer token" value={projectDomainToken.token} />
+                  <button className="mt-6 flex h-10 items-center gap-2 rounded-md border border-emerald-300 bg-white px-3 text-sm font-semibold text-emerald-900" onClick={() => navigator.clipboard.writeText(projectDomainToken.token)} type="button">
+                    <Copy size={15} />
+                    Copy
+                  </button>
+                </div>
+                <Snippet label=".env" value={projectDomainEnv} />
+                <Snippet label="curl" value={projectDomainCurl} />
               </div>
             ) : null}
           </div>
@@ -647,8 +733,25 @@ function ReadOnlyValue({ label, value }: { label: string; value: string }) {
   return (
     <label className="block text-xs font-medium uppercase text-panel-muted">
       {label}
-      <div className="mt-2 flex h-10 items-center rounded-md border border-panel-line bg-slate-50 px-3 font-mono text-xs normal-case text-panel-ink">{value}</div>
+      <div className="mt-2 flex h-10 items-center overflow-hidden rounded-md border border-panel-line bg-slate-50 px-3 font-mono text-xs normal-case text-panel-ink">
+        <span className="truncate">{value}</span>
+      </div>
     </label>
+  );
+}
+
+function Snippet({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="mb-2 text-xs font-medium uppercase text-panel-muted">{label}</div>
+      <div className="grid grid-cols-[1fr_auto] gap-3">
+        <pre className="min-h-20 overflow-auto rounded-md border border-panel-line bg-white p-3 font-mono text-xs normal-case text-panel-ink">{value}</pre>
+        <button className="flex h-10 items-center gap-2 rounded-md border border-panel-line bg-white px-3 text-sm font-semibold hover:bg-slate-50" onClick={() => navigator.clipboard.writeText(value)} type="button">
+          <Copy size={15} />
+          Copy
+        </button>
+      </div>
+    </div>
   );
 }
 

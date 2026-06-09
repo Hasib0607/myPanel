@@ -40,6 +40,14 @@ type RuntimeReviewError = {
     failed?: Array<{ tool?: string; error?: string }>;
   } | null;
 };
+type ProjectDomainApiToken = {
+  token: string;
+  tokenType: "Bearer";
+  expiresInSeconds: number;
+  apiBaseUrl: string;
+  endpoint: string;
+  deployment: { id: string; slug: string; name: string };
+};
 
 type Draft = {
   name: string;
@@ -800,7 +808,7 @@ export function DeploymentsClient({
                 {activeTab === "history" ? <HistoryPanel deployment={selected} releases={releases.data ?? selected.releases ?? []} loading={releases.isLoading} onRefresh={() => releases.refetch()} onJump={(release) => rollbackRelease.mutate({ deployment: selected, releaseId: release.id })} jumping={rollbackRelease.isPending} /> : null}
                 {activeTab === "env" ? <EnvPanel deployment={selected} envKey={envKey} envValue={envValue} envSecret={envSecret} bulkEnvText={bulkEnvText} bulkEnvSecret={bulkEnvSecret} revealedValues={revealedEnvValues} revealingKey={revealEnv.variables} savingLineKey={saveEnvLine.variables?.item.key} setEnvKey={setEnvKey} setEnvValue={setEnvValue} setEnvSecret={setEnvSecret} setBulkEnvText={setBulkEnvText} setBulkEnvSecret={setBulkEnvSecret} saveEnv={(onSuccess) => saveEnv.mutate(undefined, { onSuccess })} saveBulkEnv={(onSuccess) => saveBulkEnv.mutate(undefined, { onSuccess })} saveRawEnv={(text, onSuccess) => saveBulkEnv.mutate(text, { onSuccess })} savingEnv={saveEnv.isPending} savingBulkEnv={saveBulkEnv.isPending} revealEnv={(key) => revealEnv.mutate(key)} hideEnv={hideEnv} saveEnvLine={(item, value) => saveEnvLine.mutate({ item, value })} removeEnv={(key) => removeEnv.mutate(key)} removeBulkEnv={(keys) => removeBulkEnv.mutate(keys)} removingBulkEnv={removeBulkEnv.isPending} clearDatabaseEnvOverrides={() => clearDatabaseEnvOverrides.mutate()} clearingDatabaseEnvOverrides={clearDatabaseEnvOverrides.isPending} /> : null}
                 {activeTab === "files" ? <DeploymentFileManagerPanel accountRoot={accountRoot} apiBase={apiBase} deployment={selected} /> : null}
-                {activeTab === "settings" ? <SettingsPanel deployment={selected} deleteText={deleteText} setDeleteText={setDeleteText} onEdit={openEdit} onDelete={() => deleteProject.mutate()} deleting={deleteProject.isPending} /> : null}
+                {activeTab === "settings" ? <SettingsPanel apiBase={apiBase} deployment={selected} deleteText={deleteText} setDeleteText={setDeleteText} onEdit={openEdit} onDelete={() => deleteProject.mutate()} deleting={deleteProject.isPending} /> : null}
               </div>
             </div>
           ) : <div className="p-10 text-center text-sm text-panel-muted">Select or create a project.</div>}
@@ -1749,8 +1757,103 @@ function EnvAddModal({
   );
 }
 
-function SettingsPanel({ deployment, deleteText, setDeleteText, onEdit, onDelete, deleting }: { deployment: Deployment; deleteText: string; setDeleteText: (value: string) => void; onEdit: () => void; onDelete: () => void; deleting?: boolean }) {
-  return <div className="space-y-5"><div className="rounded-md border border-panel-line p-4"><div className="flex items-center gap-2 text-sm font-semibold"><Settings2 size={16} />Project settings</div><button className="mt-4 flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm" onClick={onEdit} type="button"><Pencil size={15} />Edit all settings</button></div><div className="rounded-md border border-red-200 bg-red-50 p-4"><div className="flex items-center gap-2 text-sm font-semibold text-red-800"><Trash2 size={16} />Delete project</div><p className="mt-1 text-sm text-red-700">Type <strong>{deployment.slug}</strong> to permanently delete this project metadata.</p><div className="mt-4 flex gap-2"><input className="h-9 rounded-md border border-red-200 bg-white px-3 text-sm" onChange={(event) => setDeleteText(event.target.value)} value={deleteText} /><button className="h-9 rounded-md bg-red-600 px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={deleteText !== deployment.slug || deleting} onClick={onDelete} type="button">Delete</button></div></div></div>;
+function SettingsPanel({
+  apiBase,
+  deployment,
+  deleteText,
+  setDeleteText,
+  onEdit,
+  onDelete,
+  deleting
+}: {
+  apiBase: "/deployments" | "/account/deployments";
+  deployment: Deployment;
+  deleteText: string;
+  setDeleteText: (value: string) => void;
+  onEdit: () => void;
+  onDelete: () => void;
+  deleting?: boolean;
+}) {
+  const [token, setToken] = useState<ProjectDomainApiToken | null>(null);
+  const [tokenNotice, setTokenNotice] = useState("");
+  const generateToken = useMutation({
+    mutationFn: () => apiPost<ProjectDomainApiToken>(`${apiBase}/${deployment.slug}/domain-api-token`, {}),
+    onSuccess: (result) => {
+      setToken(result);
+      setTokenNotice("Project domain API token generated. Copy it now and keep it private.");
+    },
+    onError: (error) => setTokenNotice(error instanceof Error ? error.message : "Could not generate project domain API token.")
+  });
+  const envSnippet = token
+    ? [
+        `PROJECT_DOMAIN_API_BASE_URL=${token.apiBaseUrl}`,
+        `PROJECT_DOMAIN_API_TOKEN=${token.token}`,
+        "PROJECT_DOMAIN_FORCE_SSL=true",
+        "PROJECT_DOMAIN_AUTO_SSL=true"
+      ].join("\n")
+    : "";
+  const curlSnippet = token
+    ? [
+        `curl -X POST "${token.apiBaseUrl}/domains" \\`,
+        `  -H "Authorization: Bearer ${token.token}" \\`,
+        `  -H "Content-Type: application/json" \\`,
+        `  -d '{"name":"example.com","forceSsl":true,"autoSsl":true}'`
+      ].join("\n")
+    : "";
+
+  return (
+    <div className="space-y-5">
+      <div className="rounded-md border border-panel-line p-4">
+        <div className="flex items-center gap-2 text-sm font-semibold"><Settings2 size={16} />Project settings</div>
+        <button className="mt-4 flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm" onClick={onEdit} type="button"><Pencil size={15} />Edit all settings</button>
+      </div>
+      <div className="rounded-md border border-panel-line p-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2 text-sm font-semibold"><KeyRound size={16} />Project domain API</div>
+            <p className="mt-1 text-sm text-panel-muted">Token adds domains only to this project and publishes DNS/vhost immediately.</p>
+          </div>
+          <button className="h-9 rounded-md bg-slate-900 px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={generateToken.isPending} onClick={() => generateToken.mutate()} type="button">
+            Generate Token
+          </button>
+        </div>
+        {tokenNotice ? <div className={`mt-3 rounded-md border p-3 text-sm ${okNotice(tokenNotice) ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-red-200 bg-red-50 text-red-800"}`}>{tokenNotice}</div> : null}
+        {token ? (
+          <div className="mt-4 grid gap-3">
+            <InlineSnippet label="API base URL" value={token.apiBaseUrl} />
+            <InlineSnippet label="Bearer token" value={token.token} />
+            <InlineSnippet label=".env" multiline value={envSnippet} />
+            <InlineSnippet label="curl" multiline value={curlSnippet} />
+          </div>
+        ) : null}
+      </div>
+      <div className="rounded-md border border-red-200 bg-red-50 p-4">
+        <div className="flex items-center gap-2 text-sm font-semibold text-red-800"><Trash2 size={16} />Delete project</div>
+        <p className="mt-1 text-sm text-red-700">Type <strong>{deployment.slug}</strong> to permanently delete this project metadata.</p>
+        <div className="mt-4 flex gap-2">
+          <input className="h-9 rounded-md border border-red-200 bg-white px-3 text-sm" onChange={(event) => setDeleteText(event.target.value)} value={deleteText} />
+          <button className="h-9 rounded-md bg-red-600 px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={deleteText !== deployment.slug || deleting} onClick={onDelete} type="button">Delete</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function InlineSnippet({ label, value, multiline = false }: { label: string; value: string; multiline?: boolean }) {
+  return (
+    <div>
+      <div className="mb-2 text-xs font-semibold uppercase text-panel-muted">{label}</div>
+      <div className="grid grid-cols-[1fr_auto] gap-2">
+        {multiline
+          ? <pre className="min-h-16 overflow-auto rounded-md border border-panel-line bg-slate-50 p-3 font-mono text-xs">{value}</pre>
+          : <div className="flex h-10 items-center overflow-hidden rounded-md border border-panel-line bg-slate-50 px-3 font-mono text-xs"><span className="truncate">{value}</span></div>}
+        <button className="flex h-10 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-semibold hover:bg-slate-50" onClick={() => writeClipboardText(value)} type="button">
+          <Clipboard size={15} />
+          Copy
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function GithubModal({ repos, loading, repoSearch, setRepoSearch, connection, githubToken, setGithubToken, githubUsername, setGithubUsername, saveToken, savingToken, onClose, onDeploy, deploying }: { repos?: GithubRepoResponse; loading: boolean; repoSearch: string; setRepoSearch: (value: string) => void; connection?: { connected: boolean; username: string | null }; githubToken: string; setGithubToken: (value: string) => void; githubUsername: string; setGithubUsername: (value: string) => void; saveToken: () => void; savingToken?: boolean; onClose: () => void; onDeploy: (repo: GithubRepo) => void; deploying?: boolean }) {
