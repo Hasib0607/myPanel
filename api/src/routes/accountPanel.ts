@@ -3278,4 +3278,27 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     await audit(request, { action: "UPDATE", resource: "account", resourceId: account.id, description: "Account changed own password" });
     return { ok: true };
   });
+
+  app.post("/api-token", async (request: any) => {
+    const body = z.object({
+      expiresInSeconds: z.coerce.number().int().min(3600).max(60 * 60 * 24 * 365).default(env.JWT_EXPIRY)
+    }).parse(request.body ?? {});
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    const token = app.jwt.sign(
+      { sub: account.username, role: "account", accountId: account.id },
+      { expiresIn: body.expiresInSeconds }
+    );
+    await audit(request, {
+      action: "CREATE",
+      resource: "account_api_token",
+      resourceId: account.id,
+      description: `Account generated API token for ${account.username}`
+    });
+    return {
+      token,
+      tokenType: "Bearer",
+      expiresInSeconds: body.expiresInSeconds,
+      apiBaseUrl: `http://${env.VPS_IP}:${env.PANEL_PORT}/api/v1`
+    };
+  });
 };

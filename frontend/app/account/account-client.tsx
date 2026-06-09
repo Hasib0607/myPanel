@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Database, FileText, FolderPlus, Globe2, Inbox, Play, Plus, RefreshCw, RotateCw, Save, Square, Trash2 } from "lucide-react";
+import { CheckCircle2, Copy, Database, FileText, FolderPlus, Globe2, Inbox, KeyRound, Play, Plus, RefreshCw, RotateCw, Save, Square, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useState } from "react";
 import { ApiError, apiDelete, apiDeleteBody, apiGet, apiPatch, apiPost, apiPut } from "@/lib/api";
@@ -63,6 +63,7 @@ type Dashboard = {
 };
 type FileList = { current: FileEntry; root: string; items: FileEntry[] };
 type FileRead = { file: FileEntry; content: string };
+type AccountApiToken = { token: string; tokenType: "Bearer"; expiresInSeconds: number; apiBaseUrl: string };
 export type AccountView = "dashboard" | "domains" | "files" | "mail" | "deployments" | "databases" | "profile";
 
 const viewTitles: Record<AccountView, string> = {
@@ -100,6 +101,7 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
   const [folderName, setFolderName] = useState("");
   const [dnsDraft, setDnsDraft] = useState({ domainId: "", type: "A", name: "@", value: "", ttl: "3600" });
   const [passwordDraft, setPasswordDraft] = useState({ currentPassword: "", newPassword: "" });
+  const [apiToken, setApiToken] = useState<AccountApiToken | null>(null);
   const [runtimeModal, setRuntimeModal] = useState<RuntimeModalState | null>(null);
 
   const dashboard = useQuery({
@@ -335,6 +337,20 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not change password.")
   });
+
+  const generateApiToken = useMutation({
+    mutationFn: () => apiPost<AccountApiToken>("/account/api-token", {}),
+    onSuccess: (result) => {
+      setApiToken(result);
+      setNotice("API token generated. Copy it now and keep it private.");
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not generate API token.")
+  });
+
+  const copyText = async (value: string, message: string) => {
+    await navigator.clipboard.writeText(value);
+    setNotice(message);
+  };
 
   const data = dashboard.data;
   const domains = data?.domains ?? [];
@@ -657,6 +673,42 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
               </button>
             </div>
           </Panel> : null}
+          {showProfile ? <Panel id="api-token" title="Account API Token" icon={<KeyRound size={17} />}>
+            <div className="space-y-4">
+              <div className="text-sm text-panel-muted">
+                Generate a bearer token for account-scoped API calls like adding domains. The token is shown only after generation.
+              </div>
+              <button className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={generateApiToken.isPending} onClick={() => generateApiToken.mutate()} type="button">
+                <KeyRound size={15} />
+                {generateApiToken.isPending ? "Generating" : "Generate API Token"}
+              </button>
+              {apiToken ? (
+                <div className="space-y-3">
+                  <div className="rounded-md border border-panel-line bg-slate-50 p-3">
+                    <div className="mb-2 flex items-center justify-between gap-3">
+                      <div className="text-xs font-semibold uppercase text-panel-muted">Bearer Token</div>
+                      <button className="flex h-8 items-center gap-2 rounded-md border border-panel-line bg-white px-2 text-xs hover:bg-slate-50" onClick={() => copyText(apiToken.token, "API token copied.")} type="button">
+                        <Copy size={13} />
+                        Copy
+                      </button>
+                    </div>
+                    <div className="break-all font-mono text-xs text-panel-text">{apiToken.token}</div>
+                  </div>
+                  <div className="rounded-md border border-panel-line bg-slate-50 p-3">
+                    <div className="mb-2 flex items-center justify-between gap-3">
+                      <div className="text-xs font-semibold uppercase text-panel-muted">Domain API .env</div>
+                      <button className="flex h-8 items-center gap-2 rounded-md border border-panel-line bg-white px-2 text-xs hover:bg-slate-50" onClick={() => copyText(accountDomainEnv(apiToken), "Domain API .env copied.")} type="button">
+                        <Copy size={13} />
+                        Copy
+                      </button>
+                    </div>
+                    <pre className="whitespace-pre-wrap break-all font-mono text-xs text-panel-text">{accountDomainEnv(apiToken)}</pre>
+                  </div>
+                  <div className="text-xs text-panel-muted">Expires in {Math.round(apiToken.expiresInSeconds / 86400)} day(s). Generate a new token anytime.</div>
+                </div>
+              ) : null}
+            </div>
+          </Panel> : null}
         </div> : null}
       </div> : null}
       </section>
@@ -754,6 +806,18 @@ function IconButton({ title, onClick, children }: { title: string; onClick: () =
       {children}
     </button>
   );
+}
+
+function accountDomainEnv(apiToken: AccountApiToken) {
+  const apiBase = apiToken.apiBaseUrl.replace(/\/api\/v1$/, "");
+  return [
+    `ACCOUNT_DOMAIN_API_BASE_URL=${apiBase}`,
+    `ACCOUNT_DOMAIN_API_TOKEN=${apiToken.token}`,
+    "ACCOUNT_DOMAIN_API_TIMEOUT=30",
+    "ACCOUNT_DOMAIN_FORCE_SSL=true",
+    "ACCOUNT_DOMAIN_HOSTING_MODE=PUBLIC_HTML",
+    "ACCOUNT_DOMAIN_DOCUMENT_ROOT=public_html"
+  ].join("\n");
 }
 
 function parentPath(value: string) {
