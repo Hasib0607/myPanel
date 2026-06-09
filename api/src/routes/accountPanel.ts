@@ -1019,7 +1019,6 @@ async function publishAccountDomainRoute(request: any, account: { id: string; ho
   const domain = await prisma.domain.findFirstOrThrow({
     where: { id: domainId, accountId: account.id },
     include: {
-      dnsRecords: true,
       deployments: { orderBy: { createdAt: "desc" }, take: 1 },
       deploymentBindings: {
         orderBy: [{ role: "asc" }, { createdAt: "asc" }],
@@ -1028,7 +1027,7 @@ async function publishAccountDomainRoute(request: any, account: { id: string; ho
       }
     }
   });
-  const dnsResult = await sysagent.applyDnsZone({ domain: domain.name, zone: renderZone(domain.name, domain.dnsRecords) });
+  const dnsResult = await publishDomainDnsZone(domain.id);
   const deployment = domain.hostingDeploymentId
     ? await prisma.deployment.findFirst({ where: { id: domain.hostingDeploymentId, accountId: account.id } })
     : domain.deploymentBindings[0]?.deployment ?? domain.deployments[0] ?? null;
@@ -1090,6 +1089,14 @@ async function queueAccountBulkDomainSslJobs(account: { homeRoot: string }, doma
     jobs.push({ domainId: domain.id, domain: domain.name, jobId: job.id });
   }
   return jobs;
+}
+
+async function activeNameServers() {
+  return prisma.nameServer.findMany({
+    where: { active: true },
+    orderBy: [{ sortOrder: "asc" }, { hostname: "asc" }],
+    select: { hostname: true, ipv4: true, ipv6: true }
+  });
 }
 
 async function queueAccountAutoDomainSslJob(account: { homeRoot: string }, domain: { id: string; name: string; documentRoot?: string | null; forceSsl: boolean }, includeWww: boolean) {
@@ -1480,6 +1487,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const redirectUrl = normalizeRedirectUrl(body.redirectUrl);
     await validateAccountHostingSettings(account.id, { ...body, redirectUrl });
     const vpsIp = await currentVpsIp();
+    const nameServers = await activeNameServers();
     try {
       const domain = await prisma.$transaction(async (tx) => {
         const created = await tx.domain.create({
@@ -1494,7 +1502,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
             hostingDeploymentId: body.hostingDeploymentId ?? null
           }
         });
-        await tx.dnsRecord.createMany({ data: defaultRecords(created.id, created.name, [], vpsIp), skipDuplicates: true });
+        await tx.dnsRecord.createMany({ data: defaultRecords(created.id, created.name, nameServers, vpsIp), skipDuplicates: true });
         return tx.domain.findUniqueOrThrow({ where: { id: created.id }, include: domainInclude() });
       });
       const sslJob = env.ACCOUNT_DOMAIN_AUTO_SSL_ENABLED && body.autoSsl && body.forceSsl
@@ -1539,6 +1547,8 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const results: Array<{ input: string; name: string; status: "created" | "skipped" | "failed"; kind?: "domain" | "subdomain"; error?: string; publishWarning?: string }> = [];
     const sslTargets: Array<{ id: string; name: string; documentRoot?: string | null; forceSsl: boolean }> = [];
     let currentDomainCount = account._count.domains;
+    const nameServers = await activeNameServers();
+    const vpsIp = await currentVpsIp();
 
     for (const name of uniqueDomains) {
       try {
@@ -1561,7 +1571,6 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
           results.push({ input: name, name: subdomainShortcut.name, status: "created", kind: "subdomain", publishWarning: subdomainShortcut.publishWarning });
           continue;
         }
-        const vpsIp = await currentVpsIp();
         const existing = await prisma.domain.findUnique({ where: { name } });
         if (existing && body.skipExisting) {
           results.push({ input: name, name, status: "skipped", error: "Domain already exists" });
@@ -1579,15 +1588,14 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
               documentRoot: "public_html"
             }
           });
-          await tx.dnsRecord.createMany({ data: defaultRecords(created.id, created.name, [], vpsIp), skipDuplicates: true });
+          await tx.dnsRecord.createMany({ data: defaultRecords(created.id, created.name, nameServers, vpsIp), skipDuplicates: true });
           return tx.domain.findUniqueOrThrow({ where: { id: created.id }, include: domainInclude() });
         });
         currentDomainCount += 1;
         let publishWarning: string | undefined;
         if (body.publish) {
           try {
-            const records = await prisma.dnsRecord.findMany({ where: { domainId: domain.id } });
-            await sysagent.applyDnsZone({ domain: domain.name, zone: renderZone(domain.name, records) });
+            await publishAccountDomainRoute(request, account, domain.id);
           } catch (error) {
             publishWarning = error instanceof Error ? error.message : "Domain DNS publish failed";
           }
