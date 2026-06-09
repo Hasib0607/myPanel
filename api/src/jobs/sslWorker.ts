@@ -3,6 +3,8 @@ import { redis } from "../lib/redis.js";
 import { logger } from "../lib/logger.js";
 import { env } from "../config/env.js";
 import { prisma } from "../lib/prisma.js";
+import { resolvePublicA } from "../lib/publicDns.js";
+import { currentVpsIp } from "../lib/serverIp.js";
 import { sysagent, type SysagentCommandResult } from "../lib/sysagent.js";
 import { subdomainFolderName } from "../lib/domainFiles.js";
 import { certbotCertificateName, isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
@@ -247,6 +249,22 @@ async function publishHttpChallengeVhost(domainName: string, domainId: string | 
   }
 }
 
+async function assertHttpSslDnsReady(domainName: string, includeWww: boolean) {
+  const vpsIp = await currentVpsIp();
+  const hostnames = [domainName, ...(includeWww && !domainName.startsWith("*.") ? [`www.${domainName}`] : [])];
+  for (const hostname of hostnames) {
+    let records: string[] = [];
+    try {
+      records = await resolvePublicA(hostname);
+    } catch (error) {
+      throw new Error(`SSL auto retry waiting for DNS: ${hostname} has no public A record yet. ${error instanceof Error ? error.message : ""}`.trim());
+    }
+    if (!records.includes(vpsIp)) {
+      throw new Error(`SSL auto retry waiting for DNS: ${hostname} resolves to ${records.join(", ") || "no A record"}, but this VPS is ${vpsIp}.`);
+    }
+  }
+}
+
 export const sslWorker = new Worker(
   "ssl",
   async (job) => {
@@ -262,6 +280,7 @@ export const sslWorker = new Worker(
       if (!result) {
         const dnsChallenge = isWildcardHostname(job.data.domain) || job.data.dnsChallenge;
         if (!dnsChallenge) {
+          await assertHttpSslDnsReady(job.data.domain, includeWww);
           await publishHttpChallengeVhost(
             job.data.domain,
             job.data.domainId,

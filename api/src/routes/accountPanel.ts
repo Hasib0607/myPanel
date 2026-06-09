@@ -72,7 +72,9 @@ const createDomainSchema = z.object({
   hostingMode: z.enum(["PUBLIC_HTML", "DEPLOYMENT_PROXY", "REDIRECT"]).default("PUBLIC_HTML"),
   documentRoot: z.string().default("public_html"),
   redirectUrl: z.string().url().nullable().optional(),
-  hostingDeploymentId: z.string().nullable().optional()
+  hostingDeploymentId: z.string().nullable().optional(),
+  autoSsl: z.boolean().default(true),
+  autoSslIncludeWww: z.boolean().default(true)
 });
 const domainUpdateSchema = z.object({
   forceSsl: z.boolean().optional(),
@@ -1036,6 +1038,26 @@ async function queueAccountBulkDomainSslJobs(account: { homeRoot: string }, doma
   return jobs;
 }
 
+async function queueAccountAutoDomainSslJob(account: { homeRoot: string }, domain: { id: string; name: string; documentRoot?: string | null; forceSsl: boolean }, includeWww: boolean) {
+  const activeJobId = await activeAccountSslJobIdForResource({ domainId: domain.id });
+  if (activeJobId) return { domainId: domain.id, domain: domain.name, jobId: activeJobId, existing: true };
+  const job = await sslQueue.add("issue", {
+    domainId: domain.id,
+    domain: domain.name,
+    email: `admin@${domain.name}`,
+    webRoot: path.join(account.homeRoot, normalizeDocumentRoot(domain.documentRoot)),
+    includeWww,
+    forceSsl: domain.forceSsl,
+    source: "account-auto-domain-ssl"
+  }, {
+    attempts: env.ACCOUNT_DOMAIN_AUTO_SSL_ATTEMPTS,
+    backoff: { type: "fixed", delay: env.ACCOUNT_DOMAIN_AUTO_SSL_RETRY_DELAY_MS },
+    removeOnComplete: 100,
+    removeOnFail: 500
+  });
+  return { domainId: domain.id, domain: domain.name, jobId: job.id, existing: false };
+}
+
 async function sslJobCounts() {
   return sslQueue.getJobCounts("waiting", "delayed", "active", "failed");
 }
@@ -1421,8 +1443,21 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
         await tx.dnsRecord.createMany({ data: defaultRecords(created.id, created.name, [], vpsIp), skipDuplicates: true });
         return tx.domain.findUniqueOrThrow({ where: { id: created.id }, include: domainInclude() });
       });
-      await audit(request, { action: "CREATE", resource: "domain", resourceId: domain.id, description: `Account created domain ${domain.name}` });
-      return reply.code(201).send(domain);
+      const sslJob = env.ACCOUNT_DOMAIN_AUTO_SSL_ENABLED && body.autoSsl && body.forceSsl
+        ? await queueAccountAutoDomainSslJob(account, domain, body.autoSslIncludeWww)
+        : null;
+      await audit(request, {
+        action: "CREATE",
+        resource: "domain",
+        resourceId: domain.id,
+        description: `Account created domain ${domain.name}`,
+        metadata: sslJob ? { autoSslQueued: true, sslJob } as any : undefined
+      });
+      return reply.code(201).send({
+        ...domain,
+        autoSslQueued: Boolean(sslJob),
+        sslJob
+      });
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
         return reply.code(409).send({ error: "Domain already exists" });
