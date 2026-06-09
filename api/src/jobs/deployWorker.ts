@@ -3350,6 +3350,12 @@ function nextWebpackBuildCommand(command: string | null | undefined) {
   return null;
 }
 
+function commandWithManagedNodeHeap(command: string | null | undefined, heapMb: number) {
+  const rendered = command?.trim();
+  if (!rendered) return rendered;
+  return rendered.replace(/--max-old-space-size=\d+/g, `--max-old-space-size=${Math.max(512, Math.floor(heapMb))}`);
+}
+
 function transformNextMiddlewareToProxy(content: string) {
   return content
     .replace(/\bfunction\s+middleware\b/g, "function proxy")
@@ -4135,13 +4141,22 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     }
 
     if (deployment.buildCommand) {
-      const defaultBuildCommand = renderDeploymentCommand(deployment.buildCommand, deployment.port);
-      const webpackBuildCommand = nextWebpackBuildCommand(defaultBuildCommand);
-      const runBuild = (label = "Build", command = defaultBuildCommand) => runHeavyBuildExclusive(() =>
+      const rawDefaultBuildCommand = renderDeploymentCommand(deployment.buildCommand, deployment.port);
+      const defaultBuildCommand = commandWithManagedNodeHeap(rawDefaultBuildCommand, deployBudget.summary.nodeHeapMb);
+      const webpackBuildCommand = commandWithManagedNodeHeap(nextWebpackBuildCommand(defaultBuildCommand), deployBudget.summary.nodeHeapMb);
+      if (rawDefaultBuildCommand !== defaultBuildCommand) {
+        await writeLog(deployment.id, releaseId, "BUILDING", "Capped inline Node heap in build command", {
+          originalCommand: rawDefaultBuildCommand,
+          command: defaultBuildCommand,
+          nodeHeapMb: deployBudget.summary.nodeHeapMb,
+          memoryMaxMb: deployBudget.summary.deployMemoryMb
+        }, "warn");
+      }
+      const runBuild = (label = "Build", command = defaultBuildCommand, heapMb = deployBudget.summary.nodeHeapMb) => runHeavyBuildExclusive(() =>
         runStep(deployment.id, releaseId, label === "Build" ? "BUILDING" : "BUILDING", label, () =>
           sysagent.deploymentBuild({
             rootPath: appPath,
-            command,
+            command: commandWithManagedNodeHeap(command, heapMb),
             env: envVars,
             resourceLimits: deployBudget.resourceLimits
           })
@@ -4154,9 +4169,17 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           command: webpackBuildCommand,
           evidence: detail.slice(0, 2000)
         }, "warn");
-        const retryResult = await runBuild("Build retry with Next Webpack fallback", webpackBuildCommand);
-        assertCommandTree(retryResult, "Build retry with Next Webpack fallback");
-        return true;
+        try {
+          const retryResult = await runBuild("Build retry with Next Webpack fallback", webpackBuildCommand);
+          assertCommandTree(retryResult, "Build retry with Next Webpack fallback");
+          return true;
+        } catch (retryError) {
+          const retryDetail = retryError instanceof Error ? retryError.message : String(retryError);
+          if (nodeBuildTerminatedBySigterm(retryDetail)) {
+            return retryBuildAfterSigterm(retryDetail, `${context} webpack fallback`, webpackBuildCommand);
+          }
+          throw retryError;
+        }
       };
       const retryBuildAfterNextMiddlewareRepair = async (detail: string, context: string) => {
         if (!nextMiddlewareProxyIssue(detail)) return false;
@@ -4181,23 +4204,31 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         }
         return true;
       };
-      const retryBuildAfterSigterm = async (detail: string, context: string) => {
+      const retryBuildAfterSigterm = async (detail: string, context: string, command = defaultBuildCommand) => {
         const startingWorkers = currentNextWorkers(envVars, deployBudget);
         const workerTargets = [...new Set([
           Math.max(1, Math.floor(startingWorkers / 2)),
           1
         ])].filter((workers) => workers < startingWorkers || workers === 1);
+        const heapTargets = [...new Set([
+          Math.min(deployBudget.summary.nodeHeapMb, Math.max(512, deployBudget.summary.deployMemoryMb - 2048)),
+          Math.min(2048, deployBudget.summary.nodeHeapMb),
+          Math.min(1024, deployBudget.summary.nodeHeapMb),
+          512
+        ])].filter((heap) => heap >= 512);
         let lastDetail = detail;
         for (const workers of workerTargets) {
+          const heapMb = workers === 1 ? heapTargets[heapTargets.length - 1] : heapTargets[0];
           envVars = nodeBuildEnvWithWorkers(envVars, workers);
           await writeLog(deployment.id, releaseId, "BUILDING", "Retrying Node build with reduced workers", {
             context,
             workers,
             CIRCLE_NODE_TOTAL: envVars.CIRCLE_NODE_TOTAL,
             memoryMaxMb: deployBudget.summary.deployMemoryMb,
-            nodeHeapMb: deployBudget.summary.nodeHeapMb
+            nodeHeapMb: heapMb,
+            command: commandWithManagedNodeHeap(command, heapMb)
           }, "warn");
-          const retryResult = await runBuild(`Build retry after SIGTERM with ${workers} worker${workers === 1 ? "" : "s"}`);
+          const retryResult = await runBuild(`Build retry after SIGTERM with ${workers} worker${workers === 1 ? "" : "s"}`, command, heapMb);
           try {
             assertCommandTree(retryResult, `Build retry after SIGTERM with ${workers} worker${workers === 1 ? "" : "s"}`);
             return true;
