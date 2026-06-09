@@ -207,6 +207,8 @@ export const sysagent = {
     request("/database/provision", { method: "POST", body: JSON.stringify(body) }),
   databaseOverview: () =>
     request("/database/overview"),
+  databaseProtection: (body: unknown) =>
+    request("/database/protection", { method: "POST", body: JSON.stringify(body) }),
   databasePassword: (body: unknown) =>
     request("/database/password", { method: "POST", body: JSON.stringify(body) }),
   databaseGrant: (body: unknown) =>

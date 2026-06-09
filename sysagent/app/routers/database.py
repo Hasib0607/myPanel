@@ -92,6 +92,13 @@ class DatabaseRowUpdateRequest(DatabaseRowTargetRequest):
     values: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
 
 
+class DatabaseProtectionRequest(BaseModel):
+    engine: str = Field(pattern=ENGINE_PATTERN)
+    username: str | None = Field(default=None, pattern=IDENTIFIER_PATTERN)
+    maxConnections: int | None = Field(default=None, ge=1, le=500)
+    slowQueryMs: int = Field(default=1000, ge=100, le=60000)
+
+
 def sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
@@ -328,6 +335,38 @@ def overview() -> dict:
             mysql_overview(),
         ]
     }
+
+
+@router.post("/protection")
+def database_protection(body: DatabaseProtectionRequest) -> dict:
+    if body.engine == "POSTGRESQL":
+        slow = postgres_psql(f"ALTER SYSTEM SET log_min_duration_statement = {sql_literal(str(body.slowQueryMs))}; SELECT pg_reload_conf();")
+        connection_limit = None
+        if body.username and body.maxConnections:
+            connection_limit = postgres_psql(f"ALTER ROLE {postgres_identifier(body.username)} CONNECTION LIMIT {body.maxConnections};")
+        pressure = postgres_psql(
+            "SELECT datname || '|' || usename || '|' || count(*) "
+            "FROM pg_stat_activity WHERE datname IS NOT NULL GROUP BY datname, usename ORDER BY count(*) DESC LIMIT 25;"
+        )
+        return {"engine": body.engine, "slowQuery": slow, "connectionLimit": connection_limit, "pressure": pressure}
+
+    slow = mysql_exec(
+        "SET GLOBAL slow_query_log = 'ON'; "
+        f"SET GLOBAL long_query_time = {max(0.1, body.slowQueryMs / 1000):.3f}; "
+        "SET GLOBAL log_output = 'FILE';"
+    )
+    connection_limit = None
+    if body.username and body.maxConnections:
+        connection_limit = mysql_exec(
+            f"ALTER USER {sql_literal(body.username)}@'localhost' WITH MAX_USER_CONNECTIONS {body.maxConnections}; "
+            f"ALTER USER {sql_literal(body.username)}@'127.0.0.1' WITH MAX_USER_CONNECTIONS {body.maxConnections}; "
+            "FLUSH PRIVILEGES;"
+        )
+    pressure = mysql_exec(
+        "SELECT IFNULL(DB,'') AS db, IFNULL(USER,'') AS user, COUNT(*) "
+        "FROM information_schema.PROCESSLIST GROUP BY DB, USER ORDER BY COUNT(*) DESC LIMIT 25;"
+    )
+    return {"engine": body.engine, "slowQuery": slow, "connectionLimit": connection_limit, "pressure": pressure}
 
 
 @router.post("/provision")

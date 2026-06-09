@@ -31,6 +31,7 @@ import {
   queueGroupCommand,
   renderLaravelProcessCommand
 } from "../lib/laravelProcesses.js";
+import { deploymentPriorityDefaults, normalizeDeploymentResourcePolicy } from "../lib/deploymentResourcePolicy.js";
 
 const frameworkSchema = z.enum(["LARAVEL", "NEXTJS", "NODEJS", "PYTHON", "GO", "STATIC"]);
 const statusSchema = z.enum(["QUEUED", "RUNNING", "STOPPED", "DEPLOYING", "BUILDING", "FAILED"]);
@@ -54,7 +55,19 @@ const laravelWorkerConfigSchema = z.object({
   maxWorkers: Math.min(deploymentWorkerMax, Math.max(value.maxWorkers, value.minWorkers, value.desiredWorkers)),
   desiredWorkers: value.enabled ? Math.max(value.minWorkers, Math.min(value.desiredWorkers, Math.max(value.maxWorkers, value.minWorkers))) : 0
 }));
+const resourcePolicySchema = z.object({
+  priorityTier: z.enum(["P1", "P2", "P3"]).default("P2"),
+  memoryMaxMb: z.number().int().min(256).max(16384).optional(),
+  cpuQuotaPercent: z.number().int().min(25).max(1600).optional(),
+  workersMax: z.number().int().min(0).max(16).optional(),
+  restartDelayMs: z.number().int().min(500).max(60000).optional(),
+  healthStrict: z.boolean().optional()
+}).transform((value) => ({
+  ...deploymentPriorityDefaults[value.priorityTier],
+  ...value
+}));
 const processConfigSchema = z.object({
+  resourcePolicy: resourcePolicySchema.optional(),
   laravelWorkers: laravelWorkerConfigSchema.optional(),
   laravelManagedProcesses: laravelManagedProcessesSchema.optional()
 }).passthrough().default({});
@@ -2177,9 +2190,16 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const body = z.object({ laravelWorkers: laravelWorkerConfigSchema }).parse(request.body ?? {});
     const deployment = await findDeployment(deploymentId);
+    const policy = normalizeDeploymentResourcePolicy(deployment.processConfig);
+    const cappedWorkers = {
+      ...body.laravelWorkers,
+      desiredWorkers: Math.min(body.laravelWorkers.desiredWorkers, policy.workersMax),
+      minWorkers: Math.min(body.laravelWorkers.minWorkers, policy.workersMax),
+      maxWorkers: Math.min(body.laravelWorkers.maxWorkers, policy.workersMax)
+    };
     const result = await applyLaravelWorkers(
       deployment,
-      body.laravelWorkers,
+      cappedWorkers,
       body.laravelWorkers.autoscale ? "manual save with Guardian autoscale enabled" : "manual worker setting"
     );
     await audit(request, { action: "UPDATE", resource: "deployment_workers", resourceId: deployment.id, description: `Updated Laravel workers for ${deployment.slug}`, metadata: result as unknown as Prisma.InputJsonObject });

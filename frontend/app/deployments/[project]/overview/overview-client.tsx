@@ -254,6 +254,8 @@ export function DeploymentOverviewClient({ project }: { project: string }) {
 
                 <ResourceHistory metrics={metrics.data} />
 
+                <TrafficInsights metrics={metrics.data} />
+
                 <div className="rounded-md border border-panel-line bg-white">
                   <div className="flex items-center justify-between border-b border-panel-line p-4">
                     <div className="text-sm font-semibold">Latest Releases</div>
@@ -346,6 +348,39 @@ function ResourceHistory({ metrics }: { metrics?: DeploymentMetrics }) {
       <div className="grid gap-0 lg:grid-cols-2">
         <UsageTrend title="RAM" unit="bytes" values={history.map((sample) => ({ timestamp: sample.timestamp, value: sample.memoryBytes }))} />
         <UsageTrend title="CPU" unit="percent" values={history.map((sample) => ({ timestamp: sample.timestamp, value: sample.cpuPercent }))} />
+      </div>
+    </div>
+  );
+}
+
+function TrafficInsights({ metrics }: { metrics?: DeploymentMetrics }) {
+  const traffic = metrics?.traffic;
+  return (
+    <div className="rounded-md border border-panel-line bg-white">
+      <div className="flex items-center justify-between border-b border-panel-line p-4">
+        <div className="text-sm font-semibold">Traffic Pressure</div>
+        <span className="text-xs text-panel-muted">last 24h</span>
+      </div>
+      <div className="grid gap-0 lg:grid-cols-3">
+        <InsightList title="Top IPs" empty="No IP data" rows={(traffic?.topIps ?? []).slice(0, 5).map((item) => ({ label: item.ip, value: `${item.requests} req` }))} />
+        <InsightList title="Top Paths" empty="No path data" rows={(traffic?.topPaths ?? []).slice(0, 5).map((item) => ({ label: item.path, value: `${item.requests} req` }))} />
+        <InsightList title="Bot Suspects" empty="No bot suspects" rows={(traffic?.botSuspects ?? []).slice(0, 5).map((item) => ({ label: item.userAgent, value: `${item.requests} req` }))} />
+      </div>
+    </div>
+  );
+}
+
+function InsightList({ title, rows, empty }: { title: string; rows: Array<{ label: string; value: string }>; empty: string }) {
+  return (
+    <div className="min-w-0 border-b border-panel-line p-4 last:border-b-0 lg:border-b-0 lg:border-r lg:last:border-r-0">
+      <div className="mb-3 text-xs font-semibold uppercase text-panel-muted">{title}</div>
+      <div className="space-y-2">
+        {rows.length ? rows.map((row) => (
+          <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-3 text-xs" key={`${title}-${row.label}`}>
+            <span className="truncate font-medium text-panel-ink" title={row.label}>{row.label}</span>
+            <span className="text-panel-muted">{row.value}</span>
+          </div>
+        )) : <div className="text-xs text-panel-muted">{empty}</div>}
       </div>
     </div>
   );

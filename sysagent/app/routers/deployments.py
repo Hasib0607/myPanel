@@ -92,6 +92,7 @@ class ProcessRequest(BaseModel):
     logDir: str | None = None
     framework: str | None = None
     resourceLimits: dict[str, int] | None = None
+    restartDelayMs: int | None = Field(default=None, ge=500, le=60000)
 
 
 class LaravelWorkersRequest(BaseModel):
@@ -701,20 +702,37 @@ def parse_nginx_log_time(value: str) -> datetime | None:
         return None
 
 
-def parse_nginx_traffic_line(line: str, cutoff: datetime) -> tuple[int, int, int] | None:
-    match = re.search(r"\[([^\]]+)\]\s+\"([^\"]*)\"\s+\d{3}\s+(\d+|-)(.*)$", line)
+def parse_nginx_traffic_line(line: str, cutoff: datetime) -> dict | None:
+    match = re.search(r"^(\S+)\s+\S+\s+\S+\s+\[([^\]]+)\]\s+\"([^\"]*)\"\s+(\d{3})\s+(\d+|-)(.*)$", line)
     if not match:
         return None
-    timestamp = parse_nginx_log_time(match.group(1))
+    timestamp = parse_nginx_log_time(match.group(2))
     if timestamp is None or timestamp < cutoff:
         return None
-    request_line = match.group(2)
-    sent = 0 if match.group(3) == "-" else int(match.group(3))
-    unquoted_tail = re.sub(r"\"[^\"]*\"", "", match.group(4))
+    ip = match.group(1)
+    request_line = match.group(3)
+    status = int(match.group(4))
+    sent = 0 if match.group(5) == "-" else int(match.group(5))
+    tail = match.group(6)
+    user_agent_match = re.findall(r"\"([^\"]*)\"", tail)
+    user_agent = user_agent_match[-1] if user_agent_match else ""
+    unquoted_tail = re.sub(r"\"[^\"]*\"", "", tail)
     tail_numbers = [int(value) for value in re.findall(r"(?<![\w.])(\d{2,})(?![\w.])", unquoted_tail)]
     request_length = tail_numbers[-1] if tail_numbers else 0
     incoming = request_length if request_length > len(request_line) else 0
-    return incoming, sent, 1
+    parts = request_line.split()
+    method = parts[0] if parts else ""
+    path = parts[1].split("?", 1)[0] if len(parts) > 1 else request_line
+    return {
+        "ip": ip,
+        "method": method,
+        "path": path,
+        "status": status,
+        "userAgent": user_agent,
+        "incoming": incoming,
+        "outgoing": sent,
+        "requests": 1,
+    }
 
 
 def nginx_log_candidates(deployment_id: str, server_names: list[str]) -> tuple[list[tuple[Path, bool]], list[str]]:
@@ -765,6 +783,10 @@ def deployment_traffic_metrics(deployment_id: str, server_names: list[str]) -> d
     outgoing = 0
     requests = 0
     sources = []
+    ip_counts: dict[str, int] = {}
+    path_counts: dict[str, int] = {}
+    bot_counts: dict[str, int] = {}
+    bad_bot_patterns = re.compile(r"bot|crawler|spider|scrapy|python-requests|curl|wget|semrush|ahrefs|mj12|bytespider|petalbot|headless", re.IGNORECASE)
     for path, require_host_match in candidates:
         if path in seen or not path.is_file():
             continue
@@ -776,18 +798,35 @@ def deployment_traffic_metrics(deployment_id: str, server_names: list[str]) -> d
             parsed = parse_nginx_traffic_line(line, cutoff)
             if parsed is None:
                 continue
-            received, sent, count = parsed
+            received = int(parsed.get("incoming") or 0)
+            sent = int(parsed.get("outgoing") or 0)
+            count = int(parsed.get("requests") or 1)
             incoming += received
             outgoing += sent
             requests += count
             source_requests += count
+            ip = str(parsed.get("ip") or "")
+            request_path = str(parsed.get("path") or "")
+            user_agent = str(parsed.get("userAgent") or "")
+            if ip:
+                ip_counts[ip] = ip_counts.get(ip, 0) + count
+            if request_path:
+                path_counts[request_path] = path_counts.get(request_path, 0) + count
+            if user_agent and bad_bot_patterns.search(user_agent):
+                bot_counts[user_agent[:160]] = bot_counts.get(user_agent[:160], 0) + count
         if source_requests:
             sources.append(str(path))
+    top_ips = [{"ip": key, "requests": value} for key, value in sorted(ip_counts.items(), key=lambda item: item[1], reverse=True)[:20]]
+    top_paths = [{"path": key, "requests": value} for key, value in sorted(path_counts.items(), key=lambda item: item[1], reverse=True)[:20]]
+    bot_suspects = [{"userAgent": key, "requests": value} for key, value in sorted(bot_counts.items(), key=lambda item: item[1], reverse=True)[:20]]
     return {
         "incomingBytes": incoming,
         "outgoingBytes": outgoing,
         "bandwidthBytes": incoming + outgoing,
         "requests": requests,
+        "topIps": top_ips,
+        "topPaths": top_paths,
+        "botSuspects": bot_suspects,
         "sources": sources,
         "windowHours": 24,
         "note": None if sources else "No matching Nginx traffic was found for this project's domains in the last 24h.",
@@ -1132,7 +1171,7 @@ def pm2_start(body: ProcessRequest, start_command: list[str]) -> dict:
         # 3 s between crash-restarts so port is released before PM2 retries, preventing
         # a tight loop that exhausts the restart counter and leaves the app permanently down.
         "--restart-delay",
-        "3000",
+        str(body.restartDelayMs or 3000),
         "--",
         *start_command[1:],
     ]

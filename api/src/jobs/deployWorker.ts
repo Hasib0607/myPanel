@@ -38,6 +38,7 @@ import {
   queueGroupCommand,
   renderLaravelProcessCommand
 } from "../lib/laravelProcesses.js";
+import { normalizeDeploymentResourcePolicy } from "../lib/deploymentResourcePolicy.js";
 import { sslQueue } from "./queues.js";
 import {
   type BoundDomain,
@@ -118,6 +119,17 @@ type DeployResourceBudget = {
     nextWorkers: number;
   };
 };
+
+function deploymentRuntimeResourceLimits(processConfig: unknown): DeployResourceLimits {
+  const policy = normalizeDeploymentResourcePolicy(processConfig);
+  return {
+    memoryMaxMb: policy.memoryMaxMb,
+    cpuQuotaPercent: policy.cpuQuotaPercent,
+    tasksMax: Math.max(128, policy.workersMax * 96),
+    nice: policy.priorityTier === "P1" ? 0 : policy.priorityTier === "P2" ? 5 : 10,
+    ioWeight: policy.priorityTier === "P1" ? 500 : policy.priorityTier === "P2" ? 200 : 100
+  };
+}
 
 const deploymentLocks = new Map<string, Promise<unknown>>();
 const heavyBuildLocks = new Map<string, Promise<unknown>>();
@@ -221,8 +233,10 @@ async function applyLaravelManagedProcesses(
   ];
 
   const status: Record<string, unknown> = {};
+  const policy = normalizeDeploymentResourcePolicy(deployment.processConfig);
+  const runtimeResourceLimits = deploymentRuntimeResourceLimits(deployment.processConfig);
   for (const definition of definitions) {
-    const desiredWorkers = action === "stop" || !definition.enabled ? 0 : definition.instances;
+    const desiredWorkers = action === "stop" || !definition.enabled ? 0 : Math.min(definition.instances, policy.workersMax);
     status[definition.key] = await runStep(
       deployment.id,
       releaseId,
@@ -236,7 +250,8 @@ async function applyLaravelManagedProcesses(
         queueCommand: renderLaravelProcessCommand(definition.command, deployment.port),
         env: envVars,
         logDir: deploymentLogDir(deployment.slug),
-        logPrefix: definition.key
+        logPrefix: definition.key,
+        resourceLimits: runtimeResourceLimits
       })
     );
   }
@@ -500,6 +515,8 @@ type DeploymentProcessBody = {
   env: Record<string, string>;
   logDir: string;
   framework?: DeploymentFramework;
+  resourceLimits?: DeployResourceLimits;
+  restartDelayMs?: number;
 };
 
 function sysagentLiveCommandsDisabled(diagnosis: SysagentLiveDiagnosis) {
@@ -890,7 +907,7 @@ function calculateDeployResourceBudget(snapshot: any): DeployResourceBudget {
 async function prepareDeployResourceBudget(deploymentId: string, releaseId: string | undefined, rootPath: string) {
   try {
     const snapshot = await sysagent.deploymentResourceSnapshot({ rootPath });
-    const budget = calculateDeployResourceBudget(snapshot);
+    const budget = await applyPriorityReserveToDeployBudget(deploymentId, calculateDeployResourceBudget(snapshot));
     await writeLog(deploymentId, releaseId, "PREFLIGHT", "Dynamic deploy resource budget", budget.summary as unknown as Prisma.InputJsonObject);
     return budget;
   } catch (error) {
@@ -901,13 +918,48 @@ async function prepareDeployResourceBudget(deploymentId: string, releaseId: stri
       defaults: { resourceLimits: { memoryMaxMb: 4096, cpuQuotaPercent: 300, tasksMax: 256, nice: 10, ioWeight: 100 } },
       error: error instanceof Error ? error.message : String(error)
     };
-    const budget = calculateDeployResourceBudget(fallbackSnapshot);
+    const budget = await applyPriorityReserveToDeployBudget(deploymentId, calculateDeployResourceBudget(fallbackSnapshot));
     await writeLog(deploymentId, releaseId, "PREFLIGHT", "Dynamic deploy resource budget fallback", {
       ...budget.summary,
       error: fallbackSnapshot.error
     } as unknown as Prisma.InputJsonObject, "warn");
     return budget;
   }
+}
+
+async function applyPriorityReserveToDeployBudget(deploymentId: string, budget: DeployResourceBudget): Promise<DeployResourceBudget> {
+  const current = await prisma.deployment.findUnique({ where: { id: deploymentId }, select: { processConfig: true } });
+  const currentPolicy = normalizeDeploymentResourcePolicy(current?.processConfig);
+  const running = await prisma.deployment.findMany({
+    where: { id: { not: deploymentId }, status: "RUNNING" },
+    select: { processConfig: true }
+  });
+  const p1Count = running.filter((deployment) => normalizeDeploymentResourcePolicy(deployment.processConfig).priorityTier === "P1").length;
+  if (p1Count === 0 || currentPolicy.priorityTier === "P1") return budget;
+  const deployMemoryMb = Math.min(budget.resourceLimits.memoryMaxMb, 3072);
+  const cpuQuotaPercent = Math.min(budget.resourceLimits.cpuQuotaPercent, 200);
+  return {
+    ...budget,
+    resourceLimits: {
+      ...budget.resourceLimits,
+      memoryMaxMb: deployMemoryMb,
+      cpuQuotaPercent,
+      nice: Math.max(budget.resourceLimits.nice, 10),
+      ioWeight: Math.min(budget.resourceLimits.ioWeight, 100)
+    },
+    env: {
+      ...budget.env,
+      NODE_OPTIONS: `--max-old-space-size=${Math.max(512, deployMemoryMb - 1536)}`,
+      CIRCLE_NODE_TOTAL: "2"
+    },
+    summary: {
+      ...budget.summary,
+      deployMemoryMb,
+      cpuQuotaPercent,
+      nodeHeapMb: Math.max(512, deployMemoryMb - 1536),
+      nextWorkers: 1
+    }
+  };
 }
 
 async function markRelease(releaseId: string | undefined, status: "RUNNING" | "SUCCEEDED" | "FAILED" | "ROLLED_BACK", startedAt?: Date) {
@@ -3611,6 +3663,8 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
     if (deployment.framework === "PYTHON" && processAction !== "stop") {
       await ensurePythonVenvRuntime(deployment.id, releaseId, appPath, renderStartCommand(deployment));
     }
+    const runtimePolicy = normalizeDeploymentResourcePolicy(deployment.processConfig);
+    const runtimeResourceLimits = deploymentRuntimeResourceLimits(deployment.processConfig);
     const result = await runLiveDeploymentProcess(
       deployment.id,
       releaseId,
@@ -3627,14 +3681,16 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
         port: deployment.port,
         env: runtimeEnvVars,
         logDir: deploymentLogDir(deployment.slug),
-        framework: deployment.framework
+        framework: deployment.framework,
+        resourceLimits: runtimeResourceLimits,
+        restartDelayMs: runtimePolicy.restartDelayMs
       }
     );
     assertLiveResult(result, `${action} process`);
 
     if (deployment.framework === "LARAVEL") {
       const config = laravelWorkerConfig(deploymentProcessConfig(deployment.processConfig).laravelWorkers);
-      const desiredWorkers = processAction === "stop" || !config.enabled ? 0 : config.desiredWorkers;
+      const desiredWorkers = processAction === "stop" || !config.enabled ? 0 : Math.min(config.desiredWorkers, runtimePolicy.workersMax);
       const workerResult = await runStep(deployment.id, releaseId, "STARTING", `Laravel queue workers ${desiredWorkers > 0 ? "apply" : "stop"}`, () =>
         sysagent.deploymentLaravelWorkers({
           name: laravelWorkerProgramName(deployment.slug),
@@ -3643,7 +3699,8 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
           desiredWorkers,
           queueCommand: config.queueCommand,
           env: runtimeEnvVars,
-          logDir: deploymentLogDir(deployment.slug)
+          logDir: deploymentLogDir(deployment.slug),
+          resourceLimits: runtimeResourceLimits
         })
       );
       const runningWorkers = (workerResult as { runningWorkers?: number; status?: { running?: number } }).runningWorkers ?? (workerResult as { status?: { running?: number } }).status?.running ?? 0;
@@ -3794,6 +3851,25 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     };
     const databaseRuntime = await buildDatabaseRuntimeEnv(deployment, envVars, { releaseId });
     envVars = databaseRuntime.envVars;
+    if (deployment.dbType && deployment.dbUser) {
+      const policy = normalizeDeploymentResourcePolicy(deployment.processConfig);
+      const maxConnections = policy.priorityTier === "P1" ? 80 : policy.priorityTier === "P2" ? 40 : 10;
+      await runStep(deployment.id, releaseId, "PREFLIGHT", "Database protection policy", () =>
+        sysagent.databaseProtection({
+          engine: deployment.dbType,
+          username: deployment.dbUser,
+          maxConnections,
+          slowQueryMs: 1000
+        })
+      ).catch((error) =>
+        writeLog(deployment.id, releaseId, "PREFLIGHT", "Database protection policy warning", {
+          warning: error instanceof Error ? error.message : String(error),
+          dbType: deployment.dbType,
+          dbUser: deployment.dbUser,
+          maxConnections
+        }, "warn")
+      );
+    }
     if (databaseRuntime.changed) {
       await writeLog(deployment.id, releaseId, "PREFLIGHT", "Normalized deployment database runtime env", {
         dbType: deployment.dbType,

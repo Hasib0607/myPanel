@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, Database, GitBranch, Globe2, KeyRound, Save, ServerCog, Settings2, Trash2, Workflow } from "lucide-react";
+import { Copy, Database, GitBranch, Globe2, KeyRound, Save, ServerCog, Settings2, ShieldCheck, Trash2, Workflow } from "lucide-react";
 import { apiDeleteBody, apiGet, apiPatch, apiPost } from "@/lib/api";
 import type { Deployment, DeploymentFramework, DeploymentSourceProvider } from "../../deployment-types";
 import { ProjectTabs, ResultNotice } from "../../deployment-ui";
@@ -46,6 +46,15 @@ type LaravelWorkerConfig = {
   lastScaleReason?: string;
 };
 
+type ResourcePolicy = {
+  priorityTier: "P1" | "P2" | "P3";
+  memoryMaxMb: number;
+  cpuQuotaPercent: number;
+  workersMax: number;
+  restartDelayMs: number;
+  healthStrict: boolean;
+};
+
 type WorkerStatusResponse = {
   config: LaravelWorkerConfig;
   status: {
@@ -85,6 +94,12 @@ type SettingsForm = {
   dbName: string;
   dbUser: string;
   autoDeployEnabled: boolean;
+  priorityTier: "P1" | "P2" | "P3";
+  memoryMaxMb: string;
+  cpuQuotaPercent: string;
+  workersPolicyMax: string;
+  restartDelayMs: string;
+  healthStrict: boolean;
   workersEnabled: boolean;
   workersAutoscale: boolean;
   workersDesired: string;
@@ -123,6 +138,12 @@ const emptyForm: SettingsForm = {
   dbName: "",
   dbUser: "",
   autoDeployEnabled: false,
+  priorityTier: "P2",
+  memoryMaxMb: "2048",
+  cpuQuotaPercent: "200",
+  workersPolicyMax: "2",
+  restartDelayMs: "3000",
+  healthStrict: false,
   workersEnabled: false,
   workersAutoscale: false,
   workersDesired: "0",
@@ -137,6 +158,21 @@ const runtimes = ["", "NODE", "PHP", "PYTHON", "GO", "STATIC"];
 const packageManagers = ["", "NPM", "PNPM", "YARN", "COMPOSER", "PIP", "UV", "GO", "NONE"];
 const processManagers = ["", "PM2", "SUPERVISOR", "SYSTEMD", "STATIC", "NONE"];
 const dbTypes = ["", "POSTGRESQL", "MYSQL"];
+const priorityTiers: Array<"P1" | "P2" | "P3"> = ["P1", "P2", "P3"];
+const priorityDefaults: Record<"P1" | "P2" | "P3", ResourcePolicy> = {
+  P1: { priorityTier: "P1", memoryMaxMb: 6144, cpuQuotaPercent: 400, workersMax: 5, restartDelayMs: 1000, healthStrict: true },
+  P2: { priorityTier: "P2", memoryMaxMb: 2048, cpuQuotaPercent: 200, workersMax: 2, restartDelayMs: 3000, healthStrict: false },
+  P3: { priorityTier: "P3", memoryMaxMb: 1024, cpuQuotaPercent: 100, workersMax: 1, restartDelayMs: 8000, healthStrict: false }
+};
+
+function resourcePolicyFromDeployment(deployment: Deployment): ResourcePolicy {
+  const rawConfig = deployment.processConfig ?? {};
+  const raw = rawConfig.resourcePolicy && typeof rawConfig.resourcePolicy === "object" && !Array.isArray(rawConfig.resourcePolicy)
+    ? rawConfig.resourcePolicy as Partial<ResourcePolicy>
+    : {};
+  const tier = raw.priorityTier === "P1" || raw.priorityTier === "P3" ? raw.priorityTier : "P2";
+  return { ...priorityDefaults[tier], ...raw, priorityTier: tier };
+}
 
 function laravelWorkersFromDeployment(deployment: Deployment): LaravelWorkerConfig {
   const raw = (deployment.processConfig?.laravelWorkers && typeof deployment.processConfig.laravelWorkers === "object")
@@ -157,6 +193,7 @@ function laravelWorkersFromDeployment(deployment: Deployment): LaravelWorkerConf
 
 function formFromDeployment(deployment: Deployment): SettingsForm {
   const workers = laravelWorkersFromDeployment(deployment);
+  const resourcePolicy = resourcePolicyFromDeployment(deployment);
   return {
     name: deployment.name,
     slug: deployment.slug,
@@ -187,6 +224,12 @@ function formFromDeployment(deployment: Deployment): SettingsForm {
     dbName: deployment.dbName ?? "",
     dbUser: deployment.dbUser ?? "",
     autoDeployEnabled: deployment.autoDeployEnabled,
+    priorityTier: resourcePolicy.priorityTier,
+    memoryMaxMb: String(resourcePolicy.memoryMaxMb),
+    cpuQuotaPercent: String(resourcePolicy.cpuQuotaPercent),
+    workersPolicyMax: String(resourcePolicy.workersMax),
+    restartDelayMs: String(resourcePolicy.restartDelayMs),
+    healthStrict: resourcePolicy.healthStrict,
     workersEnabled: workers.enabled,
     workersAutoscale: workers.autoscale,
     workersDesired: String(workers.desiredWorkers),
@@ -275,7 +318,17 @@ export function DeploymentSettingsClient({ project }: { project: string }) {
     dbName: nullable(form.dbName),
     dbUser: nullable(form.dbUser),
     autoDeployEnabled: form.autoDeployEnabled,
-    processConfig: detail.data?.processConfig ?? {}
+    processConfig: {
+      ...(detail.data?.processConfig ?? {}),
+      resourcePolicy: {
+        priorityTier: form.priorityTier,
+        memoryMaxMb: numberFromString(form.memoryMaxMb),
+        cpuQuotaPercent: numberFromString(form.cpuQuotaPercent),
+        workersMax: numberFromString(form.workersPolicyMax),
+        restartDelayMs: numberFromString(form.restartDelayMs),
+        healthStrict: form.healthStrict
+      }
+    }
   }), [detail.data?.processConfig, form]);
 
   const save = useMutation({
@@ -362,6 +415,35 @@ export function DeploymentSettingsClient({ project }: { project: string }) {
             <TextInput label="Name" onChange={(value) => setField("name", value)} required value={form.name} />
             <TextInput label="Slug" onChange={(value) => setField("slug", value.toLowerCase())} required value={form.slug} />
             <SelectInput label="Domain" labels={domainLabels} onChange={(value) => setField("domainId", value)} options={["", ...(domains.data?.items ?? []).map((domain) => domain.id)]} value={form.domainId} />
+          </div>
+        </Section>
+
+        <Section icon={<ShieldCheck size={16} />} title="Priority And Resource Limits">
+          <div className="grid grid-cols-4 gap-3">
+            <SelectInput
+              label="Priority tier"
+              labels={{ P1: "P1 Critical", P2: "P2 Normal", P3: "P3 Low" }}
+              onChange={(value) => {
+                const tier = value as "P1" | "P2" | "P3";
+                const defaults = priorityDefaults[tier];
+                setForm((current) => ({
+                  ...current,
+                  priorityTier: tier,
+                  memoryMaxMb: String(defaults.memoryMaxMb),
+                  cpuQuotaPercent: String(defaults.cpuQuotaPercent),
+                  workersPolicyMax: String(defaults.workersMax),
+                  restartDelayMs: String(defaults.restartDelayMs),
+                  healthStrict: defaults.healthStrict
+                }));
+              }}
+              options={priorityTiers}
+              value={form.priorityTier}
+            />
+            <TextInput label="RAM cap MB" onChange={(value) => setField("memoryMaxMb", value.replace(/\D/g, ""))} value={form.memoryMaxMb} />
+            <TextInput label="CPU quota %" onChange={(value) => setField("cpuQuotaPercent", value.replace(/\D/g, ""))} value={form.cpuQuotaPercent} />
+            <TextInput label="Worker cap" onChange={(value) => setField("workersPolicyMax", value.replace(/\D/g, ""))} value={form.workersPolicyMax} />
+            <TextInput label="Restart delay ms" onChange={(value) => setField("restartDelayMs", value.replace(/\D/g, ""))} value={form.restartDelayMs} />
+            <ToggleInput checked={form.healthStrict} label="Strict health" onChange={(value) => setField("healthStrict", value)} />
           </div>
         </Section>
 

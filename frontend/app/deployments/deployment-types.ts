@@ -163,6 +163,9 @@ export type DeploymentMetrics = {
     outgoingBytes: number;
     bandwidthBytes: number;
     requests: number;
+    topIps?: Array<{ ip: string; requests: number }>;
+    topPaths?: Array<{ path: string; requests: number }>;
+    botSuspects?: Array<{ userAgent: string; requests: number }>;
     sources: string[];
     windowHours: number;
     note?: string | null;

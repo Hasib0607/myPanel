@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import net from "node:net";
+import path from "node:path";
 import tls from "node:tls";
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
@@ -9,6 +10,7 @@ import { runGuardianAutoHeal, syncGuardianIncidentsOnly, type GuardianDiagnosis 
 import { startPanelSelfUpdate } from "../lib/panelSelfUpdate.js";
 import { prisma } from "../lib/prisma.js";
 import { sysagent } from "../lib/sysagent.js";
+import { normalizeDeploymentResourcePolicy } from "../lib/deploymentResourcePolicy.js";
 
 const ipActionSchema = z.object({
   ip: z.string().trim().min(3),
@@ -22,6 +24,9 @@ const allowlistSchema = z.object({
 });
 const fileActionSchema = z.object({ id: z.string().min(1) });
 const serviceActionSchema = z.object({ serviceKey: z.string().trim().min(1) });
+const lowPriorityActionSchema = z.object({
+  confirm: z.string().trim().optional()
+});
 const settingsSchema = z.object({
   autoBlockMode: z.enum(["monitor", "suggest", "auto"]),
   blockDurationMinutes: z.number().int().min(5).max(43_200)
@@ -682,6 +687,110 @@ export const guardianRoutes: FastifyPluginAsync = async (app) => {
       actions: result.actions,
       generatedAt: new Date().toISOString()
     });
+  });
+
+  app.get("/resource-users", async () => {
+    const deployments = await prisma.deployment.findMany({
+      where: { status: { in: ["RUNNING", "DEPLOYING", "BUILDING"] } },
+      orderBy: { updatedAt: "desc" },
+      take: 50
+    });
+    const rows = await Promise.all(deployments.map(async (deployment) => {
+      const policy = normalizeDeploymentResourcePolicy(deployment.processConfig);
+      const appPath = path.resolve(deployment.rootPath, deployment.rootDirectory || ".");
+      const metrics = await sysagent.deploymentMetrics({
+        deploymentId: deployment.id,
+        name: deployment.slug,
+        rootPath: appPath,
+        port: deployment.port,
+        processManager: deployment.processManager,
+        dbType: deployment.dbType,
+        dbName: deployment.dbName,
+        serverNames: [],
+        logLines: 20
+      }).catch(() => null) as any;
+      return {
+        id: deployment.id,
+        slug: deployment.slug,
+        name: deployment.name,
+        status: deployment.status,
+        priorityTier: policy.priorityTier,
+        memoryMaxMb: policy.memoryMaxMb,
+        cpuQuotaPercent: policy.cpuQuotaPercent,
+        memoryBytes: Number(metrics?.process?.memoryBytes ?? 0),
+        cpuPercent: Number(metrics?.process?.cpuPercent ?? 0),
+        processCount: Number(metrics?.process?.processCount ?? 0)
+      };
+    }));
+    return {
+      items: rows.sort((a, b) => (b.memoryBytes + b.cpuPercent * 10_000_000) - (a.memoryBytes + a.cpuPercent * 10_000_000)),
+      generatedAt: new Date().toISOString()
+    };
+  });
+
+  app.post("/low-priority/throttle", async (request, reply) => {
+    const body = lowPriorityActionSchema.parse(request.body ?? {});
+    if (body.confirm !== "THROTTLE P3") throw app.httpErrors.badRequest("Type THROTTLE P3 to confirm.");
+    const deployments = await prisma.deployment.findMany({ where: { status: "RUNNING", framework: "LARAVEL" } });
+    const targets = deployments.filter((deployment) => normalizeDeploymentResourcePolicy(deployment.processConfig).priorityTier === "P3");
+    const results = await Promise.all(targets.map(async (deployment) => {
+      const processConfig = deployment.processConfig && typeof deployment.processConfig === "object" && !Array.isArray(deployment.processConfig)
+        ? deployment.processConfig as Record<string, any>
+        : {};
+      await prisma.deployment.update({
+        where: { id: deployment.id },
+        data: {
+          processConfig: {
+            ...processConfig,
+            laravelWorkers: {
+              ...(processConfig.laravelWorkers ?? {}),
+              enabled: false,
+              desiredWorkers: 0,
+              currentWorkers: 0,
+              lastScaledAt: new Date().toISOString(),
+              lastScaleReason: "Guardian low-priority throttle"
+            }
+          } as any
+        }
+      });
+      return sysagent.deploymentLaravelWorkers({
+        name: `${deployment.slug}-queue`,
+        rootPath: path.resolve(deployment.rootPath, deployment.rootDirectory || "."),
+        action: "stop",
+        desiredWorkers: 0,
+        logDir: `${env.DEPLOYMENT_LOG_ROOT.replace(/\/+$/, "")}/${deployment.slug}`
+      }).catch((error) => ({ error: error instanceof Error ? error.message : String(error) }));
+    }));
+    await audit(request, { action: "APPLY", resource: "guardian_low_priority", description: "Throttled P3 Laravel workers", metadata: { count: targets.length, results } as any });
+    return reply.code(202).send({ accepted: true, count: targets.length, results });
+  });
+
+  app.post("/low-priority/stop", async (request, reply) => {
+    const body = lowPriorityActionSchema.parse(request.body ?? {});
+    if (body.confirm !== "STOP P3") throw app.httpErrors.badRequest("Type STOP P3 to confirm.");
+    const deployments = await prisma.deployment.findMany({ where: { status: "RUNNING" } });
+    const targets = deployments.filter((deployment) => normalizeDeploymentResourcePolicy(deployment.processConfig).priorityTier === "P3");
+    const results = await Promise.all(targets.map(async (deployment) => {
+      const result = await sysagent.deploymentProcess({
+        deploymentId: deployment.id,
+        name: deployment.slug,
+        rootPath: path.resolve(deployment.rootPath, deployment.rootDirectory || "."),
+        action: "stop",
+        processManager: deployment.processManager,
+        startCommand: deployment.startCommand,
+        port: deployment.port,
+        env: {},
+        logDir: `${env.DEPLOYMENT_LOG_ROOT.replace(/\/+$/, "")}/${deployment.slug}`,
+        framework: deployment.framework
+      }).catch((error) => ({ error: error instanceof Error ? error.message : String(error) }));
+      const processResult = result as { error?: string; returncode?: number };
+      if (!processResult.error && processResult.returncode === 0) {
+        await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "STOPPED" } }).catch(() => null);
+      }
+      return { slug: deployment.slug, result };
+    }));
+    await audit(request, { action: "APPLY", resource: "guardian_low_priority", description: "Stopped P3 deployments", metadata: { count: targets.length, results } as any });
+    return reply.code(202).send({ accepted: true, count: targets.length, results });
   });
 
   app.post("/panel-update/rebuild", async (request, reply) => {

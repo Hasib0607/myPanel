@@ -102,6 +102,22 @@ type GuardianOverview = {
   generatedAt: string;
 };
 
+type ResourceUsersResponse = {
+  generatedAt: string;
+  items: Array<{
+    id: string;
+    slug: string;
+    name: string;
+    status: string;
+    priorityTier: "P1" | "P2" | "P3";
+    memoryMaxMb: number;
+    cpuQuotaPercent: number;
+    memoryBytes: number;
+    cpuPercent: number;
+    processCount: number;
+  }>;
+};
+
 type SuspiciousIp = {
   ip: string;
   score: number;
@@ -234,9 +250,15 @@ export function GuardianClient() {
   const [allowCidr, setAllowCidr] = useState("");
   const [blockDuration, setBlockDuration] = useState(60);
   const [evidenceText, setEvidenceText] = useState<string | null>(null);
+  const [priorityBusy, setPriorityBusy] = useState<string | null>(null);
   const overview = useQuery({
     queryKey: ["guardian-overview"],
     queryFn: () => apiGet<GuardianOverview>("/guardian/overview"),
+    refetchInterval: 30_000
+  });
+  const resourceUsers = useQuery({
+    queryKey: ["guardian-resource-users"],
+    queryFn: () => apiGet<ResourceUsersResponse>("/guardian/resource-users"),
     refetchInterval: 30_000
   });
 
@@ -260,6 +282,22 @@ export function GuardianClient() {
       setAutoHealResult(error instanceof Error ? error.message : "Guardian auto-heal failed.");
     } finally {
       setAutoHealBusy(false);
+    }
+  }
+
+  async function runLowPriorityAction(action: "throttle" | "stop") {
+    const confirmText = action === "throttle" ? "THROTTLE P3" : "STOP P3";
+    if (window.prompt(`Type ${confirmText} to confirm`) !== confirmText) return;
+    setPriorityBusy(action);
+    setAutoHealResult(null);
+    try {
+      const result = await apiPost<{ count: number }>(`/guardian/low-priority/${action}`, { confirm: confirmText });
+      setAutoHealResult(`${action} applied to ${result.count} low priority project(s).`);
+      await Promise.all([overview.refetch(), resourceUsers.refetch()]);
+    } catch (error) {
+      setAutoHealResult(error instanceof Error ? error.message : `Low priority ${action} failed.`);
+    } finally {
+      setPriorityBusy(null);
     }
   }
 
@@ -489,6 +527,34 @@ export function GuardianClient() {
             <Meter detail={`${formatBytes(resources.disk.free)} free`} icon={HardDrive} label="Disk" value={resources.disk.percent} />
           </div>
         ) : null}
+
+        <div className="rounded-md border border-panel-line bg-white">
+          <div className="flex items-center justify-between border-b border-panel-line px-4 py-3">
+            <div>
+              <div className="text-sm font-semibold">Top Resource Users Now</div>
+              <div className="mt-1 text-xs text-panel-muted">{resourceUsers.data?.generatedAt ? `Updated ${new Date(resourceUsers.data.generatedAt).toLocaleTimeString()}` : "Live project pressure"}</div>
+            </div>
+            <div className="flex gap-2">
+              <button className="rounded-md border border-panel-line px-3 py-2 text-xs font-semibold hover:bg-slate-50 disabled:opacity-50" disabled={priorityBusy !== null} onClick={() => runLowPriorityAction("throttle")} type="button">Throttle P3</button>
+              <button className="rounded-md border border-red-200 px-3 py-2 text-xs font-semibold text-panel-danger hover:bg-red-50 disabled:opacity-50" disabled={priorityBusy !== null} onClick={() => runLowPriorityAction("stop")} type="button">Stop P3</button>
+            </div>
+          </div>
+          <div className="divide-y divide-panel-line">
+            {(resourceUsers.data?.items ?? []).slice(0, 8).map((item) => (
+              <div className="grid grid-cols-[1fr_80px_110px_90px_90px] items-center gap-3 px-4 py-3 text-sm" key={item.id}>
+                <div className="min-w-0">
+                  <div className="truncate font-semibold">{item.name}</div>
+                  <div className="truncate text-xs text-panel-muted">{item.slug}</div>
+                </div>
+                <span className={`w-fit rounded-md px-2 py-1 text-xs font-semibold ${item.priorityTier === "P1" ? "bg-emerald-50 text-emerald-700" : item.priorityTier === "P2" ? "bg-blue-50 text-blue-700" : "bg-slate-100 text-slate-700"}`}>{item.priorityTier}</span>
+                <span className="text-panel-muted">{formatBytes(item.memoryBytes)}</span>
+                <span className="text-panel-muted">{item.cpuPercent.toFixed(1)}%</span>
+                <span className="text-panel-muted">{item.processCount} proc</span>
+              </div>
+            ))}
+            {resourceUsers.data && resourceUsers.data.items.length === 0 ? <div className="p-4 text-sm text-panel-muted">No running projects found.</div> : null}
+          </div>
+        </div>
 
         {overview.data?.performanceGuard ? (
           <div className="rounded-md border border-panel-line bg-white">
