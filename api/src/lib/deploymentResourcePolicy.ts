@@ -41,10 +41,13 @@ export function normalizeDeploymentResourcePolicy(processConfig: unknown): Deplo
 export function processConfigWithResourcePolicy(processConfig: unknown, patch: Partial<DeploymentResourcePolicy>) {
   const rawConfig = processConfig && typeof processConfig === "object" && !Array.isArray(processConfig) ? processConfig as Record<string, unknown> : {};
   const current = normalizeDeploymentResourcePolicy(rawConfig);
+  const base = patch.priorityTier && patch.priorityTier !== current.priorityTier
+    ? deploymentPriorityDefaults[patch.priorityTier]
+    : current;
   return {
     ...rawConfig,
     resourcePolicy: {
-      ...current,
+      ...base,
       ...patch
     }
   };

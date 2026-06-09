@@ -10,7 +10,7 @@ import { runGuardianAutoHeal, syncGuardianIncidentsOnly, type GuardianDiagnosis 
 import { startPanelSelfUpdate } from "../lib/panelSelfUpdate.js";
 import { prisma } from "../lib/prisma.js";
 import { sysagent } from "../lib/sysagent.js";
-import { normalizeDeploymentResourcePolicy } from "../lib/deploymentResourcePolicy.js";
+import { normalizeDeploymentResourcePolicy, processConfigWithResourcePolicy } from "../lib/deploymentResourcePolicy.js";
 
 const ipActionSchema = z.object({
   ip: z.string().trim().min(3),
@@ -26,6 +26,9 @@ const fileActionSchema = z.object({ id: z.string().min(1) });
 const serviceActionSchema = z.object({ serviceKey: z.string().trim().min(1) });
 const lowPriorityActionSchema = z.object({
   confirm: z.string().trim().optional()
+});
+const priorityUpdateSchema = z.object({
+  priorityTier: z.enum(["P1", "P2", "P3"])
 });
 const settingsSchema = z.object({
   autoBlockMode: z.enum(["monitor", "suggest", "auto"]),
@@ -726,6 +729,29 @@ export const guardianRoutes: FastifyPluginAsync = async (app) => {
       items: rows.sort((a, b) => (b.memoryBytes + b.cpuPercent * 10_000_000) - (a.memoryBytes + a.cpuPercent * 10_000_000)),
       generatedAt: new Date().toISOString()
     };
+  });
+
+  app.post("/resource-users/:deploymentId/priority", async (request, reply) => {
+    const { deploymentId } = z.object({ deploymentId: z.string().min(1) }).parse(request.params);
+    const body = priorityUpdateSchema.parse(request.body ?? {});
+    const deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId } });
+    const processConfig = processConfigWithResourcePolicy(deployment.processConfig, { priorityTier: body.priorityTier });
+    const updated = await prisma.deployment.update({
+      where: { id: deployment.id },
+      data: { processConfig: processConfig as any }
+    });
+    await audit(request, {
+      action: "UPDATE",
+      resource: "deployment_priority",
+      resourceId: deployment.id,
+      description: `Changed ${deployment.slug} priority to ${body.priorityTier}`,
+      metadata: { priorityTier: body.priorityTier } as any
+    });
+    return reply.code(202).send({
+      id: updated.id,
+      slug: updated.slug,
+      resourcePolicy: normalizeDeploymentResourcePolicy(updated.processConfig)
+    });
   });
 
   app.post("/low-priority/throttle", async (request, reply) => {

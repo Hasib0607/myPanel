@@ -301,6 +301,20 @@ export function GuardianClient() {
     }
   }
 
+  async function updateProjectPriority(deploymentId: string, priorityTier: "P1" | "P2" | "P3") {
+    setPriorityBusy(deploymentId);
+    setAutoHealResult(null);
+    try {
+      await apiPost(`/guardian/resource-users/${encodeURIComponent(deploymentId)}/priority`, { priorityTier });
+      setAutoHealResult(`Priority updated to ${priorityTier}. Restart or redeploy applies runtime caps to already-running processes.`);
+      await Promise.all([overview.refetch(), resourceUsers.refetch()]);
+    } catch (error) {
+      setAutoHealResult(error instanceof Error ? error.message : "Priority update failed.");
+    } finally {
+      setPriorityBusy(null);
+    }
+  }
+
   async function runPanelUpdate() {
     setPanelUpdateBusy(true);
     setAutoHealResult(null);
@@ -541,12 +555,21 @@ export function GuardianClient() {
           </div>
           <div className="divide-y divide-panel-line">
             {(resourceUsers.data?.items ?? []).slice(0, 8).map((item) => (
-              <div className="grid grid-cols-[1fr_80px_110px_90px_90px] items-center gap-3 px-4 py-3 text-sm" key={item.id}>
+              <div className="grid grid-cols-[1fr_130px_110px_90px_90px] items-center gap-3 px-4 py-3 text-sm" key={item.id}>
                 <div className="min-w-0">
                   <div className="truncate font-semibold">{item.name}</div>
                   <div className="truncate text-xs text-panel-muted">{item.slug}</div>
                 </div>
-                <span className={`w-fit rounded-md px-2 py-1 text-xs font-semibold ${item.priorityTier === "P1" ? "bg-emerald-50 text-emerald-700" : item.priorityTier === "P2" ? "bg-blue-50 text-blue-700" : "bg-slate-100 text-slate-700"}`}>{item.priorityTier}</span>
+                <select
+                  className={`h-9 rounded-md border border-panel-line px-2 text-xs font-semibold ${item.priorityTier === "P1" ? "bg-emerald-50 text-emerald-700" : item.priorityTier === "P2" ? "bg-blue-50 text-blue-700" : "bg-slate-100 text-slate-700"}`}
+                  disabled={priorityBusy === item.id}
+                  onChange={(event) => updateProjectPriority(item.id, event.target.value as "P1" | "P2" | "P3")}
+                  value={item.priorityTier}
+                >
+                  <option value="P1">P1 Critical</option>
+                  <option value="P2">P2 Normal</option>
+                  <option value="P3">P3 Low</option>
+                </select>
                 <span className="text-panel-muted">{formatBytes(item.memoryBytes)}</span>
                 <span className="text-panel-muted">{item.cpuPercent.toFixed(1)}%</span>
                 <span className="text-panel-muted">{item.processCount} proc</span>
