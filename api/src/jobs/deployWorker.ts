@@ -3331,6 +3331,25 @@ function nextMiddlewareProxyIssue(text: string) {
     || (lower.includes("please use \"proxy\"") && lower.includes("middleware"));
 }
 
+function nextTurbopackBuildFailure(text: string) {
+  const lower = text.toLowerCase();
+  return lower.includes("next.js")
+    && lower.includes("turbopack")
+    && (lower.includes("exit code 1") || lower.includes("build failed") || lower.includes("creating an optimized production build"));
+}
+
+function nextWebpackBuildCommand(command: string | null | undefined) {
+  const rendered = command?.trim();
+  if (!rendered || rendered.includes("--webpack")) return null;
+  if (/\bnext\s+build\b/.test(rendered)) {
+    return rendered.replace(/\bnext\s+build\b/, "next build --webpack");
+  }
+  if (/\b(?:npm|pnpm)\s+run\s+build\b/.test(rendered) || /\byarn\s+build\b/.test(rendered)) {
+    return `${rendered} -- --webpack`;
+  }
+  return null;
+}
+
 function transformNextMiddlewareToProxy(content: string) {
   return content
     .replace(/\bfunction\s+middleware\b/g, "function proxy")
@@ -4116,16 +4135,29 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     }
 
     if (deployment.buildCommand) {
-      const runBuild = (label = "Build") => runHeavyBuildExclusive(() =>
+      const defaultBuildCommand = renderDeploymentCommand(deployment.buildCommand, deployment.port);
+      const webpackBuildCommand = nextWebpackBuildCommand(defaultBuildCommand);
+      const runBuild = (label = "Build", command = defaultBuildCommand) => runHeavyBuildExclusive(() =>
         runStep(deployment.id, releaseId, label === "Build" ? "BUILDING" : "BUILDING", label, () =>
           sysagent.deploymentBuild({
             rootPath: appPath,
-            command: renderDeploymentCommand(deployment.buildCommand, deployment.port),
+            command,
             env: envVars,
             resourceLimits: deployBudget.resourceLimits
           })
         )
       );
+      const retryBuildWithWebpack = async (detail: string, context: string) => {
+        if (!webpackBuildCommand || !nextTurbopackBuildFailure(detail)) return false;
+        await writeLog(deployment.id, releaseId, "BUILDING", "Retrying Next build with Webpack fallback", {
+          context,
+          command: webpackBuildCommand,
+          evidence: detail.slice(0, 2000)
+        }, "warn");
+        const retryResult = await runBuild("Build retry with Next Webpack fallback", webpackBuildCommand);
+        assertCommandTree(retryResult, "Build retry with Next Webpack fallback");
+        return true;
+      };
       const retryBuildAfterNextMiddlewareRepair = async (detail: string, context: string) => {
         if (!nextMiddlewareProxyIssue(detail)) return false;
         const repaired = await repairNextMiddlewareProxyConvention(appPath);
@@ -4137,8 +4169,16 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         if (repaired.length === 0) {
           return false;
         }
-        const retryResult = await runBuild("Build retry after Next proxy repair");
-        assertCommandTree(retryResult, "Build retry after Next proxy repair");
+        try {
+          const retryResult = await runBuild("Build retry after Next proxy repair");
+          assertCommandTree(retryResult, "Build retry after Next proxy repair");
+        } catch (retryError) {
+          const retryDetail = retryError instanceof Error ? retryError.message : String(retryError);
+          if (await retryBuildWithWebpack(retryDetail, "after Next proxy repair")) {
+            return true;
+          }
+          throw retryError;
+        }
         return true;
       };
       const retryBuildAfterSigterm = async (detail: string, context: string) => {
@@ -4183,6 +4223,9 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         if (nextMiddlewareProxyIssue(detail)) {
           buildRecovered = await retryBuildAfterNextMiddlewareRepair(detail, "initial build");
         }
+        if (!buildRecovered && nextTurbopackBuildFailure(detail)) {
+          buildRecovered = await retryBuildWithWebpack(detail, "initial build");
+        }
         if (nodeBuildTerminatedBySigterm(detail) && repairPackageManager) {
           buildRecovered = await retryBuildAfterSigterm(detail, "initial build");
         }
@@ -4214,6 +4257,9 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
             let dependencyRepairRecovered = false;
             if (nextMiddlewareProxyIssue(retryDetail)) {
               dependencyRepairRecovered = await retryBuildAfterNextMiddlewareRepair(retryDetail, "dependency repair");
+            }
+            if (!dependencyRepairRecovered && nextTurbopackBuildFailure(retryDetail)) {
+              dependencyRepairRecovered = await retryBuildWithWebpack(retryDetail, "dependency repair");
             }
             if (nodeBuildTerminatedBySigterm(retryDetail)) {
               dependencyRepairRecovered = await retryBuildAfterSigterm(retryDetail, "dependency repair");
