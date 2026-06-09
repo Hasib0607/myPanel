@@ -3324,6 +3324,61 @@ function nodeBuildTerminatedBySigterm(message: string) {
   return /exit code 143|exit code -15|\bSIGTERM\b|terminated by SIGTERM/i.test(message);
 }
 
+function nextMiddlewareProxyIssue(text: string) {
+  const lower = text.toLowerCase();
+  return lower.includes("\"middleware\" file convention is deprecated")
+    || lower.includes("middleware-to-proxy")
+    || (lower.includes("please use \"proxy\"") && lower.includes("middleware"));
+}
+
+function transformNextMiddlewareToProxy(content: string) {
+  return content
+    .replace(/\bfunction\s+middleware\b/g, "function proxy")
+    .replace(/\bconst\s+middleware\b/g, "const proxy")
+    .replace(/\blet\s+middleware\b/g, "let proxy")
+    .replace(/\bvar\s+middleware\b/g, "var proxy")
+    .replace(/\bmiddleware\s+as\s+default\b/g, "proxy as default")
+    .replace(/\bmiddleware\s+as\s+middleware\b/g, "proxy as proxy")
+    .replace(/\bmiddleware\s*\}/g, "proxy }")
+    .replace(/\bmiddleware\s*,/g, "proxy,");
+}
+
+async function repairNextMiddlewareProxyConvention(appPath: string) {
+  const extensions = ["ts", "tsx", "js", "jsx", "mjs", "cjs"];
+  const roots = [appPath, path.join(appPath, "src")];
+  const backupRoot = path.join(appPath, ".panel", "next-middleware-backups");
+  const repaired = [];
+  await fs.mkdir(backupRoot, { recursive: true });
+
+  for (const root of roots) {
+    for (const extension of extensions) {
+      const middlewarePath = path.join(root, `middleware.${extension}`);
+      const proxyPath = path.join(root, `proxy.${extension}`);
+      try {
+        await fs.access(middlewarePath);
+      } catch {
+        continue;
+      }
+
+      const content = await fs.readFile(middlewarePath, "utf8");
+      let proxyCreated = false;
+      try {
+        await fs.access(proxyPath);
+      } catch {
+        await fs.writeFile(proxyPath, transformNextMiddlewareToProxy(content), "utf8");
+        proxyCreated = true;
+      }
+
+      const relative = path.relative(appPath, middlewarePath).replace(/[\\/]/g, "__");
+      const backupPath = path.join(backupRoot, `${relative}.${Date.now()}`);
+      await fs.rename(middlewarePath, backupPath);
+      repaired.push({ middlewarePath, proxyPath, backupPath, proxyCreated });
+    }
+  }
+
+  return repaired;
+}
+
 async function ensureNodeLowMemoryBuildEnv(deploymentId: string, releaseId: string | undefined, envVars: Record<string, string>) {
   const current = envVars.NODE_OPTIONS ?? "";
   let value = current;
@@ -4071,6 +4126,21 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           })
         )
       );
+      const retryBuildAfterNextMiddlewareRepair = async (detail: string, context: string) => {
+        if (!nextMiddlewareProxyIssue(detail)) return false;
+        const repaired = await repairNextMiddlewareProxyConvention(appPath);
+        await writeLog(deployment.id, releaseId, "BUILDING", "Repaired deprecated Next middleware convention", {
+          context,
+          repaired,
+          evidence: detail.slice(0, 2000)
+        }, repaired.length > 0 ? "warn" : "error");
+        if (repaired.length === 0) {
+          return false;
+        }
+        const retryResult = await runBuild("Build retry after Next proxy repair");
+        assertCommandTree(retryResult, "Build retry after Next proxy repair");
+        return true;
+      };
       const retryBuildAfterSigterm = async (detail: string, context: string) => {
         const startingWorkers = currentNextWorkers(envVars, deployBudget);
         const workerTargets = [...new Set([
@@ -4110,6 +4180,9 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           ? deployment.packageManager
           : frontendAssets.hasPackageJson ? frontendAssets.packageManager : null;
         let buildRecovered = false;
+        if (nextMiddlewareProxyIssue(detail)) {
+          buildRecovered = await retryBuildAfterNextMiddlewareRepair(detail, "initial build");
+        }
         if (nodeBuildTerminatedBySigterm(detail) && repairPackageManager) {
           buildRecovered = await retryBuildAfterSigterm(detail, "initial build");
         }
@@ -4139,6 +4212,9 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           } catch (retryError) {
             const retryDetail = retryError instanceof Error ? retryError.message : String(retryError);
             let dependencyRepairRecovered = false;
+            if (nextMiddlewareProxyIssue(retryDetail)) {
+              dependencyRepairRecovered = await retryBuildAfterNextMiddlewareRepair(retryDetail, "dependency repair");
+            }
             if (nodeBuildTerminatedBySigterm(retryDetail)) {
               dependencyRepairRecovered = await retryBuildAfterSigterm(retryDetail, "dependency repair");
             }
