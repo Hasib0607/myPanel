@@ -517,6 +517,7 @@ type DeploymentProcessBody = {
   framework?: DeploymentFramework;
   resourceLimits?: DeployResourceLimits;
   restartDelayMs?: number;
+  strictHealth?: boolean;
 };
 
 function sysagentLiveCommandsDisabled(diagnosis: SysagentLiveDiagnosis) {
@@ -751,7 +752,8 @@ async function runLiveDeploymentProcess(
           processManager: body.processManager,
           rootPath: body.rootPath,
           framework: body.framework,
-          logDir: body.logDir
+          logDir: body.logDir,
+          strictHealth: body.strictHealth
         })
       );
       const healthError = liveResultFailureMessage(lastHealth, `${label} Supervisor STARTING health poll ${attempt}`);
@@ -1325,6 +1327,7 @@ async function runHealthCheckWithGuardianRecovery(
     healthUrl: string | null;
     startCommand: string | null;
     processManager: DeploymentProcessManager | null;
+    processConfig?: unknown;
     dbType?: "POSTGRESQL" | "MYSQL" | null;
     dbName?: string | null;
     dbUser?: string | null;
@@ -1354,7 +1357,8 @@ async function runHealthCheckWithGuardianRecovery(
           processManager,
           rootPath: appPath,
           framework: deployment.framework,
-          logDir: deploymentLogDir(deployment.slug)
+          logDir: deploymentLogDir(deployment.slug),
+          strictHealth: normalizeDeploymentResourcePolicy(deployment.processConfig).healthStrict
         })
     );
 
@@ -3683,7 +3687,8 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
         logDir: deploymentLogDir(deployment.slug),
         framework: deployment.framework,
         resourceLimits: runtimeResourceLimits,
-        restartDelayMs: runtimePolicy.restartDelayMs
+        restartDelayMs: runtimePolicy.restartDelayMs,
+        strictHealth: runtimePolicy.healthStrict
       }
     );
     assertLiveResult(result, `${action} process`);

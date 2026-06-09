@@ -146,6 +146,7 @@ class HealthRequest(BaseModel):
     rootPath: str | None = None
     framework: str | None = None
     logDir: str | None = None
+    strictHealth: bool = False
 
 
 class PortStatusRequest(BaseModel):
@@ -2771,7 +2772,9 @@ def port_status(body: PortStatusRequest) -> dict:
 @router.post("/health")
 def health(body: HealthRequest) -> dict:
     url = body.healthUrl or f"http://127.0.0.1:{body.port}/"
-    accept_http_errors = (body.framework or "").upper() == "LARAVEL"
+    strict = bool(body.strictHealth)
+    accept_http_errors = (body.framework or "").upper() == "LARAVEL" and not strict
+    initial_restarts = _pm2_restart_count(body.processName) if body.processName and (body.processManager or "").upper() == "PM2" else None
 
     mismatch = _pm2_process_mismatch(body)
     if mismatch:
@@ -2801,29 +2804,38 @@ def health(body: HealthRequest) -> dict:
     if first.get("returncode") != 0:
         return attach_laravel_diagnostics(first, body.rootPath, body.framework)
 
-    # Phase 2: wait 8 s then verify the process is still up (catches immediate crashes).
-    time.sleep(8)
-    second = _curl_once(url, accept_http_errors=accept_http_errors)
-    if second.get("returncode") != 0:
-        second["stderr"] = (
-            "App responded on first check but crashed within 8 s. "
-            + (second.get("stderr") or "")
-        ).strip()
-        return attach_laravel_diagnostics(second, body.rootPath, body.framework)
+    # Phase 2: verify the process stays healthy. Strict/P1 mode samples longer so
+    # instant restarts and intermittent 5xx responses are caught before traffic moves.
+    delay = 10 if strict else 8
+    probes = 3 if strict else 1
+    second = first
+    for probe in range(probes):
+        time.sleep(delay)
+        second = _curl_once(url, accept_http_errors=accept_http_errors)
+        if second.get("returncode") != 0:
+            second["stderr"] = (
+                f"App responded on first check but failed stability probe {probe + 1}/{probes} after {delay * (probe + 1)} s. "
+                + (second.get("stderr") or "")
+            ).strip()
+            return attach_laravel_diagnostics(second, body.rootPath, body.framework)
 
     # Phase 3: PM2 crash-loop detection.
     # If the process has already restarted since we started it, it is crash-looping
     # and will go down again shortly — fail the deployment now with a clear message.
     if body.processName and (body.processManager or "").upper() == "PM2":
         restarts = _pm2_restart_count(body.processName)
-        if restarts is not None and restarts > 0:
+        restart_delta = restarts - initial_restarts if restarts is not None and initial_restarts is not None else restarts
+        if restart_delta is not None and restart_delta > 0:
             second["returncode"] = 1
             second["stderr"] = (
-                f"PM2 process '{body.processName}' has already restarted {restarts} time(s) — "
+                f"PM2 process '{body.processName}' restarted during health verification ({restart_delta} new restart(s), {restarts} total) — "
                 "the app is crash-looping. Run `pm2 logs {name}` on the server to see the error."
             ).replace("{name}", body.processName)
             return second
 
+    if strict:
+        second["strictHealth"] = True
+        second["stdout"] = ((second.get("stdout") or "") + "\nStrict health passed: stable probes completed.").strip()
     return second
 
 
