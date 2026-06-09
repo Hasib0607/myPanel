@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from app.deployment_env import (
+    apply_laravel_production_defaults,
     format_dotenv_line,
     is_laravel_artisan_command,
     is_valid_laravel_app_key,
@@ -46,6 +47,16 @@ class DeploymentEnvTests(unittest.TestCase):
         self.assertEqual(env["CACHE_STORE"], "file")
         self.assertEqual(env["SESSION_DRIVER"], "file")
         self.assertEqual(env["QUEUE_CONNECTION"], "sync")
+
+    def test_apply_laravel_production_defaults_prefers_redis_when_available(self) -> None:
+        env = apply_laravel_production_defaults({"APP_KEY": VALID_APP_KEY}, redis_loaded=True)
+        self.assertEqual(env["APP_ENV"], "production")
+        self.assertEqual(env["APP_DEBUG"], "false")
+        self.assertEqual(env["CACHE_DRIVER"], "redis")
+        self.assertEqual(env["CACHE_STORE"], "redis")
+        self.assertEqual(env["SESSION_DRIVER"], "redis")
+        self.assertEqual(env["QUEUE_CONNECTION"], "redis")
+        self.assertEqual(env["REDIS_CLIENT"], "phpredis")
 
     def test_normalize_laravel_database_env_rebuilds_database_url(self) -> None:
         env = normalize_laravel_database_env(

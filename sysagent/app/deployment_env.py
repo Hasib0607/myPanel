@@ -69,6 +69,27 @@ def normalize_laravel_redis_env(process_env: dict[str, str], *, redis_loaded: bo
     return process_env
 
 
+def apply_laravel_production_defaults(process_env: dict[str, str], *, redis_loaded: bool | None = None) -> dict[str, str]:
+    """Fill missing Laravel runtime settings with production-safe defaults."""
+    process_env.setdefault("APP_ENV", "production")
+    process_env.setdefault("APP_DEBUG", "false")
+    process_env.setdefault("LOG_LEVEL", "warning")
+
+    if redis_loaded if redis_loaded is not None else php_redis_extension_loaded():
+        process_env.setdefault("CACHE_DRIVER", "redis")
+        process_env.setdefault("CACHE_STORE", "redis")
+        process_env.setdefault("SESSION_DRIVER", "redis")
+        process_env.setdefault("QUEUE_CONNECTION", "redis")
+        process_env.setdefault("REDIS_CLIENT", "phpredis")
+        return process_env
+
+    process_env.setdefault("CACHE_DRIVER", "file")
+    process_env.setdefault("CACHE_STORE", "file")
+    process_env.setdefault("SESSION_DRIVER", "file")
+    process_env.setdefault("QUEUE_CONNECTION", "sync")
+    return process_env
+
+
 def normalize_database_charset_env(process_env: dict[str, str]) -> dict[str, str]:
     """Laravel MySQL uses utf8mb4; PostgreSQL client_encoding must be UTF8, not utf8mb4."""
     connection = (process_env.get("DB_CONNECTION") or "").strip().lower()
@@ -138,7 +159,11 @@ def normalize_laravel_https_env(process_env: dict[str, str]) -> dict[str, str]:
 
 def finalize_laravel_process_env(process_env: dict[str, str]) -> dict[str, str]:
     return normalize_laravel_https_env(
-        normalize_laravel_database_env(normalize_laravel_redis_env(normalize_database_charset_env(process_env)))
+        normalize_laravel_database_env(
+            normalize_laravel_redis_env(
+                apply_laravel_production_defaults(normalize_database_charset_env(process_env))
+            )
+        )
     )
 
 
