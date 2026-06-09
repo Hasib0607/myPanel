@@ -363,7 +363,9 @@ add_header Cache-Control $vps_panel_static_cache_control always;
 
     pool_results = []
     pool_changed = False
-    if not settings.allow_live_system_commands:
+    if not settings.web_runtime_php_tuning_enabled:
+        pool_results.append({"skipped": True, "reason": "web runtime PHP tuning disabled"})
+    elif not settings.allow_live_system_commands:
         pool_results.append({"dryRun": True, "reason": "live system commands disabled"})
     else:
         Path("/var/log/php-fpm").mkdir(parents=True, exist_ok=True)
@@ -387,7 +389,9 @@ add_header Cache-Control $vps_panel_static_cache_control always;
 
     ini_results = []
     ini_changed = False
-    if not settings.allow_live_system_commands:
+    if not settings.web_runtime_php_tuning_enabled:
+        ini_results.append({"skipped": True, "reason": "web runtime PHP tuning disabled"})
+    elif not settings.allow_live_system_commands:
         ini_results.append({"dryRun": True, "reason": "live system commands disabled"})
     else:
         for ini_path in php_ini_paths():
@@ -409,3 +413,28 @@ add_header Cache-Control $vps_panel_static_cache_control always;
     results["phpIni"] = ini_results
     results["phpFpmReload"] = reload_php_fpm() if settings.allow_live_system_commands and (pool_changed or ini_changed) else None
     return {"ok": True, "results": results}
+
+
+@router.post("/web-runtime-optimizations/rollback-php")
+def rollback_web_runtime_php_tuning() -> dict:
+    if not settings.allow_live_system_commands:
+        return {"ok": True, "dryRun": True, "reason": "live system commands disabled"}
+
+    restored = []
+    for path in [*php_fpm_pool_paths(), *php_ini_paths()]:
+        backup = path.with_suffix(f"{path.suffix}.vps-panel.bak")
+        if not backup.exists():
+            restored.append({"path": str(path), "restored": False, "reason": "backup missing"})
+            continue
+        try:
+            path.write_text(backup.read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
+            restored.append({"path": str(path), "restored": True, "backup": str(backup)})
+        except OSError as error:
+            restored.append({"path": str(path), "restored": False, "error": str(error)})
+
+    did_restore = any(item.get("restored") for item in restored)
+    return {
+        "ok": True,
+        "restored": restored,
+        "phpFpmReload": reload_php_fpm() if did_restore else None,
+    }
