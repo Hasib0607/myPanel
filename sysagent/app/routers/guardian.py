@@ -95,6 +95,7 @@ RATE_LIMIT_TEMPLATES = {
     "strict": "limit_req_zone $binary_remote_addr zone=vps_panel_guardian:10m rate=3r/s;\nlimit_conn_zone $binary_remote_addr zone=vps_panel_conn:10m;\n",
 }
 PHP_FPM_POOL_GLOBS = ["/etc/php-fpm.d/*.conf", "/etc/php/*/fpm/pool.d/*.conf"]
+PHP_INI_GLOBS = ["/etc/php.ini", "/etc/php/*/fpm/php.ini", "/etc/php/*/cli/php.ini", "/etc/opt/remi/php*/php.ini"]
 
 
 def command_output(command: list[str], timeout: int = 4) -> dict[str, Any]:
@@ -170,6 +171,29 @@ def active_config_value(text: str, key: str) -> str | None:
     return match.group("value").strip() if match else None
 
 
+def config_int(value: Any) -> int | None:
+    try:
+        return int(str(value or "").strip())
+    except ValueError:
+        return None
+
+
+def memory_mb(value: Any) -> int | None:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return None
+    match = re.match(r"^(\d+)\s*([kmg])?$", raw)
+    if not match:
+        return None
+    amount = int(match.group(1))
+    unit = match.group(2) or "m"
+    if unit == "g":
+        return amount * 1024
+    if unit == "k":
+        return max(1, amount // 1024)
+    return amount
+
+
 def php_fpm_pool_config() -> dict[str, Any]:
     configs = []
     for glob in PHP_FPM_POOL_GLOBS:
@@ -182,12 +206,38 @@ def php_fpm_pool_config() -> dict[str, Any]:
             continue
         pools.append({
             "path": str(path),
+            "pm": active_config_value(text, "pm"),
             "maxChildren": active_config_value(text, "pm.max_children"),
+            "startServers": active_config_value(text, "pm.start_servers"),
+            "minSpareServers": active_config_value(text, "pm.min_spare_servers"),
+            "maxSpareServers": active_config_value(text, "pm.max_spare_servers"),
             "statusPath": active_config_value(text, "pm.status_path"),
             "slowlog": active_config_value(text, "slowlog"),
             "slowlogTimeout": active_config_value(text, "request_slowlog_timeout"),
+            "requestTerminateTimeout": active_config_value(text, "request_terminate_timeout"),
         })
     return {"pools": pools}
+
+
+def php_ini_config() -> dict[str, Any]:
+    configs = []
+    for glob in PHP_INI_GLOBS:
+        configs.extend(Path("/").glob(glob.lstrip("/")))
+    files = []
+    for path in sorted(set(configs)):
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        files.append({
+            "path": str(path),
+            "memoryLimit": active_config_value(text, "memory_limit"),
+            "maxExecutionTime": active_config_value(text, "max_execution_time"),
+            "opcacheMemoryConsumption": active_config_value(text, "opcache.memory_consumption"),
+            "opcacheMaxAcceleratedFiles": active_config_value(text, "opcache.max_accelerated_files"),
+            "opcacheValidateTimestamps": active_config_value(text, "opcache.validate_timestamps"),
+        })
+    return {"files": files}
 
 
 def php_fpm_max_children_hits() -> dict[str, Any]:
@@ -204,9 +254,12 @@ def php_fpm_max_children_hits() -> dict[str, Any]:
 def opcache_status() -> dict[str, Any]:
     result = shell_output("php -i 2>/dev/null | grep -i 'opcache.enable\\|opcache.memory_consumption\\|opcache.validate_timestamps' || true")
     stdout = result.get("stdout") or ""
+    memory_match = re.search(r"opcache\.memory_consumption\s*=>\s*(?P<value>\d+)", stdout, re.IGNORECASE)
+    validate_on = "opcache.validate_timestamps => On => On" in stdout
     return {
         "enabled": "opcache.enable => On => On" in stdout,
-        "validateTimestamps": "opcache.validate_timestamps => On => On" in stdout,
+        "memoryConsumption": int(memory_match.group("value")) if memory_match else None,
+        "validateTimestamps": validate_on,
         "raw": stdout,
         "result": result,
     }
@@ -371,12 +424,38 @@ def performance_guard(memory: Any, disk: Any, cpu_percent: float, load_average: 
         if item.get("healthy") and not item.get("memoryLimitBytes")
     ]
     fpm_config = php_fpm_pool_config()
+    php_ini = php_ini_config()
     fpm_hits = php_fpm_max_children_hits()
     opcache = opcache_status()
     nginx_runtime = nginx_runtime_config()
     fpm_pools = fpm_config.get("pools", [])
+    ini_files = php_ini.get("files", [])
     fpm_slowlog_ready = any(pool.get("slowlog") and pool.get("slowlogTimeout") not in {None, "0", "0s"} for pool in fpm_pools)
     fpm_status_ready = any(pool.get("statusPath") for pool in fpm_pools)
+    fpm_capacity_ready = any(
+        str(pool.get("pm") or "").lower() == "dynamic"
+        and (config_int(pool.get("maxChildren")) or 0) >= 80
+        and (config_int(pool.get("startServers")) or 0) >= 10
+        and (config_int(pool.get("minSpareServers")) or 0) >= 10
+        and (config_int(pool.get("maxSpareServers")) or 0) >= 30
+        and str(pool.get("requestTerminateTimeout") or "") == "30s"
+        for pool in fpm_pools
+    )
+    php_runtime_ready = any(
+        (memory_mb(item.get("memoryLimit")) or 0) >= 512
+        and str(item.get("maxExecutionTime") or "") == "30"
+        for item in ini_files
+    )
+    opcache_ini_ready = any(
+        (config_int(item.get("opcacheMemoryConsumption")) or 0) >= 256
+        and (config_int(item.get("opcacheMaxAcceleratedFiles")) or 0) >= 20000
+        and str(item.get("opcacheValidateTimestamps") or "").lower() in {"0", "off", "false"}
+        for item in ini_files
+    )
+    opcache_ready = bool(opcache.get("enabled")) and (
+        ((opcache.get("memoryConsumption") or 0) >= 256 and not opcache.get("validateTimestamps"))
+        or opcache_ini_ready
+    )
     fpm_max_child_hit_count = sum(int(item.get("count") or 0) for item in fpm_hits.get("hits", []))
     checks = [
         {
@@ -385,6 +464,13 @@ def performance_guard(memory: Any, disk: Any, cpu_percent: float, load_average: 
             "status": "pass" if fpm_max_child_hit_count == 0 else "warn",
             "detail": "No max_children warnings found in the last 24h." if fpm_max_child_hit_count == 0 else f"{fpm_max_child_hit_count} max_children warning(s) found in PHP-FPM logs.",
             "safeAction": None if fpm_max_child_hit_count == 0 else "Increase pm.max_children only after checking RAM headroom, or reduce slow PHP requests.",
+        },
+        {
+            "key": "php_fpm_capacity",
+            "label": "PHP-FPM production capacity",
+            "status": "pass" if fpm_capacity_ready else "warn",
+            "detail": "At least one PHP-FPM pool has production capacity tuning." if fpm_capacity_ready else "No PHP-FPM pool shows pm=dynamic, max_children>=80, warm spare workers, and 30s terminate timeout.",
+            "safeAction": None if fpm_capacity_ready else "Run deploy preflight/web runtime optimization, or set pm.max_children=80-150 with enough RAM headroom.",
         },
         {
             "key": "php_fpm_slowlog",
@@ -403,9 +489,16 @@ def performance_guard(memory: Any, disk: Any, cpu_percent: float, load_average: 
         {
             "key": "opcache",
             "label": "PHP OPcache",
-            "status": "pass" if opcache.get("enabled") else "warn",
-            "detail": "OPcache is enabled." if opcache.get("enabled") else "OPcache is not enabled for PHP CLI/FPM checks.",
-            "safeAction": None if opcache.get("enabled") else "Enable OPcache for PHP-FPM. For production, consider validate_timestamps=0 only with deploy-time PHP-FPM reload.",
+            "status": "pass" if opcache_ready else "warn",
+            "detail": "OPcache has production tuning." if opcache_ready else "OPcache is missing, too small, or validate_timestamps is still enabled.",
+            "safeAction": None if opcache_ready else "Use opcache.memory_consumption=256, opcache.max_accelerated_files=20000, and opcache.validate_timestamps=0 with deploy-time PHP-FPM reload.",
+        },
+        {
+            "key": "php_runtime_limits",
+            "label": "PHP runtime limits",
+            "status": "pass" if php_runtime_ready else "warn",
+            "detail": "PHP memory_limit and max_execution_time match production targets." if php_runtime_ready else "PHP ini does not show memory_limit>=512M and max_execution_time=30.",
+            "safeAction": None if php_runtime_ready else "Run deploy preflight/web runtime optimization, or set memory_limit=512M and max_execution_time=30.",
         },
         {
             "key": "nginx_json_compression",
@@ -505,6 +598,7 @@ def performance_guard(memory: Any, disk: Any, cpu_percent: float, load_average: 
             "phpFpmMaxChildrenHits": fpm_max_child_hit_count,
         },
         "phpFpm": {"config": fpm_config, "maxChildren": fpm_hits},
+        "phpIni": php_ini,
         "opcache": opcache,
         "nginx": nginx_runtime,
         "checks": checks,

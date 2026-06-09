@@ -20,6 +20,27 @@ from app.nginx_manager import (
 
 router = APIRouter()
 PHP_FPM_POOL_GLOBS = ["/etc/php-fpm.d/*.conf", "/etc/php/*/fpm/pool.d/*.conf"]
+PHP_INI_GLOBS = ["/etc/php.ini", "/etc/php/*/fpm/php.ini", "/etc/php/*/cli/php.ini", "/etc/opt/remi/php*/php.ini"]
+PHP_FPM_POOL_TUNING = {
+    "pm": "dynamic",
+    "pm.max_children": "120",
+    "pm.start_servers": "10",
+    "pm.min_spare_servers": "10",
+    "pm.max_spare_servers": "30",
+    "pm.status_path": "/fpm-status",
+    "slowlog": "/var/log/php-fpm/www-slow.log",
+    "request_slowlog_timeout": "5s",
+    "request_terminate_timeout": "30s",
+}
+PHP_INI_TUNING = {
+    "max_execution_time": "30",
+    "memory_limit": "512M",
+    "opcache.enable": "1",
+    "opcache.enable_cli": "1",
+    "opcache.memory_consumption": "256",
+    "opcache.max_accelerated_files": "20000",
+    "opcache.validate_timestamps": "0",
+}
 
 
 class VhostRequest(BaseModel):
@@ -242,9 +263,24 @@ def set_pool_directive(text: str, key: str, value: str) -> str:
     return f"{text.rstrip()}\n{line}\n"
 
 
+def set_ini_directive(text: str, key: str, value: str) -> str:
+    pattern = re.compile(rf"^\s*;?\s*{re.escape(key)}\s*=.*$", re.MULTILINE)
+    line = f"{key} = {value}"
+    if pattern.search(text):
+        return pattern.sub(line, text, count=1)
+    return f"{text.rstrip()}\n{line}\n"
+
+
 def php_fpm_pool_paths() -> list[Path]:
     paths: list[Path] = []
     for glob in PHP_FPM_POOL_GLOBS:
+        paths.extend(Path("/").glob(glob.lstrip("/")))
+    return sorted(set(path for path in paths if path.is_file()))
+
+
+def php_ini_paths() -> list[Path]:
+    paths: list[Path] = []
+    for glob in PHP_INI_GLOBS:
         paths.extend(Path("/").glob(glob.lstrip("/")))
     return sorted(set(path for path in paths if path.is_file()))
 
@@ -334,9 +370,9 @@ add_header Cache-Control $vps_panel_static_cache_control always;
         for pool_path in php_fpm_pool_paths():
             try:
                 original = pool_path.read_text(encoding="utf-8", errors="ignore")
-                updated = set_pool_directive(original, "pm.status_path", "/fpm-status")
-                updated = set_pool_directive(updated, "slowlog", "/var/log/php-fpm/www-slow.log")
-                updated = set_pool_directive(updated, "request_slowlog_timeout", "5s")
+                updated = original
+                for key, value in PHP_FPM_POOL_TUNING.items():
+                    updated = set_pool_directive(updated, key, value)
                 changed = updated != original
                 if changed:
                     backup = pool_path.with_suffix(f"{pool_path.suffix}.vps-panel.bak")
@@ -348,5 +384,28 @@ add_header Cache-Control $vps_panel_static_cache_control always;
             except OSError as error:
                 pool_results.append({"path": str(pool_path), "error": str(error)})
     results["phpFpmPools"] = pool_results
-    results["phpFpmReload"] = reload_php_fpm() if settings.allow_live_system_commands and pool_changed else None
+
+    ini_results = []
+    ini_changed = False
+    if not settings.allow_live_system_commands:
+        ini_results.append({"dryRun": True, "reason": "live system commands disabled"})
+    else:
+        for ini_path in php_ini_paths():
+            try:
+                original = ini_path.read_text(encoding="utf-8", errors="ignore")
+                updated = original
+                for key, value in PHP_INI_TUNING.items():
+                    updated = set_ini_directive(updated, key, value)
+                changed = updated != original
+                if changed:
+                    backup = ini_path.with_suffix(f"{ini_path.suffix}.vps-panel.bak")
+                    if not backup.exists():
+                        backup.write_text(original, encoding="utf-8")
+                    ini_path.write_text(updated, encoding="utf-8")
+                    ini_changed = True
+                ini_results.append({"path": str(ini_path), "changed": changed})
+            except OSError as error:
+                ini_results.append({"path": str(ini_path), "error": str(error)})
+    results["phpIni"] = ini_results
+    results["phpFpmReload"] = reload_php_fpm() if settings.allow_live_system_commands and (pool_changed or ini_changed) else None
     return {"ok": True, "results": results}
