@@ -73,6 +73,7 @@ export function buildApp() {
   app.addHook("preHandler", async (request, reply) => {
     const unsafe = !["GET", "HEAD", "OPTIONS"].includes(request.method);
     if (!unsafe || request.url.startsWith("/api/v1/auth/login") || request.url.startsWith("/api/v1/auth/account/login") || request.url.startsWith("/api/v1/webhooks/")) return;
+    if (bearerToken(request.headers.authorization)) return;
 
     if (!validCsrfPair(request.cookies[csrfCookieName], request.headers[csrfHeaderName])) {
       return reply.code(403).send({ error: "Invalid CSRF token" });
@@ -92,7 +93,7 @@ export function buildApp() {
 
   app.decorate("requireAccount", async (request: any, reply: any) => {
     try {
-      const token = request.cookies.account_session;
+      const token = bearerToken(request.headers.authorization) ?? request.cookies.account_session;
       if (!token) return reply.code(401).send({ error: "Unauthorized" });
       request.user = app.jwt.verify(token);
       if (request.user?.role !== "account" || !request.user?.accountId) {
@@ -152,4 +153,10 @@ export function buildApp() {
   app.register(whmMigrationRoutes, { prefix: "/api/v1/whm-migrations" });
 
   return app;
+}
+
+function bearerToken(value: unknown) {
+  if (typeof value !== "string") return null;
+  const match = value.match(/^Bearer\s+(.+)$/i);
+  return match?.[1]?.trim() || null;
 }
