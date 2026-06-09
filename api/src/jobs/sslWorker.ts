@@ -1,5 +1,6 @@
 import { Worker } from "bullmq";
 import { redis } from "../lib/redis.js";
+import { sslQueue } from "./queues.js";
 import { logger } from "../lib/logger.js";
 import { env } from "../config/env.js";
 import { prisma } from "../lib/prisma.js";
@@ -265,6 +266,44 @@ async function assertHttpSslDnsReady(domainName: string, includeWww: boolean) {
   }
 }
 
+async function rescheduleAccountAutoSslForDns(job: any, error: unknown) {
+  if (job.data?.source !== "account-auto-domain-ssl") return null;
+  if (job.data?.domainId) {
+    const domain = await prisma.domain.findUnique({ where: { id: job.data.domainId }, select: { sslEnabled: true } });
+    if (domain?.sslEnabled) {
+      return { pendingDns: false, skipped: true, reason: "SSL is already enabled" };
+    }
+  }
+
+  const nextRetry = Number(job.data?.autoRetryCount ?? 0) + 1;
+  if (nextRetry > env.ACCOUNT_DOMAIN_AUTO_SSL_ATTEMPTS) return null;
+
+  const retry = await sslQueue.add("issue", {
+    ...job.data,
+    autoRetryCount: nextRetry
+  }, {
+    delay: env.ACCOUNT_DOMAIN_AUTO_SSL_RETRY_DELAY_MS,
+    attempts: 1,
+    removeOnComplete: 100,
+    removeOnFail: 500
+  });
+
+  const message = error instanceof Error ? error.message : String(error);
+  logger.warn("account auto SSL waiting for DNS; retry scheduled", {
+    domain: job.data.domain,
+    retry: nextRetry,
+    retryJobId: retry.id,
+    message
+  });
+  return {
+    pendingDns: true,
+    retryJobId: retry.id,
+    retryInMs: env.ACCOUNT_DOMAIN_AUTO_SSL_RETRY_DELAY_MS,
+    retry: nextRetry,
+    message
+  };
+}
+
 export const sslWorker = new Worker(
   "ssl",
   async (job) => {
@@ -280,7 +319,13 @@ export const sslWorker = new Worker(
       if (!result) {
         const dnsChallenge = isWildcardHostname(job.data.domain) || job.data.dnsChallenge;
         if (!dnsChallenge) {
-          await assertHttpSslDnsReady(job.data.domain, includeWww);
+          try {
+            await assertHttpSslDnsReady(job.data.domain, includeWww);
+          } catch (error) {
+            const scheduled = await rescheduleAccountAutoSslForDns(job, error);
+            if (scheduled) return scheduled;
+            throw error;
+          }
           await publishHttpChallengeVhost(
             job.data.domain,
             job.data.domainId,

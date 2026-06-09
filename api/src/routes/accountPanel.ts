@@ -1015,6 +1015,60 @@ async function accountSubdomainSslPreflight(request: any, subdomainId: string) {
   };
 }
 
+async function publishAccountDomainRoute(request: any, account: { id: string; homeRoot: string }, domainId: string) {
+  const domain = await prisma.domain.findFirstOrThrow({
+    where: { id: domainId, accountId: account.id },
+    include: {
+      dnsRecords: true,
+      deployments: { orderBy: { createdAt: "desc" }, take: 1 },
+      deploymentBindings: {
+        orderBy: [{ role: "asc" }, { createdAt: "asc" }],
+        take: 1,
+        include: { deployment: true }
+      }
+    }
+  });
+  const dnsResult = await sysagent.applyDnsZone({ domain: domain.name, zone: renderZone(domain.name, domain.dnsRecords) });
+  const deployment = domain.hostingDeploymentId
+    ? await prisma.deployment.findFirst({ where: { id: domain.hostingDeploymentId, accountId: account.id } })
+    : domain.deploymentBindings[0]?.deployment ?? domain.deployments[0] ?? null;
+  const nginxResult = deployment && deploymentIsRoutable(deployment)
+    ? await sysagent.deploymentNginx(
+        buildDeploymentNginxRequest({
+          deploymentId: deployment.id,
+          fqdn: `${domain.name} www.${domain.name}`,
+          upstreamPort: deployment.port,
+          rootPath: accountDeploymentAppPath(deployment),
+          framework: deployment.framework,
+          startCommand: deployment.startCommand,
+          publicDirectory: deployment.publicDirectory,
+          outputDirectory: deployment.outputDirectory,
+          fallbackRootPath: path.join(account.homeRoot, normalizeDocumentRoot(domain.documentRoot)),
+          forceSsl: domain.forceSsl && domain.sslEnabled
+        })
+      )
+    : domain.hostingMode === "REDIRECT"
+      ? await sysagent.writeRedirectNginxVhost({
+          name: `domain-${nginxResourceName(domain.name)}`,
+          serverName: `${domain.name} www.${domain.name}`,
+          redirectUrl: normalizeRedirectUrl(domain.redirectUrl)
+        })
+      : await sysagent.writeStaticNginxVhost({
+          name: `domain-${nginxResourceName(domain.name)}`,
+          serverName: `${domain.name} www.${domain.name}`,
+          rootPath: path.join(account.homeRoot, normalizeDocumentRoot(domain.documentRoot)),
+          forceHttps: domain.forceSsl && domain.sslEnabled,
+          ...(domain.sslEnabled
+            ? {
+                sslCertificate: `/etc/letsencrypt/live/${domain.name}/fullchain.pem`,
+                sslCertificateKey: `/etc/letsencrypt/live/${domain.name}/privkey.pem`
+              }
+            : {})
+        });
+  await audit(request, { action: "APPLY", resource: "domain", resourceId: domain.id, description: `Account published DNS and website for ${domain.name}`, metadata: { dnsResult, nginxResult } as any });
+  return { domain, dnsResult, nginxResult };
+}
+
 async function queueAccountBulkDomainSslJobs(account: { homeRoot: string }, domains: Array<{ id: string; name: string; documentRoot?: string | null; forceSsl: boolean }>) {
   const jobs = [];
   for (const [index, domain] of domains.entries()) {
@@ -1446,17 +1500,26 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       const sslJob = env.ACCOUNT_DOMAIN_AUTO_SSL_ENABLED && body.autoSsl && body.forceSsl
         ? await queueAccountAutoDomainSslJob(account, domain, body.autoSslIncludeWww)
         : null;
+      let publishResult: Awaited<ReturnType<typeof publishAccountDomainRoute>> | null = null;
+      let publishWarning: string | null = null;
+      try {
+        publishResult = await publishAccountDomainRoute(request, account, domain.id);
+      } catch (error) {
+        publishWarning = error instanceof Error ? error.message : "Domain publish failed";
+      }
       await audit(request, {
         action: "CREATE",
         resource: "domain",
         resourceId: domain.id,
         description: `Account created domain ${domain.name}`,
-        metadata: sslJob ? { autoSslQueued: true, sslJob } as any : undefined
+        metadata: { autoSslQueued: Boolean(sslJob), sslJob, publishWarning } as any
       });
       return reply.code(201).send({
         ...domain,
         autoSslQueued: Boolean(sslJob),
-        sslJob
+        sslJob,
+        publishWarning,
+        publishResult: publishResult ? { dnsResult: publishResult.dnsResult, nginxResult: publishResult.nginxResult } : null
       });
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
@@ -1679,45 +1742,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       }
     });
     const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
-    const dnsResult = await sysagent.applyDnsZone({ domain: domain.name, zone: renderZone(domain.name, domain.dnsRecords) });
-    const deployment = domain.hostingDeploymentId
-      ? await prisma.deployment.findFirst({ where: { id: domain.hostingDeploymentId, accountId: account.id } })
-      : domain.deploymentBindings[0]?.deployment ?? domain.deployments[0] ?? null;
-    const nginxResult = deployment && deploymentIsRoutable(deployment)
-      ? await sysagent.deploymentNginx(
-          buildDeploymentNginxRequest({
-            deploymentId: deployment.id,
-            fqdn: `${domain.name} www.${domain.name}`,
-            upstreamPort: deployment.port,
-            rootPath: accountDeploymentAppPath(deployment),
-            framework: deployment.framework,
-            startCommand: deployment.startCommand,
-            publicDirectory: deployment.publicDirectory,
-            outputDirectory: deployment.outputDirectory,
-            fallbackRootPath: path.join(account.homeRoot, normalizeDocumentRoot(domain.documentRoot)),
-            forceSsl: domain.forceSsl && domain.sslEnabled
-          })
-        )
-      : domain.hostingMode === "REDIRECT"
-        ? await sysagent.writeRedirectNginxVhost({
-          name: `domain-${nginxResourceName(domain.name)}`,
-          serverName: `${domain.name} www.${domain.name}`,
-          redirectUrl: normalizeRedirectUrl(domain.redirectUrl)
-        })
-        : await sysagent.writeStaticNginxVhost({
-            name: `domain-${nginxResourceName(domain.name)}`,
-            serverName: `${domain.name} www.${domain.name}`,
-            rootPath: path.join(account.homeRoot, normalizeDocumentRoot(domain.documentRoot)),
-            forceHttps: domain.forceSsl && domain.sslEnabled,
-            ...(domain.sslEnabled
-              ? {
-                  sslCertificate: `/etc/letsencrypt/live/${domain.name}/fullchain.pem`,
-                  sslCertificateKey: `/etc/letsencrypt/live/${domain.name}/privkey.pem`
-                }
-              : {})
-          });
-    await audit(request, { action: "APPLY", resource: "domain", resourceId: domain.id, description: `Account published DNS and website for ${domain.name}`, metadata: { dnsResult, nginxResult } as any });
-    return reply.code(202).send({ domain, dnsResult, nginxResult });
+    return reply.code(202).send(await publishAccountDomainRoute(request, account, domain.id));
   });
 
   app.delete("/domains/:domainId", async (request: any) => {
