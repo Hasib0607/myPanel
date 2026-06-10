@@ -3,10 +3,10 @@
 import type { ReactNode } from "react";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, CheckCircle2, Clock3, Download, Play, Plus, RefreshCw, RotateCw, ServerCrash, Square, Terminal, Trash2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Clock3, Download, HardDrive, Play, Plus, RefreshCw, RotateCw, ServerCrash, Square, Terminal, Trash2 } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { StatCard } from "@/components/stat-card";
-import { apiDelete, apiGet, apiPost } from "@/lib/api";
+import { apiDelete, apiDeleteBody, apiGet, apiPost } from "@/lib/api";
 
 type ServiceStatus = "healthy" | "down" | "pending";
 type ManagedServiceAction = "install" | "start" | "stop" | "restart" | "enable" | "disable";
@@ -73,6 +73,25 @@ type PanelUpdateStatus = {
     branch: string;
   };
 };
+
+type LargestFilesData = {
+  items: Array<{
+    path: string;
+    name: string;
+    root: string;
+    sizeBytes: number | string;
+    modifiedAt: string | null;
+    deletable: boolean;
+    deleteReason?: string | null;
+  }>;
+  scannedRoots: string[];
+  generatedAt: string;
+};
+
+function toNumber(value: number | string | null | undefined) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : 0;
+}
 
 function formatBytes(value: number) {
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -170,6 +189,11 @@ export function DashboardClient() {
     queryFn: () => apiGet<PanelUpdateStatus>("/webhooks/panel-update/status"),
     refetchInterval: (query) => ["queued", "running"].includes(query.state.data?.status.state ?? "") ? 5_000 : false
   });
+  const largestFiles = useQuery({
+    queryKey: ["dashboard-largest-files"],
+    queryFn: () => apiGet<LargestFilesData>("/dashboard/largest-files"),
+    staleTime: 60_000
+  });
 
   const refreshNameServers = async () => {
     await queryClient.invalidateQueries({ queryKey: ["nameservers"] });
@@ -232,6 +256,13 @@ export function DashboardClient() {
       await panelUpdate.refetch();
     }
   });
+  const deleteLargestFile = useMutation({
+    mutationFn: (path: string) => apiDeleteBody<{ ok: boolean; path: string; removedBytes?: number | string; dryRun?: boolean }>("/dashboard/largest-files", { path }),
+    onSuccess: async () => {
+      await largestFiles.refetch();
+      await dashboard.refetch();
+    }
+  });
 
   const data = dashboard.data;
   const statsUnavailable = data?.systemStats?.unavailable;
@@ -268,6 +299,7 @@ export function DashboardClient() {
         </div>
 
         <div className="grid grid-cols-[1fr_380px] gap-6">
+          <div className="space-y-6">
           <div className="rounded-md border border-panel-line bg-white">
             <div className="flex items-center justify-between border-b border-panel-line px-4 py-3">
               <div className="text-sm font-semibold">Service Health</div>
@@ -313,6 +345,84 @@ export function DashboardClient() {
               </tbody>
             </table>
             {serviceNotice ? <div className="border-t border-panel-line px-4 py-3 text-xs text-panel-muted">{serviceNotice}</div> : null}
+          </div>
+
+          <div className="rounded-md border border-panel-line bg-white">
+            <div className="flex items-center justify-between gap-3 border-b border-panel-line px-4 py-3">
+              <div>
+                <div className="flex items-center gap-2 text-sm font-semibold">
+                  <HardDrive size={16} />
+                  Largest Files
+                </div>
+                <div className="mt-1 text-xs text-panel-muted">
+                  {largestFiles.data ? `Updated ${new Date(largestFiles.data.generatedAt).toLocaleTimeString()}` : "Scanning managed storage roots..."}
+                </div>
+              </div>
+              <button
+                aria-label="Refresh largest files"
+                className="grid h-9 w-9 place-items-center rounded-md border border-panel-line hover:bg-slate-50 disabled:opacity-50"
+                disabled={largestFiles.isFetching}
+                onClick={() => largestFiles.refetch()}
+                title="Refresh largest files"
+                type="button"
+              >
+                <RefreshCw size={15} />
+              </button>
+            </div>
+            {largestFiles.isError ? (
+              <div className="border-b border-red-100 bg-red-50 px-4 py-3 text-sm text-panel-danger">
+                {largestFiles.error instanceof Error ? largestFiles.error.message : "Largest files could not be loaded."}
+              </div>
+            ) : null}
+            {deleteLargestFile.isError ? (
+              <div className="border-b border-red-100 bg-red-50 px-4 py-3 text-sm text-panel-danger">
+                {deleteLargestFile.error instanceof Error ? deleteLargestFile.error.message : "File could not be deleted."}
+              </div>
+            ) : null}
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-left text-xs uppercase text-panel-muted">
+                <tr>
+                  <th className="px-4 py-3">File</th>
+                  <th className="px-4 py-3">Size</th>
+                  <th className="px-4 py-3">Root</th>
+                  <th className="px-4 py-3">Modified</th>
+                  <th className="px-4 py-3 text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(largestFiles.data?.items ?? []).map((file) => (
+                  <tr key={file.path} className="border-t border-panel-line">
+                    <td className="max-w-[460px] px-4 py-3">
+                      <div className="truncate font-medium" title={file.name}>{file.name}</div>
+                      <div className="mt-1 truncate font-mono text-xs text-panel-muted" title={file.path}>{file.path}</div>
+                      {!file.deletable ? <div className="mt-1 text-xs text-amber-700">{file.deleteReason ?? "Protected"}</div> : null}
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-3 font-semibold">{formatBytes(toNumber(file.sizeBytes))}</td>
+                    <td className="whitespace-nowrap px-4 py-3 text-panel-muted">{file.root}</td>
+                    <td className="whitespace-nowrap px-4 py-3 text-panel-muted">{file.modifiedAt ? new Date(file.modifiedAt).toLocaleString() : "-"}</td>
+                    <td className="px-4 py-3 text-right">
+                      <button
+                        aria-label={`Delete ${file.name}`}
+                        className="inline-grid h-8 w-8 place-items-center rounded-md border border-panel-line text-panel-muted hover:bg-red-50 hover:text-panel-danger disabled:opacity-40"
+                        disabled={!file.deletable || deleteLargestFile.isPending}
+                        onClick={() => {
+                          if (window.confirm(`Delete this file?\n\n${file.path}\n\nSize: ${formatBytes(toNumber(file.sizeBytes))}`)) {
+                            deleteLargestFile.mutate(file.path);
+                          }
+                        }}
+                        title={file.deletable ? "Delete file" : file.deleteReason ?? "Protected file"}
+                        type="button"
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {largestFiles.isLoading ? <div className="border-t border-panel-line px-4 py-6 text-sm text-panel-muted">Scanning files...</div> : null}
+            {largestFiles.data?.items.length === 0 ? <div className="border-t border-panel-line px-4 py-6 text-sm text-panel-muted">No large files found above 10 MB.</div> : null}
+          </div>
           </div>
 
           <div className="space-y-6">

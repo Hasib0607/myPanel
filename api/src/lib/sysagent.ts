@@ -34,6 +34,16 @@ export type SysagentBackupUploadJob = {
   result: SysagentCommandResult;
 };
 
+export type SysagentLargestFile = {
+  path: string;
+  name: string;
+  root: string;
+  sizeBytes: number | string;
+  modifiedAt: string | null;
+  deletable: boolean;
+  deleteReason?: string | null;
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
@@ -251,6 +261,10 @@ export const sysagent = {
     request("/database/row", { method: "DELETE", body: JSON.stringify(body) }),
   deleteFiles: (body: unknown) =>
     request<{ ok: true; removed: string[]; dryRun?: boolean }>("/files/delete", { method: "DELETE", body: JSON.stringify(body) }),
+  largestFiles: (body: unknown) =>
+    request<{ items: SysagentLargestFile[]; scannedRoots: string[]; generatedAt: string }>("/files/largest", { method: "POST", body: JSON.stringify(body) }),
+  deleteLargeFile: (body: unknown) =>
+    request<{ ok: true; path: string; removedBytes: number | string; dryRun?: boolean }>("/files/largest", { method: "DELETE", body: JSON.stringify(body) }),
   trashFiles: (body: unknown) =>
     request<{ ok: true; movedToTrash: string[]; permanentlyRemoved: string[]; dryRun?: boolean }>("/files/trash", { method: "POST", body: JSON.stringify(body) }),
   gitStatus: (body: unknown) =>

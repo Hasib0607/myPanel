@@ -109,6 +109,25 @@ export const dashboardRoutes: FastifyPluginAsync = async (app) => {
     };
   });
 
+  app.get("/largest-files", { preHandler: app.requireAuth }, async () => {
+    return sysagent.largestFiles({ limit: 40, minBytes: 10 * 1024 * 1024 });
+  });
+
+  app.delete("/largest-files", { preHandler: app.requireAuth }, async (request) => {
+    const body = z.object({
+      path: z.string().min(1)
+    }).parse(request.body);
+    const result = await sysagent.deleteLargeFile(body);
+    await audit(request, {
+      action: "DELETE",
+      resource: "large_file",
+      resourceId: body.path,
+      description: `Deleted large file ${body.path}`,
+      metadata: { result: result as any }
+    });
+    return result;
+  });
+
   app.post("/services/:serviceKey/:action", { preHandler: app.requireAuth }, async (request, reply) => {
     const { serviceKey, action } = z.object({
       serviceKey: z.enum(["nginx", "bind9", "postfix", "dovecot"]),

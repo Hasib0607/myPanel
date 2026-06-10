@@ -1,4 +1,5 @@
 from __future__ import annotations
+import heapq
 import os
 import re
 import shutil
@@ -18,6 +19,15 @@ router = APIRouter()
 
 class DeleteRequest(BaseModel):
     paths: list[str] = Field(min_length=1, max_length=100)
+
+
+class LargestFilesRequest(BaseModel):
+    limit: int = Field(default=40, ge=1, le=200)
+    minBytes: int = Field(default=10 * 1024 * 1024, ge=0)
+
+
+class DeleteLargeFileRequest(BaseModel):
+    path: str
 
 
 class ChmodRequest(BaseModel):
@@ -87,6 +97,39 @@ LEGACY_SUBDOMAIN_FOLDERS = [
     "backups",
     "private",
 ]
+SKIP_SCAN_DIRS = {
+    ".cache",
+    ".git",
+    ".next/cache",
+    ".npm",
+    ".pnpm-store",
+    "__pycache__",
+    "node_modules",
+}
+PROTECTED_DELETE_NAMES = {
+    ".env",
+    "artisan",
+    "composer.json",
+    "composer.lock",
+    "index.php",
+    "package.json",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+}
+PROTECTED_DELETE_SUFFIXES = {
+    ".cnf",
+    ".conf",
+    ".crt",
+    ".key",
+    ".pem",
+    ".service",
+    ".sock",
+}
+
+
+def iso_timestamp(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
 
 
 def assert_safe_name(name: str) -> None:
@@ -96,6 +139,109 @@ def assert_safe_name(name: str) -> None:
 
 def root_path() -> Path:
     return Path(settings.file_manager_root).resolve()
+
+
+def largest_scan_roots() -> list[tuple[str, Path]]:
+    candidates = [
+        ("accounts", settings.file_manager_root),
+        ("backups", settings.backup_root),
+        ("panel logs", "/var/log/vps-panel"),
+        ("temporary files", "/tmp"),
+    ]
+    roots: list[tuple[str, Path]] = []
+    seen: set[Path] = set()
+    for label, candidate in candidates:
+        try:
+            path = Path(candidate).resolve()
+        except OSError:
+            continue
+        if path in seen or not path.exists() or not path.is_dir():
+            continue
+        seen.add(path)
+        roots.append((label, path))
+    return roots
+
+
+def is_inside(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
+
+
+def delete_protection_reason(path: Path) -> str | None:
+    if path.name in PROTECTED_DELETE_NAMES:
+        return "Protected app/config file"
+    if path.suffix in PROTECTED_DELETE_SUFFIXES:
+        return "Protected server/config file type"
+    if any(part in {".git", "vendor", "node_modules"} for part in path.parts):
+        return "Dependency or git internals are protected"
+    return None
+
+
+def large_file_delete_allowed(path: Path) -> tuple[bool, str]:
+    try:
+        target = path.resolve()
+    except OSError:
+        return False, "Path is not accessible"
+    if not target.exists():
+        return False, "File no longer exists"
+    if target.is_symlink():
+        return False, "Symlink deletion is blocked"
+    if not target.is_file():
+        return False, "Only files can be deleted from this list"
+    protection = delete_protection_reason(target)
+    if protection:
+        return False, protection
+
+    allowed_roots = [root for _, root in largest_scan_roots()]
+    if not any(is_inside(target, root) for root in allowed_roots):
+        return False, "Path is outside managed cleanup roots"
+    return True, "Allowed"
+
+
+def should_skip_scan_dir(root: str, dirname: str) -> bool:
+    if dirname in SKIP_SCAN_DIRS:
+        return True
+    relative = dirname.strip("/")
+    return relative in SKIP_SCAN_DIRS or f"{Path(root).name}/{relative}" in SKIP_SCAN_DIRS
+
+
+def collect_largest_files(limit: int, min_bytes: int) -> tuple[list[dict], list[str]]:
+    heap: list[tuple[int, float, str, str]] = []
+    scanned_roots: list[str] = []
+    for label, scan_root in largest_scan_roots():
+        scanned_roots.append(str(scan_root))
+        for dirpath, dirnames, filenames in os.walk(scan_root, topdown=True, followlinks=False):
+            dirnames[:] = [name for name in dirnames if not should_skip_scan_dir(dirpath, name)]
+            for filename in filenames:
+                path = Path(dirpath) / filename
+                try:
+                    stat = path.lstat()
+                except OSError:
+                    continue
+                if not os.path.isfile(path) or os.path.islink(path):
+                    continue
+                size = int(stat.st_size)
+                if size < min_bytes:
+                    continue
+                item = (size, float(stat.st_mtime), str(path), label)
+                if len(heap) < limit:
+                    heapq.heappush(heap, item)
+                elif size > heap[0][0]:
+                    heapq.heapreplace(heap, item)
+
+    files: list[dict] = []
+    for size, modified_at, path_text, label in sorted(heap, reverse=True):
+        path = Path(path_text)
+        deletable, delete_reason = large_file_delete_allowed(path)
+        files.append({
+            "path": path_text,
+            "name": path.name,
+            "root": label,
+            "sizeBytes": size,
+            "modifiedAt": iso_timestamp(modified_at),
+            "deletable": deletable,
+            "deleteReason": delete_reason,
+        })
+    return files, scanned_roots
 
 
 def safe_path(input_path: str) -> Path:
@@ -113,6 +259,33 @@ def dry_run(command: list[str], path: Path) -> dict:
         "command": command,
         "path": str(path),
         "ok": True,
+    }
+
+
+@router.post("/largest")
+def largest_files(body: LargestFilesRequest) -> dict:
+    files, scanned_roots = collect_largest_files(body.limit, body.minBytes)
+    return {
+        "items": files,
+        "scannedRoots": scanned_roots,
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.delete("/largest")
+def delete_large_file(body: DeleteLargeFileRequest) -> dict:
+    target = Path(body.path)
+    deletable, reason = large_file_delete_allowed(target)
+    if not deletable:
+        raise HTTPException(status_code=400, detail=reason)
+    size = target.stat().st_size
+    if not settings.allow_live_file_manager:
+        return dry_run(["delete-large-file", str(target)], target)
+    target.unlink()
+    return {
+        "ok": True,
+        "path": str(target),
+        "removedBytes": size,
     }
 
 
