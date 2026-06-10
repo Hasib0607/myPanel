@@ -19,11 +19,13 @@ import {
   normalizeLaravelManagedProcesses,
   queueGroupCommand
 } from "../lib/laravelProcesses.js";
+import { normalizeDeploymentResourcePolicy } from "../lib/deploymentResourcePolicy.js";
 
 const staleDeploymentMs = Number(process.env.GUARDIAN_STALE_DEPLOYMENT_MS ?? 15 * 60_000);
 const autoDeployRepairEnabled = process.env.GUARDIAN_AUTO_DEPLOY_REPAIR !== "false";
 const autoDeployCooldownMs = Number(process.env.GUARDIAN_AUTO_DEPLOY_COOLDOWN_MS ?? 30 * 60_000);
 const autoDeployMaxAttempts = Number(process.env.GUARDIAN_AUTO_DEPLOY_MAX_ATTEMPTS_PER_HOUR ?? 2);
+const laravelProductionKeys = ["APP_ENV", "APP_DEBUG", "LOG_LEVEL", "CACHE_DRIVER", "CACHE_STORE", "SESSION_DRIVER", "QUEUE_CONNECTION", "REDIS_CLIENT"] as const;
 
 function deploymentAppPath(rootPath: string, rootDirectory: string | null | undefined) {
   const cleanRootDirectory = (rootDirectory || ".").replace(/^\/+|\/+$/g, "");
@@ -101,6 +103,114 @@ function deploymentLogDir(slug: string) {
 
 function deploymentProcessConfig(value: unknown): Record<string, any> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {};
+}
+
+async function runWebRuntimeWatch() {
+  const diagnosis = await sysagent.guardianDiagnosis() as GuardianDiagnosis & {
+    performanceGuard?: { checks?: Array<{ key?: string; status?: string }> };
+  };
+  const repairKeys = new Set([
+    "php_fpm_capacity",
+    "php_fpm_slowlog",
+    "php_fpm_status",
+    "opcache",
+    "php_runtime_limits",
+    "nginx_json_compression",
+    "nginx_cache_config"
+  ]);
+  const failing = (diagnosis.performanceGuard?.checks ?? [])
+    .filter((check) => check.key && repairKeys.has(check.key) && check.status !== "pass")
+    .map((check) => check.key as string);
+  if (!failing.length) return { changed: false, reason: "web runtime production checks pass" };
+
+  const result = await sysagent.ensureWebRuntimeOptimizations();
+  return { changed: true, failing, result };
+}
+
+async function upsertGuardianDeploymentEnv(deploymentId: string, key: string, value: string) {
+  return prisma.deploymentEnvVar.upsert({
+    where: { deploymentId_key: { deploymentId, key } },
+    update: { value, isSecret: false, secretRef: null },
+    create: { deploymentId, key, value, isSecret: false }
+  });
+}
+
+async function runLaravelProductionWatch() {
+  const deployments = await prisma.deployment.findMany({
+    where: { framework: "LARAVEL", status: "RUNNING" },
+    include: { env: true },
+    orderBy: { updatedAt: "desc" },
+    take: 50
+  });
+  const results = [];
+  let redisReady: boolean | null = null;
+
+  for (const deployment of deployments) {
+    const policy = normalizeDeploymentResourcePolicy(deployment.processConfig);
+    if (policy.priorityTier !== "P1") continue;
+
+    const current = Object.fromEntries(
+      deployment.env
+        .filter((item) => item.value !== null)
+        .map((item) => [item.key.toUpperCase(), item.value as string])
+    );
+    if (redisReady === null) {
+      const tools = await sysagent.deploymentRuntimeTools({ tools: ["redis-cli", "php-ext-redis"] });
+      redisReady = tools.items.every((item) => item.installed);
+    }
+
+    const desired: Record<string, string> = {
+      APP_ENV: "production",
+      APP_DEBUG: "false",
+      LOG_LEVEL: "warning"
+    };
+    if (redisReady) {
+      Object.assign(desired, {
+        CACHE_DRIVER: "redis",
+        CACHE_STORE: "redis",
+        SESSION_DRIVER: "redis",
+        QUEUE_CONNECTION: "redis",
+        REDIS_CLIENT: "phpredis"
+      });
+    }
+
+    const changed = Object.entries(desired)
+      .filter(([key, value]) => (current[key] ?? "").trim().toLowerCase() !== value.toLowerCase());
+    if (!changed.length) {
+      results.push({ deploymentId: deployment.id, slug: deployment.slug, changed: false, redisReady });
+      continue;
+    }
+
+    const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
+    const sync = await sysagent.deploymentPatchLaravelProductionEnv({
+      rootPath: appPath,
+      values: Object.fromEntries(changed)
+    });
+    const failed = sync.dryRun || (typeof sync.returncode === "number" && sync.returncode !== 0);
+    if (!failed) {
+      for (const [key, value] of changed) {
+        await upsertGuardianDeploymentEnv(deployment.id, key, value);
+      }
+    }
+    await prisma.deploymentLog.create({
+      data: {
+        deploymentId: deployment.id,
+        step: "PREFLIGHT",
+        level: failed ? "warn" : "info",
+        message: failed
+          ? "Guardian could not apply P1 Laravel production runtime settings"
+          : "Guardian applied P1 Laravel production runtime settings",
+        metadata: {
+          changed: changed.map(([key]) => key),
+          redisReady,
+          sync
+        } as any
+      }
+    });
+    results.push({ deploymentId: deployment.id, slug: deployment.slug, changed: true, keys: changed.map(([key]) => key), redisReady, sync });
+  }
+
+  return { checked: deployments.length, managedKeys: laravelProductionKeys, results };
 }
 
 function laravelWorkerConfig(value: unknown) {
@@ -1060,6 +1170,12 @@ export const guardianWorker = new Worker(
     }
     if (job.name === "deployment-guard-watch") {
       return runDeploymentGuardWatch();
+    }
+    if (job.name === "web-runtime-watch") {
+      return runWebRuntimeWatch();
+    }
+    if (job.name === "laravel-production-watch") {
+      return runLaravelProductionWatch();
     }
     if (job.name === "deployment-auto-deploy-watch") {
       return runDeploymentAutoDeployPoll();

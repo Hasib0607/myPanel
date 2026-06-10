@@ -181,6 +181,8 @@ export const sysagent = {
     request<SysagentCommandResult>("/deployments/python/repair-runtime", { method: "POST", body: JSON.stringify(body) }),
   deploymentSyncLaravelEnv: (body: { rootPath: string; port?: number; env?: Record<string, string> }) =>
     request<SysagentCommandResult & { envPath?: string; appKey?: string; keyGenerated?: boolean }>("/deployments/laravel/sync-env-file", { method: "POST", body: JSON.stringify(body) }),
+  deploymentPatchLaravelProductionEnv: (body: { rootPath: string; values: Record<string, string> }) =>
+    request<SysagentCommandResult & { envPath?: string; changedKeys?: string[] }>("/deployments/laravel/production-env", { method: "POST", body: JSON.stringify(body) }),
   deploymentRepairSupervisor: (body: unknown) =>
     request<SysagentCommandResult>("/deployments/supervisor/repair", { method: "POST", body: JSON.stringify(body) }),
   deploymentNginxInspect: (body: unknown) =>

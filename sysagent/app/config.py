@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     deployment_nice: int = 10
     deployment_io_weight: int = 100
     deployment_worker_max: int = 3
-    web_runtime_php_tuning_enabled: bool = False
+    web_runtime_php_tuning_enabled: bool = True
     ssl_certbot_timeout_seconds: int = 1800
     deployment_log_root: str = "/var/log/vps-panel/deployments"
     backup_root: str = "/var/backups/vps-panel"

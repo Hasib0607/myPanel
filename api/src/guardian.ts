@@ -4,6 +4,8 @@ import { guardianQueue } from "./jobs/queues.js";
 const intervalMs = Number(process.env.GUARDIAN_INTERVAL_MS ?? 60_000);
 const deploymentDoctorIntervalMs = Number(process.env.GUARDIAN_DEPLOYMENT_DOCTOR_INTERVAL_MS ?? 5 * 60_000);
 const deploymentGuardIntervalMs = Number(process.env.GUARDIAN_DEPLOYMENT_GUARD_INTERVAL_MS ?? 10 * 60_000);
+const webRuntimeIntervalMs = Number(process.env.GUARDIAN_WEB_RUNTIME_INTERVAL_MS ?? 5 * 60_000);
+const laravelProductionIntervalMs = Number(process.env.GUARDIAN_LARAVEL_PRODUCTION_INTERVAL_MS ?? 5 * 60_000);
 const autoDeployPollIntervalMs = Number(process.env.GUARDIAN_AUTO_DEPLOY_POLL_INTERVAL_MS ?? 60_000);
 const panelUpdatePollIntervalMs = Number(process.env.PANEL_UPDATE_POLL_INTERVAL_MS ?? 60_000);
 const sslRenewIntervalMs = Number(process.env.GUARDIAN_SSL_RENEW_INTERVAL_MS ?? 12 * 60 * 60_000);
@@ -30,6 +32,18 @@ async function scheduleGuardian() {
     await guardianQueue.add("deployment-guard-watch", {}, {
       jobId: "guardian-deployment-guard-watch",
       repeat: { every: deploymentGuardIntervalMs },
+      removeOnComplete: 100,
+      removeOnFail: 100
+    });
+    await guardianQueue.add("web-runtime-watch", {}, {
+      jobId: "guardian-web-runtime-watch",
+      repeat: { every: webRuntimeIntervalMs },
+      removeOnComplete: 100,
+      removeOnFail: 100
+    });
+    await guardianQueue.add("laravel-production-watch", {}, {
+      jobId: "guardian-laravel-production-watch",
+      repeat: { every: laravelProductionIntervalMs },
       removeOnComplete: 100,
       removeOnFail: 100
     });
@@ -62,6 +76,8 @@ async function scheduleGuardian() {
       autoHealEnabled,
       intervalMs,
       deploymentDoctorIntervalMs,
+      webRuntimeIntervalMs,
+      laravelProductionIntervalMs,
       autoDeployPollEnabled,
       autoDeployPollIntervalMs,
       panelUpdatePollEnabled,

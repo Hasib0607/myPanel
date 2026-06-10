@@ -230,6 +230,11 @@ class SyncEnvFileRequest(BaseModel):
     env: dict[str, str] | None = None
 
 
+class LaravelProductionEnvRequest(BaseModel):
+    rootPath: str
+    values: dict[str, str]
+
+
 def path_is_within(root: Path, target: Path) -> bool:
     try:
         target.relative_to(root)
@@ -2394,6 +2399,59 @@ def _ensure_laravel_env(root_path: str, port: int | None, env: dict[str, str] | 
 @router.post("/laravel/sync-env-file")
 def sync_laravel_env(body: SyncEnvFileRequest) -> dict:
     return _ensure_laravel_env(body.rootPath, body.port, body.env)
+
+
+@router.post("/laravel/production-env")
+def patch_laravel_production_env(body: LaravelProductionEnvRequest) -> dict:
+    info = path_info(body.rootPath)
+    if not info["allowed"]:
+        return blocked_command("Path escapes configured file manager root", ["patch-laravel-production-env", body.rootPath], info)
+
+    root = Path(body.rootPath).resolve()
+    env_path = root / ".env"
+    if not (root / "artisan").is_file():
+        return {
+            "dryRun": False,
+            "returncode": 1,
+            "stdout": "",
+            "stderr": "Laravel artisan file was not found",
+            "path": info,
+        }
+
+    existing = read_existing_env_values(env_path)
+    existing.update(body.values)
+    if not is_valid_laravel_app_key(existing.get("APP_KEY")):
+        return {
+            "dryRun": False,
+            "returncode": 1,
+            "stdout": "",
+            "stderr": "Laravel APP_KEY is missing or invalid; Guardian will not rotate it during production tuning",
+            "path": info,
+            "envPath": str(env_path),
+        }
+    write_laravel_env_bundle(str(root), existing)
+    clear_laravel_bootstrap_config_cache(str(root))
+    config_clear = guarded_deployment_command(
+        str(root),
+        "php artisan config:clear",
+        env=existing,
+    )
+    config_cache = (
+        guarded_deployment_command(str(root), "php artisan config:cache", env=existing)
+        if config_clear.get("returncode") == 0
+        else {"returncode": 1, "stderr": "Skipped because config:clear failed"}
+    )
+    return {
+        "dryRun": False,
+        "returncode": config_cache.get("returncode", 1),
+        "stdout": f"Patched production keys in {env_path}",
+        "stderr": config_cache.get("stderr") or config_clear.get("stderr") or "",
+        "path": info,
+        "envPath": str(env_path),
+        "changedKeys": sorted(body.values),
+        "configClear": config_clear,
+        "configCache": config_cache,
+    }
 
 
 def verify_laravel_public_index(root_path: str) -> dict:

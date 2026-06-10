@@ -399,6 +399,7 @@ PANEL_UPDATE_SCRIPT=$APP_DIR/scripts/deploy/update-panel.sh
 PANEL_UPDATE_STATUS_FILE=/var/log/vps-panel/self-update-status.json
 PANEL_UPDATE_LOG_FILE=/var/log/vps-panel/self-update.log
 PANEL_UPDATE_PID_FILE=/tmp/vps-panel-self-update.pid
+WEB_RUNTIME_PHP_TUNING_ENABLED=true
 PANEL_UPDATE_API_SERVICE=vps-panel-api
 PANEL_UPDATE_SERVICES=vps-panel-sysagent vps-panel-workers vps-panel-guardian vps-panel-frontend vps-panel-api
 PANEL_UPDATE_DIRTY_STRATEGY=reset
