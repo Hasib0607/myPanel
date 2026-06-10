@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { Fragment, FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Eye, Globe2, ListPlus, Mail, Network, Plus, Search, Settings2, ShieldCheck, Split, Trash2, X } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronUp, Eye, Globe2, ListPlus, Mail, Network, Plus, Search, Settings2, ShieldCheck, Split, Trash2, X } from "lucide-react";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { PageHeader } from "@/components/page-header";
 import { apiDeleteBody, apiGet, apiPatch, apiPost } from "@/lib/api";
@@ -89,6 +89,18 @@ type BulkDomainActionResponse = {
   queueCounts?: Record<string, number>;
 };
 
+type SortColumn = "domain" | "status" | "dns" | "mailboxes" | "subdomains" | "hosting" | "ssl";
+type SortDirection = "asc" | "desc";
+
+function compareSsl(a: Domain, b: Domain, direction: SortDirection) {
+  const rank = (domain: Domain) => {
+    if (domain.sslEnabled) return direction === "asc" ? 1 : 0;
+    if (domain.forceSsl) return direction === "asc" ? 0 : 1;
+    return 2;
+  };
+  return rank(a) - rank(b);
+}
+
 function statusClass(status: DomainStatus) {
   if (status === "ACTIVE") return "bg-emerald-50 text-emerald-700";
   if (status === "SUSPENDED") return "bg-red-50 text-panel-danger";
@@ -151,6 +163,7 @@ export function DomainsClient({
   const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
   const [selectedDomainIds, setSelectedDomainIds] = useState<string[]>([]);
   const [deleteSubdomainTarget, setDeleteSubdomainTarget] = useState<{ domainId: string; subdomainId: string; fqdn: string } | null>(null);
+  const [sort, setSort] = useState<{ column: SortColumn; direction: SortDirection } | null>(null);
   const normalizedNewDomain = normalizeDomainInput(newDomain);
   const parsedBulkDomains = useMemo(() => {
     const domains = bulkText
@@ -171,6 +184,47 @@ export function DomainsClient({
     queryFn: () => apiGet<DomainListResponse>(queryPath)
   });
   const visibleDomains = domains.data?.items ?? [];
+  const sortedVisibleDomains = useMemo(() => {
+    if (!sort) return visibleDomains;
+    const items = [...visibleDomains];
+    const direction = sort.direction === "asc" ? 1 : -1;
+    items.sort((left, right) => {
+      let comparison = 0;
+      switch (sort.column) {
+        case "domain":
+          comparison = left.name.localeCompare(right.name);
+          break;
+        case "status":
+          comparison = left.status.localeCompare(right.status);
+          break;
+        case "dns":
+          comparison = left._count.dnsRecords - right._count.dnsRecords;
+          break;
+        case "mailboxes":
+          comparison = left._count.mailAccounts - right._count.mailAccounts;
+          break;
+        case "subdomains":
+          comparison = left._count.subdomains - right._count.subdomains;
+          break;
+        case "hosting": {
+          const hostingValue = (domain: Domain) => {
+            if (domain.hostingMode === "DEPLOYMENT_PROXY") {
+              const deployment = deploymentItems.find((item) => item.id === domain.hostingDeploymentId);
+              return deployment ? `${domain.hostingMode} ${deployment.name}:${deployment.port}` : domain.hostingMode;
+            }
+            if (domain.hostingMode === "REDIRECT") return `${domain.hostingMode} ${domain.redirectUrl ?? ""}`;
+            return `${domain.hostingMode} ${domain.documentRoot}`;
+          };
+          comparison = hostingValue(left).localeCompare(hostingValue(right));
+          break;
+        }
+        case "ssl":
+          return compareSsl(left, right, sort.direction);
+      }
+      return comparison * direction;
+    });
+    return items;
+  }, [deploymentItems, sort, visibleDomains]);
   const totalDomains = domains.data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(totalDomains / PAGE_SIZE));
   const pageStart = totalDomains === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
@@ -342,6 +396,37 @@ export function DomainsClient({
     }
     if (domain.hostingMode === "REDIRECT") return domain.redirectUrl || "redirect";
     return domain.documentRoot || "public_html";
+  }
+
+  function toggleSort(column: SortColumn) {
+    setSort((current) => {
+      if (current?.column === column) {
+        return { column, direction: current.direction === "asc" ? "desc" : "asc" };
+      }
+      return { column, direction: "asc" };
+    });
+  }
+
+  function sortIndicator(column: SortColumn) {
+    if (sort?.column !== column) return null;
+    return sort.direction === "asc" ? <ChevronUp size={14} /> : <ChevronDown size={14} />;
+  }
+
+  function SortableHeader({ column, label }: { column: SortColumn; label: string }) {
+    const active = sort?.column === column;
+    return (
+      <th className="px-4 py-3">
+        <button
+          className={`inline-flex items-center gap-1 font-semibold uppercase transition-colors ${active ? "text-panel-ink" : "text-panel-muted hover:text-panel-ink"}`}
+          onClick={() => toggleSort(column)}
+          title={active ? `Sorted ${sort?.direction === "asc" ? "ascending" : "descending"}. Click to reverse.` : `Sort by ${label}`}
+          type="button"
+        >
+          {label}
+          {sortIndicator(column)}
+        </button>
+      </th>
+    );
   }
 
   function submitSearch(event: FormEvent<HTMLFormElement>) {
@@ -568,18 +653,18 @@ export function DomainsClient({
                     type="checkbox"
                   />
                 </th>
-                <th className="px-4 py-3">Domain</th>
-                <th className="px-4 py-3">Status</th>
-                <th className="px-4 py-3">DNS</th>
-                <th className="px-4 py-3">Mailboxes</th>
-                <th className="px-4 py-3">Subdomains</th>
-                <th className="px-4 py-3">Hosting</th>
-                <th className="px-4 py-3">SSL</th>
+                <SortableHeader column="domain" label="Domain" />
+                <SortableHeader column="status" label="Status" />
+                <SortableHeader column="dns" label="DNS" />
+                <SortableHeader column="mailboxes" label="Mailboxes" />
+                <SortableHeader column="subdomains" label="Subdomains" />
+                <SortableHeader column="hosting" label="Hosting" />
+                <SortableHeader column="ssl" label="SSL" />
                 <th className="px-4 py-3">Actions</th>
               </tr>
             </thead>
             <tbody>
-              {visibleDomains.map((domain) => (
+              {sortedVisibleDomains.map((domain) => (
                 <Fragment key={domain.id}>
                   <tr className="border-t border-panel-line">
                     <td className="px-4 py-3">
