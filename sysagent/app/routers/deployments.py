@@ -29,7 +29,7 @@ from app.deployment_env import (
     write_laravel_env_bundle,
 )
 from app.deployment_commands import laravel_has_public_web_root, laravel_public_permission_commands, normalize_laravel_start_command, parse_deployment_command, resolve_laravel_public_root
-from app.laravel_nginx import laravel_fpm_socket, nginx_app_locations
+from app.laravel_nginx import laravel_fpm_pool_name, laravel_fpm_socket, nginx_app_locations
 from app.laravel_fpm import (
     laravel_fpm_config_path,
     php_fpm_executable,
@@ -48,6 +48,7 @@ from app.nginx_manager import (
     safe_letsencrypt_path,
     safe_nginx_path,
     safe_web_root,
+    server_name_directive_tokens,
     server_name_tokens,
     _config_has_insecure_port443,
     _config_has_server_name,
@@ -136,6 +137,22 @@ class NginxRequest(BaseModel):
     sslCertificate: str | None = None
     sslCertificateKey: str | None = None
     requireSsl: bool = False
+
+
+class LaravelRuntimeRequest(BaseModel):
+    deploymentId: str
+    name: str
+    rootPath: str
+    serverName: str | None = None
+    upstreamPort: int | None = Field(default=None, ge=1, le=65535)
+    processManager: str | None = None
+    startCommand: str | None = None
+    logDir: str | None = None
+
+
+class LaravelTimingRequest(BaseModel):
+    url: str
+    samples: int = Field(default=5, ge=1, le=10)
 
 
 class RetireNginxRouteRequest(BaseModel):
@@ -1082,6 +1099,227 @@ def laravel_fpm_process(body: ProcessRequest) -> dict:
     }
 
 
+def _laravel_fpm_processes(pool_name: str) -> list[dict]:
+    processes: list[dict] = []
+    needle = f"pool {pool_name}"
+    for proc in psutil.process_iter(["pid", "username", "name", "cmdline", "cpu_percent", "memory_info", "status"]):
+        try:
+            cmdline = " ".join(proc.info.get("cmdline") or [])
+            name = proc.info.get("name") or ""
+            if needle not in cmdline and needle not in name:
+                continue
+            mem = proc.info.get("memory_info")
+            processes.append({
+                "pid": proc.info["pid"],
+                "user": proc.info.get("username"),
+                "name": name,
+                "status": proc.info.get("status"),
+                "cpuPercent": float(proc.info.get("cpu_percent") or 0),
+                "memoryBytes": int(getattr(mem, "rss", 0) or 0),
+                "cmdline": cmdline,
+            })
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return processes
+
+
+def _socket_queue(socket_path: str) -> dict:
+    result = run_command(["ss", "-xln"], allow_live=DEPLOYMENT_COMMANDS_LIVE)
+    stdout = result.get("stdout") or ""
+    queue = {"recvQ": None, "sendQ": None, "raw": ""}
+    for line in stdout.splitlines():
+        if socket_path not in line:
+            continue
+        parts = line.split()
+        if len(parts) >= 4:
+            try:
+                queue["recvQ"] = int(parts[2])
+                queue["sendQ"] = int(parts[3])
+            except ValueError:
+                pass
+        queue["raw"] = line.strip()
+        break
+    return {**queue, "result": result}
+
+
+def _laravel_slowlog(pool_name: str, lines: int = 80) -> dict:
+    candidates = [
+        Path("/var/log/php-fpm") / f"{pool_name}-slow.log",
+        Path("/var/log") / f"{pool_name}-slow.log",
+    ]
+    for path in candidates:
+        if path.exists():
+            stat = path.stat()
+            return {
+                "path": str(path),
+                "exists": True,
+                "sizeBytes": stat.st_size,
+                "modifiedAt": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+                "text": _tail_text(path, lines),
+            }
+    return {"path": str(candidates[0]), "exists": False, "sizeBytes": 0, "modifiedAt": None, "text": ""}
+
+
+def _active_nginx_upstreams_for_server(server_name: str | None) -> list[dict]:
+    if not server_name:
+        return []
+    tokens = server_name_tokens(server_name)
+    upstreams: list[dict] = []
+    for scan_dir in _nginx_scan_dirs():
+        root = Path(scan_dir)
+        if not root.is_dir():
+            continue
+        for conf_path in root.iterdir():
+            try:
+                target = conf_path.resolve() if conf_path.is_symlink() else conf_path
+                text = target.read_text(encoding="utf-8", errors="ignore")
+                claimed = server_name_directive_tokens(text)
+                if not any(token in claimed for token in tokens):
+                    continue
+                for match in re.finditer(r"\b(?:fastcgi_pass|proxy_pass)\s+([^;]+);", text):
+                    upstreams.append({"file": conf_path.name, "path": str(conf_path), "upstream": match.group(1).strip()})
+            except OSError:
+                continue
+    return upstreams
+
+
+def _stale_artisan_serve_processes(root_path: str, port: int | None) -> list[dict]:
+    root = str(Path(root_path).resolve())
+    processes: list[dict] = []
+    for proc in psutil.process_iter(["pid", "username", "cmdline", "cpu_percent", "memory_info"]):
+        try:
+            cmdline = " ".join(proc.info.get("cmdline") or [])
+            if "artisan serve" not in cmdline and "/server.php" not in cmdline:
+                continue
+            if root not in cmdline and (not port or f":{port}" not in cmdline and f"--port {port}" not in cmdline):
+                continue
+            mem = proc.info.get("memory_info")
+            processes.append({
+                "pid": proc.info["pid"],
+                "user": proc.info.get("username"),
+                "cpuPercent": float(proc.info.get("cpu_percent") or 0),
+                "memoryBytes": int(getattr(mem, "rss", 0) or 0),
+                "cmdline": cmdline,
+            })
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return processes
+
+
+@router.post("/laravel/runtime-status")
+def laravel_runtime_status(body: LaravelRuntimeRequest) -> dict:
+    info = path_info(body.rootPath)
+    if not info["allowed"]:
+        return blocked_command("Path escapes configured file manager root", ["laravel-runtime-status", body.name], info)
+    pool_name = laravel_fpm_pool_name(body.deploymentId)
+    socket_path = laravel_fpm_socket(body.deploymentId)
+    config_path = laravel_fpm_config_path(body.deploymentId)
+    processes = _laravel_fpm_processes(pool_name)
+    queue = _socket_queue(socket_path)
+    nginx_upstreams = _active_nginx_upstreams_for_server(body.serverName)
+    expected_upstream = f"unix:{socket_path}"
+    active_socket = any(item.get("upstream") == expected_upstream for item in nginx_upstreams)
+    stale_supervisor = supervisor_program_path(body.name).exists()
+    stale_artisan = _stale_artisan_serve_processes(body.rootPath, body.upstreamPort)
+    slowlog = _laravel_slowlog(pool_name)
+    return {
+        "dryRun": False,
+        "returncode": 0 if Path(socket_path).exists() and active_socket else 1,
+        "path": info,
+        "poolName": pool_name,
+        "socketPath": socket_path,
+        "socketExists": Path(socket_path).exists(),
+        "configPath": str(config_path),
+        "configExists": config_path.exists(),
+        "processCount": len(processes),
+        "processes": processes,
+        "queue": queue,
+        "slowlog": slowlog,
+        "nginx": {
+            "serverName": body.serverName,
+            "expectedUpstream": expected_upstream,
+            "activeSocket": active_socket,
+            "upstreams": nginx_upstreams,
+        },
+        "staleSupervisor": {
+            "configured": stale_supervisor,
+            "program": body.name,
+            "configPath": str(supervisor_program_path(body.name)),
+            "artisanServeProcesses": stale_artisan,
+        },
+    }
+
+
+@router.post("/laravel/runtime-repair")
+def laravel_runtime_repair(body: LaravelRuntimeRequest) -> dict:
+    process_result = laravel_fpm_process(ProcessRequest(
+        deploymentId=body.deploymentId,
+        name=body.name,
+        rootPath=body.rootPath,
+        action="start",
+        processManager=body.processManager,
+        startCommand=body.startCommand or "php-fpm",
+        port=body.upstreamPort,
+        framework="LARAVEL",
+        logDir=body.logDir,
+    ))
+    status = laravel_runtime_status(body)
+    failed = process_result.get("returncode", 0) != 0 or status.get("returncode", 0) != 0
+    return {
+        "dryRun": bool(process_result.get("dryRun")),
+        "returncode": 1 if failed else 0,
+        "process": process_result,
+        "status": status,
+    }
+
+
+@router.post("/laravel/timing")
+def laravel_timing(body: LaravelTimingRequest) -> dict:
+    samples: list[dict] = []
+    for index in range(body.samples):
+        result = run_command([
+            "curl",
+            "-sS",
+            "-o", "/dev/null",
+            "--max-time", "60",
+            "-w", "code=%{http_code} start=%{time_starttransfer} total=%{time_total}",
+            body.url,
+        ], allow_live=DEPLOYMENT_COMMANDS_LIVE)
+        stdout = result.get("stdout") or ""
+        parsed = {"index": index + 1, "httpCode": 0, "startTransferSeconds": None, "totalSeconds": None, "result": result}
+        for token in stdout.split():
+            key, _, value = token.partition("=")
+            if key == "code":
+                try:
+                    parsed["httpCode"] = int(value)
+                except ValueError:
+                    parsed["httpCode"] = 0
+            if key == "start":
+                try:
+                    parsed["startTransferSeconds"] = float(value)
+                except ValueError:
+                    pass
+            if key == "total":
+                try:
+                    parsed["totalSeconds"] = float(value)
+                except ValueError:
+                    pass
+        samples.append(parsed)
+        if index < body.samples - 1:
+            time.sleep(0.25)
+    totals = sorted(item["totalSeconds"] for item in samples if isinstance(item.get("totalSeconds"), float))
+    p50 = totals[len(totals) // 2] if totals else None
+    p95 = totals[min(len(totals) - 1, int(len(totals) * 0.95))] if totals else None
+    return {
+        "dryRun": any((item["result"] or {}).get("dryRun") for item in samples),
+        "returncode": 0 if samples and all((item["result"] or {}).get("returncode", 0) == 0 for item in samples) else 1,
+        "url": body.url,
+        "samples": samples,
+        "p50Seconds": p50,
+        "p95Seconds": p95,
+    }
+
+
 def laravel_worker_status(body: LaravelWorkersRequest) -> dict:
     info = path_info(body.rootPath)
     return {
@@ -1598,6 +1836,26 @@ def _remove_managed_nginx_config(config_name: str) -> list[str]:
     return removed
 
 
+def _public_route_upstream_failed(result: dict) -> bool:
+    http_code = result.get("httpCode")
+    detail = f"{result.get('stderr') or ''}\n{result.get('stdout') or ''}".lower()
+    return http_code in {502, 503, 504} or any(
+        token in detail
+        for token in ("bad gateway", "upstream", "connect() failed", "connection refused")
+    )
+
+
+def _laravel_nginx_post_reload_check(server_name: str, public_root: str, framework: str | None, *, require_https: bool) -> dict:
+    route = _curl_public_route(server_name, "/", public_root, framework, require_https=require_https)
+    if not _public_route_upstream_failed(route):
+        return {**route, "returncode": 0}
+    return {
+        **route,
+        "returncode": 1,
+        "stderr": route.get("stderr") or f"HTTP {route.get('httpCode')} after Nginx reload",
+    }
+
+
 @router.post("/nginx-retire")
 def nginx_retire(body: RetireNginxRouteRequest) -> dict:
     try:
@@ -1771,6 +2029,11 @@ server {{
             nginx_sites_available(),
             nginx_sites_enabled(),
             server_name=server_name,
+            post_reload_check=(
+                lambda: _laravel_nginx_post_reload_check(server_name, str(public_root), body.framework, require_https=has_ssl and body.forceSsl)
+                if (body.framework or "").upper() == "LARAVEL"
+                else None
+            ),
         )
         return {
             **result,

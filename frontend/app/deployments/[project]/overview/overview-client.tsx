@@ -4,9 +4,9 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, ArrowDownToLine, ArrowUpFromLine, CheckCircle2, Cpu, Database, FolderGit2, Globe2, HardDrive, HeartPulse, KeyRound, ListChecks, MemoryStick, Network, RefreshCw, TerminalSquare, Wrench } from "lucide-react";
+import { Activity, ArrowDownToLine, ArrowUpFromLine, CheckCircle2, Cpu, Database, FolderGit2, Gauge, Globe2, HardDrive, HeartPulse, KeyRound, ListChecks, MemoryStick, Network, RefreshCw, ServerCog, TerminalSquare, Wrench } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
-import type { Deployment, DeploymentDoctorApproval, DeploymentDoctorResponse, DeploymentMetrics, PreflightResponse, QueueResponse } from "../../deployment-types";
+import type { Deployment, DeploymentDoctorApproval, DeploymentDoctorResponse, DeploymentMetrics, LaravelRuntimeStatus, LaravelTimingResult, PreflightResponse, QueueResponse } from "../../deployment-types";
 import { ActionButton, DeploymentSummary, EmptyState, Metric, ProjectTabs, ResultNotice, actionIcon, formatDate, formatDuration, statusBadge } from "../../deployment-ui";
 
 export function DeploymentOverviewClient({ project }: { project: string }) {
@@ -84,6 +84,7 @@ export function DeploymentOverviewClient({ project }: { project: string }) {
           <>
             <DeploymentSummary deployment={deployment} />
             <ResourceOverview metrics={metrics.data} loading={metrics.isLoading || metrics.isFetching} />
+            {deployment.framework === "LARAVEL" ? <LaravelRuntimePanel project={project} deployment={deployment} /> : null}
 
             <div className="flex flex-wrap items-center gap-2">
               {(["deploy", "redeploy", "pull", "rollback", "start", "stop", "restart"] as const).map((name) => (
@@ -335,6 +336,111 @@ function UsageCard({ icon, label, value, detail }: { icon: ReactNode; label: str
       <div className="mt-1 truncate text-xs text-panel-muted" title={typeof detail === "string" ? detail : undefined}>{detail}</div>
     </div>
   );
+}
+
+function LaravelRuntimePanel({ project, deployment }: { project: string; deployment: Deployment }) {
+  const queryClient = useQueryClient();
+  const [timing, setTiming] = useState<LaravelTimingResult | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const runtime = useQuery({
+    queryKey: ["deployment-laravel-runtime", project],
+    queryFn: () => apiGet<LaravelRuntimeStatus>(`/deployments/${project}/laravel-runtime`),
+    refetchInterval: 15000
+  });
+  const repair = useMutation({
+    mutationFn: () => apiPost<{ repair: unknown; route: unknown; status: LaravelRuntimeStatus }>(`/deployments/${project}/laravel-runtime/repair`, {}),
+    onSuccess: async () => {
+      setNotice("Laravel runtime repair completed.");
+      await Promise.all([
+        runtime.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["deployment-doctor", project] }),
+        queryClient.invalidateQueries({ queryKey: ["deployment-metrics", project] })
+      ]);
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Laravel runtime repair failed")
+  });
+  const timingCheck = useMutation({
+    mutationFn: () => apiPost<LaravelTimingResult>(`/deployments/${project}/laravel-runtime/timing`, { samples: 5 }),
+    onSuccess: (result) => {
+      setTiming(result);
+      setNotice("Timing check completed.");
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Timing check failed")
+  });
+  const data = runtime.data;
+  const ok = Boolean(data?.socketExists && data?.nginx.activeSocket && !data?.staleSupervisor.configured && !data?.staleSupervisor.artisanServeProcesses.length);
+  return (
+    <div className="rounded-md border border-panel-line bg-white">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-panel-line p-4">
+        <div className="flex items-center gap-2 text-sm font-semibold">
+          <ServerCog size={16} />
+          Laravel Runtime
+          <span className={`rounded-md px-2 py-1 text-xs font-semibold ${ok ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800"}`}>
+            {runtime.isLoading ? "checking" : ok ? "PHP-FPM ready" : "attention"}
+          </span>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button className="flex h-8 items-center gap-2 rounded-md border border-panel-line px-3 text-xs font-semibold hover:bg-slate-50 disabled:opacity-50" disabled={runtime.isFetching} onClick={() => runtime.refetch()} type="button">
+            <RefreshCw size={14} />Status
+          </button>
+          <button className="flex h-8 items-center gap-2 rounded-md border border-panel-line px-3 text-xs font-semibold hover:bg-slate-50 disabled:opacity-50" disabled={timingCheck.isPending} onClick={() => timingCheck.mutate()} type="button">
+            <Gauge size={14} />Timing Test
+          </button>
+          <button className="flex h-8 items-center gap-2 rounded-md bg-panel-accent px-3 text-xs font-semibold text-white disabled:opacity-50" disabled={repair.isPending} onClick={() => repair.mutate()} type="button">
+            <Wrench size={14} />Repair PHP-FPM
+          </button>
+        </div>
+      </div>
+      <div className="grid gap-3 p-4 lg:grid-cols-4">
+        <RuntimeMini label="Pool" value={data?.poolName ?? "Loading..."} detail={`${data?.processCount ?? 0} PHP-FPM processes`} />
+        <RuntimeMini label="Socket" value={data?.socketExists ? "Active" : "Missing"} detail={data?.socketPath ?? "-"} danger={Boolean(data && !data.socketExists)} />
+        <RuntimeMini label="Nginx socket" value={data?.nginx.activeSocket ? "Matched" : "Mismatch"} detail={data?.nginx.expectedUpstream ?? "-"} danger={Boolean(data && !data.nginx.activeSocket)} />
+        <RuntimeMini label="Queue" value={`${data?.queue.recvQ ?? 0}/${data?.queue.sendQ ?? 0}`} detail={data?.queue.raw || "socket queue"} danger={Boolean((data?.queue.recvQ ?? 0) > 0)} />
+        <RuntimeMini label="Stale artisan" value={data?.staleSupervisor.artisanServeProcesses.length ? "Running" : "None"} detail={`${data?.staleSupervisor.artisanServeProcesses.length ?? 0} process`} danger={Boolean(data?.staleSupervisor.artisanServeProcesses.length)} />
+        <RuntimeMini label="Stale supervisor" value={data?.staleSupervisor.configured ? "Configured" : "None"} detail={data?.staleSupervisor.configPath ?? "-"} danger={Boolean(data?.staleSupervisor.configured)} />
+        <RuntimeMini label="Slowlog" value={data?.slowlog.exists ? formatBytes(data.slowlog.sizeBytes) : "Empty"} detail={data?.slowlog.path ?? "-"} />
+        <RuntimeMini label="Start command" value={deployment.startCommand || "php-fpm"} detail="Laravel web runtime" />
+      </div>
+      {notice ? <div className="mx-4 mb-4 rounded-md border border-panel-line bg-slate-50 p-3 text-xs text-panel-muted">{notice}</div> : null}
+      {timing ? (
+        <div className="mx-4 mb-4 rounded-md border border-panel-line p-3">
+          <div className="flex items-center justify-between gap-3 text-xs">
+            <div className="min-w-0 truncate font-semibold">{timing.url}</div>
+            <div className="shrink-0 text-panel-muted">p50 {formatSeconds(timing.p50Seconds)} · p95 {formatSeconds(timing.p95Seconds)}</div>
+          </div>
+          <div className="mt-2 grid gap-2 sm:grid-cols-5">
+            {timing.samples.map((sample) => (
+              <div className="rounded-md bg-slate-50 p-2 text-xs" key={sample.index}>
+                <div className="font-semibold">#{sample.index} · {sample.httpCode}</div>
+                <div className="mt-1 text-panel-muted">{formatSeconds(sample.totalSeconds)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      {data?.slowlog.text ? (
+        <div className="mx-4 mb-4">
+          <div className="mb-2 text-xs font-semibold uppercase text-panel-muted">Slowlog Tail</div>
+          <pre className="max-h-56 overflow-auto rounded-md bg-slate-950 p-3 text-xs text-slate-100">{data.slowlog.text}</pre>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function RuntimeMini({ label, value, detail, danger = false }: { label: string; value: ReactNode; detail: ReactNode; danger?: boolean }) {
+  return (
+    <div className={`min-w-0 rounded-md border p-3 ${danger ? "border-amber-200 bg-amber-50" : "border-panel-line bg-white"}`}>
+      <div className="text-xs uppercase text-panel-muted">{label}</div>
+      <div className="mt-2 truncate text-sm font-semibold text-panel-ink">{value}</div>
+      <div className="mt-1 truncate text-xs text-panel-muted" title={typeof detail === "string" ? detail : undefined}>{detail}</div>
+    </div>
+  );
+}
+
+function formatSeconds(value: number | null | undefined) {
+  if (!Number.isFinite(value ?? NaN)) return "-";
+  return `${(value as number).toFixed(3)}s`;
 }
 
 function ResourceHistory({ metrics }: { metrics?: DeploymentMetrics }) {

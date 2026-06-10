@@ -174,6 +174,39 @@ export type DeploymentMetrics = {
   buildLogs: DeploymentLog[];
 };
 
+export type LaravelRuntimeStatus = {
+  returncode?: number;
+  poolName: string;
+  socketPath: string;
+  socketExists: boolean;
+  configPath: string;
+  configExists: boolean;
+  processCount: number;
+  processes: Array<{ pid: number; user?: string | null; cpuPercent?: number; memoryBytes?: number; cmdline?: string }>;
+  queue: { recvQ: number | null; sendQ: number | null; raw?: string };
+  slowlog: { path: string; exists: boolean; sizeBytes: number; modifiedAt: string | null; text: string };
+  nginx: {
+    serverName: string | null;
+    expectedUpstream: string;
+    activeSocket: boolean;
+    upstreams: Array<{ file: string; path: string; upstream: string }>;
+  };
+  staleSupervisor: {
+    configured: boolean;
+    program: string;
+    configPath: string;
+    artisanServeProcesses: Array<{ pid: number; user?: string | null; cpuPercent?: number; memoryBytes?: number; cmdline: string }>;
+  };
+};
+
+export type LaravelTimingResult = {
+  url: string;
+  returncode?: number;
+  p50Seconds: number | null;
+  p95Seconds: number | null;
+  samples: Array<{ index: number; httpCode: number; startTransferSeconds: number | null; totalSeconds: number | null }>;
+};
+
 export type DeploymentDoctorResponse = {
   status: "pass" | "warn" | "fail";
   summary: string;

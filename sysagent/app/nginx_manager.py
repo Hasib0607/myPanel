@@ -230,7 +230,15 @@ def skipped_reload(message: str) -> dict:
     }
 
 
-def publish_nginx_config(name: str, config: str, sites_available: str, sites_enabled: str, *, server_name: str | None = None) -> dict:
+def publish_nginx_config(
+    name: str,
+    config: str,
+    sites_available: str,
+    sites_enabled: str,
+    *,
+    server_name: str | None = None,
+    post_reload_check: Callable[[], dict] | None = None,
+) -> dict:
     available = safe_nginx_path(sites_available, name)
     enabled = safe_nginx_path(sites_enabled, name)
     temp_available = available.with_name(f".{available.name}.tmp")
@@ -345,11 +353,30 @@ def publish_nginx_config(name: str, config: str, sites_available: str, sites_ena
                 "removedConflicts": removed,
             }
 
+        route_check = post_reload_check() if post_reload_check else None
+        if route_check and route_check.get("returncode") != 0:
+            run_live_step("rollback config", lambda: _restore(available, old_available))
+            run_live_step("rollback enabled config", lambda: _restore(enabled, old_enabled))
+            rollback_reload = run_command(["systemctl", "reload", "nginx"], allow_live=True)
+            return {
+                "write": write,
+                "enable": enable,
+                "test": test,
+                "reload": reload_result,
+                "postReloadCheck": route_check,
+                "rollbackReload": rollback_reload,
+                "configPath": str(available),
+                "enabledPath": str(enabled),
+                "rolledBack": True,
+                "removedConflicts": removed,
+            }
+
         return {
             "write": write,
             "enable": enable,
             "test": test,
             "reload": reload_result,
+            "postReloadCheck": route_check,
             "configPath": str(available),
             "enabledPath": str(enabled),
             "rolledBack": False,

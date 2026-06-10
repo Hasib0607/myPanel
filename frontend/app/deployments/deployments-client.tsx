@@ -2,10 +2,10 @@
 
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, ArrowDownToLine, ArrowUpFromLine, CheckCircle2, Clipboard, Cpu, Database, Eye, EyeOff, FolderGit2, GitBranch, Github, HardDrive, History, KeyRound, List, MemoryStick, Network, Pencil, Play, Plus, Rocket, Save, Search, Settings2, ShieldCheck, Square, ToggleLeft, ToggleRight, Trash2, Wand2, X } from "lucide-react";
+import { Activity, ArrowDownToLine, ArrowUpFromLine, CheckCircle2, Clipboard, Cpu, Database, Eye, EyeOff, FolderGit2, Gauge, GitBranch, Github, HardDrive, History, KeyRound, List, MemoryStick, Network, Pencil, Play, Plus, RefreshCw, Rocket, Save, Search, ServerCog, Settings2, ShieldCheck, Square, ToggleLeft, ToggleRight, Trash2, Wand2, X } from "lucide-react";
 import { ApiError, apiDelete, apiDeleteBody, apiGet, apiGetText, apiPatch, apiPost, apiPut } from "@/lib/api";
 import { FileManagerClient } from "@/app/files/file-manager-client";
-import type { Deployment, DeploymentDomainBinding, DeploymentEnvVar, DeploymentFramework, DeploymentListResponse, DeploymentMetrics, DeploymentRelease, DetectionResponse, PreflightResponse, QueueResponse, DeploymentSourceProvider } from "./deployment-types";
+import type { Deployment, DeploymentDomainBinding, DeploymentEnvVar, DeploymentFramework, DeploymentListResponse, DeploymentMetrics, DeploymentRelease, DetectionResponse, LaravelRuntimeStatus, LaravelTimingResult, PreflightResponse, QueueResponse, DeploymentSourceProvider } from "./deployment-types";
 import { frameworkOptions, sourceOptions } from "./deployment-types";
 import { ResultNotice, actionIcon, formatDate, healthBadge, queryString, statusBadge } from "./deployment-ui";
 
@@ -997,7 +997,62 @@ function OverviewPanel({ apiBase, deployment }: { apiBase: "/deployments" | "/ac
         <UsageMetric icon={<Network size={16} />} label="Bandwidth" value={formatBytes(data?.traffic.bandwidthBytes ?? 0)} detail={data?.traffic.note ?? "last 24h"} />
         <UsageMetric icon={<Activity size={16} />} label="Metrics" value={data?.ok === false ? "Unavailable" : "Live"} detail={data?.generatedAt ? formatDate(data.generatedAt) : "-"} />
       </div>
+      {deployment.framework === "LARAVEL" ? <LaravelRuntimeCompact apiBase={apiBase} deployment={deployment} /> : null}
       <ResourceHistory metrics={data} />
+    </div>
+  );
+}
+
+function LaravelRuntimeCompact({ apiBase, deployment }: { apiBase: "/deployments" | "/account/deployments"; deployment: Deployment }) {
+  const runtime = useQuery({
+    queryKey: ["deployment-laravel-runtime", apiBase, deployment.id],
+    queryFn: () => apiGet<LaravelRuntimeStatus>(`${apiBase}/${deployment.id}/laravel-runtime`),
+    refetchInterval: 15000
+  });
+  const [timing, setTiming] = useState<LaravelTimingResult | null>(null);
+  const repair = useMutation({
+    mutationFn: () => apiPost(`${apiBase}/${deployment.id}/laravel-runtime/repair`, {}),
+    onSuccess: () => runtime.refetch()
+  });
+  const timingCheck = useMutation({
+    mutationFn: () => apiPost<LaravelTimingResult>(`${apiBase}/${deployment.id}/laravel-runtime/timing`, { samples: 5 }),
+    onSuccess: setTiming
+  });
+  const data = runtime.data;
+  const ok = Boolean(data?.socketExists && data?.nginx.activeSocket && !data?.staleSupervisor.configured && !data?.staleSupervisor.artisanServeProcesses.length);
+  return (
+    <div className="rounded-md border border-panel-line bg-white">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-panel-line p-4">
+        <div className="flex items-center gap-2 text-sm font-semibold">
+          <ServerCog size={16} />
+          Laravel Runtime
+          <span className={`rounded-md px-2 py-1 text-xs ${ok ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800"}`}>
+            {runtime.isLoading ? "checking" : ok ? "ready" : "attention"}
+          </span>
+        </div>
+        <div className="flex gap-2">
+          <button className="flex h-8 items-center gap-2 rounded-md border border-panel-line px-3 text-xs font-semibold hover:bg-slate-50 disabled:opacity-50" disabled={runtime.isFetching} onClick={() => runtime.refetch()} type="button"><RefreshCw size={14} />Status</button>
+          <button className="flex h-8 items-center gap-2 rounded-md border border-panel-line px-3 text-xs font-semibold hover:bg-slate-50 disabled:opacity-50" disabled={timingCheck.isPending} onClick={() => timingCheck.mutate()} type="button"><Gauge size={14} />Timing</button>
+          <button className="flex h-8 items-center gap-2 rounded-md bg-panel-accent px-3 text-xs font-semibold text-white disabled:opacity-50" disabled={repair.isPending} onClick={() => repair.mutate()} type="button"><Wand2 size={14} />Repair</button>
+        </div>
+      </div>
+      <div className="grid gap-3 p-4 lg:grid-cols-4">
+        <RuntimeCell label="Pool" value={data?.poolName ?? "Loading..."} detail={`${data?.processCount ?? 0} processes`} />
+        <RuntimeCell label="Socket" value={data?.socketExists ? "Active" : "Missing"} detail={data?.socketPath ?? "-"} danger={Boolean(data && !data.socketExists)} />
+        <RuntimeCell label="Nginx" value={data?.nginx.activeSocket ? "Matched" : "Mismatch"} detail={data?.nginx.expectedUpstream ?? "-"} danger={Boolean(data && !data.nginx.activeSocket)} />
+        <RuntimeCell label="Queue" value={`${data?.queue.recvQ ?? 0}/${data?.queue.sendQ ?? 0}`} detail={timing ? `p95 ${formatSeconds(timing.p95Seconds)}` : "socket queue"} danger={Boolean((data?.queue.recvQ ?? 0) > 0)} />
+      </div>
+      {data?.slowlog.text ? <pre className="mx-4 mb-4 max-h-32 overflow-auto rounded-md bg-slate-950 p-3 text-xs text-slate-100">{data.slowlog.text}</pre> : null}
+    </div>
+  );
+}
+
+function RuntimeCell({ label, value, detail, danger = false }: { label: string; value: ReactNode; detail: ReactNode; danger?: boolean }) {
+  return (
+    <div className={`min-w-0 rounded-md border p-3 ${danger ? "border-amber-200 bg-amber-50" : "border-panel-line bg-white"}`}>
+      <div className="text-xs uppercase text-panel-muted">{label}</div>
+      <div className="mt-2 truncate text-sm font-semibold">{value}</div>
+      <div className="mt-1 truncate text-xs text-panel-muted" title={typeof detail === "string" ? detail : undefined}>{detail}</div>
     </div>
   );
 }
@@ -1078,6 +1133,11 @@ function TrendStat({ label, value }: { label: string; value: string }) {
 function formatMetricValue(value: number, unit: "bytes" | "percent") {
   if (unit === "bytes") return formatBytes(value);
   return `${Number.isFinite(value) ? value.toFixed(1) : "0.0"}%`;
+}
+
+function formatSeconds(value: number | null | undefined) {
+  if (!Number.isFinite(value ?? NaN)) return "-";
+  return `${(value as number).toFixed(3)}s`;
 }
 
 function formatBytes(value: number) {

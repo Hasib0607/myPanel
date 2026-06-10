@@ -2557,6 +2557,71 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     return { ...(metrics as Record<string, unknown>), buildLogs };
   });
 
+  app.get("/:deploymentId/laravel-runtime", async (request) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const deployment = await findDeployment(deploymentId);
+    if (deployment.framework !== "LARAVEL") throw app.httpErrors.badRequest("Laravel runtime status is only available for Laravel deployments.");
+    const domain = deployment.domainBindings?.find((binding) => binding.role === "primary")?.domain ?? deployment.domainBindings?.[0]?.domain ?? deployment.domain;
+    const serverName = deploymentServerName(domain);
+    return sysagent.deploymentLaravelRuntimeStatus({
+      deploymentId: deployment.id,
+      name: deployment.slug,
+      rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
+      serverName,
+      upstreamPort: deployment.port,
+      processManager: deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework],
+      startCommand: deployment.startCommand,
+      logDir: deploymentLogDir(deployment.slug)
+    });
+  });
+
+  app.post("/:deploymentId/laravel-runtime/repair", async (request) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const deployment = await findDeployment(deploymentId);
+    if (deployment.framework !== "LARAVEL") throw app.httpErrors.badRequest("Laravel runtime repair is only available for Laravel deployments.");
+    const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
+    const domain = deployment.domainBindings?.find((binding) => binding.role === "primary")?.domain ?? deployment.domainBindings?.[0]?.domain ?? deployment.domain;
+    const serverName = deploymentServerName(domain);
+    const repair = await sysagent.deploymentLaravelRuntimeRepair({
+      deploymentId: deployment.id,
+      name: deployment.slug,
+      rootPath: appPath,
+      serverName,
+      upstreamPort: deployment.port,
+      processManager: deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework],
+      startCommand: "php-fpm",
+      logDir: deploymentLogDir(deployment.slug)
+    });
+    const route = await rewriteDeploymentDomainRoute(deployment);
+    const status = await sysagent.deploymentLaravelRuntimeStatus({
+      deploymentId: deployment.id,
+      name: deployment.slug,
+      rootPath: appPath,
+      serverName,
+      upstreamPort: deployment.port,
+      processManager: deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework],
+      startCommand: "php-fpm",
+      logDir: deploymentLogDir(deployment.slug)
+    });
+    await addLog(deployment.id, "HEALTH_CHECK", "Laravel PHP-FPM runtime repair requested", undefined, { repair, route, status } as Prisma.InputJsonObject);
+    await audit(request, { action: "APPLY", resource: "deployment_laravel_runtime", resourceId: deployment.id, description: `Repaired Laravel PHP-FPM runtime for ${deployment.slug}`, metadata: { repair, route, status } as Prisma.InputJsonObject });
+    return { repair, route, status };
+  });
+
+  app.post("/:deploymentId/laravel-runtime/timing", async (request) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const body = z.object({ url: z.string().url().optional(), samples: z.coerce.number().int().min(1).max(10).default(5) }).parse(request.body ?? {});
+    const deployment = await findDeployment(deploymentId);
+    if (deployment.framework !== "LARAVEL") throw app.httpErrors.badRequest("Laravel timing check is only available for Laravel deployments.");
+    const domain = deployment.domainBindings?.find((binding) => binding.role === "primary")?.domain ?? deployment.domainBindings?.[0]?.domain ?? deployment.domain;
+    const serverName = deploymentServerName(domain)?.split(/\s+/)[0];
+    const url = body.url ?? (deployment.healthUrl?.startsWith("http") ? deployment.healthUrl : serverName ? `https://${serverName}/` : null);
+    if (!url) throw app.httpErrors.badRequest("Add a domain or health URL before running a timing check.");
+    const timing = await sysagent.deploymentLaravelTiming({ url, samples: body.samples });
+    await addLog(deployment.id, "HEALTH_CHECK", `Laravel timing check sampled ${body.samples} request(s)`, undefined, { timing } as Prisma.InputJsonObject);
+    return timing;
+  });
+
   app.get("/:deploymentId/logs", async (request) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const query = z.object({ releaseId: z.string().optional(), step: z.string().optional(), limit: z.coerce.number().int().min(1).max(500).default(200) }).parse(request.query);

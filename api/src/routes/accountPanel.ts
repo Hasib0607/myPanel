@@ -18,7 +18,7 @@ import { githubApiErrorMessage, isGithubWebhookPermissionError } from "../lib/gi
 import { publishDomainDnsZone } from "../lib/domainDnsPublish.js";
 import { detectDeploymentFiles } from "../lib/deploymentDetection.js";
 import { deploymentRuntimeReview, prepareDeploymentRuntimeTools } from "../lib/deploymentRuntimeReview.js";
-import { buildDeploymentNginxRequest, deploymentIsRoutable } from "../lib/deploymentDomainSsl.js";
+import { buildDeploymentNginxRequest, deploymentIsRoutable, publishDeploymentProxyNginx } from "../lib/deploymentDomainSsl.js";
 import { prisma } from "../lib/prisma.js";
 import { resolvePublicA } from "../lib/publicDns.js";
 import { deleteSecret, getSecret, putSecret } from "../lib/secrets.js";
@@ -1335,6 +1335,13 @@ function accountDeploymentServerNames(deployment: { domain?: { name: string; inc
   return [...names];
 }
 
+function accountPrimaryDeploymentServerName(deployment: { domain?: { name: string; includeWww?: boolean } | null; domainBindings?: Array<{ role?: string; domain?: { name: string; includeWww?: boolean } | null; subdomain?: { name: string; domain?: { name: string } | null } | null }> }) {
+  const primary = deployment.domainBindings?.find((binding) => binding.role === "primary") ?? deployment.domainBindings?.[0];
+  if (primary?.subdomain?.domain?.name) return accountDeploymentServerName({ name: `${primary.subdomain.name}.${primary.subdomain.domain.name}`, includeWww: false });
+  if (primary?.domain?.name) return accountDeploymentServerName(primary.domain);
+  return accountDeploymentServerName(deployment.domain);
+}
+
 function accountDeploymentLogCutoff() {
   return new Date(Date.now() - 24 * 60 * 60 * 1000);
 }
@@ -2571,6 +2578,79 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       })
     ]);
     return { ...(metrics as Record<string, unknown>), buildLogs };
+  });
+
+  app.get("/deployments/:deploymentId/laravel-runtime", async (request: any) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const deployment = await findAccountDeployment(request, deploymentId);
+    if (deployment.framework !== "LARAVEL") throw app.httpErrors.badRequest("Laravel runtime status is only available for Laravel deployments.");
+    const serverName = accountPrimaryDeploymentServerName(deployment);
+    return sysagent.deploymentLaravelRuntimeStatus({
+      deploymentId: deployment.id,
+      name: deployment.slug,
+      rootPath: accountDeploymentAppPath(deployment),
+      serverName,
+      upstreamPort: deployment.port,
+      processManager: deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework],
+      startCommand: deployment.startCommand,
+      logDir: accountDeploymentLogDir(deployment.slug)
+    });
+  });
+
+  app.post("/deployments/:deploymentId/laravel-runtime/repair", async (request: any) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const deployment = await findAccountDeployment(request, deploymentId);
+    if (deployment.framework !== "LARAVEL") throw app.httpErrors.badRequest("Laravel runtime repair is only available for Laravel deployments.");
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    const serverName = accountPrimaryDeploymentServerName(deployment);
+    const appPath = accountDeploymentAppPath(deployment);
+    const repair = await sysagent.deploymentLaravelRuntimeRepair({
+      deploymentId: deployment.id,
+      name: deployment.slug,
+      rootPath: appPath,
+      serverName,
+      upstreamPort: deployment.port,
+      processManager: deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework],
+      startCommand: "php-fpm",
+      logDir: accountDeploymentLogDir(deployment.slug)
+    });
+    const route = serverName
+      ? await publishDeploymentProxyNginx({
+          deploymentId: deployment.id,
+          fqdn: serverName,
+          upstreamPort: deployment.port,
+          rootPath: appPath,
+          framework: deployment.framework,
+          startCommand: "php-fpm",
+          publicDirectory: deployment.publicDirectory,
+          outputDirectory: deployment.outputDirectory,
+          fallbackRootPath: path.join(account.homeRoot, "public_html"),
+          forceHttps: true
+        })
+      : { skipped: true, reason: "No domain is linked to this deployment" };
+    const status = await sysagent.deploymentLaravelRuntimeStatus({
+      deploymentId: deployment.id,
+      name: deployment.slug,
+      rootPath: appPath,
+      serverName,
+      upstreamPort: deployment.port,
+      processManager: deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework],
+      startCommand: "php-fpm",
+      logDir: accountDeploymentLogDir(deployment.slug)
+    });
+    await audit(request, { action: "APPLY", resource: "deployment_laravel_runtime", resourceId: deployment.id, description: `Account repaired Laravel PHP-FPM runtime for ${deployment.slug}`, metadata: { repair, route, status } as any });
+    return { repair, route, status };
+  });
+
+  app.post("/deployments/:deploymentId/laravel-runtime/timing", async (request: any) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const body = z.object({ url: z.string().url().optional(), samples: z.coerce.number().int().min(1).max(10).default(5) }).parse(request.body ?? {});
+    const deployment = await findAccountDeployment(request, deploymentId);
+    if (deployment.framework !== "LARAVEL") throw app.httpErrors.badRequest("Laravel timing check is only available for Laravel deployments.");
+    const serverName = accountPrimaryDeploymentServerName(deployment)?.split(/\s+/)[0];
+    const url = body.url ?? (deployment.healthUrl?.startsWith("http") ? deployment.healthUrl : serverName ? `https://${serverName}/` : null);
+    if (!url) throw app.httpErrors.badRequest("Add a domain or health URL before running a timing check.");
+    return sysagent.deploymentLaravelTiming({ url, samples: body.samples });
   });
 
   app.get("/deployments/:deploymentId/workers", async (request: any) => {

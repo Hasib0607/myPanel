@@ -187,6 +187,12 @@ export const sysagent = {
     request<SysagentCommandResult>("/deployments/supervisor/repair", { method: "POST", body: JSON.stringify(body) }),
   deploymentNginxInspect: (body: unknown) =>
     request<SysagentCommandResult & { exists: boolean; enabled: boolean; expectedUpstream: string; containsExpectedUpstream: boolean; availablePath: string; enabledPath: string }>("/deployments/nginx-inspect", { method: "POST", body: JSON.stringify(body) }),
+  deploymentLaravelRuntimeStatus: (body: unknown) =>
+    request("/deployments/laravel/runtime-status", { method: "POST", body: JSON.stringify(body) }),
+  deploymentLaravelRuntimeRepair: (body: unknown) =>
+    request("/deployments/laravel/runtime-repair", { method: "POST", body: JSON.stringify(body) }),
+  deploymentLaravelTiming: (body: unknown) =>
+    request("/deployments/laravel/timing", { method: "POST", body: JSON.stringify(body) }),
   deploymentPublicRoute: (body: unknown) =>
     request<SysagentCommandResult>("/deployments/public-route", { method: "POST", body: JSON.stringify(body) }),
   deploymentPublicAccessDiagnose: (body: unknown) =>
