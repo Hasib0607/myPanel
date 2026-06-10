@@ -1048,8 +1048,8 @@ function renderPythonStartCommand(command: string | null | undefined, port: numb
     .replace(/^flask\b/, ".venv/bin/python -m flask");
 }
 
-function laravelStartCommand(port: number) {
-  return `php artisan serve --host=127.0.0.1 --port ${port}`;
+function laravelStartCommand(_port: number) {
+  return "php-fpm";
 }
 
 function isLegacyLaravelPhpFpmCommand(command: string | null | undefined) {
@@ -1068,7 +1068,7 @@ function renderStartCommand(deployment: { framework: DeploymentFramework; startC
     return laravelStartCommand(deployment.port);
   }
   if (deployment.framework === "LARAVEL" && deployment.startCommand?.trim().toLowerCase().startsWith("php artisan serve")) {
-    return laravelStartCommand(deployment.port);
+    return "php-fpm";
   }
   return renderDeploymentCommand(deployment.startCommand, deployment.port);
 }

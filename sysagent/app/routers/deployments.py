@@ -29,7 +29,13 @@ from app.deployment_env import (
     write_laravel_env_bundle,
 )
 from app.deployment_commands import laravel_has_public_web_root, laravel_public_permission_commands, normalize_laravel_start_command, parse_deployment_command, resolve_laravel_public_root
-from app.laravel_nginx import nginx_app_locations
+from app.laravel_nginx import laravel_fpm_socket, nginx_app_locations
+from app.laravel_fpm import (
+    laravel_fpm_config_path,
+    php_fpm_executable,
+    php_fpm_service,
+    render_laravel_fpm_pool,
+)
 from app.deployment_health import backend_only_laravel_health, curl_health_probe
 from app.platform import runtime_tool_install_plan
 from app.nginx_paths import nginx_sites_available, nginx_sites_enabled
@@ -963,6 +969,119 @@ def _remove_supervisor_program(name: str) -> dict:
     return {"stop": stop, "remove": {"returncode": 0, "removed": removed, "configPath": str(config_path)}, "reread": reread, "update": update}
 
 
+def laravel_fpm_process(body: ProcessRequest) -> dict:
+    info = path_info(body.rootPath)
+    if not info["allowed"]:
+        return blocked_command("Path escapes configured file manager root", ["php-fpm", body.action, body.name], info)
+
+    executable = php_fpm_executable()
+    service = php_fpm_service()
+    if not executable or not service:
+        return blocked_command("PHP-FPM is not installed or its systemd service was not found", ["php-fpm", body.action, body.name], info)
+
+    config_path = laravel_fpm_config_path(body.deploymentId)
+    socket_path = laravel_fpm_socket(body.deploymentId)
+    steps: dict[str, dict] = {}
+
+    if body.action == "status":
+        ready = Path(socket_path).exists()
+        return {
+            "dryRun": False,
+            "command": ["php-fpm", "socket-check", socket_path],
+            "returncode": 0 if ready else 1,
+            "stdout": f"Laravel PHP-FPM socket ready: {socket_path}" if ready else "",
+            "stderr": "" if ready else f"Laravel PHP-FPM socket is missing: {socket_path}",
+            "path": info,
+            "runtime": "php-fpm",
+            "socketPath": socket_path,
+            "configPath": str(config_path),
+        }
+
+    if body.action == "stop":
+        try:
+            removed = config_path.exists()
+            if removed:
+                config_path.unlink()
+            steps["config"] = {"returncode": 0, "removed": removed, "configPath": str(config_path)}
+        except OSError as error:
+            steps["config"] = {"returncode": 1, "stderr": str(error), "configPath": str(config_path)}
+        steps["reload"] = run_command(["systemctl", "reload", service]) if steps["config"]["returncode"] == 0 else {"returncode": 1, "stderr": "Skipped because config removal failed"}
+        if shutil.which("supervisorctl"):
+            steps["retireSupervisor"] = {"returncode": 0, **_remove_supervisor_program(body.name)}
+        failed = [name for name, step in steps.items() if step.get("returncode", 0) != 0]
+        return {
+            "dryRun": any(step.get("dryRun") for step in steps.values()),
+            "command": ["systemctl", "reload", service],
+            "returncode": 1 if failed else 0,
+            "stderr": "; ".join(f"{name}: {step.get('stderr', '')}" for name, step in steps.items() if name in failed),
+            "path": info,
+            "runtime": "php-fpm",
+            "socketPath": socket_path,
+            **steps,
+        }
+
+    ensure = _ensure_laravel_env(body.rootPath, body.port, body.env)
+    if ensure.get("returncode") != 0:
+        return ensure
+    writable = repair_laravel_writable_paths(LaravelWritablePathsRequest(rootPath=body.rootPath))
+    if writable.get("returncode") != 0:
+        return writable
+
+    limits = effective_resource_limits(body.resourceLimits) or {}
+    memory_limit_mb = min(1024, max(256, int(limits.get("memoryMaxMb", 512))))
+    max_children = min(40, max(8, int(limits.get("memoryMaxMb", 2560)) // 128))
+    try:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            render_laravel_fpm_pool(
+                body.deploymentId,
+                body.rootPath,
+                memory_limit_mb=memory_limit_mb,
+                max_children=max_children,
+            ),
+            encoding="utf-8",
+        )
+        steps["config"] = {"returncode": 0, "configPath": str(config_path)}
+    except OSError as error:
+        steps["config"] = {"returncode": 1, "stderr": str(error), "configPath": str(config_path)}
+
+    steps["test"] = run_command([executable, "-t"]) if steps["config"]["returncode"] == 0 else {"returncode": 1, "stderr": "Skipped because config write failed"}
+    steps["reload"] = run_command(["systemctl", "reload", service]) if steps["test"].get("returncode") == 0 else {"returncode": 1, "stderr": "Skipped because PHP-FPM config test failed"}
+
+    if shutil.which("supervisorctl"):
+        stale = _remove_supervisor_program(body.name)
+        steps["retireSupervisor"] = {
+            # The web runtime is already healthy on PHP-FPM. Retiring a stale
+            # Artisan Supervisor program is cleanup and must not fail deploys
+            # when supervisord is absent or temporarily unavailable.
+            "returncode": 0,
+            **stale,
+        }
+
+    if steps["reload"].get("returncode") == 0 and not steps["reload"].get("dryRun"):
+        for _ in range(30):
+            if Path(socket_path).exists():
+                break
+            time.sleep(0.1)
+        if not Path(socket_path).exists():
+            steps["socket"] = {"returncode": 1, "stderr": f"PHP-FPM socket was not created: {socket_path}"}
+        else:
+            steps["socket"] = {"returncode": 0, "socketPath": socket_path}
+
+    failed = [name for name, step in steps.items() if isinstance(step, dict) and step.get("returncode", 0) != 0]
+    return {
+        "dryRun": any(step.get("dryRun") for step in steps.values() if isinstance(step, dict)),
+        "command": ["systemctl", "reload", service],
+        "returncode": 1 if failed else 0,
+        "stderr": "; ".join(f"{name}: {steps[name].get('stderr', '')}" for name in failed),
+        "path": info,
+        "runtime": "php-fpm",
+        "socketPath": socket_path,
+        "configPath": str(config_path),
+        **steps,
+    }
+
+
 def laravel_worker_status(body: LaravelWorkersRequest) -> dict:
     info = path_info(body.rootPath)
     return {
@@ -1396,6 +1515,10 @@ def migrate(body: CommandRequest) -> dict:
 @router.post("/process")
 def process(body: ProcessRequest) -> dict:
     body = normalize_process_root(body)
+    normalized_start = (body.startCommand or "").strip().lower()
+    explicit_octane = "artisan octane:start" in normalized_start or "rr serve" in normalized_start or "roadrunner" in normalized_start
+    if (body.framework or "").upper() == "LARAVEL" and not explicit_octane:
+        return laravel_fpm_process(body)
     manager = (body.processManager or "NONE").upper()
     if manager == "PM2":
         if body.action in {"start", "restart"}:
@@ -1541,6 +1664,29 @@ def nginx(body: NginxRequest) -> dict:
 
         server_name = body.serverName
         config_name = nginx_config_name(body.deploymentId, server_name)
+        fpm_preflight = None
+        if (body.framework or "").upper() == "LARAVEL" and not Path(laravel_fpm_socket(body.deploymentId)).exists():
+            fpm_preflight = laravel_fpm_process(
+                ProcessRequest(
+                    deploymentId=body.deploymentId,
+                    name=body.deploymentId,
+                    rootPath=body.rootPath,
+                    action="start",
+                    processManager="SUPERVISOR",
+                    startCommand="php-fpm",
+                    port=body.upstreamPort,
+                    framework="LARAVEL",
+                )
+            )
+            if fpm_preflight.get("returncode", 0) != 0:
+                return {
+                    **blocked_command(
+                        "Laravel PHP-FPM pool could not be prepared before publishing Nginx",
+                        ["write-nginx", config_name],
+                        path_info(body.rootPath),
+                    ),
+                    "fpmPreflight": fpm_preflight,
+                }
         scrubbed = _scrub_hostname_nginx_configs(config_name, server_name) if settings.allow_live_nginx else {"removedConflicts": [], "removedInsecurePort443": []}
         public_root = resolve_laravel_public_root(body.rootPath, body.publicDirectory)
         fallback_root = safe_web_root(body.fallbackRootPath) if body.fallbackRootPath else None
@@ -1569,6 +1715,7 @@ def nginx(body: NginxRequest) -> dict:
             )
 
         app_locations = nginx_app_locations(
+            deployment_id=body.deploymentId,
             framework=body.framework,
             public_root=public_root,
             upstream_port=body.upstreamPort,
@@ -1630,6 +1777,7 @@ server {{
             "path": info,
             "serverName": server_name,
             "scrubbed": scrubbed,
+            "fpmPreflight": fpm_preflight,
         }
     except HTTPException:
         raise
@@ -1994,6 +2142,8 @@ def _pm2_process_mismatch(body: HealthRequest) -> str | None:
 
 
 def _supervisor_process_mismatch(body: HealthRequest) -> str | None:
+    if (body.framework or "").upper() == "LARAVEL":
+        return None
     if not body.processName or (body.processManager or "").upper() != "SUPERVISOR":
         return None
     if shutil.which("supervisorctl") is None:
@@ -2736,7 +2886,8 @@ def nginx_inspect(body: NginxInspectRequest) -> dict:
     content = ""
     if available.exists():
         content = available.read_text(encoding="utf-8", errors="ignore")
-    upstream = f"127.0.0.1:{body.upstreamPort}"
+    laravel_fpm = laravel_has_public_web_root(body.rootPath)
+    upstream = laravel_fpm_socket(body.deploymentId) if laravel_fpm else f"127.0.0.1:{body.upstreamPort}"
     tokens = server_name_tokens(server_name)
     claiming: list[dict] = []
     stale_static_claims: list[str] = []
@@ -2856,6 +3007,27 @@ def health(body: HealthRequest) -> dict:
         }
     if (body.framework or "").upper() == "LARAVEL" and not laravel_has_public_web_root(body.rootPath):
         return backend_only_laravel_health(body.processName)
+    if (body.framework or "").upper() == "LARAVEL":
+        socket_path = Path(laravel_fpm_socket(body.deploymentId))
+        if socket_path.exists():
+            return {
+                "dryRun": False,
+                "command": ["php-fpm", "socket-check", str(socket_path)],
+                "returncode": 0,
+                "stdout": f"Laravel PHP-FPM socket ready: {socket_path}",
+                "stderr": "",
+                "runtime": "php-fpm",
+                "socketPath": str(socket_path),
+            }
+        return {
+            "dryRun": False,
+            "command": ["php-fpm", "socket-check", str(socket_path)],
+            "returncode": 1,
+            "stdout": "",
+            "stderr": f"Laravel PHP-FPM socket is missing: {socket_path}",
+            "runtime": "php-fpm",
+            "socketPath": str(socket_path),
+        }
 
     # Phase 1: wait for the process to bind (with retries for connection refused).
     first = _curl_once(url, accept_http_errors=accept_http_errors)

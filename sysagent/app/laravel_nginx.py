@@ -1,4 +1,21 @@
 from __future__ import annotations
+
+import re
+from pathlib import Path
+
+
+def laravel_fpm_pool_name(deployment_id: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_.-]+", "-", deployment_id).strip("-")
+    return f"vps-panel-{cleaned or 'laravel'}"
+
+
+def laravel_fpm_socket(deployment_id: str) -> str:
+    socket_dir = Path("/run/php-fpm")
+    if not socket_dir.exists() and Path("/run/php").exists():
+        socket_dir = Path("/run/php")
+    return str(socket_dir / f"{laravel_fpm_pool_name(deployment_id)}.sock")
+
+
 def nginx_proxy_headers(upstream_port: int, *, loopback_host: bool = False) -> str:
     host_header = f"127.0.0.1:{upstream_port}" if loopback_host else "$http_host"
     return (
@@ -62,6 +79,7 @@ def nginx_spa_static_locations(public_root: str, upstream_port: int) -> str:
 
 def nginx_app_locations(
     *,
+    deployment_id: str,
     framework: str | None,
     public_root: str,
     upstream_port: int,
@@ -75,8 +93,8 @@ def nginx_app_locations(
     if normalized == "STATIC":
         return nginx_spa_static_locations(public_root, upstream_port)
     return nginx_laravel_app_locations(
+        deployment_id=deployment_id,
         public_root=public_root,
-        upstream_port=upstream_port,
         fallback_error_page=fallback_error_page,
         fallback_location=fallback_location,
     )
@@ -84,13 +102,15 @@ def nginx_app_locations(
 
 def nginx_laravel_app_locations(
     *,
+    deployment_id: str,
     public_root: str,
-    upstream_port: int,
     fallback_error_page: str,
     fallback_location: str,
 ) -> str:
+    socket_path = laravel_fpm_socket(deployment_id)
     return (
         f"    root {public_root};\n"
+        "    index index.php;\n"
         "\n"
         "    # Compatibility for legacy Laravel templates that generate asset('/public/...') URLs.\n"
         "    location ~* ^/public/(.+\\.(?:css|js|mjs|map|ico|gif|jpe?g|png|svg|webp|woff2?|ttf|eot|otf))$ {\n"
@@ -101,19 +121,32 @@ def nginx_laravel_app_locations(
         "    }\n"
         "\n"
         "    location ~* \\.(?:css|js|mjs|map|ico|gif|jpe?g|png|svg|webp|woff2?|ttf|eot|otf)$ {\n"
-        "        try_files $uri @deployment_upstream;\n"
+        "        try_files $uri /index.php?$query_string;\n"
         "        expires 7d;\n"
         "        access_log off;\n"
         "        add_header Cache-Control \"public\";\n"
         "    }\n"
         "\n"
-        f"    location / {{\n"
-        f"{fallback_error_page}"
-        f"{nginx_proxy_headers(upstream_port)}"
+        "    location / {\n"
+        "        try_files $uri /index.php?$query_string;\n"
         "    }\n"
         "\n"
-        "    location @deployment_upstream {\n"
-        f"{nginx_proxy_headers(upstream_port)}"
+        "    location = /index.php {\n"
+        f"{fallback_error_page}"
+        "        include fastcgi_params;\n"
+        "        fastcgi_param SCRIPT_FILENAME $document_root/index.php;\n"
+        "        fastcgi_param SCRIPT_NAME /index.php;\n"
+        "        fastcgi_param HTTPS $https;\n"
+        "        fastcgi_param HTTP_X_FORWARDED_PROTO $scheme;\n"
+        "        fastcgi_param HTTP_X_FORWARDED_HOST $host;\n"
+        "        fastcgi_param HTTP_X_FORWARDED_PORT $server_port;\n"
+        f"        fastcgi_pass unix:{socket_path};\n"
+        "        fastcgi_connect_timeout 10s;\n"
+        "        fastcgi_send_timeout 60s;\n"
+        "        fastcgi_read_timeout 60s;\n"
+        "        fastcgi_buffering on;\n"
+        "        fastcgi_buffers 16 16k;\n"
+        "        fastcgi_buffer_size 32k;\n"
         "    }\n"
         f"{fallback_location}"
     )

@@ -60,6 +60,7 @@ test("detectDeploymentFiles infers Vite preview or static serve without start sc
 test("detectDeploymentFiles detects Laravel only with artisan or laravel framework", () => {
   const withArtisan = detectDeploymentFiles(["artisan", "composer.json"], null, null);
   assert.equal(withArtisan.detected, "LARAVEL");
+  assert.equal(withArtisan.suggestions.startCommand, "php-fpm");
 
   const withLaravelComposer = detectDeploymentFiles(
     ["composer.json"],
@@ -67,6 +68,7 @@ test("detectDeploymentFiles detects Laravel only with artisan or laravel framewo
     JSON.stringify({ require: { "laravel/framework": "^11.0" } })
   );
   assert.equal(withLaravelComposer.detected, "LARAVEL");
+  assert.equal(withLaravelComposer.suggestions.startCommand, "php-fpm");
 
   const composerOnly = detectDeploymentFiles(
     ["composer.json"],

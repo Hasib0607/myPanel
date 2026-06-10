@@ -574,8 +574,9 @@ function renderStartCommand(deployment: { framework: string; startCommand: strin
     deployment.framework === "LARAVEL"
     && (!normalized || normalized === "php-fpm" || /^php(\d+(?:\.\d+)?)?-fpm$/.test(normalized))
   ) {
-    return `php artisan serve --host=127.0.0.1 --port ${deployment.port}`;
+    return "php-fpm";
   }
+  if (deployment.framework === "LARAVEL" && normalized.startsWith("php artisan serve")) return "php-fpm";
   return deployment.startCommand?.replaceAll("{PORT}", String(deployment.port)).replaceAll("$PORT", String(deployment.port)) ?? null;
 }
 

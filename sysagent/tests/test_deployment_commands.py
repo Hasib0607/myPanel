@@ -38,21 +38,21 @@ class DeploymentCommandTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_deployment_command("/tmp/python -m pip install -r requirements.txt")
 
-    def test_normalizes_legacy_php_fpm_start_command(self) -> None:
+    def test_normalizes_legacy_php_fpm_start_command_for_compatibility(self) -> None:
         normalized = normalize_laravel_start_command("php-fpm", 12001)
-        self.assertEqual(normalized, "php artisan serve --host=127.0.0.1 --port 12001")
+        self.assertEqual(normalized, "php-fpm")
 
     def test_normalizes_versioned_php_fpm_start_command(self) -> None:
         normalized = normalize_laravel_start_command("php8.2-fpm", 12001)
-        self.assertEqual(normalized, "php artisan serve --host=127.0.0.1 --port 12001")
+        self.assertEqual(normalized, "php-fpm")
 
     def test_keeps_custom_laravel_start_command(self) -> None:
         normalized = normalize_laravel_start_command("php artisan serve --host=127.0.0.1 --port {PORT}", 12001)
-        self.assertEqual(normalized, "php artisan serve --host=127.0.0.1 --port 12001")
+        self.assertEqual(normalized, "php-fpm")
 
     def test_laravel_artisan_serve_literal_port_is_rewritten(self) -> None:
         normalized = normalize_laravel_start_command("php artisan serve --host=127.0.0.1 --port 10005", 12001)
-        self.assertEqual(normalized, "php artisan serve --host=127.0.0.1 --port 12001")
+        self.assertEqual(normalized, "php-fpm")
 
     def test_backend_only_laravel_without_public_uses_idle_process(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -62,7 +62,7 @@ class DeploymentCommandTests(unittest.TestCase):
             normalized = normalize_laravel_start_command("php artisan serve --host=127.0.0.1 --port {PORT}", 12001, str(root))
             self.assertEqual(normalized, "sleep infinity")
 
-    def test_laravel_with_public_index_keeps_artisan_serve(self) -> None:
+    def test_laravel_with_public_index_uses_php_fpm(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             public = root / "public"
@@ -70,7 +70,7 @@ class DeploymentCommandTests(unittest.TestCase):
             (public / "index.php").write_text("<?php\n", encoding="utf-8")
             self.assertTrue(laravel_has_public_web_root(str(root)))
             normalized = normalize_laravel_start_command("php artisan serve --host=127.0.0.1 --port {PORT}", 12001, str(root))
-            self.assertEqual(normalized, "php artisan serve --host=127.0.0.1 --port 12001")
+            self.assertEqual(normalized, "php-fpm")
 
     def test_deployment_path_allowed_under_file_manager_root(self) -> None:
         self.assertTrue(deployment_path_allowed("/var/www/deployments/example-app", "/var/www"))

@@ -241,7 +241,7 @@ export function detectDeploymentFiles(
         packageManager: "COMPOSER",
         installCommand: "composer install --no-dev --optimize-autoloader --no-interaction --no-scripts",
         buildCommand: null,
-        startCommand: "php artisan serve --host=127.0.0.1 --port {PORT}",
+        startCommand: "php-fpm",
         outputDirectory: "public",
         processManager: "SUPERVISOR"
       }
@@ -334,7 +334,7 @@ export function detectDeploymentFiles(
         packageManager: "COMPOSER",
         installCommand: "composer install --no-dev --optimize-autoloader --no-interaction --no-scripts",
         buildCommand: null,
-        startCommand: "php artisan serve --host=127.0.0.1 --port {PORT}",
+        startCommand: "php-fpm",
         outputDirectory: "public",
         processManager: "SUPERVISOR"
       }

@@ -58,11 +58,8 @@ def normalize_laravel_start_command(command: str | None, port: int | None, root_
     artisan_serve = lowered.startswith("php artisan serve")
     if (legacy_laravel_start or artisan_serve) and not laravel_has_public_web_root(root_path):
         return "sleep infinity"
-    if legacy_laravel_start:
-        effective_port = port or 8000
-        return f"php artisan serve --host=127.0.0.1 --port {effective_port}"
-    if artisan_serve and port is not None:
-        return f"php artisan serve --host=127.0.0.1 --port {port}"
+    if legacy_laravel_start or artisan_serve:
+        return "php-fpm"
     if port is not None:
         return cleaned.replace("{PORT}", str(port)).replace("$PORT", str(port))
     return cleaned
