@@ -61,6 +61,14 @@ type BackupCoverage = {
   note: string;
 };
 
+type RemoteBackupStatus = {
+  remoteTarget: string;
+  about?: Record<string, unknown> | null;
+  backupSize?: { count?: number; bytes?: number | string } | null;
+  latest: string[];
+  result: { returncode?: number; stdout?: string; stderr?: string };
+};
+
 const initialDraft = {
   label: "manual",
   appDir: "/opt/myPanel",
@@ -221,10 +229,24 @@ export function BackupsClient() {
   const prune = useMutation({
     mutationFn: () => apiPost("/backups/prune", { keepLast: Number(settings.retentionKeepLast || 2) }),
     onSuccess: async () => {
-      setNotice("Prune completed.");
+      setNotice("Local prune completed.");
       await refresh();
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Prune failed.")
+  });
+  const remoteStatus = useMutation({
+    mutationFn: () => apiGet<RemoteBackupStatus>("/backups/remote-status"),
+    onSuccess: () => setNotice("Google Drive status checked."),
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Drive status check failed.")
+  });
+  const pruneRemote = useMutation({
+    mutationFn: () => apiPost<{ removed: string[]; kept: string[] }>("/backups/prune-remote", { keepLast: Number(settings.retentionKeepLast || 2) }),
+    onSuccess: async (data) => {
+      setNotice(`Drive prune completed. Removed ${data.removed.length}, kept ${data.kept.length}.`);
+      await remoteStatus.mutateAsync().catch(() => undefined);
+      await refresh();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Drive prune failed.")
   });
   const analyzeCoverage = useMutation({
     mutationFn: () => apiPost<BackupCoverage>("/backups/coverage", {
@@ -339,9 +361,38 @@ export function BackupsClient() {
               </label>
               <Input label="Drive Target" value={settings.remoteTarget} onChange={(remoteTarget) => setSettings({ ...settings, remoteTarget })} />
               <button className="rounded-md border border-panel-line px-3 text-sm font-semibold hover:bg-slate-50" onClick={() => saveSettings.mutate()} type="button">Save</button>
-              <button className="rounded-md border border-panel-line px-3 text-sm font-semibold hover:bg-slate-50" onClick={() => prune.mutate()} type="button">Prune</button>
+              <button className="rounded-md border border-panel-line px-3 text-sm font-semibold hover:bg-slate-50 disabled:opacity-60" disabled={prune.isPending} onClick={() => prune.mutate()} type="button">Prune Local</button>
+              <button className="rounded-md border border-panel-line px-3 text-sm font-semibold hover:bg-slate-50 disabled:opacity-60" disabled={remoteStatus.isPending} onClick={() => remoteStatus.mutate()} type="button">Check Drive</button>
+              <button className="rounded-md border border-red-200 px-3 text-sm font-semibold text-panel-danger hover:bg-red-50 disabled:opacity-60" disabled={pruneRemote.isPending} onClick={() => pruneRemote.mutate()} type="button">Prune Drive</button>
             </div>
           </div>
+
+          {remoteStatus.data ? (
+            <div className="rounded-md border border-panel-line bg-white">
+              <div className="flex items-center justify-between border-b border-panel-line px-4 py-3">
+                <div className="text-sm font-semibold">Google Drive Backup Storage</div>
+                <div className="truncate text-xs text-panel-muted">{remoteStatus.data.remoteTarget}</div>
+              </div>
+              <div className="grid gap-3 p-4 lg:grid-cols-4">
+                <CoverageStat label="Drive used" value={formatBytes(remoteAboutNumber(remoteStatus.data.about, "used"))} />
+                <CoverageStat label="Drive free" value={formatBytes(remoteAboutNumber(remoteStatus.data.about, "free"))} />
+                <CoverageStat label="Drive total" value={formatBytes(remoteAboutNumber(remoteStatus.data.about, "total"))} />
+                <CoverageStat label="Backup folder" value={`${formatBytes(remoteStatus.data.backupSize?.bytes)} · ${remoteStatus.data.backupSize?.count ?? 0} files`} />
+              </div>
+              {remoteStatus.data.result.returncode && remoteStatus.data.result.returncode !== 0 ? (
+                <div className="mx-4 mb-4 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-xs text-panel-danger">
+                  {remoteStatus.data.result.stderr || "Could not read Drive status."}
+                </div>
+              ) : null}
+              <CoverageList
+                title="Latest Drive backups"
+                rows={(remoteStatus.data.latest ?? []).map((line) => {
+                  const [size, _time, ...nameParts] = line.split(";");
+                  return { label: nameParts.join(";") || line, value: formatBytes(Number(size)) };
+                })}
+              />
+            </div>
+          ) : null}
 
           <div className="rounded-md border border-panel-line bg-white">
             <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Google Drive Secrets</div>
@@ -616,6 +667,13 @@ function formatBytes(value: number | string | null | undefined) {
   if (numeric >= 1024 ** 3) return `${(numeric / 1024 ** 3).toFixed(2)} GB`;
   if (numeric >= 1024 ** 2) return `${(numeric / 1024 ** 2).toFixed(2)} MB`;
   return `${(numeric / 1024).toFixed(1)} KB`;
+}
+
+function remoteAboutNumber(about: Record<string, unknown> | null | undefined, key: string) {
+  const value = about?.[key];
+  if (typeof value === "number") return value;
+  if (typeof value === "string" && /^\d+$/.test(value)) return Number(value);
+  return null;
 }
 
 function statusClass(status: string) {

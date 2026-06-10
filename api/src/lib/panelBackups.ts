@@ -147,6 +147,10 @@ function backupCommandError(action: string, envelope: SysagentResultEnvelope) {
     return `${action} did not run on the server. Set ALLOW_LIVE_BACKUP=true on vps-panel-sysagent, then restart vps-panel-sysagent and vps-panel-workers.`;
   }
   if (result.returncode !== 0) {
+    const output = `${result.stderr ?? ""}\n${result.stdout ?? ""}`;
+    if (/storageQuotaExceeded|Drive storage quota has been exceeded/i.test(output)) {
+      return `${action} failed because the Google Drive storage quota is full. Free Drive space, prune old remote backups, or switch the backup target, then retry.`;
+    }
     return result.stderr?.trim() || result.stdout?.trim() || `${action} failed with exit code ${result.returncode ?? "unknown"}.`;
   }
   return null;

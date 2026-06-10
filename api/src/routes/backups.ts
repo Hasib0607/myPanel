@@ -185,6 +185,27 @@ export const backupRoutes: FastifyPluginAsync = async (app) => {
     return sysagent.backupCoverage(body);
   });
 
+  app.get("/remote-status", async () => {
+    const settings = await getBackupSettings();
+    if (settings.remoteProvider !== "GOOGLE_DRIVE" || !settings.remoteTarget) {
+      return { remoteTarget: settings.remoteTarget, about: null, backupSize: null, latest: [], result: { returncode: 0, stdout: "Remote provider is not Google Drive.", stderr: "" } };
+    }
+    const googleDrive = await googleDriveConfig(settings);
+    return sysagent.remoteBackupStatus({ remoteTarget: settings.remoteTarget, googleDrive });
+  });
+
+  app.post("/prune-remote", async (request) => {
+    const body = z.object({ keepLast: z.number().int().min(1).max(500).optional() }).parse(request.body ?? {});
+    const settings = await getBackupSettings();
+    if (settings.remoteProvider !== "GOOGLE_DRIVE" || !settings.remoteTarget) {
+      throw new Error("Google Drive backup target is not configured.");
+    }
+    const googleDrive = await googleDriveConfig(settings);
+    const result = await sysagent.pruneRemoteBackups({ remoteTarget: settings.remoteTarget, keepLast: body.keepLast ?? settings.retentionKeepLast, googleDrive });
+    await audit(request, { action: "DELETE", resource: "panel_backup_remote_archive", description: "Pruned Google Drive backup archives", metadata: result as any });
+    return result;
+  });
+
   app.get("/jobs/:id", async (request, reply) => {
     const params = z.object({ id: z.string().min(1) }).parse(request.params);
     const row = await prisma.guardianSetting.findUnique({ where: { key: backupJobKey(params.id) } });

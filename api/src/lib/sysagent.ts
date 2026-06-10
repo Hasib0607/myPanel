@@ -90,6 +90,8 @@ export const sysagent = {
     request<{ archivePath: string; remotePath: string; skipped: boolean; result: SysagentCommandResult }>("/backup/download-remote", { method: "POST", body: JSON.stringify(body) }),
   pruneRemoteBackups: (body: unknown) =>
     request<{ remoteTarget: string; kept: string[]; removed: string[]; result: SysagentCommandResult }>("/backup/prune-remote", { method: "POST", body: JSON.stringify(body) }),
+  remoteBackupStatus: (body: unknown) =>
+    request<{ remoteTarget: string; about?: Record<string, unknown> | null; backupSize?: { count?: number; bytes?: number | string } | null; latest: string[]; result: SysagentCommandResult }>("/backup/remote-status", { method: "POST", body: JSON.stringify(body) }),
   restorePreview: (path: string) =>
     request<{ archivePath: string; commands: string[]; note: string }>(`/backup/restore-preview?path=${encodeURIComponent(path)}`, { method: "POST" }),
   restoreBackup: (body: unknown) =>

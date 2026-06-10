@@ -89,6 +89,13 @@ class RemotePruneRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class RemoteStatusRequest(BaseModel):
+    remote_target: str = Field(alias="remoteTarget")
+    google_drive: dict[str, Any] | None = Field(default=None, alias="googleDrive")
+
+    model_config = {"populate_by_name": True}
+
+
 class RestoreRequest(BaseModel):
     path: str
     mode: str = Field(default="full")
@@ -846,6 +853,50 @@ def prune_remote(body: RemotePruneRequest) -> dict[str, Any]:
     ] + [f"rclone rmdirs {quoted_target} --leave-root || true"]) or "true"
     result = run_command(["bash", "-lc", f"set -Eeuo pipefail\n{setup}{script}"], env=env, allow_live=settings.allow_live_backup, timeout=1800)
     return {"remoteTarget": remote_target, "kept": names[:body.keep_last], "removed": removable, "result": result}
+
+
+@router.post("/remote-status")
+def remote_status(body: RemoteStatusRequest) -> dict[str, Any]:
+    remote_target = body.remote_target.rstrip("/")
+    quoted_target = shlex.quote(remote_target)
+    setup, env = rclone_env_and_setup(body.google_drive, remote_target)
+    script = f"""
+set -Eeuo pipefail
+{setup}
+{rclone_install_snippet()}
+echo "== about =="
+rclone about {quoted_target} --json || true
+echo "== backup-size =="
+rclone size {quoted_target} --json || true
+echo "== latest =="
+rclone lsf --recursive --format "stp" {quoted_target} | awk '/\\.tar\\.gz(\\.gpg)?$/ {{ print }}' | sort -r | head -20 || true
+"""
+    result = run_command(["bash", "-lc", script], env=env, allow_live=settings.allow_live_backup, timeout=900)
+    about: dict[str, Any] | None = None
+    backup_size: dict[str, Any] | None = None
+    stdout = result.get("stdout", "")
+    about_match = re.search(r"== about ==\n(.*?)\n== backup-size ==", stdout, re.S)
+    size_match = re.search(r"== backup-size ==\n(.*?)\n== latest ==", stdout, re.S)
+    try:
+        about_text = (about_match.group(1) if about_match else "").strip()
+        about = json.loads(about_text) if about_text.startswith("{") else None
+    except json.JSONDecodeError:
+        about = None
+    try:
+        size_text = (size_match.group(1) if size_match else "").strip()
+        backup_size = json.loads(size_text) if size_text.startswith("{") else None
+    except json.JSONDecodeError:
+        backup_size = None
+    latest = []
+    if "== latest ==" in stdout:
+        latest = [line for line in stdout.split("== latest ==", 1)[1].strip().splitlines() if line.strip()]
+    return {
+        "remoteTarget": remote_target,
+        "about": about,
+        "backupSize": backup_size,
+        "latest": latest,
+        "result": result,
+    }
 
 
 def checked_archive(path: str) -> Path:
