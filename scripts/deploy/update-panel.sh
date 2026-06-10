@@ -26,6 +26,8 @@ SYSTEMCTL_NO_BLOCK="${PANEL_UPDATE_SYSTEMCTL_NO_BLOCK:-true}"
 STALE_AFTER_SECONDS="${PANEL_UPDATE_STALE_AFTER_SECONDS:-1200}"
 APP_USER="${APP_USER:-panel}"
 FRONTEND_PORT="${FRONTEND_PORT:-3000}"
+SELF_UPDATE_NICE="${PANEL_UPDATE_NICE:-15}"
+SELF_UPDATE_IONICE_CLASS="${PANEL_UPDATE_IONICE_CLASS:-3}"
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")"
 SCRIPT_REEXECUTED="${PANEL_UPDATE_SCRIPT_REEXECUTED:-false}"
 FINAL_COMMIT=""
@@ -46,6 +48,16 @@ fi
 
 log() {
   echo "[$(date -Is)] $*" | tee -a "$LOG_FILE"
+}
+
+apply_self_update_priority() {
+  if command -v renice >/dev/null 2>&1; then
+    renice -n "$SELF_UPDATE_NICE" -p "$$" >/dev/null 2>&1 || true
+  fi
+  if command -v ionice >/dev/null 2>&1; then
+    ionice -c "$SELF_UPDATE_IONICE_CLASS" -p "$$" >/dev/null 2>&1 || true
+  fi
+  log "self-update priority applied: nice=$SELF_UPDATE_NICE ionice_class=$SELF_UPDATE_IONICE_CLASS"
 }
 
 json_escape() {
@@ -102,6 +114,8 @@ cleanup() {
 }
 
 trap cleanup EXIT
+
+apply_self_update_priority
 
 run() {
   log "+ $*"
@@ -965,6 +979,7 @@ ensure_node_runtime
 ensure_current_vps_ip_config
 ensure_live_sysagent_config
 ensure_large_upload_config
+repair_self_update_service_unit
 repair_frontend_service_unit
 repair_sysagent_runtime
 
@@ -980,7 +995,6 @@ run "$NPM_BIN" --workspace api run prisma:generate
 frontend_build_with_recovery
 
 patch_nginx_websocket
-repair_self_update_service_unit
 patch_nginx_api_upload_limit
 ensure_nginx_global_upload_limit
 

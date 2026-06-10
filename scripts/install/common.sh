@@ -597,6 +597,18 @@ Environment=PANEL_UPDATE_ISOLATED=true
 ExecStartPre=+/usr/bin/bash $APP_DIR/scripts/maintenance/patch-panel-nginx-api-upload.sh
 ExecStartPre=+/usr/bin/bash $APP_DIR/scripts/maintenance/fix-nginx-upload-size.sh
 ExecStart=/usr/bin/env PANEL_UPDATE_ISOLATED=true /usr/bin/bash $APP_DIR/scripts/deploy/update-panel.sh
+Nice=15
+CPUAccounting=true
+CPUWeight=10
+CPUQuota=200%
+MemoryAccounting=true
+MemoryHigh=3G
+MemoryMax=4G
+MemorySwapMax=0
+IOAccounting=true
+IOWeight=10
+IOSchedulingClass=idle
+OOMScoreAdjust=500
 KillMode=process
 TimeoutStopSec=30
 

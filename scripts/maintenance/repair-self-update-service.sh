@@ -32,6 +32,18 @@ Environment=PANEL_UPDATE_ISOLATED=true
 ExecStartPre=+/usr/bin/bash $nginx_patch
 ExecStartPre=+/usr/bin/bash $nginx_global
 ExecStart=/usr/bin/env PANEL_UPDATE_ISOLATED=true /usr/bin/bash $update_script
+Nice=15
+CPUAccounting=true
+CPUWeight=10
+CPUQuota=200%
+MemoryAccounting=true
+MemoryHigh=3G
+MemoryMax=4G
+MemorySwapMax=0
+IOAccounting=true
+IOWeight=10
+IOSchedulingClass=idle
+OOMScoreAdjust=500
 KillMode=process
 TimeoutStopSec=30
 
@@ -41,4 +53,13 @@ EOF
 
 chmod 0644 "$unit"
 "$SYSTEMCTL_BIN" daemon-reload
-echo "Repaired $unit with root nginx upload prep before panel self-update"
+if "$SYSTEMCTL_BIN" is-active --quiet vps-panel-self-update.service; then
+  "$SYSTEMCTL_BIN" set-property --runtime vps-panel-self-update.service \
+    CPUWeight=10 \
+    CPUQuota=200% \
+    MemoryHigh=3G \
+    MemoryMax=4G \
+    MemorySwapMax=0 \
+    IOWeight=10 || true
+fi
+echo "Repaired $unit with root nginx upload prep and isolated self-update resources"
