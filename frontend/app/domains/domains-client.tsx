@@ -183,6 +183,11 @@ export function DomainsClient({
     queryKey: ["domains", apiBase, search, page],
     queryFn: () => apiGet<DomainListResponse>(queryPath)
   });
+  const deployments = useQuery({
+    queryKey: ["deployments", deploymentApiBase, "domain-hosting"],
+    queryFn: () => apiGet<DeploymentListResponse | Deployment[]>(`${deploymentApiBase}?page=1&pageSize=100`)
+  });
+  const deploymentItems = Array.isArray(deployments.data) ? deployments.data : deployments.data?.items ?? [];
   const visibleDomains = domains.data?.items ?? [];
   const sortedVisibleDomains = useMemo(() => {
     if (!sort) return visibleDomains;
@@ -233,12 +238,6 @@ export function DomainsClient({
   const visibleSelectedCount = visibleDomainIds.filter((id) => selectedDomainIds.includes(id)).length;
   const allVisibleSelected = visibleDomainIds.length > 0 && visibleSelectedCount === visibleDomainIds.length;
   const selectedCount = selectedDomainIds.length;
-
-  const deployments = useQuery({
-    queryKey: ["deployments", deploymentApiBase, "domain-hosting"],
-    queryFn: () => apiGet<DeploymentListResponse | Deployment[]>(`${deploymentApiBase}?page=1&pageSize=100`)
-  });
-  const deploymentItems = Array.isArray(deployments.data) ? deployments.data : deployments.data?.items ?? [];
 
   const createDomain = useMutation({
     mutationFn: () => apiPost<Domain>(apiBase, { name: normalizedNewDomain, forceSsl }),
