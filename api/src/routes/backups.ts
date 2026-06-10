@@ -180,6 +180,11 @@ export const backupRoutes: FastifyPluginAsync = async (app) => {
     return reply.code(202).send(initial);
   });
 
+  app.post("/coverage", async (request) => {
+    const body = backupSchema.parse(request.body ?? {});
+    return sysagent.backupCoverage(body);
+  });
+
   app.get("/jobs/:id", async (request, reply) => {
     const params = z.object({ id: z.string().min(1) }).parse(request.params);
     const row = await prisma.guardianSetting.findUnique({ where: { key: backupJobKey(params.id) } });

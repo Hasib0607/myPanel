@@ -1,13 +1,16 @@
 import { z } from "zod";
 import path from "node:path";
+import { env } from "../config/env.js";
 import { audit } from "./audit.js";
 import { prisma } from "./prisma.js";
 import { getSecret, putSecret } from "./secrets.js";
 import { sysagent } from "./sysagent.js";
 
+const defaultPanelAppDir = env.PANEL_UPDATE_WORKDIR || "/opt/myPanel";
+
 export const backupSchema = z.object({
   label: z.string().trim().min(1).max(80).default("manual"),
-  appDir: z.string().trim().default("/opt/vps-panel"),
+  appDir: z.string().trim().default(defaultPanelAppDir),
   includeApp: z.boolean().default(true),
   includeEnv: z.boolean().default(true),
   includeDatabase: z.boolean().default(true),
@@ -202,6 +205,15 @@ function panelBackupForJson<T extends { sizeBytes?: bigint | number | string | n
   };
 }
 
+function failedBackupPartialResult(error: unknown) {
+  const details = (error as any)?.result;
+  const archivePath = typeof details?.archivePath === "string" ? details.archivePath : undefined;
+  const sizeBytes = backupSizeForDb(details?.sizeBytes);
+  const includes = Array.isArray(details?.includes) ? details.includes.map(String) : undefined;
+  const remotePath = typeof details?.remote?.remotePath === "string" ? details.remote.remotePath : undefined;
+  return { details, archivePath, sizeBytes, includes, remotePath };
+}
+
 function rcloneTransferPercent(text: string) {
   const matches = [...text.matchAll(/Transferred:\s+.*?,\s*([0-9]+(?:\.[0-9]+)?)%/gi)];
   const last = matches.at(-1)?.[1];
@@ -393,9 +405,17 @@ export async function runPanelBackup(input: unknown, request?: any, onProgress?:
     return jsonUpdated;
   } catch (error) {
     const message = readableErrorMessage(error);
+    const partial = failedBackupPartialResult(error);
     const updated = await prisma.panelBackup.update({
       where: { id: record.id },
-      data: { status: "FAILED", result: { error: message, details: (error as any).result } as any, finishedAt: new Date() }
+      data: {
+        status: "FAILED",
+        archivePath: partial.archivePath,
+        sizeBytes: partial.sizeBytes,
+        includes: partial.includes,
+        result: { error: message, details: partial.details, partialArchiveKept: Boolean(partial.archivePath), remotePath: partial.remotePath } as any,
+        finishedAt: new Date()
+      }
     });
     const jsonUpdated = panelBackupForJson(updated);
     if (request) {
@@ -409,7 +429,7 @@ export async function runPanelBackup(input: unknown, request?: any, onProgress?:
 export function defaultFullBackup(label: string) {
   return backupSchema.parse({
     label,
-    appDir: "/opt/vps-panel",
+    appDir: defaultPanelAppDir,
     includeApp: true,
     includeEnv: true,
     includeDatabase: true,

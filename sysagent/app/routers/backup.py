@@ -29,7 +29,7 @@ SAFE_LABEL = re.compile(r"[^a-zA-Z0-9_.-]+")
 
 class BackupRequest(BaseModel):
     label: str = Field(default="manual")
-    app_dir: str = Field(default="/opt/vps-panel", alias="appDir")
+    app_dir: str = Field(default="/opt/myPanel", alias="appDir")
     include_app: bool = Field(default=True, alias="includeApp")
     include_env: bool = Field(default=True, alias="includeEnv")
     include_database: bool = Field(default=True, alias="includeDatabase")
@@ -98,6 +98,15 @@ class RestoreRequest(BaseModel):
 def safe_label(label: str) -> str:
     cleaned = SAFE_LABEL.sub("-", label.strip()).strip("-")
     return cleaned[:80] or "manual"
+
+
+def default_app_dir() -> str:
+    configured = os.environ.get("PANEL_APP_DIR") or os.environ.get("PANEL_UPDATE_WORKDIR")
+    candidates = [configured, "/opt/myPanel", "/opt/vps-panel", "/opt/mypanel"]
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return candidate
+    return configured or "/opt/myPanel"
 
 
 def path_under_backup_root(value: str) -> str:
@@ -207,6 +216,42 @@ def backup_paths(body: BackupRequest) -> list[str]:
     return paths
 
 
+def du_bytes(path_value: str) -> dict[str, Any]:
+    path = Path(path_value)
+    if not path.exists():
+        return {"path": path_value, "exists": False, "bytes": 0, "error": "missing"}
+    result = run_command(["du", "-sxB1", str(path)], allow_live=True, timeout=900)
+    bytes_value = 0
+    if result.get("returncode") == 0:
+        first = (result.get("stdout") or "").splitlines()[0:1]
+        if first:
+            try:
+                bytes_value = int(first[0].split()[0])
+            except (ValueError, IndexError):
+                bytes_value = 0
+    return {
+        "path": path_value,
+        "exists": True,
+        "bytes": bytes_value,
+        "result": result,
+        "error": "" if result.get("returncode") == 0 else (result.get("stderr") or result.get("stdout") or "du failed"),
+    }
+
+
+def parse_du_lines(text: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        try:
+            size = int(parts[0])
+        except ValueError:
+            continue
+        rows.append({"path": parts[1], "bytes": size})
+    return rows
+
+
 def backup_script(body: BackupRequest, archive_path: str, staging_dir: str) -> str:
     includes = " ".join([shlex.quote(path.lstrip("/")) for path in backup_paths(body)])
     excludes = " ".join([f"--exclude={shlex.quote(pattern)}" for pattern in body.exclude_patterns])
@@ -253,13 +298,15 @@ stat -c '%s' {output_arg} 2>/dev/null || stat -f '%z' {output_arg}
 
 @router.get("/plan")
 def backup_plan() -> dict[str, Any]:
+    app_dir = default_app_dir()
     return {
         "backupRoot": settings.backup_root,
+        "appDir": app_dir,
         "liveEnabled": settings.allow_live_backup,
         "freeBytes": shutil.disk_usage(settings.backup_root if Path(settings.backup_root).exists() else "/").free,
         "includes": [
-            "/opt/vps-panel",
-            "/opt/vps-panel/.env",
+            app_dir,
+            f"{app_dir}/.env",
             "PostgreSQL DATABASE_URL dump",
             "/var/www/accounts",
             "/var/www/deployments",
@@ -269,6 +316,31 @@ def backup_plan() -> dict[str, Any]:
             "mail config and mailboxes",
             "Let's Encrypt certificate material",
         ],
+    }
+
+
+@router.post("/coverage")
+def backup_coverage(body: BackupRequest) -> dict[str, Any]:
+    paths = backup_paths(body)
+    unique_paths = list(dict.fromkeys(paths))
+    included = [du_bytes(path) for path in unique_paths]
+    included_total = sum(int(item.get("bytes") or 0) for item in included)
+    disk = shutil.disk_usage("/")
+    top_result = run_command(
+        ["bash", "-lc", "du -xB1 -d1 / /var /opt /home /etc 2>/dev/null | sort -nr | head -80"],
+        allow_live=True,
+        timeout=1800,
+    )
+    top = parse_du_lines(top_result.get("stdout") or "")
+    return {
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "disk": {"totalBytes": disk.total, "usedBytes": disk.used, "freeBytes": disk.free},
+        "backupRoot": settings.backup_root,
+        "includes": included,
+        "includedTotalBytes": included_total,
+        "excludePatterns": body.exclude_patterns,
+        "topDiskPaths": top,
+        "note": "Archive size is compressed and excludes patterns like node_modules, cache, tmp, and *.log, so it can be much smaller than included source size.",
     }
 
 

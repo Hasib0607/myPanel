@@ -60,7 +60,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const sysagent = {
   stats: () => request("/system/stats"),
-  backupPlan: () => request<{ backupRoot: string; liveEnabled: boolean; freeBytes: number; includes: string[] }>("/backup/plan"),
+  backupPlan: () => request<{ backupRoot: string; appDir?: string; liveEnabled: boolean; freeBytes: number; includes: string[] }>("/backup/plan"),
+  backupCoverage: (body: unknown) =>
+    request("/backup/coverage", { method: "POST", body: JSON.stringify(body) }),
   backupArchives: () => request<{ items: Array<{ path: string; name: string; sizeBytes: number | string; sizeBytesText?: string | null; modifiedAt: string; checksumPath: string }> }>("/backup/archives"),
   createBackup: (body: unknown) =>
     request<{ archivePath: string; stagingDir: string; includes: string[]; sizeBytes?: number | string | null; sizeBytesText?: string | null; result: SysagentCommandResult }>("/backup/create", { method: "POST", body: JSON.stringify(body) }),
