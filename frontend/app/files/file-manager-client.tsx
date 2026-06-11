@@ -14,6 +14,7 @@ import {
   Folder,
   FolderPlus,
   Github,
+  HardDrive,
   Image as ImageIcon,
   Info,
   RefreshCw,
@@ -77,6 +78,20 @@ type Overview = {
   textReadLimit: number;
   uploadLimit: number;
   uploadChunkLimit: number;
+};
+
+type LargestFilesData = {
+  items: Array<{
+    path: string;
+    name: string;
+    root: string;
+    sizeBytes: number | string;
+    modifiedAt: string | null;
+    deletable: boolean;
+    deleteReason?: string | null;
+  }>;
+  scannedRoots: string[];
+  generatedAt: string;
 };
 
 type DownloadResponse = {
@@ -171,6 +186,11 @@ function formatBytes(value: number) {
   return `${(value / 1024 / 1024 / 1024 / 1024).toFixed(1)} TB`;
 }
 
+function toNumber(value: number | string | null | undefined) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
 function parentPath(filePath: string) {
   if (filePath === "." || !filePath.includes("/")) return ".";
   return filePath.split("/").slice(0, -1).join("/") || ".";
@@ -221,6 +241,116 @@ function TreeNode({ node, currentPath, onOpen }: { node: TreeEntry; currentPath:
   );
 }
 
+function LargestFilesModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const largestFiles = useQuery({
+    queryKey: ["files-largest-files-modal"],
+    queryFn: () => apiGet<LargestFilesData>("/dashboard/largest-files"),
+    enabled: open,
+    staleTime: 60_000
+  });
+  const deleteLargestFile = useMutation({
+    mutationFn: (path: string) => apiDeleteBody<{ ok: boolean; path: string; removedBytes?: number | string; dryRun?: boolean }>("/dashboard/largest-files", { path }),
+    onSuccess: async () => {
+      await largestFiles.refetch();
+    }
+  });
+
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-6">
+      <div className="flex max-h-[86vh] w-full max-w-6xl flex-col overflow-hidden rounded-md border border-panel-line bg-white shadow-xl">
+        <div className="flex items-center justify-between border-b border-panel-line p-4">
+          <div>
+            <div className="flex items-center gap-2 text-sm font-semibold text-panel-text">
+              <HardDrive size={17} />
+              Largest Files
+            </div>
+            <div className="mt-1 text-xs text-panel-muted">
+              {largestFiles.data ? `Updated ${new Date(largestFiles.data.generatedAt).toLocaleTimeString()}` : "Scan managed storage roots."}
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              aria-label="Refresh largest files"
+              className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line hover:bg-slate-50 disabled:opacity-50"
+              disabled={largestFiles.isFetching}
+              onClick={() => largestFiles.refetch()}
+              title="Refresh"
+              type="button"
+            >
+              <RefreshCw size={16} />
+            </button>
+            <button
+              aria-label="Close largest files"
+              className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line hover:bg-slate-50"
+              onClick={onClose}
+              title="Close"
+              type="button"
+            >
+              <X size={16} />
+            </button>
+          </div>
+        </div>
+        {largestFiles.isError ? (
+          <div className="border-b border-red-100 bg-red-50 px-4 py-3 text-sm text-panel-danger">
+            {largestFiles.error instanceof Error ? largestFiles.error.message : "Largest files could not be loaded."}
+          </div>
+        ) : null}
+        {deleteLargestFile.isError ? (
+          <div className="border-b border-red-100 bg-red-50 px-4 py-3 text-sm text-panel-danger">
+            {deleteLargestFile.error instanceof Error ? deleteLargestFile.error.message : "File could not be deleted."}
+          </div>
+        ) : null}
+        <div className="min-h-0 flex-1 overflow-auto">
+          <table className="w-full min-w-[920px] text-sm">
+            <thead className="sticky top-0 bg-slate-50 text-left text-xs uppercase text-panel-muted">
+              <tr>
+                <th className="px-4 py-3">File</th>
+                <th className="px-4 py-3">Size</th>
+                <th className="px-4 py-3">Root</th>
+                <th className="px-4 py-3">Modified</th>
+                <th className="px-4 py-3 text-right">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(largestFiles.data?.items ?? []).map((file) => (
+                <tr key={file.path} className="border-t border-panel-line">
+                  <td className="max-w-[520px] px-4 py-3">
+                    <div className="truncate font-medium text-panel-text" title={file.name}>{file.name}</div>
+                    <div className="mt-1 truncate font-mono text-xs text-panel-muted" title={file.path}>{file.path}</div>
+                    {!file.deletable ? <div className="mt-1 text-xs text-amber-700">{file.deleteReason ?? "Protected"}</div> : null}
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-3 font-semibold">{formatBytes(toNumber(file.sizeBytes))}</td>
+                  <td className="whitespace-nowrap px-4 py-3 text-panel-muted">{file.root}</td>
+                  <td className="whitespace-nowrap px-4 py-3 text-panel-muted">{file.modifiedAt ? new Date(file.modifiedAt).toLocaleString() : "-"}</td>
+                  <td className="px-4 py-3 text-right">
+                    <button
+                      aria-label={`Delete ${file.name}`}
+                      className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-panel-line text-panel-muted hover:bg-red-50 hover:text-panel-danger disabled:opacity-40"
+                      disabled={!file.deletable || deleteLargestFile.isPending}
+                      onClick={() => {
+                        if (window.confirm(`Delete this file?\n\n${file.path}\n\nSize: ${formatBytes(toNumber(file.sizeBytes))}`)) {
+                          deleteLargestFile.mutate(file.path);
+                        }
+                      }}
+                      title={file.deletable ? "Delete file" : file.deleteReason ?? "Protected file"}
+                      type="button"
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {largestFiles.isLoading ? <div className="border-t border-panel-line px-4 py-6 text-sm text-panel-muted">Scanning files...</div> : null}
+          {largestFiles.data?.items.length === 0 ? <div className="border-t border-panel-line px-4 py-6 text-sm text-panel-muted">No large files found above 10 MB.</div> : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function FileManagerClient({
   apiBase = "/files",
   domainsApiBase = "/domains",
@@ -263,6 +393,7 @@ export function FileManagerClient({
   const [autoPullBusy, setAutoPullBusy] = useState(false);
   const [repoPickerOpen, setRepoPickerOpen] = useState(false);
   const [repoSearch, setRepoSearch] = useState("");
+  const [largestFilesOpen, setLargestFilesOpen] = useState(false);
   const promptResolverRef = useRef<((value: string | null) => void) | null>(null);
   const confirmResolverRef = useRef<((value: boolean) => void) | null>(null);
   const autoPullTimerRef = useRef<number | null>(null);
@@ -888,6 +1019,9 @@ export function FileManagerClient({
             <button aria-label="Upload" className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50" onClick={() => setUploadDialogOpen(true)} title="Upload" type="button">
               <Upload size={16} />
             </button>
+            <button aria-label="Largest files" className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-sm hover:bg-slate-50" onClick={() => setLargestFilesOpen(true)} title="Largest files" type="button">
+              <HardDrive size={16} />
+            </button>
             <div className="mx-1 h-6 border-l border-panel-line" />
             <button
               aria-label="Copy selected items"
@@ -1352,6 +1486,7 @@ export function FileManagerClient({
           </div>
         </div>
       ) : null}
+      <LargestFilesModal open={largestFilesOpen} onClose={() => setLargestFilesOpen(false)} />
       <InputModal
         open={Boolean(promptRequest)}
         title={promptRequest?.title ?? "Input"}
