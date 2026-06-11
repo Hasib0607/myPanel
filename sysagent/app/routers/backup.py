@@ -300,6 +300,7 @@ tar --ignore-failed-read --warning=no-file-changed {excludes} -czf {archive_arg}
 {encryption_part}
 sha256sum {output_arg} > {shlex.quote(output_path + ".sha256")} 2>/dev/null || shasum -a 256 {output_arg} > {shlex.quote(output_path + ".sha256")}
 stat -c '%s' {output_arg} 2>/dev/null || stat -f '%z' {output_arg}
+rm -rf {staging_arg} || true
 """
 
 
@@ -983,6 +984,15 @@ def prune(body: PruneRequest) -> dict[str, Any]:
     root = Path(settings.backup_root)
     archives = sorted([*root.glob("mypanel-*.tar.gz"), *root.glob("mypanel-*.tar.gz.gpg")], key=lambda p: p.stat().st_mtime, reverse=True) if root.exists() else []
     removable = archives[body.keep_last:]
-    script = "\n".join([f"rm -f '{path}' '{path}.sha256'" for path in removable]) or "true"
+    stale_staging = sorted(root.glob(".staging-*")) if root.exists() else []
+    script = "\n".join(
+        [f"rm -f {shlex.quote(str(path))} {shlex.quote(str(path) + '.sha256')}" for path in removable]
+        + [f"rm -rf {shlex.quote(str(path))}" for path in stale_staging]
+    ) or "true"
     result = run_command(["bash", "-lc", script], allow_live=settings.allow_live_backup, timeout=900)
-    return {"kept": len(archives[:body.keep_last]), "removed": [str(path) for path in removable], "result": result}
+    return {
+        "kept": len(archives[:body.keep_last]),
+        "removed": [str(path) for path in removable],
+        "removedStaging": [str(path) for path in stale_staging],
+        "result": result,
+    }
