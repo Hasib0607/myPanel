@@ -82,12 +82,6 @@ function matchesSearch(value: string, query: string) {
   return value.toLowerCase().includes(query.trim().toLowerCase());
 }
 
-function rowMatchesSearch(row: Record<string, string>, headers: string[], query: string) {
-  const needle = query.trim().toLowerCase();
-  if (!needle) return true;
-  return headers.some((header) => (row[header] ?? "").toLowerCase().includes(needle));
-}
-
 function nullable(column: Column) {
   return column.nullable.toUpperCase() === "YES";
 }
@@ -136,10 +130,11 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
     queryKey: ["database-browser-columns", apiBase, engine, database, selectedTable],
     queryFn: () => apiPost<ColumnListResult>(`${apiBase}/columns`, { ...target, table: selectedTable })
   });
+  const rowSearchTerm = rowSearch.trim();
   const rows = useQuery({
     enabled: Boolean(selectedTable),
-    queryKey: ["database-browser-rows", apiBase, engine, database, selectedTable, limit, offset],
-    queryFn: () => apiPost<RowPreviewResult>(`${apiBase}/rows`, { ...target, table: selectedTable, limit, offset })
+    queryKey: ["database-browser-rows", apiBase, engine, database, selectedTable, limit, offset, rowSearchTerm],
+    queryFn: () => apiPost<RowPreviewResult>(`${apiBase}/rows`, { ...target, table: selectedTable, limit, offset, search: rowSearchTerm || undefined })
   });
 
   useEffect(() => {
@@ -167,10 +162,7 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
     ),
     [columns.data?.columns, columnSearch]
   );
-  const filteredRows = useMemo(
-    () => parsed.rows.filter((row) => rowMatchesSearch(row, parsed.headers, rowSearch)),
-    [parsed.headers, parsed.rows, rowSearch]
-  );
+  const filteredRows = parsed.rows;
   const primaryColumn = columns.data?.columns.find((column) => column.primary)?.name ?? null;
   const editableColumns = columns.data?.columns ?? [];
 
@@ -322,6 +314,7 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
                 <div className="font-semibold">{selectedTable || "Select a table"}</div>
                 <div className="text-xs text-panel-muted">
                   {editableColumns.length} columns · showing {rowSearch ? `${filteredRows.length} of ` : ""}{parsed.rows.length} rows
+                  {rowSearchTerm ? " matching search" : ""}
                 </div>
               </div>
             </div>
@@ -355,15 +348,21 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
                     <input
                       className="h-9 w-full rounded-md border border-panel-line bg-white pl-8 pr-8 text-sm outline-none ring-panel-accent focus:ring-2 disabled:bg-slate-50"
                       disabled={!selectedTable}
-                      onChange={(event) => setRowSearch(event.target.value)}
-                      placeholder="Search rows in current page..."
+                      onChange={(event) => {
+                        setRowSearch(event.target.value);
+                        setOffset(0);
+                      }}
+                      placeholder="Search rows in full table..."
                       type="search"
                       value={rowSearch}
                     />
                     {rowSearch ? (
                       <button
                         className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-panel-muted hover:bg-slate-100 hover:text-panel-ink"
-                        onClick={() => setRowSearch("")}
+                        onClick={() => {
+                          setRowSearch("");
+                          setOffset(0);
+                        }}
                         title="Clear search"
                         type="button"
                       >
@@ -417,8 +416,8 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
                   </table>
                   {rows.isLoading ? <div className="p-6 text-sm text-panel-muted">Loading rows...</div> : null}
                   {!rows.isLoading && selectedTable && parsed.rows.length === 0 ? <div className="p-6 text-sm text-panel-muted">No rows found in this page.</div> : null}
-                  {!rows.isLoading && selectedTable && parsed.rows.length > 0 && filteredRows.length === 0 ? (
-                    <div className="p-6 text-sm text-panel-muted">No rows match &quot;{rowSearch}&quot; on this page.</div>
+                  {!rows.isLoading && selectedTable && rowSearchTerm && parsed.rows.length === 0 ? (
+                    <div className="p-6 text-sm text-panel-muted">No rows match &quot;{rowSearchTerm}&quot; in this table.</div>
                   ) : null}
                 </div>
               </>

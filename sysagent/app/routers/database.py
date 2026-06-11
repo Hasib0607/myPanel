@@ -72,6 +72,7 @@ class DatabaseTableRequest(BaseModel):
 class DatabaseRowsRequest(DatabaseTableRequest):
     limit: int = Field(default=50, ge=1, le=500)
     offset: int = Field(default=0, ge=0)
+    search: str | None = Field(default=None, max_length=200)
 
 
 class DatabaseTableImportRequest(DatabaseTableRequest):
@@ -488,20 +489,48 @@ def list_columns(body: DatabaseTableRequest) -> dict:
     return {"engine": body.engine, "database": body.database, "table": body.table, "columns": columns, "result": result}
 
 
+def table_column_names(engine: str, database: str, table: str) -> list[str]:
+    if engine == "POSTGRESQL":
+        sql = (
+            "SELECT column_name FROM information_schema.columns "
+            f"WHERE table_schema = 'public' AND table_name = {sql_literal(table)} "
+            "ORDER BY ordinal_position;"
+        )
+        result = run_command(["sudo", "-u", "postgres", "psql", "-d", database, "-At", "-c", sql])
+    else:
+        sql = (
+            "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+            f"WHERE TABLE_SCHEMA = {sql_literal(database)} AND TABLE_NAME = {sql_literal(table)} "
+            "ORDER BY ORDINAL_POSITION;"
+        )
+        result = mysql_exec(sql)
+    return parse_lines(result.get("stdout"))
+
+
 @router.post("/rows")
 def preview_rows(body: DatabaseRowsRequest) -> dict:
+    search = (body.search or "").strip()
+    columns = table_column_names(body.engine, body.database, body.table) if search else []
     if body.engine == "POSTGRESQL":
+        where = ""
+        if columns:
+            haystack = "concat_ws(E'\\t', " + ", ".join(f"{postgres_identifier(column)}::text" for column in columns) + ")"
+            where = f" WHERE {haystack} ILIKE {sql_literal('%' + search + '%')}"
         result = run_command([
             "sudo", "-u", "postgres", "psql", "-d", body.database, "--csv",
-            "-c", f"SELECT * FROM {postgres_identifier(body.table)} LIMIT {body.limit} OFFSET {body.offset};"
+            "-c", f"SELECT * FROM {postgres_identifier(body.table)}{where} LIMIT {body.limit} OFFSET {body.offset};"
         ])
     else:
+        where = ""
+        if columns:
+            haystack = "CONCAT_WS('\\t', " + ", ".join(mysql_identifier(column) for column in columns) + ")"
+            where = f" WHERE {haystack} LIKE {sql_literal('%' + search + '%')}"
         result = run_command([
             "mysql", "--batch", "--raw", "-e",
-            f"SELECT * FROM {mysql_identifier(body.table)} LIMIT {body.limit} OFFSET {body.offset};",
+            f"SELECT * FROM {mysql_identifier(body.table)}{where} LIMIT {body.limit} OFFSET {body.offset};",
             body.database,
         ])
-    return {"engine": body.engine, "database": body.database, "table": body.table, "format": "CSV" if body.engine == "POSTGRESQL" else "TSV", "rows": result.get("stdout") or "", "result": result}
+    return {"engine": body.engine, "database": body.database, "table": body.table, "format": "CSV" if body.engine == "POSTGRESQL" else "TSV", "rows": result.get("stdout") or "", "search": search, "result": result}
 
 
 @router.post("/table/export")
