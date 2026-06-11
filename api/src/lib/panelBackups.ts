@@ -261,6 +261,15 @@ function backupTarget(backupRoot: string, label: string, encrypted: boolean) {
   };
 }
 
+async function deleteLocalArchiveAfterRemoteUpload(archivePath: string) {
+  const deleted = await sysagent.deleteBackupArchive(archivePath);
+  const error = backupCommandError("Local archive cleanup", deleted);
+  if (error) {
+    throw Object.assign(new Error(error), { result: { localCleanup: deleted } });
+  }
+  return deleted;
+}
+
 async function waitForCreateBackupJob(
   jobId: string,
   onProgress?: BackupProgressHandler
@@ -371,6 +380,8 @@ export async function runPanelBackup(input: unknown, request?: any, onProgress?:
     await onProgress?.({ phase: "ARCHIVE_CREATED", percent: 55, message: `Archive created${formatBytes(result.sizeBytes) ? ` (${formatBytes(result.sizeBytes)})` : ""}.`, result });
     if (settings.remoteProvider === "GOOGLE_DRIVE" && settings.remoteTarget) {
       const googleDrive = await googleDriveConfig(settings);
+      await onProgress?.({ phase: "PRUNING_REMOTE", percent: 56, message: "Pruning old Drive backups before upload to free space." });
+      await sysagent.pruneRemoteBackups({ remoteTarget: settings.remoteTarget, keepLast: Math.max(1, settings.retentionKeepLast - 1), googleDrive });
       await onProgress?.({ phase: "UPLOADING", percent: 56, message: "Starting Google Drive upload." });
       const uploadJob = await sysagent.uploadBackupJob({ path: result.archivePath, remoteTarget: settings.remoteTarget, googleDrive });
       uploadResult = uploadJob.status === "RUNNING" ? await waitForUploadBackupJob(uploadJob.jobId, onProgress) : {
@@ -385,6 +396,8 @@ export async function runPanelBackup(input: unknown, request?: any, onProgress?:
       }
       await onProgress?.({ phase: "PRUNING_REMOTE", percent: 90, message: "Google Drive upload completed. Pruning old Drive backups.", result: uploadResult });
       await sysagent.pruneRemoteBackups({ remoteTarget: settings.remoteTarget, keepLast: settings.retentionKeepLast, googleDrive });
+      await onProgress?.({ phase: "PRUNING_LOCAL", percent: 94, message: "Drive upload completed. Removing local archive copy." });
+      await deleteLocalArchiveAfterRemoteUpload(result.archivePath);
     }
     await onProgress?.({ phase: "PRUNING_LOCAL", percent: 95, message: "Pruning old local backups." });
     await sysagent.pruneBackups({ keep_last: settings.retentionKeepLast });
@@ -394,10 +407,10 @@ export async function runPanelBackup(input: unknown, request?: any, onProgress?:
       where: { id: record.id },
       data: {
         status: ok ? "SUCCEEDED" : "FAILED",
-        archivePath: result.archivePath,
+        archivePath: uploadResult ? null : result.archivePath,
         sizeBytes: backupSizeForDb(result.sizeBytes),
         includes: result.includes,
-        result: { ...result, remote: uploadResult, settings: { remoteProvider: settings.remoteProvider, remoteTarget: settings.remoteTarget } } as any,
+        result: { ...result, localArchiveDeleted: Boolean(uploadResult), remote: uploadResult, settings: { remoteProvider: settings.remoteProvider, remoteTarget: settings.remoteTarget } } as any,
         finishedAt: new Date()
       }
     });

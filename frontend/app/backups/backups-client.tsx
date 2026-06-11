@@ -12,10 +12,14 @@ type BackupRecord = {
   archivePath: string | null;
   sizeBytes: number | string | null;
   includes: string[];
-  result: { error?: string; partialArchiveKept?: boolean; details?: unknown; result?: { dryRun?: boolean; command?: string[]; stdout?: string; stderr?: string; returncode?: number }; remote?: { remotePath?: string } };
+  result: { error?: string; partialArchiveKept?: boolean; details?: unknown; result?: { dryRun?: boolean; command?: string[]; stdout?: string; stderr?: string; returncode?: number }; remote?: { remotePath?: string }; remotePath?: string };
   createdAt: string;
   finishedAt: string | null;
 };
+
+function backupRecordPath(item: BackupRecord) {
+  return item.archivePath ?? item.result?.remote?.remotePath ?? item.result?.remotePath ?? null;
+}
 
 type BackupArchive = {
   path: string;
@@ -437,8 +441,11 @@ export function BackupsClient() {
                 <div className="grid grid-cols-[1fr_auto] gap-4 px-4 py-3" key={item.id}>
                   <div className="min-w-0">
                     <div className="font-semibold">{item.label} <span className={statusClass(item.status)}>{item.status}</span></div>
-                    <div className="mt-1 truncate text-xs text-panel-muted">{item.archivePath ?? "No archive path yet"}</div>
+                    <div className="mt-1 truncate text-xs text-panel-muted">{backupRecordPath(item) ?? "No archive path yet"}</div>
                     <div className="mt-1 text-xs text-panel-muted">{formatBytes(item.sizeBytes)} · {new Date(item.createdAt).toLocaleString()}</div>
+                    {!item.archivePath && item.result?.remote?.remotePath ? (
+                      <div className="mt-1 text-xs text-emerald-700">Uploaded to Drive. Local archive removed.</div>
+                    ) : null}
                     {item.status === "FAILED" && item.result?.error ? (
                       <div className="mt-2 line-clamp-2 rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-panel-danger" title={item.result.error}>
                         {item.result.partialArchiveKept ? "Local archive kept. " : ""}{item.result.error}
