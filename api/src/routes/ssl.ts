@@ -198,6 +198,7 @@ async function runSslPreflight(domain: { id: string; name: string; documentRoot?
   const effectiveIncludeWww = Boolean(wwwCheck?.ok);
   const dnsChecks = [apexCheck, ...(wwwCheck ? [wwwCheck] : [])];
   const webRoot = path.join(env.FILE_MANAGER_ROOT, domain.name, domain.documentRoot || "public_html");
+  const httpVhost = await publishDomainHttpVhost(domain.name, webRoot, effectiveIncludeWww);
   const preflight = await sysagent.sslPreflight({ domain: domain.name, webRoot, includeWww: effectiveIncludeWww });
 
   if (!commandSucceeded(preflight.certbot)) {
@@ -208,10 +209,34 @@ async function runSslPreflight(domain: { id: string; name: string; documentRoot?
   const failedCheck = preflightChallengeChecks(preflight).find((check) => !commandSucceeded(check));
   if (failedCheck) {
     const detail = commandFailureDetail(failedCheck);
-    throw Object.assign(new Error(`HTTP ACME challenge failed for ${domain.name}. Publish the domain first and keep port 80 open.${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
+    throw Object.assign(new Error(`HTTP ACME challenge failed for ${domain.name}. The panel published the challenge vhost, but the public challenge URL still did not return the token. Keep port 80 open and confirm public DNS points to this VPS.${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
   }
 
-  return { dnsChecks, preflight, webRoot, includeWww: effectiveIncludeWww };
+  return { dnsChecks, httpVhost, preflight, webRoot, includeWww: effectiveIncludeWww };
+}
+
+async function publishDomainHttpVhost(domainName: string, webRoot: string, includeWww: boolean) {
+  const certName = certbotCertificateName(domainName);
+  const serverName = includeWww ? `${domainName} www.${domainName}` : domainName;
+  const result = await sysagent.writeStaticNginxVhost({
+    name: `domain-${nginxResourceName(domainName)}`,
+    serverName,
+    rootPath: webRoot,
+    forceHttps: false,
+    sslCertificate: `/etc/letsencrypt/live/${certName}/fullchain.pem`,
+    sslCertificateKey: `/etc/letsencrypt/live/${certName}/privkey.pem`
+  }) as { test?: SysagentCommandResult; reload?: SysagentCommandResult };
+
+  if (result.test && !commandSucceeded(result.test)) {
+    const detail = commandFailureDetail(result.test);
+    throw Object.assign(new Error(`Could not publish HTTP challenge vhost for ${domainName}.${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
+  }
+  if (result.reload && !commandSucceeded(result.reload)) {
+    const detail = commandFailureDetail(result.reload);
+    throw Object.assign(new Error(`Could not reload Nginx for ${domainName}.${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
+  }
+
+  return result;
 }
 
 async function subdomainSslTarget(subdomainId: string) {
