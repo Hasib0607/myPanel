@@ -20,7 +20,7 @@ const envSchema = z.object({
   DEPLOY_MIN_APP_RESERVE_MB: z.coerce.number().int().min(512).default(8192),
   DEPLOY_APP_RESERVE_MULTIPLIER: z.coerce.number().min(1).default(2),
   DEPLOY_MIN_MEMORY_MB: z.coerce.number().int().min(512).default(3072),
-  DEPLOY_MAX_MEMORY_MB: z.coerce.number().int().min(1024).default(4096),
+  DEPLOY_MAX_MEMORY_MB: z.coerce.number().int().min(1024).default(12288),
   DEPLOY_FREE_CPU_CORES: z.coerce.number().int().min(0).default(2),
   DEPLOY_WEB_RUNTIME_OPTIMIZATION_ENABLED: z.coerce.boolean().default(true),
   PANEL_UPDATE_WEBHOOK_SECRET: z.string().optional(),

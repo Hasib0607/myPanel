@@ -865,7 +865,7 @@ function calculateDeployResourceBudget(snapshot: any): DeployResourceBudget {
   const minAppReserveMb = Number(env.DEPLOY_MIN_APP_RESERVE_MB || 8192);
   const appReserveMultiplier = Number(env.DEPLOY_APP_RESERVE_MULTIPLIER || 2);
   const minDeployMemoryMb = Number(env.DEPLOY_MIN_MEMORY_MB || 3072);
-  const maxDeployMemoryMb = Number(env.DEPLOY_MAX_MEMORY_MB || 4096);
+  const maxDeployMemoryMb = Number(env.DEPLOY_MAX_MEMORY_MB || 12288);
   const freeCpuCores = Number(env.DEPLOY_FREE_CPU_CORES || 2);
   const appReserveMb = Math.max(minAppReserveMb, Math.ceil(runningAppsMemoryMb * appReserveMultiplier));
   const budgetByTotal = totalMemoryMb > 0 ? totalMemoryMb - appReserveMb - systemReserveMb : Number(defaults.memoryMaxMb || 4096);
@@ -4231,6 +4231,9 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           const retryDetail = retryError instanceof Error ? retryError.message : String(retryError);
           if (await retryBuildWithWebpack(retryDetail, "after Next proxy repair")) {
             return true;
+          }
+          if (nodeBuildTerminatedBySigterm(retryDetail)) {
+            return retryBuildAfterSigterm(retryDetail, "after Next proxy repair");
           }
           throw retryError;
         }
