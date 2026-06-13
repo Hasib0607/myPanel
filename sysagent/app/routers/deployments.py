@@ -418,6 +418,52 @@ def git_commit_info(root_path: str, target: Path, env: dict[str, str] | None = N
     }
 
 
+def git_success(result: dict | None) -> bool:
+    return bool(result and result.get("returncode") == 0 and not result.get("dryRun"))
+
+
+def git_sha_matches(left: str | None, right: str | None) -> bool:
+    if not left or not right:
+        return False
+    a = left.strip().lower()
+    b = right.strip().lower()
+    return a == b or a.startswith(b) or b.startswith(a)
+
+
+def git_rev_parse(root_path: str, target: Path, revision: str, env: dict[str, str] | None = None, resource_limits: dict[str, int] | None = None) -> dict:
+    return git_command_with_safe_directory(
+        root_path,
+        target,
+        ["git", "-C", str(target), "rev-parse", revision],
+        env=env,
+        resource_limits=resource_limits,
+    )
+
+
+def git_commit_available(root_path: str, target: Path, commit_sha: str, env: dict[str, str] | None = None, resource_limits: dict[str, int] | None = None) -> dict:
+    return git_command_with_safe_directory(
+        root_path,
+        target,
+        ["git", "-C", str(target), "cat-file", "-e", f"{commit_sha}^{{commit}}"],
+        env=env,
+        resource_limits=resource_limits,
+    )
+
+
+def git_sync_verify_result(expected_sha: str | None, commit: dict) -> dict:
+    actual_sha = commit.get("sha")
+    ok = git_sha_matches(str(actual_sha) if actual_sha else None, expected_sha)
+    return {
+        "dryRun": False,
+        "command": ["git", "verify-head", expected_sha or ""],
+        "stdout": f"HEAD {actual_sha} matches expected {expected_sha}" if ok else "",
+        "stderr": "" if ok else f"Git sync ended at {actual_sha or 'unknown'}, expected {expected_sha or 'unknown'}",
+        "returncode": 0 if ok else 1,
+        "expectedSha": expected_sha,
+        "actualSha": actual_sha,
+    }
+
+
 def deployment_cwd(root_path: str) -> str:
     return str(Path(root_path).resolve())
 
@@ -1703,21 +1749,66 @@ def git_sync(body: GitSyncRequest) -> dict:
     if target.joinpath(".git").exists():
         remote = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "remote", "set-url", "origin", body.gitUrl], env=env, resource_limits=body.resourceLimits) if body.gitUrl else None
         fetch = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "fetch", "origin", body.branch, "--prune"], env=env, resource_limits=body.resourceLimits)
-        reset_target = body.commitSha or "FETCH_HEAD"
-        reset = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "reset", "--hard", reset_target], env=env, resource_limits=body.resourceLimits)
-        clean = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "clean", "-fd"], env=env, resource_limits=body.resourceLimits)
-        return {"safeDirectory": safe, "remote": remote, "sync": fetch, "reset": reset, "clean": clean, "commit": git_commit_info(body.rootPath, target, env)}
+        fetch_commit = git_rev_parse(body.rootPath, target, "FETCH_HEAD", env=env, resource_limits=body.resourceLimits) if git_success(fetch) else None
+        desired_sha = body.commitSha or ((fetch_commit.get("stdout") or "").strip() if fetch_commit else None)
+        desired_available = None
+        fetch_commit_sha = None
+        if body.commitSha and git_success(fetch):
+            desired_available = git_commit_available(body.rootPath, target, body.commitSha, env=env, resource_limits=body.resourceLimits)
+            if not git_success(desired_available):
+                fetch_commit_sha = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "fetch", "origin", body.commitSha], env=env, resource_limits=body.resourceLimits)
+                desired_available = git_commit_available(body.rootPath, target, body.commitSha, env=env, resource_limits=body.resourceLimits)
+        reset_target = desired_sha or "FETCH_HEAD"
+        reset = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "reset", "--hard", reset_target], env=env, resource_limits=body.resourceLimits) if git_success(fetch) and (not body.commitSha or git_success(desired_available)) else {
+            "dryRun": False,
+            "command": ["git", "-C", str(target), "reset", "--hard", reset_target],
+            "stdout": "",
+            "stderr": "Skipped because git fetch failed or requested commit is not available locally.",
+            "returncode": 1,
+        }
+        clean = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "clean", "-fd"], env=env, resource_limits=body.resourceLimits) if git_success(reset) else {
+            "dryRun": False,
+            "command": ["git", "-C", str(target), "clean", "-fd"],
+            "stdout": "",
+            "stderr": "Skipped because git reset failed.",
+            "returncode": 1,
+        }
+        commit = git_commit_info(body.rootPath, target, env)
+        verify = git_sync_verify_result(desired_sha, commit) if git_success(reset) and desired_sha else {
+            "dryRun": False,
+            "command": ["git", "verify-head", desired_sha or ""],
+            "stdout": "",
+            "stderr": "Skipped because no expected commit could be resolved.",
+            "returncode": 1,
+            "expectedSha": desired_sha,
+            "actualSha": commit.get("sha"),
+        }
+        return {"safeDirectory": safe, "remote": remote, "sync": fetch, "fetchHead": fetch_commit, "fetchCommit": fetch_commit_sha, "commitAvailable": desired_available, "reset": reset, "clean": clean, "commit": commit, "verify": verify}
     if body.gitUrl:
         command = ["git", "clone", "--branch", body.branch, body.gitUrl, str(target)]
     else:
         command = ["git", "-C", str(target), "fetch", "--all", "--prune"]
     result = git_command_with_safe_directory(body.rootPath, target, command, env=env, resource_limits=body.resourceLimits)
     checkout = None
+    desired_available = None
     if body.commitSha:
-        checkout = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "checkout", body.commitSha], env=env, resource_limits=body.resourceLimits)
+        desired_available = git_commit_available(body.rootPath, target, body.commitSha, env=env, resource_limits=body.resourceLimits) if git_success(result) else None
+        if not git_success(desired_available):
+            fetch_commit_sha = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "fetch", "origin", body.commitSha], env=env, resource_limits=body.resourceLimits) if target.joinpath(".git").exists() else None
+            desired_available = git_commit_available(body.rootPath, target, body.commitSha, env=env, resource_limits=body.resourceLimits) if fetch_commit_sha else desired_available
+        checkout = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "checkout", body.commitSha], env=env, resource_limits=body.resourceLimits) if git_success(desired_available) else {
+            "dryRun": False,
+            "command": ["git", "-C", str(target), "checkout", body.commitSha],
+            "stdout": "",
+            "stderr": "Skipped because requested commit is not available after clone/fetch.",
+            "returncode": 1,
+        }
     elif not body.gitUrl:
         checkout = git_command_with_safe_directory(body.rootPath, target, ["git", "-C", str(target), "checkout", body.branch], env=env, resource_limits=body.resourceLimits)
-    return {"safeDirectory": safe, "sync": result, "checkout": checkout, "commit": git_commit_info(body.rootPath, target, env) if target.joinpath(".git").exists() else None}
+    commit = git_commit_info(body.rootPath, target, env) if target.joinpath(".git").exists() else None
+    expected_sha = body.commitSha
+    verify = git_sync_verify_result(expected_sha, commit) if expected_sha and commit else None
+    return {"safeDirectory": safe, "sync": result, "commitAvailable": desired_available, "checkout": checkout, "commit": commit, "verify": verify}
 
 
 @router.post("/install")

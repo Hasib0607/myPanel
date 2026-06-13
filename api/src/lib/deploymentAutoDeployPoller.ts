@@ -19,6 +19,7 @@ type PollableDeployment = Awaited<ReturnType<typeof loadPollableDeployments>>[nu
 const blockingDeploymentStatuses = ["QUEUED", "DEPLOYING", "BUILDING"] as const;
 const activeReleaseStatuses = ["QUEUED", "RUNNING"] as const;
 const skipLogCooldownMs = Number(process.env.GUARDIAN_AUTO_DEPLOY_SKIP_LOG_COOLDOWN_MS ?? 30 * 60_000);
+const failedReleaseRetryCooldownMs = Number(process.env.GUARDIAN_AUTO_DEPLOY_FAILED_RELEASE_RETRY_COOLDOWN_MS ?? 10 * 60_000);
 
 function superadminGithubTokenRef() {
   return "github:superadmin:token";
@@ -118,7 +119,7 @@ async function shouldQueueRemoteHead(deployment: PollableDeployment, remoteSha: 
     where: { deploymentId: deployment.id },
     orderBy: { createdAt: "desc" },
     take: 20,
-    select: { id: true, status: true, commitSha: true }
+    select: { id: true, status: true, commitSha: true, createdAt: true }
   });
   const activeRelease = recentReleases.find((release) => activeReleaseStatuses.includes(release.status as any));
   if (activeRelease) {
@@ -129,9 +130,17 @@ async function shouldQueueRemoteHead(deployment: PollableDeployment, remoteSha: 
     await prisma.deployment.update({ where: { id: deployment.id }, data: { commitSha: alreadyReleased.commitSha ?? remoteSha } });
     return { queue: false, reason: `remote head already deployed by release ${alreadyReleased.id}` };
   }
-  const alreadyQueued = recentReleases.find((release) => shaMatches(release.commitSha, remoteSha));
-  if (alreadyQueued) {
-    return { queue: false, reason: `remote head already has release ${alreadyQueued.id}` };
+  const recentFailed = recentReleases.find((release) => shaMatches(release.commitSha, remoteSha) && release.status === "FAILED");
+  if (recentFailed) {
+    const ageMs = Date.now() - recentFailed.createdAt.getTime();
+    if (ageMs < failedReleaseRetryCooldownMs) {
+      return { queue: false, reason: `remote head release ${recentFailed.id} failed recently; retry cooldown active` };
+    }
+    return { queue: true, reason: `remote head release ${recentFailed.id} failed; retrying after cooldown` };
+  }
+  const alreadyKnown = recentReleases.find((release) => shaMatches(release.commitSha, remoteSha));
+  if (alreadyKnown) {
+    return { queue: true, reason: `remote head has ${alreadyKnown.status.toLowerCase()} release ${alreadyKnown.id}; queueing a fresh deploy` };
   }
 
   return { queue: true, reason: "remote head differs from deployed commit" };
