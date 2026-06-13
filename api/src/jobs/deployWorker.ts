@@ -938,7 +938,8 @@ async function applyPriorityReserveToDeployBudget(deploymentId: string, budget: 
   });
   const p1Count = running.filter((deployment) => normalizeDeploymentResourcePolicy(deployment.processConfig).priorityTier === "P1").length;
   if (p1Count === 0 || currentPolicy.priorityTier === "P1") return budget;
-  const deployMemoryMb = Math.min(budget.resourceLimits.memoryMaxMb, 3072);
+  const protectedBuildMemoryMb = Math.max(Number(env.DEPLOY_MIN_MEMORY_MB || 3072), Math.min(8192, Number(env.DEPLOY_MAX_MEMORY_MB || 12288)));
+  const deployMemoryMb = Math.min(budget.resourceLimits.memoryMaxMb, protectedBuildMemoryMb);
   const cpuQuotaPercent = Math.min(budget.resourceLimits.cpuQuotaPercent, 200);
   return {
     ...budget,
