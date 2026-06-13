@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-UPLOAD_SIZE="${UPLOAD_SIZE:-0}"
+UPLOAD_SIZE="${UPLOAD_SIZE:-500M}"
 
 if [[ "$(id -u)" != "0" ]]; then
   echo "Run as root." >&2

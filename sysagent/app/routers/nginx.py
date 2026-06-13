@@ -241,6 +241,7 @@ def ensure_panel_upload_limits() -> dict:
     scripts = [
         app_dir / "scripts" / "maintenance" / "patch-panel-nginx-api-upload.sh",
         app_dir / "scripts" / "maintenance" / "fix-nginx-upload-size.sh",
+        app_dir / "scripts" / "maintenance" / "fix-php-upload-limits.sh",
     ]
     results: list[dict] = []
     for script in scripts:
