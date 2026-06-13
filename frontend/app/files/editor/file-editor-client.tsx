@@ -65,7 +65,7 @@ function parentPath(filePath: string) {
   return filePath.split("/").slice(0, -1).join("/") || ".";
 }
 
-export function FileEditorClient({ initialPath, apiBase = "/files" }: { initialPath: string; apiBase?: "/files" | "/account/files" }) {
+export function FileEditorClient({ initialPath, apiBase = "/files" }: { initialPath: string; apiBase?: string }) {
   const router = useRouter();
   const queryClient = useQueryClient();
   const editorHostRef = useRef<HTMLDivElement | null>(null);
@@ -149,7 +149,7 @@ export function FileEditorClient({ initialPath, apiBase = "/files" }: { initialP
     onSuccess: async () => {
       setOriginalContent(content);
       setLastResult("Saved.");
-      await queryClient.invalidateQueries({ queryKey: ["files-editor-read", filePath] });
+      await queryClient.invalidateQueries({ queryKey: ["files-editor-read", apiBase, filePath] });
       await queryClient.invalidateQueries({ queryKey: ["files-list"] });
     },
     onError: (error) => setLastResult(error instanceof Error ? error.message : "Could not save")

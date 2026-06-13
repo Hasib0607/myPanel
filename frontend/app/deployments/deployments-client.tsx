@@ -934,7 +934,7 @@ function DeploymentFileManagerPanel({ accountRoot, apiBase, deployment }: { acco
       <FileManagerClient
         apiBase={fileApiBase}
         domainsApiBase={apiBase === "/account/deployments" ? "/account/domains" : "/domains"}
-        editorBase={null}
+        editorBase={apiBase === "/account/deployments" ? "/account/files/editor" : `/deployments/${deployment.slug}/files/editor`}
         embedded
         enableGithubPull={false}
         fixedRoot={{

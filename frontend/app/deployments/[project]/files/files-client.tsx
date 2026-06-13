@@ -24,7 +24,7 @@ export function DeploymentFilesClient({ project }: { project: string }) {
           <div className="overflow-hidden rounded-md border border-panel-line bg-white">
             <FileManagerClient
               apiBase="/files"
-              editorBase={null}
+              editorBase={`/deployments/${project}/files/editor`}
               embedded
               enableGithubPull={false}
               fixedRoot={{
