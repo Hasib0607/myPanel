@@ -3356,6 +3356,34 @@ function commandWithManagedNodeHeap(command: string | null | undefined, heapMb: 
   return rendered.replace(/--max-old-space-size=\d+/g, `--max-old-space-size=${Math.max(512, Math.floor(heapMb))}`);
 }
 
+async function capPackageJsonNodeHeap(appPath: string, heapMb: number) {
+  const packageJsonPath = path.join(appPath, "package.json");
+  const raw = await fs.readFile(packageJsonPath, "utf8").catch(() => null);
+  if (!raw) return null;
+
+  let pkg: { scripts?: Record<string, string> };
+  try {
+    pkg = JSON.parse(raw) as { scripts?: Record<string, string> };
+  } catch {
+    return null;
+  }
+
+  const scripts = pkg.scripts ?? {};
+  const changedScripts: Record<string, { before: string; after: string }> = {};
+  for (const [name, script] of Object.entries(scripts)) {
+    const next = commandWithManagedNodeHeap(script, heapMb);
+    if (next && next !== script) {
+      scripts[name] = next;
+      changedScripts[name] = { before: script, after: next };
+    }
+  }
+
+  if (Object.keys(changedScripts).length === 0) return null;
+  pkg.scripts = scripts;
+  await fs.writeFile(packageJsonPath, `${JSON.stringify(pkg, null, 2)}\n`, "utf8");
+  return { packageJsonPath, changedScripts, nodeHeapMb: Math.max(512, Math.floor(heapMb)) };
+}
+
 function transformNextMiddlewareToProxy(content: string) {
   return content
     .replace(/\bfunction\s+middleware\b/g, "function proxy")
@@ -4144,6 +4172,10 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       const rawDefaultBuildCommand = renderDeploymentCommand(deployment.buildCommand, deployment.port);
       const defaultBuildCommand = commandWithManagedNodeHeap(rawDefaultBuildCommand, deployBudget.summary.nodeHeapMb);
       const webpackBuildCommand = commandWithManagedNodeHeap(nextWebpackBuildCommand(defaultBuildCommand), deployBudget.summary.nodeHeapMb);
+      const packageHeapCap = await capPackageJsonNodeHeap(appPath, deployBudget.summary.nodeHeapMb);
+      if (packageHeapCap) {
+        await writeLog(deployment.id, releaseId, "BUILDING", "Capped package.json Node heap in build scripts", packageHeapCap as Prisma.InputJsonObject, "warn");
+      }
       if (rawDefaultBuildCommand !== defaultBuildCommand) {
         await writeLog(deployment.id, releaseId, "BUILDING", "Capped inline Node heap in build command", {
           originalCommand: rawDefaultBuildCommand,
