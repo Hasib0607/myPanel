@@ -1,7 +1,9 @@
 from __future__ import annotations
+import os
 import re
 from pathlib import Path
 from typing import Callable, TypeVar
+from uuid import uuid4
 
 from fastapi import HTTPException
 
@@ -241,7 +243,7 @@ def publish_nginx_config(
 ) -> dict:
     available = safe_nginx_path(sites_available, name)
     enabled = safe_nginx_path(sites_enabled, name)
-    temp_available = available.with_name(f".{available.name}.tmp")
+    temp_available = available.with_name(f".{available.name}.{os.getpid()}-{uuid4().hex}.tmp")
 
     write = {
         "dryRun": not settings.allow_live_nginx,
@@ -336,7 +338,12 @@ def publish_nginx_config(
                 "removedConflicts": removed,
             }
 
-        run_live_step("promote config", lambda: temp_available.replace(available))
+        def promote_config() -> None:
+            if not temp_available.exists():
+                temp_available.write_text(config, encoding="utf-8")
+            temp_available.replace(available)
+
+        run_live_step("promote config", promote_config)
         run_live_step("enable config", lambda: _enable_site(available, enabled))
         reload_result = run_command(["systemctl", "reload", "nginx"], allow_live=True)
         if reload_result.get("returncode") != 0:
