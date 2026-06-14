@@ -250,6 +250,21 @@ async function publishHttpChallengeVhost(domainName: string, domainId: string | 
   }
 }
 
+function firstFailedPreflightChallenge(preflight: { checks?: SysagentCommandResult[]; localChecks?: SysagentCommandResult[] }) {
+  const checks = preflight.localChecks?.length ? preflight.localChecks : preflight.checks ?? [];
+  return checks.find((check) => check.returncode !== 0 || check.dryRun);
+}
+
+async function assertHttpChallengeReachable(domainName: string, includeWww: boolean, webRoot: string) {
+  const preflight = await sysagent.sslPreflight({ domain: domainName, webRoot, includeWww });
+  assertLiveCommandSucceeded("Certbot readiness check", preflight.certbot);
+  const failed = firstFailedPreflightChallenge(preflight);
+  if (failed) {
+    const detail = commandDetail(failed);
+    throw new Error(`SSL auto retry waiting for HTTP challenge route: ${domainName} returned an invalid ACME challenge response.${detail ? ` ${detail}` : ""}`);
+  }
+}
+
 async function assertHttpSslDnsReady(domainName: string, includeWww: boolean) {
   const vpsIp = await currentVpsIp();
   const hostnames = [domainName, ...(includeWww && !domainName.startsWith("*.") ? [`www.${domainName}`] : [])];
@@ -319,19 +334,21 @@ export const sslWorker = new Worker(
       if (!result) {
         const dnsChallenge = isWildcardHostname(job.data.domain) || job.data.dnsChallenge;
         if (!dnsChallenge) {
+          const webRoot = job.data.webRoot ?? `${env.FILE_MANAGER_ROOT}/${job.data.domain}/public_html`;
           try {
             await assertHttpSslDnsReady(job.data.domain, includeWww);
+            await publishHttpChallengeVhost(
+              job.data.domain,
+              job.data.domainId,
+              includeWww,
+              webRoot
+            );
+            await assertHttpChallengeReachable(job.data.domain, includeWww, webRoot);
           } catch (error) {
             const scheduled = await rescheduleAccountAutoSslForDns(job, error);
             if (scheduled) return scheduled;
             throw error;
           }
-          await publishHttpChallengeVhost(
-            job.data.domain,
-            job.data.domainId,
-            includeWww,
-            job.data.webRoot ?? `${env.FILE_MANAGER_ROOT}/${job.data.domain}/public_html`
-          );
         }
         result = dnsChallenge
           ? await sysagent.issueDnsCertificate({
