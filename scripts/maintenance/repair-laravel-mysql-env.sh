@@ -70,6 +70,20 @@ set_env() {
   fi
 }
 
+env_value() {
+  local key="$1"
+  grep -E "^${key}=" "$APP_DIR/.env" | tail -n 1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
+}
+
+clear_if_postgres_url() {
+  local key="$1"
+  local value
+  value="$(env_value "$key" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$value" == postgres://* || "$value" == postgresql://* ]]; then
+    set_env "$key" ""
+  fi
+}
+
 set_env DB_CONNECTION mysql
 set_env DB_HOST "$DB_HOST"
 set_env DB_PORT "$DB_PORT"
@@ -78,6 +92,8 @@ if [[ -n "$DB_USER" ]]; then set_env DB_USERNAME "$DB_USER"; fi
 if [[ -n "$DB_PASS" ]]; then set_env DB_PASSWORD "$DB_PASS"; fi
 set_env DB_CHARSET utf8mb4
 set_env DB_COLLATION utf8mb4_unicode_ci
+clear_if_postgres_url DATABASE_URL
+clear_if_postgres_url DB_URL
 
 (
   cd "$APP_DIR"
@@ -86,4 +102,4 @@ set_env DB_COLLATION utf8mb4_unicode_ci
 )
 
 echo "Laravel MySQL env repaired at $APP_DIR"
-grep -E '^(DB_CONNECTION|DB_HOST|DB_PORT|DB_DATABASE|DB_USERNAME|DB_CHARSET|DB_COLLATION)=' "$APP_DIR/.env"
+grep -E '^(DB_CONNECTION|DB_HOST|DB_PORT|DB_DATABASE|DB_USERNAME|DB_CHARSET|DB_COLLATION|DATABASE_URL|DB_URL)=' "$APP_DIR/.env"
