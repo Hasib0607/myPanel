@@ -26,6 +26,50 @@ type AccountTerminalDomain = {
   }>;
 };
 
+const terminalBlockedEnvKeys = new Set([
+  "DATABASE_URL",
+  "DIRECT_DATABASE_URL",
+  "DB_URL",
+  "DB_CONNECTION",
+  "DB_HOST",
+  "DB_PORT",
+  "DB_DATABASE",
+  "DB_USERNAME",
+  "DB_PASSWORD",
+  "DB_CHARSET",
+  "DB_COLLATION",
+  "PGHOST",
+  "PGPORT",
+  "PGDATABASE",
+  "PGUSER",
+  "PGPASSWORD",
+  "POSTGRES_HOST",
+  "POSTGRES_PORT",
+  "POSTGRES_DB",
+  "POSTGRES_USER",
+  "POSTGRES_PASSWORD",
+  "MYSQL_HOST",
+  "MYSQL_PORT",
+  "MYSQL_DATABASE",
+  "MYSQL_USER",
+  "MYSQL_PASSWORD"
+]);
+
+function terminalEnvironment(scope: TerminalScope) {
+  const inherited = { ...(process.env as Record<string, string>) };
+  for (const key of terminalBlockedEnvKeys) {
+    delete inherited[key];
+  }
+  return {
+    ...inherited,
+    HOME: scope.cwd,
+    PWD: scope.cwd,
+    USER: scope.username ?? process.env.USER ?? "panel",
+    LOGNAME: scope.username ?? process.env.LOGNAME ?? "panel",
+    PS1: scope.domain ? `[${scope.username ?? "account"}@${scope.domain} \\W]$ ` : "\\u@\\h:\\w\\$ "
+  };
+}
+
 function insideRoot(target: string, root: string) {
   return target === root || target.startsWith(`${root}${path.sep}`);
 }
@@ -168,14 +212,7 @@ export const terminalRoutes: FastifyPluginAsync = async (app) => {
       cols: 80,
       rows: 24,
       cwd: scope.cwd,
-      env: {
-        ...(process.env as Record<string, string>),
-        HOME: scope.cwd,
-        PWD: scope.cwd,
-        USER: scope.username ?? process.env.USER ?? "panel",
-        LOGNAME: scope.username ?? process.env.LOGNAME ?? "panel",
-        PS1: scope.domain ? `[${scope.username ?? "account"}@${scope.domain} \\W]$ ` : "\\u@\\h:\\w\\$ "
-      }
+      env: terminalEnvironment(scope)
     });
 
     ptyProcess.onData((data) => {
