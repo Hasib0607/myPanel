@@ -25,6 +25,9 @@ from app.platform import current_os, package_install_command, package_install_en
 router = APIRouter()
 
 SAFE_LABEL = re.compile(r"[^a-zA-Z0-9_.-]+")
+REMOTE_ARCHIVE = re.compile(r"\.tar\.gz(\.gpg)?$")
+RCLONE_DRIVE_COPY_FLAGS = "--drive-acknowledge-abuse"
+RCLONE_DRIVE_DELETE_FLAGS = "--drive-acknowledge-abuse --drive-use-trash=false"
 
 
 class BackupRequest(BaseModel):
@@ -621,6 +624,25 @@ def dated_remote_paths(remote_target: str, archive: Path) -> tuple[str, str]:
     return dated_target, f"{dated_target}/{archive.name}"
 
 
+def remote_archive_names(stdout: str) -> list[str]:
+    names: list[str] = []
+    for line in stdout.splitlines():
+        value = line.split(";", 1)[1] if ";" in line else line
+        name = value.strip()
+        if name and REMOTE_ARCHIVE.search(name):
+            names.append(name)
+    return names
+
+
+def rclone_delete_remote_backup_commands(remote_path: str) -> list[str]:
+    quoted_path = shlex.quote(remote_path)
+    quoted_checksum = shlex.quote(remote_path + ".sha256")
+    return [
+        f"rclone deletefile {quoted_path} {RCLONE_DRIVE_DELETE_FLAGS}",
+        f"rclone deletefile {quoted_checksum} {RCLONE_DRIVE_DELETE_FLAGS} || true",
+    ]
+
+
 @router.post("/upload-remote")
 def upload_remote(body: RemoteUploadRequest) -> dict[str, Any]:
     archive = checked_archive(body.path)
@@ -637,12 +659,12 @@ set -Eeuo pipefail
 {setup}
 {rclone_install_snippet()}
 echo "Preparing Google Drive target {dated_target}" >&2
-rclone mkdir {quoted_target} --drive-acknowledge-abuse
+rclone mkdir {quoted_target} {RCLONE_DRIVE_COPY_FLAGS}
 echo "Uploading archive to {remote_path}" >&2
-rclone copyto {quoted_archive} {quoted_remote_path} --drive-acknowledge-abuse --stats 5s --stats-one-line
+rclone copyto {quoted_archive} {quoted_remote_path} {RCLONE_DRIVE_COPY_FLAGS} --stats 5s --stats-one-line
 if [ -f {quoted_checksum} ]; then
   echo "Uploading checksum to {remote_path}.sha256" >&2
-  rclone copyto {quoted_checksum} {shlex.quote(remote_path + ".sha256")} --drive-acknowledge-abuse --stats 5s --stats-one-line
+  rclone copyto {quoted_checksum} {shlex.quote(remote_path + ".sha256")} {RCLONE_DRIVE_COPY_FLAGS} --stats 5s --stats-one-line
 fi
 """
     result = run_command(["bash", "-lc", script], env=env, allow_live=settings.allow_live_backup, timeout=7200)
@@ -665,12 +687,12 @@ set -Eeuo pipefail
 {setup}
 {rclone_install_snippet()}
 echo "Preparing Google Drive target {dated_target}" >&2
-rclone mkdir {quoted_target} --drive-acknowledge-abuse
+rclone mkdir {quoted_target} {RCLONE_DRIVE_COPY_FLAGS}
 echo "Uploading archive to {remote_path}" >&2
-rclone copyto {quoted_archive} {quoted_remote_path} --drive-acknowledge-abuse --stats 5s --stats-one-line
+rclone copyto {quoted_archive} {quoted_remote_path} {RCLONE_DRIVE_COPY_FLAGS} --stats 5s --stats-one-line
 if [ -f {quoted_checksum} ]; then
   echo "Uploading checksum to {remote_path}.sha256" >&2
-  rclone copyto {quoted_checksum} {shlex.quote(remote_path + ".sha256")} --drive-acknowledge-abuse --stats 5s --stats-one-line
+  rclone copyto {quoted_checksum} {shlex.quote(remote_path + ".sha256")} {RCLONE_DRIVE_COPY_FLAGS} --stats 5s --stats-one-line
 fi
 """
     job_id = uuid.uuid4().hex
@@ -846,12 +868,14 @@ def prune_remote(body: RemotePruneRequest) -> dict[str, Any]:
         allow_live=settings.allow_live_backup,
         timeout=900,
     )
-    names = [line.split(";", 1)[1] for line in list_result.get("stdout", "").splitlines() if ";" in line]
+    if list_result.get("returncode") not in (0, None):
+        return {"remoteTarget": remote_target, "kept": [], "removed": [], "result": list_result}
+    names = remote_archive_names(list_result.get("stdout", ""))
     removable = names[body.keep_last:]
     script = "\n".join([
-        f"rclone deletefile {shlex.quote(remote_target + '/' + name)}; rclone deletefile {shlex.quote(remote_target + '/' + name + '.sha256')} || true"
+        "\n".join(rclone_delete_remote_backup_commands(remote_target + "/" + name))
         for name in removable
-    ] + [f"rclone rmdirs {quoted_target} --leave-root || true"]) or "true"
+    ] + [f"rclone rmdirs {quoted_target} --leave-root {RCLONE_DRIVE_DELETE_FLAGS} || true"]) or "true"
     result = run_command(["bash", "-lc", f"set -Eeuo pipefail\n{setup}{script}"], env=env, allow_live=settings.allow_live_backup, timeout=1800)
     return {"remoteTarget": remote_target, "kept": names[:body.keep_last], "removed": removable, "result": result}
 
@@ -968,12 +992,12 @@ def delete_archive(path: str) -> dict[str, Any]:
 def delete_remote(body: RemoteDeleteRequest) -> dict[str, Any]:
     setup, env = rclone_env_and_setup(body.google_drive, body.remote_path)
     remote_path = body.remote_path.rstrip("/")
+    delete_script = "\n".join(rclone_delete_remote_backup_commands(remote_path))
     script = f"""
 set -Eeuo pipefail
 {setup}
 command -v rclone >/dev/null 2>&1
-rclone deletefile {shlex.quote(remote_path)}
-rclone deletefile {shlex.quote(remote_path + ".sha256")} || true
+{delete_script}
 """
     result = run_command(["bash", "-lc", script], env=env, allow_live=settings.allow_live_backup, timeout=900)
     return {"remotePath": remote_path, "result": result}

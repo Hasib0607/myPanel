@@ -381,7 +381,11 @@ export async function runPanelBackup(input: unknown, request?: any, onProgress?:
     if (settings.remoteProvider === "GOOGLE_DRIVE" && settings.remoteTarget) {
       const googleDrive = await googleDriveConfig(settings);
       await onProgress?.({ phase: "PRUNING_REMOTE", percent: 56, message: "Pruning old Drive backups before upload to free space." });
-      await sysagent.pruneRemoteBackups({ remoteTarget: settings.remoteTarget, keepLast: Math.max(1, settings.retentionKeepLast - 1), googleDrive });
+      const preUploadPrune = await sysagent.pruneRemoteBackups({ remoteTarget: settings.remoteTarget, keepLast: Math.max(1, settings.retentionKeepLast - 1), googleDrive });
+      const preUploadPruneError = backupCommandError("Google Drive pre-upload pruning", preUploadPrune);
+      if (preUploadPruneError) {
+        throw Object.assign(new Error(preUploadPruneError), { result: { ...result, remotePrune: preUploadPrune } });
+      }
       await onProgress?.({ phase: "UPLOADING", percent: 56, message: "Starting Google Drive upload." });
       const uploadJob = await sysagent.uploadBackupJob({ path: result.archivePath, remoteTarget: settings.remoteTarget, googleDrive });
       uploadResult = uploadJob.status === "RUNNING" ? await waitForUploadBackupJob(uploadJob.jobId, onProgress) : {
@@ -395,7 +399,11 @@ export async function runPanelBackup(input: unknown, request?: any, onProgress?:
         throw Object.assign(new Error(uploadError), { result: { ...result, remote: uploadResult } });
       }
       await onProgress?.({ phase: "PRUNING_REMOTE", percent: 90, message: "Google Drive upload completed. Pruning old Drive backups.", result: uploadResult });
-      await sysagent.pruneRemoteBackups({ remoteTarget: settings.remoteTarget, keepLast: settings.retentionKeepLast, googleDrive });
+      const postUploadPrune = await sysagent.pruneRemoteBackups({ remoteTarget: settings.remoteTarget, keepLast: settings.retentionKeepLast, googleDrive });
+      const postUploadPruneError = backupCommandError("Google Drive post-upload pruning", postUploadPrune);
+      if (postUploadPruneError) {
+        throw Object.assign(new Error(postUploadPruneError), { result: { ...result, remote: uploadResult, remotePrune: postUploadPrune } });
+      }
       await onProgress?.({ phase: "PRUNING_LOCAL", percent: 94, message: "Drive upload completed. Removing local archive copy." });
       await deleteLocalArchiveAfterRemoteUpload(result.archivePath);
     }
