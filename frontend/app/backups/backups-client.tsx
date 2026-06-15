@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Archive, Download, Eye, RefreshCw, RotateCcw, ShieldCheck, Trash2 } from "lucide-react";
+import { Archive, Download, Eye, RefreshCw, RotateCcw, ShieldCheck, Trash2, UploadCloud } from "lucide-react";
 import { useEffect, useState } from "react";
 import { apiDeleteBody, apiGet, apiPost, apiPut } from "@/lib/api";
 
@@ -252,6 +252,15 @@ export function BackupsClient() {
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Drive prune failed.")
   });
+  const pushDrive = useMutation({
+    mutationFn: (body: { id?: string; path?: string }) => apiPost<BackupJob>("/backups/push-drive-jobs", body),
+    onSuccess: (job) => {
+      setActiveBackupJobId(job.id);
+      localStorage.setItem("activeBackupJobId", job.id);
+      setNotice("");
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Drive upload failed.")
+  });
   const analyzeCoverage = useMutation({
     mutationFn: () => apiPost<BackupCoverage>("/backups/coverage", {
       ...draft,
@@ -454,6 +463,7 @@ export function BackupsClient() {
                   </div>
                   <div className="flex gap-2">
                     {item.archivePath ? <>
+                      <button className="rounded-md border border-emerald-200 p-2 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50" disabled={pushDrive.isPending} onClick={() => pushDrive.mutate({ id: item.id })} type="button" title="Push to Drive"><UploadCloud size={15} /></button>
                       <a className="rounded-md border border-panel-line p-2 hover:bg-slate-50" href={`/api/v1/backups/download?path=${encodeURIComponent(item.archivePath)}`} title="Download"><Download size={15} /></a>
                       <button className="rounded-md border border-panel-line p-2 hover:bg-slate-50" onClick={() => verify.mutate(item.archivePath!)} type="button" title="Verify"><ShieldCheck size={15} /></button>
                       <button className="rounded-md border border-panel-line p-2 hover:bg-slate-50" onClick={() => loadManifest.mutate(item.archivePath!)} type="button" title="Manifest"><Archive size={15} /></button>
@@ -507,6 +517,7 @@ export function BackupsClient() {
                     <div className="mt-1 text-xs text-panel-muted">{formatBytes(item.sizeBytes)} · {new Date(item.modifiedAt).toLocaleString()}</div>
                   </div>
                   <div className="flex gap-2">
+                    <button className="rounded-md border border-emerald-200 p-2 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50" disabled={pushDrive.isPending} onClick={() => pushDrive.mutate({ path: item.path })} type="button" title="Push to Drive"><UploadCloud size={15} /></button>
                     <a className="rounded-md border border-panel-line p-2 hover:bg-slate-50" href={`/api/v1/backups/download?path=${encodeURIComponent(item.path)}`} title="Download"><Download size={15} /></a>
                     <button className="rounded-md border border-panel-line p-2 hover:bg-slate-50" onClick={() => verify.mutate(item.path)} type="button" title="Verify"><ShieldCheck size={15} /></button>
                     <button className="rounded-md border border-panel-line p-2 hover:bg-slate-50" onClick={() => loadManifest.mutate(item.path)} type="button" title="Manifest"><Archive size={15} /></button>

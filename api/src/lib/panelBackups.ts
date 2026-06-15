@@ -451,6 +451,75 @@ export async function runPanelBackup(input: unknown, request?: any, onProgress?:
   }
 }
 
+export async function pushLocalBackupToDrive(input: { id?: string; path?: string }, onProgress?: BackupProgressHandler) {
+  const settings = await getBackupSettings();
+  if (settings.remoteProvider !== "GOOGLE_DRIVE" || !settings.remoteTarget) {
+    throw new Error("Google Drive backup target is not configured.");
+  }
+
+  const record = input.id ? await prisma.panelBackup.findUnique({ where: { id: input.id } }) : null;
+  const archivePath = input.path ?? record?.archivePath ?? undefined;
+  if (!archivePath) {
+    throw new Error("This backup has no local archive to push to Drive.");
+  }
+
+  const googleDrive = await googleDriveConfig(settings);
+  await onProgress?.({ phase: "PRUNING_REMOTE", percent: 10, message: "Pruning old Drive backups before upload to free space." });
+  const preUploadPrune = await sysagent.pruneRemoteBackups({ remoteTarget: settings.remoteTarget, keepLast: Math.max(1, settings.retentionKeepLast - 1), googleDrive });
+  const preUploadPruneError = backupCommandError("Google Drive pre-upload pruning", preUploadPrune);
+  if (preUploadPruneError) {
+    throw new Error(preUploadPruneError);
+  }
+
+  await onProgress?.({ phase: "UPLOADING", percent: 15, message: "Starting Google Drive upload." });
+  const uploadJob = await sysagent.uploadBackupJob({ path: archivePath, remoteTarget: settings.remoteTarget, googleDrive });
+  const uploadResult = uploadJob.status === "RUNNING" ? await waitForUploadBackupJob(uploadJob.jobId, onProgress) : {
+    archivePath: uploadJob.archivePath,
+    remoteTarget: uploadJob.remoteTarget,
+    remotePath: uploadJob.remotePath,
+    result: uploadJob.result
+  };
+  const uploadError = backupCommandError("Google Drive upload", uploadResult);
+  if (uploadError) {
+    throw new Error(uploadError);
+  }
+
+  await onProgress?.({ phase: "PRUNING_REMOTE", percent: 90, message: "Google Drive upload completed. Pruning old Drive backups.", result: uploadResult });
+  const postUploadPrune = await sysagent.pruneRemoteBackups({ remoteTarget: settings.remoteTarget, keepLast: settings.retentionKeepLast, googleDrive });
+  const postUploadPruneError = backupCommandError("Google Drive post-upload pruning", postUploadPrune);
+  if (postUploadPruneError) {
+    throw new Error(postUploadPruneError);
+  }
+
+  await onProgress?.({ phase: "PRUNING_LOCAL", percent: 94, message: "Drive upload completed. Removing local archive copy." });
+  await deleteLocalArchiveAfterRemoteUpload(archivePath);
+
+  if (!record) {
+    await onProgress?.({ phase: "SUCCEEDED", percent: 100, message: "Backup pushed to Drive.", result: uploadResult });
+    return { archivePath: null, result: { remote: uploadResult, localArchiveDeleted: true } };
+  }
+
+  const existingResult = (record.result ?? {}) as Record<string, unknown>;
+  const updated = await prisma.panelBackup.update({
+    where: { id: record.id },
+    data: {
+      status: "SUCCEEDED",
+      archivePath: null,
+      result: {
+        ...existingResult,
+        remote: uploadResult,
+        localArchiveDeleted: true,
+        pushedToDriveAt: new Date().toISOString(),
+        settings: { remoteProvider: settings.remoteProvider, remoteTarget: settings.remoteTarget }
+      } as any,
+      finishedAt: new Date()
+    }
+  });
+  const jsonUpdated = panelBackupForJson(updated);
+  await onProgress?.({ phase: "SUCCEEDED", percent: 100, message: "Backup pushed to Drive.", result: jsonUpdated });
+  return jsonUpdated;
+}
+
 export function defaultFullBackup(label: string) {
   return backupSchema.parse({
     label,

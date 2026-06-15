@@ -4,7 +4,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { audit } from "../lib/audit.js";
-import { backupSchema, getBackupSettings, googleDriveConfig, runPanelBackup, saveBackupSettings } from "../lib/panelBackups.js";
+import { backupSchema, getBackupSettings, googleDriveConfig, pushLocalBackupToDrive, runPanelBackup, saveBackupSettings } from "../lib/panelBackups.js";
 import { prisma } from "../lib/prisma.js";
 import { sysagent } from "../lib/sysagent.js";
 
@@ -19,6 +19,10 @@ const restoreJobSchema = z.object({
   execute: z.boolean().default(true),
   mode: z.string().default("full")
 });
+const pushDriveJobSchema = z.object({
+  id: z.string().min(1).optional(),
+  path: z.string().min(1).optional()
+}).refine((value) => value.id || value.path, { message: "id or path is required" });
 
 type RestoreJobStatus = {
   id: string;
@@ -172,6 +176,65 @@ export const backupRoutes: FastifyPluginAsync = async (app) => {
           backupId: record?.id,
           archivePath: record?.archivePath ?? undefined,
           result: record,
+          finishedAt: new Date().toISOString()
+        });
+      }
+    })();
+
+    return reply.code(202).send(initial);
+  });
+
+  app.post("/push-drive-jobs", async (request, reply) => {
+    const body = pushDriveJobSchema.parse(request.body ?? {});
+    const id = randomUUID();
+    const initial: BackupJobStatus = {
+      id,
+      status: "QUEUED",
+      phase: "QUEUED",
+      percent: 1,
+      message: "Drive upload job queued.",
+      archivePath: body.path,
+      backupId: body.id,
+      startedAt: new Date().toISOString()
+    };
+    await saveBackupJob(initial);
+
+    void (async () => {
+      let job = initial;
+      const update = async (patch: Partial<BackupJobStatus>) => {
+        job = { ...job, ...patch };
+        await saveBackupJob(job);
+      };
+      try {
+        await update({ status: "RUNNING", phase: "PRUNING_REMOTE", percent: 5, message: "Preparing Google Drive upload." });
+        const record = await pushLocalBackupToDrive(body, async (progress) => {
+          await update({
+            status: progress.phase === "FAILED" ? "FAILED" : progress.phase === "SUCCEEDED" ? "SUCCEEDED" : "RUNNING",
+            phase: progress.phase as BackupJobStatus["phase"],
+            percent: progress.percent,
+            message: progress.message,
+            result: progress.result ?? job.result
+          });
+        });
+        await update({
+          status: "SUCCEEDED",
+          phase: "SUCCEEDED",
+          percent: 100,
+          message: "Backup pushed to Google Drive.",
+          backupId: (record as any)?.id ?? body.id,
+          archivePath: (record as any)?.archivePath ?? undefined,
+          result: record,
+          finishedAt: new Date().toISOString()
+        });
+        await audit(request, { action: "CREATE", resource: "panel_backup_remote_archive", resourceId: body.id, description: "Pushed local backup archive to Google Drive", metadata: record as any });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Drive upload failed.";
+        await update({
+          status: "FAILED",
+          phase: "FAILED",
+          percent: 100,
+          message,
+          error: message,
           finishedAt: new Date().toISOString()
         });
       }
