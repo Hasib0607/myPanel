@@ -2,7 +2,7 @@
 
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, ArrowDownToLine, ArrowUpFromLine, CheckCircle2, Clipboard, Cpu, Database, Eye, EyeOff, FolderGit2, Gauge, GitBranch, Github, HardDrive, History, KeyRound, List, MemoryStick, Network, Pencil, Play, Plus, RefreshCw, Rocket, Save, Search, ServerCog, Settings2, ShieldCheck, Square, ToggleLeft, ToggleRight, Trash2, Wand2, X } from "lucide-react";
+import { Activity, ArrowDownToLine, ArrowUpFromLine, CheckCircle2, Clipboard, Clock3, Cpu, Database, Eye, EyeOff, FolderGit2, Gauge, GitBranch, Github, HardDrive, History, KeyRound, List, MemoryStick, Network, Pencil, Play, Plus, RefreshCw, Rocket, Save, Search, ServerCog, Settings2, ShieldCheck, Square, ToggleLeft, ToggleRight, Trash2, Wand2, X } from "lucide-react";
 import { ApiError, apiDelete, apiDeleteBody, apiGet, apiGetText, apiPatch, apiPost, apiPut } from "@/lib/api";
 import { FileManagerClient } from "@/app/files/file-manager-client";
 import type { Deployment, DeploymentDomainBinding, DeploymentEnvVar, DeploymentFramework, DeploymentListResponse, DeploymentMetrics, DeploymentRelease, DetectionResponse, LaravelRuntimeStatus, LaravelTimingResult, PreflightResponse, QueueResponse, DeploymentSourceProvider } from "./deployment-types";
@@ -47,6 +47,28 @@ type ProjectDomainApiToken = {
   apiBaseUrl: string;
   endpoint: string;
   deployment: { id: string; slug: string; name: string };
+};
+type CronJob = {
+  id: string;
+  name: string;
+  command: string;
+  minute: string;
+  hour: string;
+  dayOfMonth: string;
+  month: string;
+  dayOfWeek: string;
+  enabled: boolean;
+  lastAppliedAt: string | null;
+};
+const emptyCronDraft = {
+  name: "",
+  command: "",
+  minute: "*",
+  hour: "*",
+  dayOfMonth: "*",
+  month: "*",
+  dayOfWeek: "*",
+  enabled: true
 };
 
 type Draft = {
@@ -223,6 +245,19 @@ function domainOptions(domains: Domain[]): DomainOption[] {
 
 function okNotice(message: string) {
   return !/could|error|failed|invalid/i.test(message);
+}
+
+function cronJobToDraft(item: CronJob) {
+  return {
+    name: item.name,
+    command: item.command,
+    minute: item.minute,
+    hour: item.hour,
+    dayOfMonth: item.dayOfMonth,
+    month: item.month,
+    dayOfWeek: item.dayOfWeek,
+    enabled: item.enabled
+  };
 }
 
 async function writeClipboardText(text: string) {
@@ -1834,8 +1869,20 @@ function SettingsPanel({
   onDelete: () => void;
   deleting?: boolean;
 }) {
+  const queryClient = useQueryClient();
   const [token, setToken] = useState<ProjectDomainApiToken | null>(null);
   const [tokenNotice, setTokenNotice] = useState("");
+  const [settingsNotice, setSettingsNotice] = useState("");
+  const [cronDraft, setCronDraft] = useState(emptyCronDraft);
+  const [cronEdits, setCronEdits] = useState<Record<string, typeof emptyCronDraft>>({});
+  const cronJobs = useQuery({
+    queryKey: ["deployment", apiBase, deployment.slug, "cron-jobs", "compact"],
+    queryFn: () => apiGet<{ items: CronJob[] }>(`${apiBase}/${deployment.slug}/cron-jobs`)
+  });
+  useEffect(() => {
+    if (!cronJobs.data?.items) return;
+    setCronEdits(Object.fromEntries(cronJobs.data.items.map((item) => [item.id, cronJobToDraft(item)])));
+  }, [cronJobs.data?.items]);
   const generateToken = useMutation({
     mutationFn: () => apiPost<ProjectDomainApiToken>(`${apiBase}/${deployment.slug}/domain-api-token`, {}),
     onSuccess: (result) => {
@@ -1844,6 +1891,37 @@ function SettingsPanel({
     },
     onError: (error) => setTokenNotice(error instanceof Error ? error.message : "Could not generate project domain API token.")
   });
+  const refreshCronJobs = async () => {
+    await queryClient.invalidateQueries({ queryKey: ["deployment", apiBase, deployment.slug, "cron-jobs", "compact"] });
+  };
+  const createCronJob = useMutation({
+    mutationFn: () => apiPost(`${apiBase}/${deployment.slug}/cron-jobs`, cronDraft),
+    onSuccess: async () => {
+      setCronDraft(emptyCronDraft);
+      setSettingsNotice("Cron job saved.");
+      await refreshCronJobs();
+    },
+    onError: (error) => setSettingsNotice(error instanceof Error ? error.message : "Could not save cron job.")
+  });
+  const updateCronJob = useMutation({
+    mutationFn: ({ id, value }: { id: string; value: typeof emptyCronDraft }) => apiPatch(`${apiBase}/${deployment.slug}/cron-jobs/${id}`, value),
+    onSuccess: async () => {
+      setSettingsNotice("Cron job updated.");
+      await refreshCronJobs();
+    },
+    onError: (error) => setSettingsNotice(error instanceof Error ? error.message : "Could not update cron job.")
+  });
+  const deleteCronJob = useMutation({
+    mutationFn: (id: string) => apiDelete(`${apiBase}/${deployment.slug}/cron-jobs/${id}`),
+    onSuccess: async () => {
+      setSettingsNotice("Cron job deleted.");
+      await refreshCronJobs();
+    },
+    onError: (error) => setSettingsNotice(error instanceof Error ? error.message : "Could not delete cron job.")
+  });
+  const setCronEdit = <K extends keyof typeof emptyCronDraft>(id: string, key: K, value: (typeof emptyCronDraft)[K]) => {
+    setCronEdits((current) => ({ ...current, [id]: { ...(current[id] ?? emptyCronDraft), [key]: value } }));
+  };
   const envSnippet = token
     ? [
         `PROJECT_DOMAIN_API_BASE_URL=${token.apiBaseUrl}`,
@@ -1866,6 +1944,60 @@ function SettingsPanel({
       <div className="rounded-md border border-panel-line p-4">
         <div className="flex items-center gap-2 text-sm font-semibold"><Settings2 size={16} />Project settings</div>
         <button className="mt-4 flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm" onClick={onEdit} type="button"><Pencil size={15} />Edit all settings</button>
+      </div>
+      <div className="rounded-md border border-panel-line p-4">
+        <div className="flex items-center gap-2 text-sm font-semibold"><Clock3 size={16} />Project cron jobs</div>
+        <div className="mt-4 grid grid-cols-[minmax(120px,1fr)_minmax(220px,2fr)_repeat(5,72px)_76px_auto] gap-2">
+          <Input label="Name" onChange={(name) => setCronDraft({ ...cronDraft, name })} value={cronDraft.name} />
+          <Input label="Command" onChange={(command) => setCronDraft({ ...cronDraft, command })} value={cronDraft.command} />
+          <Input label="Min" onChange={(minute) => setCronDraft({ ...cronDraft, minute })} value={cronDraft.minute} />
+          <Input label="Hour" onChange={(hour) => setCronDraft({ ...cronDraft, hour })} value={cronDraft.hour} />
+          <Input label="Day" onChange={(dayOfMonth) => setCronDraft({ ...cronDraft, dayOfMonth })} value={cronDraft.dayOfMonth} />
+          <Input label="Month" onChange={(month) => setCronDraft({ ...cronDraft, month })} value={cronDraft.month} />
+          <Input label="Week" onChange={(dayOfWeek) => setCronDraft({ ...cronDraft, dayOfWeek })} value={cronDraft.dayOfWeek} />
+          <label className="flex h-full items-end gap-2 pb-2 text-xs font-medium text-panel-muted"><input checked={cronDraft.enabled} onChange={(event) => setCronDraft({ ...cronDraft, enabled: event.target.checked })} type="checkbox" /> On</label>
+          <div className="flex items-end">
+            <button className="flex h-9 items-center gap-2 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={createCronJob.isPending || !cronDraft.name.trim() || !cronDraft.command.trim()} onClick={() => createCronJob.mutate()} type="button">
+              <Plus size={15} />
+              Add
+            </button>
+          </div>
+        </div>
+        {settingsNotice ? <div className={`mt-3 rounded-md border p-3 text-sm ${okNotice(settingsNotice) ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-red-200 bg-red-50 text-red-800"}`}>{settingsNotice}</div> : null}
+        <div className="mt-4 divide-y divide-panel-line rounded-md border border-panel-line">
+          {(cronJobs.data?.items ?? []).map((item) => {
+            const edit = cronEdits[item.id] ?? cronJobToDraft(item);
+            return (
+              <div className="grid grid-cols-[minmax(120px,1fr)_minmax(220px,2fr)_repeat(5,72px)_76px_auto_auto] gap-2 p-3" key={item.id}>
+                <Input label="Name" onChange={(name) => setCronEdit(item.id, "name", name)} value={edit.name} />
+                <Input label="Command" onChange={(command) => setCronEdit(item.id, "command", command)} value={edit.command} />
+                <Input label="Min" onChange={(minute) => setCronEdit(item.id, "minute", minute)} value={edit.minute} />
+                <Input label="Hour" onChange={(hour) => setCronEdit(item.id, "hour", hour)} value={edit.hour} />
+                <Input label="Day" onChange={(dayOfMonth) => setCronEdit(item.id, "dayOfMonth", dayOfMonth)} value={edit.dayOfMonth} />
+                <Input label="Month" onChange={(month) => setCronEdit(item.id, "month", month)} value={edit.month} />
+                <Input label="Week" onChange={(dayOfWeek) => setCronEdit(item.id, "dayOfWeek", dayOfWeek)} value={edit.dayOfWeek} />
+                <label className="flex h-full items-end gap-2 pb-2 text-xs font-medium text-panel-muted"><input checked={edit.enabled} onChange={(event) => {
+                  const next = { ...edit, enabled: event.target.checked };
+                  setCronEdits((current) => ({ ...current, [item.id]: next }));
+                  updateCronJob.mutate({ id: item.id, value: next });
+                }} type="checkbox" /> On</label>
+                <div className="flex items-end">
+                  <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-semibold hover:bg-slate-50 disabled:opacity-60" disabled={updateCronJob.isPending || !edit.name.trim() || !edit.command.trim()} onClick={() => updateCronJob.mutate({ id: item.id, value: edit })} type="button">
+                    <Save size={15} />
+                    Save
+                  </button>
+                </div>
+                <div className="flex items-end">
+                  <button className="flex h-9 items-center rounded-md border border-red-200 px-3 text-sm font-semibold text-panel-danger hover:bg-red-50 disabled:opacity-60" disabled={deleteCronJob.isPending} onClick={() => deleteCronJob.mutate(item.id)} type="button" title="Delete cron job">
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+                {item.lastAppliedAt ? <div className="col-span-10 text-xs text-panel-muted">Applied {new Date(item.lastAppliedAt).toLocaleString()}</div> : null}
+              </div>
+            );
+          })}
+          {!cronJobs.isLoading && !(cronJobs.data?.items ?? []).length ? <div className="p-4 text-sm text-panel-muted">No cron jobs.</div> : null}
+        </div>
       </div>
       <div className="rounded-md border border-panel-line p-4">
         <div className="flex items-center justify-between gap-3">
