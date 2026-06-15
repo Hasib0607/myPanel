@@ -71,6 +71,18 @@ const processConfigSchema = z.object({
   laravelWorkers: laravelWorkerConfigSchema.optional(),
   laravelManagedProcesses: laravelManagedProcessesSchema.optional()
 }).passthrough().default({});
+const cronFieldSchema = z.string().trim().min(1).max(32).regex(/^[a-zA-Z0-9*,/\-?LW#]+$/);
+const cronJobSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+  command: z.string().trim().min(1).max(1000),
+  minute: cronFieldSchema.default("*"),
+  hour: cronFieldSchema.default("*"),
+  dayOfMonth: cronFieldSchema.default("*"),
+  month: cronFieldSchema.default("*"),
+  dayOfWeek: cronFieldSchema.default("*"),
+  enabled: z.boolean().default(true)
+});
+const cronJobUpdateSchema = cronJobSchema.partial();
 const projectDomainApiTokenSchema = z.object({
   expiresInSeconds: z.coerce.number().int().min(3600).max(60 * 60 * 24 * 365).default(env.JWT_EXPIRY)
 });
@@ -221,12 +233,58 @@ function serializeDeployment<T extends { domainBindings?: any[]; domainId?: stri
   };
 }
 
+function cronJobForSysagent(job: {
+  id: string;
+  name: string;
+  command: string;
+  minute: string;
+  hour: string;
+  dayOfMonth: string;
+  month: string;
+  dayOfWeek: string;
+  enabled: boolean;
+}) {
+  return {
+    id: job.id,
+    name: job.name,
+    command: job.command,
+    minute: job.minute,
+    hour: job.hour,
+    dayOfMonth: job.dayOfMonth,
+    month: job.month,
+    dayOfWeek: job.dayOfWeek,
+    enabled: job.enabled
+  };
+}
+
 async function findDeployment(idOrSlug: string) {
   const deployment = await prisma.deployment.findFirstOrThrow({
     where: { OR: [{ id: idOrSlug }, { slug: idOrSlug }] },
     include: includeFullDeployment()
   });
   return serializeDeployment(deployment);
+}
+
+async function applyDeploymentCron(deployment: Awaited<ReturnType<typeof findDeployment>>) {
+  const jobs = await prisma.deploymentCronJob.findMany({
+    where: { deploymentId: deployment.id },
+    orderBy: [{ createdAt: "asc" }, { name: "asc" }]
+  });
+  const result = await sysagent.deploymentCron({
+    deploymentId: deployment.id,
+    name: deployment.slug,
+    rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
+    logDir: deploymentLogDir(deployment.slug),
+    jobs: jobs.map(cronJobForSysagent)
+  });
+  if (result.returncode && result.returncode !== 0) {
+    throw new Error(result.stderr || "Cron apply failed.");
+  }
+  await prisma.deploymentCronJob.updateMany({
+    where: { deploymentId: deployment.id },
+    data: { lastAppliedAt: new Date() }
+  });
+  return result;
 }
 
 async function syncPrimaryDomainBinding(deploymentId: string, domainId: string | null | undefined) {
@@ -2226,6 +2284,52 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     const result = await applyLaravelManagedProcesses(deployment, body.laravelManagedProcesses);
     await audit(request, { action: "UPDATE", resource: "deployment_laravel_processes", resourceId: deployment.id, description: `Updated Laravel managed processes for ${deployment.slug}` });
     return reply.code(202).send(result);
+  });
+
+  app.get("/:deploymentId/cron-jobs", async (request) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const deployment = await findDeployment(deploymentId);
+    const items = await prisma.deploymentCronJob.findMany({
+      where: { deploymentId: deployment.id },
+      orderBy: [{ createdAt: "asc" }, { name: "asc" }]
+    });
+    return { items };
+  });
+
+  app.post("/:deploymentId/cron-jobs", async (request, reply) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const body = cronJobSchema.parse(request.body ?? {});
+    const deployment = await findDeployment(deploymentId);
+    const item = await prisma.deploymentCronJob.create({
+      data: { ...body, deploymentId: deployment.id }
+    });
+    const apply = await applyDeploymentCron(deployment);
+    await audit(request, { action: "CREATE", resource: "deployment_cron_job", resourceId: item.id, description: `Created cron job ${item.name} for ${deployment.slug}`, metadata: { apply } as Prisma.InputJsonObject });
+    return reply.code(201).send({ item, apply });
+  });
+
+  app.patch("/:deploymentId/cron-jobs/:cronJobId", async (request) => {
+    const { deploymentId, cronJobId } = z.object({ deploymentId: z.string(), cronJobId: z.string() }).parse(request.params);
+    const body = cronJobUpdateSchema.parse(request.body ?? {});
+    const deployment = await findDeployment(deploymentId);
+    const existing = await prisma.deploymentCronJob.findFirstOrThrow({ where: { id: cronJobId, deploymentId: deployment.id } });
+    const item = await prisma.deploymentCronJob.update({
+      where: { id: existing.id },
+      data: body
+    });
+    const apply = await applyDeploymentCron(deployment);
+    await audit(request, { action: "UPDATE", resource: "deployment_cron_job", resourceId: item.id, description: `Updated cron job ${item.name} for ${deployment.slug}`, metadata: { apply } as Prisma.InputJsonObject });
+    return { item, apply };
+  });
+
+  app.delete("/:deploymentId/cron-jobs/:cronJobId", async (request) => {
+    const { deploymentId, cronJobId } = z.object({ deploymentId: z.string(), cronJobId: z.string() }).parse(request.params);
+    const deployment = await findDeployment(deploymentId);
+    const existing = await prisma.deploymentCronJob.findFirstOrThrow({ where: { id: cronJobId, deploymentId: deployment.id } });
+    await prisma.deploymentCronJob.delete({ where: { id: existing.id } });
+    const apply = await applyDeploymentCron(deployment);
+    await audit(request, { action: "DELETE", resource: "deployment_cron_job", resourceId: existing.id, description: `Deleted cron job ${existing.name} for ${deployment.slug}`, metadata: { apply } as Prisma.InputJsonObject });
+    return { ok: true, apply };
   });
 
   app.delete("/:deploymentId", async (request) => {

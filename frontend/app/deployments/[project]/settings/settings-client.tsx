@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, Database, GitBranch, Globe2, KeyRound, Save, ServerCog, Settings2, ShieldCheck, Trash2, Workflow } from "lucide-react";
+import { Clock3, Copy, Database, GitBranch, Globe2, KeyRound, Plus, Save, ServerCog, Settings2, ShieldCheck, Trash2, Workflow } from "lucide-react";
 import { apiDeleteBody, apiGet, apiPatch, apiPost } from "@/lib/api";
 import type { Deployment, DeploymentFramework, DeploymentSourceProvider } from "../../deployment-types";
 import { ProjectTabs, ResultNotice } from "../../deployment-ui";
@@ -70,6 +70,21 @@ type WorkerStatusResponse = {
     status?: { running?: number; configured?: number; processes?: Array<{ name: string; state: string; detail: string }> };
     error?: string;
   } | null;
+};
+
+type CronJob = {
+  id: string;
+  name: string;
+  command: string;
+  minute: string;
+  hour: string;
+  dayOfMonth: string;
+  month: string;
+  dayOfWeek: string;
+  enabled: boolean;
+  lastAppliedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 type SettingsForm = {
@@ -172,6 +187,16 @@ const priorityDefaults: Record<"P1" | "P2" | "P3", ResourcePolicy> = {
   P2: { priorityTier: "P2", memoryMaxMb: 2048, cpuQuotaPercent: 200, workersMax: 2, restartDelayMs: 3000, healthStrict: false },
   P3: { priorityTier: "P3", memoryMaxMb: 1024, cpuQuotaPercent: 100, workersMax: 1, restartDelayMs: 8000, healthStrict: false }
 };
+const emptyCronDraft = {
+  name: "",
+  command: "",
+  minute: "*",
+  hour: "*",
+  dayOfMonth: "*",
+  month: "*",
+  dayOfWeek: "*",
+  enabled: true
+};
 
 function resourcePolicyFromDeployment(deployment: Deployment): ResourcePolicy {
   const rawConfig = deployment.processConfig ?? {};
@@ -257,6 +282,19 @@ function numberFromString(value: string) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function cronJobToDraft(item: CronJob) {
+  return {
+    name: item.name,
+    command: item.command,
+    minute: item.minute,
+    hour: item.hour,
+    dayOfMonth: item.dayOfMonth,
+    month: item.month,
+    dayOfWeek: item.dayOfWeek,
+    enabled: item.enabled
+  };
+}
+
 export function DeploymentSettingsClient({
   project,
   apiBase = "/deployments",
@@ -276,6 +314,8 @@ export function DeploymentSettingsClient({
   const [newWebhookSecret, setNewWebhookSecret] = useState("");
   const [projectDomainToken, setProjectDomainToken] = useState<ProjectDomainApiToken | null>(null);
   const [laravelProcessesJson, setLaravelProcessesJson] = useState("");
+  const [cronDraft, setCronDraft] = useState(emptyCronDraft);
+  const [cronEdits, setCronEdits] = useState<Record<string, typeof emptyCronDraft>>({});
 
   const detail = useQuery({
     queryKey: ["deployment", apiBase, project],
@@ -299,6 +339,11 @@ export function DeploymentSettingsClient({
     queryFn: () => apiGet<Record<string, unknown>>(`${apiBase}/${project}/laravel-processes`),
     enabled: detail.data?.framework === "LARAVEL"
   });
+  const cronJobs = useQuery({
+    queryKey: ["deployment", apiBase, project, "cron-jobs"],
+    queryFn: () => apiGet<{ items: CronJob[] }>(`${apiBase}/${project}/cron-jobs`),
+    enabled: Boolean(detail.data)
+  });
 
   useEffect(() => {
     if (detail.data) setForm(formFromDeployment(detail.data));
@@ -306,6 +351,10 @@ export function DeploymentSettingsClient({
   useEffect(() => {
     if (laravelProcesses.data) setLaravelProcessesJson(JSON.stringify(laravelProcesses.data, null, 2));
   }, [laravelProcesses.data]);
+  useEffect(() => {
+    if (!cronJobs.data?.items) return;
+    setCronEdits(Object.fromEntries(cronJobs.data.items.map((item) => [item.id, cronJobToDraft(item)])));
+  }, [cronJobs.data?.items]);
 
   const payload = useMemo(() => ({
     name: form.name.trim(),
@@ -410,6 +459,34 @@ export function DeploymentSettingsClient({
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not save Laravel managed processes")
   });
+  const createCronJob = useMutation({
+    mutationFn: () => apiPost(`${apiBase}/${project}/cron-jobs`, cronDraft),
+    onSuccess: async () => {
+      setCronDraft(emptyCronDraft);
+      setNotice("Cron job saved.");
+      await queryClient.invalidateQueries({ queryKey: ["deployment", apiBase, project, "cron-jobs"] });
+      await queryClient.invalidateQueries({ queryKey: ["deployment", apiBase, project] });
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not save cron job")
+  });
+  const updateCronJob = useMutation({
+    mutationFn: ({ id, value }: { id: string; value: typeof emptyCronDraft }) => apiPatch(`${apiBase}/${project}/cron-jobs/${id}`, value),
+    onSuccess: async () => {
+      setNotice("Cron job updated.");
+      await queryClient.invalidateQueries({ queryKey: ["deployment", apiBase, project, "cron-jobs"] });
+      await queryClient.invalidateQueries({ queryKey: ["deployment", apiBase, project] });
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not update cron job")
+  });
+  const deleteCronJob = useMutation({
+    mutationFn: (id: string) => apiDeleteBody(`${apiBase}/${project}/cron-jobs/${id}`, {}),
+    onSuccess: async () => {
+      setNotice("Cron job deleted.");
+      await queryClient.invalidateQueries({ queryKey: ["deployment", apiBase, project, "cron-jobs"] });
+      await queryClient.invalidateQueries({ queryKey: ["deployment", apiBase, project] });
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not delete cron job")
+  });
   const generateProjectDomainToken = useMutation({
     mutationFn: () => apiPost<ProjectDomainApiToken>(`${apiBase}/${project}/domain-api-token`, {}),
     onSuccess: (result) => {
@@ -421,6 +498,13 @@ export function DeploymentSettingsClient({
 
   function setField<K extends keyof SettingsForm>(key: K, value: SettingsForm[K]) {
     setForm((current) => ({ ...current, [key]: value }));
+  }
+
+  function setCronEdit<K extends keyof typeof emptyCronDraft>(id: string, key: K, value: (typeof emptyCronDraft)[K]) {
+    setCronEdits((current) => ({
+      ...current,
+      [id]: { ...(current[id] ?? emptyCronDraft), [key]: value }
+    }));
   }
 
   function submit(event: FormEvent<HTMLFormElement>) {
@@ -660,6 +744,76 @@ export function DeploymentSettingsClient({
             </button>
           </Section>
         ) : null}
+
+        <Section icon={<Clock3 size={16} />} title="Project Cron Jobs">
+          <div className="grid grid-cols-[1fr_2fr_repeat(5,76px)_96px_auto] gap-2">
+            <TextInput label="Name" onChange={(name) => setCronDraft({ ...cronDraft, name })} value={cronDraft.name} />
+            <TextInput label="Command" onChange={(command) => setCronDraft({ ...cronDraft, command })} value={cronDraft.command} />
+            <TextInput label="Minute" onChange={(minute) => setCronDraft({ ...cronDraft, minute })} value={cronDraft.minute} />
+            <TextInput label="Hour" onChange={(hour) => setCronDraft({ ...cronDraft, hour })} value={cronDraft.hour} />
+            <TextInput label="Day" onChange={(dayOfMonth) => setCronDraft({ ...cronDraft, dayOfMonth })} value={cronDraft.dayOfMonth} />
+            <TextInput label="Month" onChange={(month) => setCronDraft({ ...cronDraft, month })} value={cronDraft.month} />
+            <TextInput label="Weekday" onChange={(dayOfWeek) => setCronDraft({ ...cronDraft, dayOfWeek })} value={cronDraft.dayOfWeek} />
+            <ToggleInput checked={cronDraft.enabled} label="On" onChange={(enabled) => setCronDraft({ ...cronDraft, enabled })} />
+            <div className="flex items-end">
+              <button
+                className="flex h-10 items-center justify-center gap-2 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white disabled:opacity-60"
+                disabled={createCronJob.isPending || !cronDraft.name.trim() || !cronDraft.command.trim()}
+                onClick={() => createCronJob.mutate()}
+                type="button"
+                title="Add cron job"
+              >
+                <Plus size={15} />
+                Add
+              </button>
+            </div>
+          </div>
+          <div className="mt-4 divide-y divide-panel-line rounded-md border border-panel-line">
+            {(cronJobs.data?.items ?? []).map((item) => {
+              const edit = cronEdits[item.id] ?? cronJobToDraft(item);
+              return (
+                <div className="grid grid-cols-[1fr_2fr_repeat(5,76px)_96px_auto_auto] gap-2 p-3" key={item.id}>
+                  <TextInput label="Name" onChange={(name) => setCronEdit(item.id, "name", name)} value={edit.name} />
+                  <TextInput label="Command" onChange={(command) => setCronEdit(item.id, "command", command)} value={edit.command} />
+                  <TextInput label="Minute" onChange={(minute) => setCronEdit(item.id, "minute", minute)} value={edit.minute} />
+                  <TextInput label="Hour" onChange={(hour) => setCronEdit(item.id, "hour", hour)} value={edit.hour} />
+                  <TextInput label="Day" onChange={(dayOfMonth) => setCronEdit(item.id, "dayOfMonth", dayOfMonth)} value={edit.dayOfMonth} />
+                  <TextInput label="Month" onChange={(month) => setCronEdit(item.id, "month", month)} value={edit.month} />
+                  <TextInput label="Weekday" onChange={(dayOfWeek) => setCronEdit(item.id, "dayOfWeek", dayOfWeek)} value={edit.dayOfWeek} />
+                  <ToggleInput checked={edit.enabled} label="On" onChange={(enabled) => {
+                    const next = { ...edit, enabled };
+                    setCronEdits((current) => ({ ...current, [item.id]: next }));
+                    updateCronJob.mutate({ id: item.id, value: next });
+                  }} />
+                  <div className="flex items-end">
+                    <button
+                      className="flex h-10 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-semibold hover:bg-slate-50 disabled:opacity-60"
+                      disabled={updateCronJob.isPending || !edit.name.trim() || !edit.command.trim()}
+                      onClick={() => updateCronJob.mutate({ id: item.id, value: edit })}
+                      type="button"
+                    >
+                      <Save size={15} />
+                      Save
+                    </button>
+                  </div>
+                  <div className="flex items-end">
+                    <button
+                      className="flex h-10 items-center gap-2 rounded-md border border-red-200 px-3 text-sm font-semibold text-panel-danger hover:bg-red-50 disabled:opacity-60"
+                      disabled={deleteCronJob.isPending}
+                      onClick={() => deleteCronJob.mutate(item.id)}
+                      type="button"
+                      title="Delete cron job"
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
+                  {item.lastAppliedAt ? <div className="col-span-10 text-xs text-panel-muted">Applied {new Date(item.lastAppliedAt).toLocaleString()}</div> : null}
+                </div>
+              );
+            })}
+            {!cronJobs.isLoading && !(cronJobs.data?.items ?? []).length ? <div className="p-4 text-sm text-panel-muted">No cron jobs.</div> : null}
+          </div>
+        </Section>
 
         <Section icon={<Globe2 size={16} />} title="Paths And Network">
           <div className="grid grid-cols-3 gap-3">

@@ -164,6 +164,8 @@ export const sysagent = {
     request("/deployments/process", { method: "POST", body: JSON.stringify(body) }),
   deploymentLaravelWorkers: (body: unknown) =>
     request<SysagentCommandResult & { desiredWorkers?: number; runningWorkers?: number; status?: { running?: number; configured?: number; processes?: unknown[] } }>("/deployments/laravel-workers", { method: "POST", body: JSON.stringify(body) }),
+  deploymentCron: (body: unknown) =>
+    request<SysagentCommandResult & { cronPath?: string; enabledJobs?: number; removed?: boolean }>("/deployments/cron", { method: "POST", body: JSON.stringify(body) }),
   deploymentNginx: (body: unknown) =>
     request<{ write: SysagentCommandResult; enable: SysagentCommandResult; test: SysagentCommandResult; reload: SysagentCommandResult; configPath: string; enabledPath?: string; serverName?: string }>("/deployments/nginx", { method: "POST", body: JSON.stringify(body) }),
   deploymentRetireNginxRoute: (body: unknown) =>

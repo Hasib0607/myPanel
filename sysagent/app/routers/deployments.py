@@ -114,6 +114,26 @@ class LaravelWorkersRequest(BaseModel):
     resourceLimits: dict[str, int] | None = None
 
 
+class CronJobRequest(BaseModel):
+    id: str = Field(pattern="^[a-zA-Z0-9_.-]+$")
+    name: str = Field(min_length=1, max_length=80)
+    command: str = Field(min_length=1, max_length=1000)
+    minute: str = Field(default="*", pattern="^[a-zA-Z0-9*,/\\-]+$")
+    hour: str = Field(default="*", pattern="^[a-zA-Z0-9*,/\\-]+$")
+    dayOfMonth: str = Field(default="*", pattern="^[a-zA-Z0-9*,/\\-?LW#]+$")
+    month: str = Field(default="*", pattern="^[a-zA-Z0-9*,/\\-]+$")
+    dayOfWeek: str = Field(default="*", pattern="^[a-zA-Z0-9*,/\\-?LW#]+$")
+    enabled: bool = True
+
+
+class CronApplyRequest(BaseModel):
+    deploymentId: str = Field(pattern="^[a-zA-Z0-9_.-]+$")
+    name: str = Field(pattern="^[a-zA-Z0-9_.-]+$")
+    rootPath: str
+    logDir: str | None = None
+    jobs: list[CronJobRequest] = Field(default_factory=list, max_length=100)
+
+
 def normalize_process_root(body: ProcessRequest) -> ProcessRequest:
     root = Path(body.rootPath).resolve()
     parent = root.parent
@@ -292,6 +312,103 @@ def blocked_command(reason: str, command: list[str], info: dict | None = None) -
     if info is not None:
         result["path"] = info
     return result
+
+
+def cron_file_path(deployment_id: str) -> Path:
+    safe_id = re.sub(r"[^a-zA-Z0-9_.-]+", "-", deployment_id).strip("-") or "deployment"
+    return Path("/etc/cron.d") / f"vps-panel-{safe_id}"
+
+
+def cron_shell_fragment(value: str) -> str:
+    return value.replace("\n", " ").replace("\r", " ").strip()
+
+
+def render_deployment_cron(body: CronApplyRequest, root_path: Path, log_dir: Path) -> str:
+    lines = [
+        "# Managed by vps-panel. Do not edit manually.",
+        f"# Deployment: {body.name} ({body.deploymentId})",
+        "SHELL=/bin/bash",
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "",
+    ]
+    for job in body.jobs:
+        if not job.enabled:
+            continue
+        command = cron_shell_fragment(job.command)
+        if not command:
+            continue
+        log_file = log_dir / f"cron-{re.sub(r'[^a-zA-Z0-9_.-]+', '-', job.id)}.log"
+        schedule = f"{job.minute} {job.hour} {job.dayOfMonth} {job.month} {job.dayOfWeek}"
+        wrapped = f"cd {shlex.quote(str(root_path))} && {command} >> {shlex.quote(str(log_file))} 2>&1"
+        lines.append(f"# {job.name}")
+        lines.append(f"{schedule} root /bin/bash -lc {shlex.quote(wrapped)}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def apply_deployment_cron_file(body: CronApplyRequest) -> dict:
+    info = path_info(body.rootPath)
+    path = cron_file_path(body.deploymentId)
+    enabled_jobs = [job for job in body.jobs if job.enabled]
+    command = ["write-file", str(path)]
+    if not info["allowed"]:
+        return blocked_command("Path escapes configured file manager root", command, info)
+    if not settings.allow_live_system_commands:
+        return {
+            "dryRun": True,
+            "command": command,
+            "path": info,
+            "cronPath": str(path),
+            "stdout": "",
+            "stderr": "ALLOW_LIVE_SYSTEM_COMMANDS=false. Cron file was not changed.",
+            "returncode": 0,
+        }
+
+    try:
+        if not enabled_jobs:
+            try:
+                path.unlink()
+                removed = True
+            except FileNotFoundError:
+                removed = False
+            return {
+                "dryRun": False,
+                "command": ["rm", "-f", str(path)],
+                "path": info,
+                "cronPath": str(path),
+                "removed": removed,
+                "stdout": "Cron file removed." if removed else "No cron file existed.",
+                "stderr": "",
+                "returncode": 0,
+            }
+
+        root_path = Path(body.rootPath).resolve()
+        log_dir = Path(body.logDir or settings.deployment_log_root).resolve()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        rendered = render_deployment_cron(body, root_path, log_dir)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(rendered, encoding="utf-8")
+        os.chmod(tmp, 0o644)
+        tmp.replace(path)
+        return {
+            "dryRun": False,
+            "command": command,
+            "path": info,
+            "cronPath": str(path),
+            "enabledJobs": len(enabled_jobs),
+            "stdout": rendered,
+            "stderr": "",
+            "returncode": 0,
+        }
+    except Exception as exc:
+        return {
+            "dryRun": False,
+            "command": command,
+            "path": info,
+            "cronPath": str(path),
+            "stdout": "",
+            "stderr": str(exc),
+            "returncode": 1,
+        }
 
 
 def effective_resource_limits(resource_limits: dict[str, int] | None = None) -> dict[str, int] | None:
@@ -3426,3 +3543,8 @@ def health(body: HealthRequest) -> dict:
 @router.post("/public-route")
 def public_route(body: PublicRouteRequest) -> dict:
     return _curl_public_route(body.serverName, body.path, body.rootPath, body.framework, body.requireHttps)
+
+
+@router.post("/cron")
+def deployment_cron(body: CronApplyRequest) -> dict:
+    return apply_deployment_cron_file(body)

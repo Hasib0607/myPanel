@@ -171,6 +171,18 @@ const accountLaravelWorkersSchema = z.object({
   maxWorkers: z.number().int().min(1).max(deploymentWorkerMax).default(deploymentWorkerMax),
   queueCommand: z.string().trim().min(1).max(500).default("php artisan queue:work --sleep=3 --tries=3 --timeout=90")
 });
+const accountCronFieldSchema = z.string().trim().min(1).max(32).regex(/^[a-zA-Z0-9*,/\-?LW#]+$/);
+const accountCronJobSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+  command: z.string().trim().min(1).max(1000),
+  minute: accountCronFieldSchema.default("*"),
+  hour: accountCronFieldSchema.default("*"),
+  dayOfMonth: accountCronFieldSchema.default("*"),
+  month: accountCronFieldSchema.default("*"),
+  dayOfWeek: accountCronFieldSchema.default("*"),
+  enabled: z.boolean().default(true)
+});
+const accountCronJobUpdateSchema = accountCronJobSchema.partial();
 const githubConnectionSchema = z.object({
   username: z.string().trim().min(1).nullable().optional(),
   token: z.string().min(8).nullable().optional(),
@@ -612,6 +624,52 @@ async function findAccountDeployment(request: any, idOrSlug: string) {
     include: includeAccountDeployment()
   });
   return serializeAccountDeployment(deployment);
+}
+
+function accountCronJobForSysagent(job: {
+  id: string;
+  name: string;
+  command: string;
+  minute: string;
+  hour: string;
+  dayOfMonth: string;
+  month: string;
+  dayOfWeek: string;
+  enabled: boolean;
+}) {
+  return {
+    id: job.id,
+    name: job.name,
+    command: job.command,
+    minute: job.minute,
+    hour: job.hour,
+    dayOfMonth: job.dayOfMonth,
+    month: job.month,
+    dayOfWeek: job.dayOfWeek,
+    enabled: job.enabled
+  };
+}
+
+async function applyAccountDeploymentCron(deployment: Awaited<ReturnType<typeof findAccountDeployment>>) {
+  const jobs = await prisma.deploymentCronJob.findMany({
+    where: { deploymentId: deployment.id },
+    orderBy: [{ createdAt: "asc" }, { name: "asc" }]
+  });
+  const result = await sysagent.deploymentCron({
+    deploymentId: deployment.id,
+    name: deployment.slug,
+    rootPath: accountDeploymentAppPath(deployment),
+    logDir: accountDeploymentLogDir(deployment.slug),
+    jobs: jobs.map(accountCronJobForSysagent)
+  });
+  if (result.returncode && result.returncode !== 0) {
+    throw new Error(result.stderr || "Cron apply failed.");
+  }
+  await prisma.deploymentCronJob.updateMany({
+    where: { deploymentId: deployment.id },
+    data: { lastAppliedAt: new Date() }
+  });
+  return result;
 }
 
 async function nextDeploymentPort() {
@@ -2749,6 +2807,52 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       data: { processConfig: { ...processConfig, laravelManagedProcesses: config } as Prisma.InputJsonValue }
     });
     return reply.code(202).send({ config, results });
+  });
+
+  app.get("/deployments/:deploymentId/cron-jobs", async (request: any) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const deployment = await findAccountDeployment(request, deploymentId);
+    const items = await prisma.deploymentCronJob.findMany({
+      where: { deploymentId: deployment.id },
+      orderBy: [{ createdAt: "asc" }, { name: "asc" }]
+    });
+    return { items };
+  });
+
+  app.post("/deployments/:deploymentId/cron-jobs", async (request: any, reply) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const body = accountCronJobSchema.parse(request.body ?? {});
+    const deployment = await findAccountDeployment(request, deploymentId);
+    const item = await prisma.deploymentCronJob.create({
+      data: { ...body, deploymentId: deployment.id }
+    });
+    const apply = await applyAccountDeploymentCron(deployment);
+    await audit(request, { action: "CREATE", resource: "deployment_cron_job", resourceId: item.id, description: `Account created cron job ${item.name} for ${deployment.slug}`, metadata: { apply } as Prisma.InputJsonObject });
+    return reply.code(201).send({ item, apply });
+  });
+
+  app.patch("/deployments/:deploymentId/cron-jobs/:cronJobId", async (request: any) => {
+    const { deploymentId, cronJobId } = z.object({ deploymentId: z.string(), cronJobId: z.string() }).parse(request.params);
+    const body = accountCronJobUpdateSchema.parse(request.body ?? {});
+    const deployment = await findAccountDeployment(request, deploymentId);
+    const existing = await prisma.deploymentCronJob.findFirstOrThrow({ where: { id: cronJobId, deploymentId: deployment.id } });
+    const item = await prisma.deploymentCronJob.update({
+      where: { id: existing.id },
+      data: body
+    });
+    const apply = await applyAccountDeploymentCron(deployment);
+    await audit(request, { action: "UPDATE", resource: "deployment_cron_job", resourceId: item.id, description: `Account updated cron job ${item.name} for ${deployment.slug}`, metadata: { apply } as Prisma.InputJsonObject });
+    return { item, apply };
+  });
+
+  app.delete("/deployments/:deploymentId/cron-jobs/:cronJobId", async (request: any) => {
+    const { deploymentId, cronJobId } = z.object({ deploymentId: z.string(), cronJobId: z.string() }).parse(request.params);
+    const deployment = await findAccountDeployment(request, deploymentId);
+    const existing = await prisma.deploymentCronJob.findFirstOrThrow({ where: { id: cronJobId, deploymentId: deployment.id } });
+    await prisma.deploymentCronJob.delete({ where: { id: existing.id } });
+    const apply = await applyAccountDeploymentCron(deployment);
+    await audit(request, { action: "DELETE", resource: "deployment_cron_job", resourceId: existing.id, description: `Account deleted cron job ${existing.name} for ${deployment.slug}`, metadata: { apply } as Prisma.InputJsonObject });
+    return { ok: true, apply };
   });
 
   app.get("/deployments/:deploymentId/logs", async (request: any) => {
