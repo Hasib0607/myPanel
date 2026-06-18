@@ -330,6 +330,7 @@ export function DeploymentsClient({
   const [logText, setLogText] = useState("");
   const [logTitle, setLogTitle] = useState("");
   const [logType, setLogType] = useState<LogType>("build");
+  const [logTarget, setLogTarget] = useState<{ deployment: Deployment; type: LogType } | null>(null);
   const [notice, setNotice] = useState("");
   const [revealedEnvValues, setRevealedEnvValues] = useState<Record<string, string>>({});
   const [runtimeModal, setRuntimeModal] = useState<RuntimeModalState | null>(null);
@@ -548,11 +549,22 @@ export function DeploymentsClient({
     onSuccess: ({ deployment, text, type }) => {
       setLogTitle(`${deployment.name} ${type === "build" ? "build log" : "running log"}`);
       setLogType(type);
+      setLogTarget({ deployment, type });
       setLogText(text);
       setLogModalOpen(true);
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not load logs")
   });
+
+  function refreshOpenLogs() {
+    if (!logTarget || openLogs.isPending) return;
+    openLogs.mutate(logTarget);
+  }
+
+  function closeLogs() {
+    setLogModalOpen(false);
+    setLogTarget(null);
+  }
 
   async function copyLogText() {
     try {
@@ -853,7 +865,17 @@ export function DeploymentsClient({
       {createOpen ? <ProjectModal title="Create Project" draft={draft} setDraft={setDraft} domains={domainOptions(domains.data?.items ?? [])} databaseOverview={databaseOverview.data} notice={notice} onClose={() => setCreateOpen(false)} onDetect={() => detect.mutate("create")} onSubmit={() => createDeployment.mutate()} submitLabel="Create" busy={createDeployment.isPending} openGithub={() => enableGithub ? setRepoPickerOpen(true) : undefined} enableGithub={enableGithub} /> : null}
       {editingOpen ? <ProjectModal title="Edit Project" draft={editDraft} setDraft={setEditDraft} domains={domainOptions(domains.data?.items ?? [])} databaseOverview={databaseOverview.data} notice={notice} onClose={() => setEditingOpen(false)} onDetect={() => detect.mutate("edit")} onSubmit={() => updateDeployment.mutate()} submitLabel="Save changes" busy={updateDeployment.isPending} openGithub={() => enableGithub ? setRepoPickerOpen(true) : undefined} enableGithub={enableGithub} /> : null}
       {enableGithub && repoPickerOpen ? <GithubModal repos={repos.data} loading={repos.isLoading} repoSearch={repoSearch} setRepoSearch={setRepoSearch} connection={githubConnection.data} githubToken={githubToken} setGithubToken={setGithubToken} githubUsername={githubUsername} setGithubUsername={setGithubUsername} saveToken={() => saveGithubToken.mutate()} savingToken={saveGithubToken.isPending} onClose={() => setRepoPickerOpen(false)} onDeploy={(repo) => selectGithubRepo.mutate(repo)} deploying={selectGithubRepo.isPending} /> : null}
-      {logModalOpen ? <LogsModal title={logTitle} type={logType} text={logText} onCopy={copyLogText} onClose={() => setLogModalOpen(false)} /> : null}
+      {logModalOpen ? (
+        <LogsModal
+          title={logTitle}
+          type={logType}
+          text={logText}
+          refreshing={openLogs.isPending}
+          onCopy={copyLogText}
+          onRefresh={refreshOpenLogs}
+          onClose={closeLogs}
+        />
+      ) : null}
       {runtimeModal ? (
         <RuntimeInstallModal
           busy={action.isPending}
@@ -2113,7 +2135,23 @@ function RuntimeInstallModal({
   );
 }
 
-function LogsModal({ title, type, text, onCopy, onClose }: { title: string; type: LogType; text: string; onCopy: () => Promise<void> | void; onClose: () => void }) {
+function LogsModal({
+  title,
+  type,
+  text,
+  refreshing,
+  onCopy,
+  onRefresh,
+  onClose
+}: {
+  title: string;
+  type: LogType;
+  text: string;
+  refreshing: boolean;
+  onCopy: () => Promise<void> | void;
+  onRefresh: () => void;
+  onClose: () => void;
+}) {
   const [copied, setCopied] = useState(false);
   const logRef = useRef<HTMLPreElement | null>(null);
 
@@ -2124,6 +2162,12 @@ function LogsModal({ title, type, text, onCopy, onClose }: { title: string; type
     });
     return () => window.cancelAnimationFrame(frame);
   }, [text]);
+
+  useEffect(() => {
+    if (type !== "running") return;
+    const timer = window.setInterval(onRefresh, 5000);
+    return () => window.clearInterval(timer);
+  }, [onRefresh, type]);
 
   async function handleCopy() {
     try {
@@ -2141,12 +2185,21 @@ function LogsModal({ title, type, text, onCopy, onClose }: { title: string; type
         <div className="flex items-center justify-between border-b border-panel-line p-4">
           <div>
             <div className="text-sm font-semibold text-panel-ink">{title}</div>
-            <div className="mt-1 text-xs text-panel-muted">{type === "running" ? "Runtime stdout, stderr, and Laravel log tail from the server." : "Build and deployment event log for sharing and debugging."}</div>
+            <div className="mt-1 text-xs text-panel-muted">{type === "running" ? "Live runtime stdout, stderr, and application log tails from the server." : "Build and deployment event log for sharing and debugging."}</div>
           </div>
           <button className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line" onClick={onClose} type="button"><X size={16} /></button>
         </div>
         <pre ref={logRef} className="min-h-0 flex-1 overflow-auto bg-slate-950 p-4 font-mono text-xs leading-5 text-slate-100">{text || "No logs yet."}</pre>
         <div className="flex justify-end gap-2 border-t border-panel-line p-4">
+          <button
+            className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium hover:bg-slate-50 disabled:opacity-60"
+            disabled={refreshing}
+            onClick={onRefresh}
+            type="button"
+          >
+            <RefreshCw className={refreshing ? "animate-spin" : ""} size={15} />
+            {refreshing ? "Refreshing" : "Refresh"}
+          </button>
           <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium hover:bg-slate-50" onClick={handleCopy} type="button"><Clipboard size={15} />{copied ? "Copied" : "Copy logs"}</button>
           <button className="h-9 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white" onClick={onClose} type="button">Close</button>
         </div>

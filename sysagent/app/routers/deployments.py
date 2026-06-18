@@ -1760,27 +1760,57 @@ def runtime_logs(body: RuntimeLogsRequest) -> dict:
     def tail(path: Path) -> str:
         if not path.exists():
             return ""
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        return "\n".join(lines[-body.lines:])
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            return "\n".join(lines[-body.lines:])
+        except OSError as error:
+            return f"(could not read: {error})"
+
+    def log_section(label: str, path: Path, value: str | None = None) -> tuple[str, str]:
+        content = value if value is not None else tail(path)
+        return (f"== {label} ({path}) ==", content or "(empty)")
+
+    def laravel_log_files(root: Path) -> list[Path]:
+        logs_dir = root / "storage" / "logs"
+        if not logs_dir.exists() or not logs_dir.is_dir():
+            return [logs_dir / "laravel.log"]
+        candidates = [
+            path for path in logs_dir.glob("*.log")
+            if path.is_file() and path.name.startswith(("laravel", "lumen"))
+        ]
+        if not candidates:
+            return [logs_dir / "laravel.log"]
+
+        def modified_at(path: Path) -> float:
+            try:
+                return path.stat().st_mtime
+            except OSError:
+                return 0
+
+        return sorted(candidates, key=modified_at, reverse=True)[:5]
 
     stdout = tail(log_dir / "running-out.log")
     stderr = tail(log_dir / "running-error.log")
-    laravel = ""
+    sections = [
+        log_section("STDOUT", log_dir / "running-out.log", stdout),
+        log_section("STDERR", log_dir / "running-error.log", stderr),
+    ]
+    laravel_parts: list[str] = []
     if body.rootPath:
         root = Path(body.rootPath).resolve()
         info = path_info(str(root))
         if info["allowed"]:
-            laravel = tail(root / "storage" / "logs" / "laravel.log")
-    text = "\n".join([
-        f"== STDOUT ({log_dir / 'running-out.log'}) ==",
-        stdout or "(empty)",
-        "",
-        f"== STDERR ({log_dir / 'running-error.log'}) ==",
-        stderr or "(empty)",
-        "",
-        f"== LARAVEL ({Path(body.rootPath).resolve() / 'storage' / 'logs' / 'laravel.log' if body.rootPath else 'not requested'}) ==",
-        laravel or "(empty)",
-    ])
+            for path in laravel_log_files(root):
+                content = tail(path)
+                laravel_parts.append(content)
+                sections.append(log_section("LARAVEL", path, content))
+        else:
+            sections.append(("== APPLICATION LOGS ==", "(root path is outside the allowed file root)"))
+    else:
+        sections.append(("== APPLICATION LOGS ==", "(root path not requested)"))
+
+    text = "\n\n".join(f"{heading}\n{content}" for heading, content in sections)
+    laravel = "\n\n".join(part for part in laravel_parts if part)
     return {"ok": True, "logDir": str(log_dir), "stdout": stdout, "stderr": stderr, "laravel": laravel, "text": text}
 
 
