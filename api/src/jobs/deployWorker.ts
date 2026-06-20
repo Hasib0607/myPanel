@@ -18,6 +18,7 @@ import {
   nodeStartUsesVitePreview
 } from "../lib/deploymentDetection.js";
 import { nginxUpstreamFailure, nodePackageBinaryMissing, supervisorStartStillStarting } from "../lib/deploymentFailureRuntimeRepairs.js";
+import { normalizeLoopbackRuntimeUrls } from "../lib/deploymentEnv.js";
 import { appendFrontendModuleNotFoundHint, envDrivenRuntimeExecutables, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables, runtimeInstallTargetsForTools } from "../lib/deploymentRuntimeTools.js";
 import {
   deploymentRecoveryAttempts,
@@ -1209,9 +1210,12 @@ function isSiblingDomainPublicUrl(value: string | null | undefined, domain: Boun
   }
 }
 
-function deploymentEnvWithPublicUrl(envVars: Record<string, string>, domain: BoundDomain | null, httpsReady = false) {
+function deploymentEnvWithPublicUrl(envVars: Record<string, string>, domain: BoundDomain | null, httpsReady = false, deploymentPort?: number) {
   const publicEnv: Record<string, string> = deploymentPublicEnv(domain, httpsReady);
-  const merged: Record<string, string> = { ...publicEnv, ...envVars };
+  const merged: Record<string, string> = {
+    ...publicEnv,
+    ...normalizeLoopbackRuntimeUrls(envVars, deploymentPort)
+  };
 
   if (!domain?.name) return merged;
 
@@ -1822,7 +1826,7 @@ async function optionalPublicRouteWarning(
       sysagent.deploymentRepairLaravelWritablePaths({ rootPath: appPath })
     );
     if (await deploymentHttpsReady(domain)) {
-      envVars = deploymentEnvWithPublicUrl(envVars, domain, true);
+      envVars = deploymentEnvWithPublicUrl(envVars, domain, true, deployment.port);
     }
     envVars = await ensureLaravelAppKey(deploymentId, releaseId, appPath, deployment.port, envVars);
     await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Guardian preflight repair", () =>
@@ -1985,7 +1989,7 @@ async function optionalPublicRouteWarning(
       && httpsReady
       && routeMeta.effectiveUrl?.toLowerCase().startsWith(`http://${domain.name.toLowerCase()}`)
     ) {
-      envVars = deploymentEnvWithPublicUrl(envVars, domain, true);
+      envVars = deploymentEnvWithPublicUrl(envVars, domain, true, deployment.port);
       envVars = await ensureLaravelAppKey(deploymentId, releaseId, appPath, deployment.port, envVars);
       await republishDeploymentNginxVhost(deploymentId, releaseId, { ...deployment, rootPath: appPath }, domain);
       await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Restart after HTTPS URL repair", () =>
@@ -3723,7 +3727,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
     const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
     const domain = deploymentDomain(deployment);
     const routeDomains = deploymentRouteDomains(deployment);
-    const runtimeEnvVars = deploymentEnvWithPublicUrl(envVars, domain);
+    const runtimeEnvVars = deploymentEnvWithPublicUrl(envVars, domain, false, deployment.port);
 
     if (processAction !== "stop" && domain && await deploymentRunsLaravel(deployment.framework, appPath)) {
       await ensureLaravelPublicIndexForDomain(deployment.id, releaseId, appPath, domain);
@@ -3960,7 +3964,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     let domain = deploymentDomain(deployment);
     let routeDomains = deploymentRouteDomains(deployment);
     let envVars = {
-      ...deploymentEnvWithPublicUrl(await resolveEnvVars(deployment.env), domain),
+      ...deploymentEnvWithPublicUrl(await resolveEnvVars(deployment.env), domain, false, deployment.port),
       ...deployBudget.env
     };
     const databaseRuntime = await buildDatabaseRuntimeEnv(deployment, envVars, { releaseId });
@@ -4455,7 +4459,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         assertLiveResult((httpsNginx as { enable?: unknown }).enable, "Nginx HTTPS proxy config enable");
         assertLiveResult((httpsNginx as { test?: unknown }).test, "Nginx HTTPS config test");
         assertLiveResult((httpsNginx as { reload?: unknown }).reload, "Nginx HTTPS reload");
-        envVars = deploymentEnvWithPublicUrl(envVars, domain, true);
+        envVars = deploymentEnvWithPublicUrl(envVars, domain, true, deployment.port);
         if (await deploymentRunsLaravel(deployment.framework, appPath)) {
           envVars = await ensureLaravelAppKey(deployment.id, releaseId, appPath, deployment.port, envVars);
         }
@@ -4514,7 +4518,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         })
       );
       if (!tlsSync.httpsReady) {
-        envVars = deploymentEnvWithPublicUrl(envVars, activeDomain, false);
+        envVars = deploymentEnvWithPublicUrl(envVars, activeDomain, false, deployment.port);
         await repairDeploymentSslAccess(deployment.id, releaseId, { ...deployment, rootPath: appPath }, activeDomain).catch((error) =>
           writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "Automatic SSL repair skipped", {
             warning: error instanceof Error ? error.message : String(error)
@@ -4525,7 +4529,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           diagnose: JSON.parse(JSON.stringify(diagnose)) as Prisma.InputJsonValue
         }, "warn");
       } else {
-        envVars = deploymentEnvWithPublicUrl(envVars, activeDomain, true);
+        envVars = deploymentEnvWithPublicUrl(envVars, activeDomain, true, deployment.port);
       }
     }
 
