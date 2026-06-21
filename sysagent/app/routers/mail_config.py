@@ -476,6 +476,14 @@ def policy_restriction() -> str:
     return "check_policy_service inet:127.0.0.1:10031,permit_sasl_authenticated,reject"
 
 
+def policy_restriction_class() -> str:
+    return "vps_panel_policy"
+
+
+def policy_service_restriction() -> str:
+    return f"{policy_restriction_class()},permit_sasl_authenticated,reject"
+
+
 def sync_mailbox(payload: MailboxRequest) -> dict:
     email, user, domain = safe_email(payload.email)
     maildir = maildir_for(user, domain)
@@ -854,6 +862,11 @@ def configure_smtp(payload: MailDomain) -> dict:
         run_command(["postconf", "-e", f"{key}={value}"])
         for key, value in smtp_settings(hostname, effective_cert, effective_key, payload.messageRateLimit)
     ]
+    policy_postfix = [
+        run_command(["postconf", "-e", f"smtpd_restriction_classes={policy_restriction_class()}"]),
+        run_command(["postconf", "-e", "vps_panel_policy=check_policy_service inet:127.0.0.1:10031"]),
+        run_command(["postconf", "-e", f"smtpd_recipient_restrictions={policy_restriction_class()},permit_sasl_authenticated,reject_unauth_destination"]),
+    ]
     vdomains = merge_key_value_line(VMAILDOMAINS, domain, f"{domain} OK")
     postmap_domains = run_command(["postmap", str(VMAILDOMAINS)])
     smtp_suspended = dry_write(SMTP_SUSPENDED, SMTP_SUSPENDED.read_text(encoding="utf-8") if SMTP_SUSPENDED.exists() else "")
@@ -862,7 +875,7 @@ def configure_smtp(payload: MailDomain) -> dict:
     submission = run_command(["postconf", "-M", "submission/inet=submission inet n - y - - smtpd"])
     submission_tls = run_command(["postconf", "-P", "submission/inet/syslog_name=postfix/submission"])
     submission_auth = run_command(["postconf", "-P", "submission/inet/smtpd_sasl_auth_enable=yes"])
-    submission_relay = run_command(["postconf", "-P", f"submission/inet/smtpd_recipient_restrictions={policy_restriction()}"])
+    submission_relay = run_command(["postconf", "-P", f"submission/inet/smtpd_recipient_restrictions={policy_service_restriction()}"])
     submission_tls_only = run_command(["postconf", "-P", "submission/inet/smtpd_tls_security_level=encrypt"])
     submission_rate = [
         run_command(["postconf", "-P", f"submission/inet/smtpd_client_message_rate_limit={payload.messageRateLimit}"]),
@@ -874,7 +887,7 @@ def configure_smtp(payload: MailDomain) -> dict:
         run_command(["postconf", "-P", "smtps/inet/syslog_name=postfix/smtps"]),
         run_command(["postconf", "-P", "smtps/inet/smtpd_tls_wrappermode=yes"]),
         run_command(["postconf", "-P", "smtps/inet/smtpd_sasl_auth_enable=yes"]),
-        run_command(["postconf", "-P", f"smtps/inet/smtpd_recipient_restrictions={policy_restriction()}"]),
+        run_command(["postconf", "-P", f"smtps/inet/smtpd_recipient_restrictions={policy_service_restriction()}"]),
         run_command(["postconf", "-P", f"smtps/inet/smtpd_client_message_rate_limit={payload.messageRateLimit}"]),
         run_command(["postconf", "-P", f"smtps/inet/smtpd_client_recipient_rate_limit={payload.messageRateLimit * 10}"]),
         run_command(["postconf", "-P", f"smtps/inet/smtpd_client_connection_rate_limit={max(10, payload.messageRateLimit // 2)}"]),
@@ -959,6 +972,7 @@ ssl_key = <{key_path}
         *service_start,
         *firewall,
         *postfix,
+        *policy_postfix,
         postmap_domains,
         postmap_suspended,
         sasl_access,
@@ -1000,6 +1014,7 @@ ssl_key = <{key_path}
         "serviceStart": service_start,
         "firewall": firewall,
         "postfix": postfix,
+        "policyPostfix": policy_postfix,
         "vdomains": vdomains,
         "postmapDomains": postmap_domains,
         "smtpSuspended": smtp_suspended,
