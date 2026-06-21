@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from app.mail_utils import dovecot_password_hash, dovecot_user_line, mail_milter_settings, mail_security_postfix_settings, mail_security_profile, smtp_settings
 from app.routers import mail_config
-from app.routers.mail_config import IncomingHealthRequest, MailDomain, SmtpHealthRequest, dry_write, incoming_health_test, parse_maildir_message, smtp_health_test
+from app.routers.mail_config import IncomingHealthRequest, MailDomain, MailQueueActionRequest, SmtpHealthRequest, dry_write, incoming_health_test, mail_diagnostics, mail_queue_action, parse_maildir_message, smtp_health_test
 
 
 class MailConfigTests(unittest.TestCase):
@@ -95,6 +95,14 @@ class MailConfigTests(unittest.TestCase):
         self.assertTrue(all(not check["ok"] for check in smtp["checks"]))
         self.assertFalse(incoming["ok"])
         self.assertTrue(incoming["dryRun"])
+
+    def test_dry_run_diagnostics_and_queue_actions_are_not_successful(self):
+        with patch.object(mail_config, "settings", SimpleNamespace(allow_live_system_commands=False)):
+            diagnostics = mail_diagnostics(MailDomain(domain="example.com"))
+            action = mail_queue_action(MailQueueActionRequest(action="flush"))
+        self.assertFalse(diagnostics["ok"])
+        self.assertTrue(all(not check["ok"] for check in diagnostics["checks"]))
+        self.assertFalse(action["ok"])
 
 
 if __name__ == "__main__":

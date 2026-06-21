@@ -3364,7 +3364,8 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       email: `${mailbox.username}@${mailbox.domain.name}`,
       quotaMb: body.quotaMb ?? mailbox.quotaMb,
       passwordHash,
-      enabled: body.enabled ?? mailbox.enabled
+      enabled: body.enabled ?? mailbox.enabled,
+      smtpSuspended: mailbox.smtpSuspended
     }), `Mailbox ${mailbox.username}@${mailbox.domain.name}`);
     await prisma.mailAccount.update({ where: { id: mailbox.id }, data });
     await audit(request, { action: "UPDATE", resource: "mail_account", resourceId: mailboxId, description: "Account updated mailbox" });

@@ -344,12 +344,17 @@ export const sysagent = {
     request("/mail-config/security/configure", { method: "POST", body: JSON.stringify(body) }),
   mailStackStatus: () =>
     request("/mail-config/stack/status"),
-  installMailStack: () =>
-    request("/mail-config/stack/install", { method: "POST" }),
+  installMailStack: (body: { enableRspamd?: boolean } = {}) =>
+    request("/mail-config/stack/install", { method: "POST", body: JSON.stringify(body) }),
   mailFirewallStatus: () =>
     request("/mail-config/firewall/status"),
   applyMailFirewall: () =>
     request("/mail-config/firewall/apply", { method: "POST" }),
   reloadMailServices: () =>
-    request("/mail-config/reload", { method: "POST" })
+    request("/mail-config/reload", { method: "POST" }),
+  mailDiagnostics: (body: unknown) =>
+    request("/mail-config/diagnostics", { method: "POST", body: JSON.stringify(body) }),
+  mailQueue: () => request("/mail-config/queue"),
+  mailQueueAction: (body: unknown) =>
+    request("/mail-config/queue/action", { method: "POST", body: JSON.stringify(body) })
 };

@@ -4,6 +4,7 @@ import { z } from "zod";
 import { mailQueue } from "../jobs/queues.js";
 import { prisma } from "../lib/prisma.js";
 import { syncMailboxInbox } from "../lib/mailInboxSync.js";
+import { consumeMailboxSendAllowance } from "../lib/mailSendingPolicy.js";
 
 const folderSchema = z.enum(["INBOX", "SENT", "DRAFTS", "SPAM", "TRASH"]);
 
@@ -108,6 +109,8 @@ export const webmailRoutes: FastifyPluginAsync = async (app) => {
       include: { domain: true }
     });
     const from = `${account.username}@${account.domain.name}`;
+    const envelopeFrom = account.domain.mailBounceAddress || from;
+    await consumeMailboxSendAllowance(account.id);
     const pending = await prisma.mail.create({
       data: {
         accountId: account.id,
@@ -124,7 +127,7 @@ export const webmailRoutes: FastifyPluginAsync = async (app) => {
       }
     });
     try {
-      const job = await mailQueue.add("send", { ...body, accountId: account.id, from, mailId: pending.id }, {
+      const job = await mailQueue.add("send", { ...body, accountId: account.id, from, envelopeFrom, mailId: pending.id }, {
         attempts: 3,
         backoff: { type: "exponential", delay: 5_000 },
         removeOnComplete: 500,

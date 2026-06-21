@@ -7,6 +7,7 @@ from email.parser import BytesParser
 from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -38,6 +39,8 @@ class MailDomain(BaseModel):
     certificatePath: str | None = None
     keyPath: str | None = None
     messageRateLimit: int = Field(default=60, ge=1, le=10000)
+    selector: str = Field(default="mail", pattern=r"^[a-z0-9][a-z0-9_-]{0,30}$")
+    pop3Enabled: bool = False
 
 
 class MailboxRequest(BaseModel):
@@ -45,6 +48,7 @@ class MailboxRequest(BaseModel):
     quotaMb: int = Field(default=1024, ge=128)
     passwordHash: str | None = None
     enabled: bool = True
+    smtpSuspended: bool = False
 
 
 class MailboxSyncRequest(BaseModel):
@@ -82,14 +86,24 @@ class MailSecurityRequest(BaseModel):
     enableClamav: bool = False
 
 
+class MailStackInstallRequest(BaseModel):
+    enableRspamd: bool = False
+
+
 class MailboxMessagesRequest(BaseModel):
     email: str
     maxMessages: int = Field(default=250, ge=1, le=1000)
 
 
+class MailQueueActionRequest(BaseModel):
+    action: str = Field(pattern=r"^(flush|retry|delete)$")
+    queueId: str | None = Field(default=None, pattern=r"^[A-Fa-f0-9*!]{5,30}$")
+
+
 VMAILBOX = Path("/etc/postfix/vmailbox")
 VMAILDOMAINS = Path("/etc/postfix/vmaildomains")
 VIRTUAL_ALIASES = Path("/etc/postfix/virtual")
+SMTP_SUSPENDED = Path("/etc/postfix/smtp_suspended")
 DOVECOT_USERS = Path("/etc/dovecot/users")
 DOVECOT_PANEL_AUTH = Path("/etc/dovecot/conf.d/10-vps-panel-auth.conf")
 DOVECOT_PANEL_MAIL = Path("/etc/dovecot/conf.d/10-vps-panel-mail.conf")
@@ -110,6 +124,7 @@ def mail_config_transaction(function):
         Path("/etc/postfix/main.cf"),
         Path("/etc/postfix/master.cf"),
         VMAILDOMAINS,
+        SMTP_SUSPENDED,
         DOVECOT_PANEL_AUTH,
         DOVECOT_PANEL_MAIL,
         DOVECOT_PANEL_SSL,
@@ -284,7 +299,8 @@ def sync_mailbox(payload: MailboxRequest) -> dict:
     vdomains = merge_key_value_line(VMAILDOMAINS, domain, f"{domain} OK")
     vmailbox = merge_key_value_line(VMAILBOX, email, f"{email} {domain}/{user}/" if payload.enabled else None)
     dovecot_user = merge_dovecot_user(email, payload.passwordHash, maildir, payload.quotaMb, payload.enabled)
-    return {"email": email, "enabled": payload.enabled, "maildir": str(maildir), "mkdir": mkdir, "vdomains": vdomains, "vmailbox": vmailbox, "dovecotUser": dovecot_user}
+    smtp_access = merge_key_value_line(SMTP_SUSPENDED, email, f"{email} REJECT SMTP sending suspended by administrator" if payload.smtpSuspended else None)
+    return {"email": email, "enabled": payload.enabled, "smtpSuspended": payload.smtpSuspended, "maildir": str(maildir), "mkdir": mkdir, "vdomains": vdomains, "vmailbox": vmailbox, "dovecotUser": dovecot_user, "smtpAccess": smtp_access}
 
 
 def prune_domain_mailboxes(domain: str, wanted: set[str]) -> dict:
@@ -292,9 +308,12 @@ def prune_domain_mailboxes(domain: str, wanted: set[str]) -> dict:
     kept_vmailbox = [line for line in vmailbox_lines if not line.strip() or line.split()[0].split("@")[-1].lower() != domain or line.split()[0].lower() in wanted]
     dovecot_lines = DOVECOT_USERS.read_text(encoding="utf-8").splitlines() if DOVECOT_USERS.exists() else []
     kept_dovecot = [line for line in dovecot_lines if not line.strip() or line.split(":", 1)[0].split("@")[-1].lower() != domain or line.split(":", 1)[0].lower() in wanted]
+    suspended_lines = SMTP_SUSPENDED.read_text(encoding="utf-8").splitlines() if SMTP_SUSPENDED.exists() else []
+    kept_suspended = [line for line in suspended_lines if not line.strip() or line.split()[0].split("@")[-1].lower() != domain or line.split()[0].lower() in wanted]
     return {
         "vmailbox": dry_write(VMAILBOX, "\n".join(kept_vmailbox).strip() + "\n"),
         "dovecotUsers": dry_write(DOVECOT_USERS, "\n".join(kept_dovecot).strip() + "\n"),
+        "smtpSuspended": dry_write(SMTP_SUSPENDED, "\n".join(kept_suspended).strip() + "\n"),
     }
 
 
@@ -347,15 +366,17 @@ def mail_stack_status() -> dict:
 
 
 @router.post("/stack/install")
-def install_mail_stack() -> dict:
+def install_mail_stack(payload: MailStackInstallRequest = MailStackInstallRequest()) -> dict:
     plan = install_plan_for("mail_stack", current_os())
-    return run_install_plan(plan, timeout=1800)
+    stack = run_install_plan(plan, timeout=1800)
+    security = configure_mail_security(MailSecurityRequest(enableClamav=False)) if payload.enableRspamd and settings.allow_live_system_commands else None
+    return {"ok": settings.allow_live_system_commands and stack.get("returncode") == 0 and (security is None or security.get("ok") is True), "dryRun": not settings.allow_live_system_commands, "stack": stack, "rspamd": security}
 
 
 @router.get("/firewall/status")
 def mail_firewall_status() -> dict:
     return {
-        "requiredPorts": [25, 143, 465, 587, 993],
+        "requiredPorts": [25, 143, 465, 587, 993, 995],
         "rules": run_command(list_rules_command()),
         "listeners": run_command(["ss", "-ltn"]),
     }
@@ -363,13 +384,13 @@ def mail_firewall_status() -> dict:
 
 @router.post("/firewall/apply")
 def apply_mail_firewall() -> dict:
-    ports = [25, 143, 465, 587, 993]
+    ports = [25, 143, 465, 587, 993, 995]
+    results = [run_command(apply_rule_command(action="ALLOW", port=port, protocol="tcp", source_ip=None)) for port in ports]
     return {
+        "ok": settings.allow_live_system_commands and all(result.get("returncode") == 0 for result in results),
+        "dryRun": not settings.allow_live_system_commands,
         "ports": ports,
-        "results": [
-            run_command(apply_rule_command(action="ALLOW", port=port, protocol="tcp", source_ip=None))
-            for port in ports
-        ],
+        "results": results,
         "rules": run_command(list_rules_command()),
     }
 
@@ -377,12 +398,13 @@ def apply_mail_firewall() -> dict:
 @router.post("/dkim")
 def setup_dkim(payload: MailDomain) -> dict:
     domain = payload.domain.strip().lower()
+    selector = payload.selector.strip().lower()
     key_dir = Path("/etc/opendkim/keys") / domain
     if settings.allow_live_system_commands:
         key_dir.mkdir(parents=True, exist_ok=True)
-    private_key = key_dir / "mail.private"
-    result = {"skipped": True, "reason": "existing key retained", "returncode": 0} if private_key.exists() else run_command(["opendkim-genkey", "-b", "2048", "-d", domain, "-D", str(key_dir), "-s", "mail"])
-    txt_path = key_dir / "mail.txt"
+    private_key = key_dir / f"{selector}.private"
+    result = {"skipped": True, "reason": "existing key retained", "returncode": 0} if private_key.exists() else run_command(["opendkim-genkey", "-b", "2048", "-d", domain, "-D", str(key_dir), "-s", selector])
+    txt_path = key_dir / f"{selector}.txt"
     txt_value = None
     if txt_path.exists():
         raw = txt_path.read_text(encoding="utf-8")
@@ -400,8 +422,8 @@ def setup_dkim(payload: MailDomain) -> dict:
         "ExternalIgnoreList": f"refile:{OPENDKIM_TRUSTED_HOSTS}",
         "InternalHosts": f"refile:{OPENDKIM_TRUSTED_HOSTS}",
     })
-    key_table = merge_key_value_line(OPENDKIM_KEY_TABLE, f"mail._domainkey.{domain}", f"mail._domainkey.{domain} {domain}:mail:{private_key}")
-    signing_table = merge_key_value_line(OPENDKIM_SIGNING_TABLE, f"*@{domain}", f"*@{domain} mail._domainkey.{domain}")
+    key_table = merge_key_value_line(OPENDKIM_KEY_TABLE, f"{selector}._domainkey.{domain}", f"{selector}._domainkey.{domain} {domain}:{selector}:{private_key}")
+    signing_table = merge_key_value_line(OPENDKIM_SIGNING_TABLE, f"*@{domain}", f"*@{domain} {selector}._domainkey.{domain}")
     trusted_hosts = merge_unique_lines(OPENDKIM_TRUSTED_HOSTS, ["127.0.0.1", "localhost", "::1", domain, f"*.{domain}"])
     postfix = [
         run_command(["postconf", "-e", f"{key}={value}"])
@@ -413,10 +435,15 @@ def setup_dkim(payload: MailDomain) -> dict:
         run_command(["chmod", "640", str(OPENDKIM_KEY_TABLE), str(OPENDKIM_SIGNING_TABLE), str(OPENDKIM_TRUSTED_HOSTS)]),
     ]
     restart = run_command(["systemctl", "restart", "opendkim"])
+    postfix_reload = run_command(["systemctl", "reload", "postfix"])
+    key_check = run_command(["opendkim-testkey", "-d", domain, "-s", selector, "-vvv"])
+    require_command_success(result, *postfix, *permissions, restart, postfix_reload)
     return {
+        "ok": settings.allow_live_system_commands,
+        "dryRun": not settings.allow_live_system_commands,
         "result": result,
-        "selector": "mail",
-        "recordName": "mail._domainkey",
+        "selector": selector,
+        "recordName": f"{selector}._domainkey",
         "recordValue": txt_value,
         "txtPath": str(txt_path),
         "config": config,
@@ -424,8 +451,8 @@ def setup_dkim(payload: MailDomain) -> dict:
         "postfix": postfix,
         "permissions": permissions,
         "restart": restart,
-        "postfixReload": run_command(["systemctl", "reload", "postfix"]),
-        "keyCheck": run_command(["opendkim-testkey", "-d", domain, "-s", "mail", "-vvv"]),
+        "postfixReload": postfix_reload,
+        "keyCheck": key_check,
     }
 
 
@@ -435,9 +462,11 @@ def create_mailbox(payload: MailboxRequest) -> dict:
     synced = sync_mailbox(payload)
     postmap_domains = run_command(["postmap", str(VMAILDOMAINS)])
     postmap = run_command(["postmap", str(VMAILBOX)])
+    postmap_suspended = run_command(["postmap", str(SMTP_SUSPENDED)])
+    sasl_access = run_command(["postconf", "-e", f"smtpd_sender_restrictions=check_sasl_access hash:{SMTP_SUSPENDED},reject_non_fqdn_sender,reject_unknown_sender_domain"])
     reload_result = reload_mail_services()
-    require_command_success(postmap_domains, postmap, *reload_result.values())
-    return {**synced, "ok": settings.allow_live_system_commands, "dryRun": not settings.allow_live_system_commands, "vmail": vmail, "postmapDomains": postmap_domains, "postmap": postmap, "reload": reload_result}
+    require_command_success(postmap_domains, postmap, postmap_suspended, sasl_access, *reload_result.values())
+    return {**synced, "ok": settings.allow_live_system_commands, "dryRun": not settings.allow_live_system_commands, "vmail": vmail, "postmapDomains": postmap_domains, "postmap": postmap, "postmapSuspended": postmap_suspended, "saslAccess": sasl_access, "reload": reload_result}
 
 
 @router.post("/mailbox/messages")
@@ -464,9 +493,11 @@ def sync_mailboxes(payload: MailboxSyncRequest) -> dict:
     pruned = prune_domain_mailboxes(domain, wanted)
     postmap_domains = run_command(["postmap", str(VMAILDOMAINS)])
     postmap = run_command(["postmap", str(VMAILBOX)])
+    postmap_suspended = run_command(["postmap", str(SMTP_SUSPENDED)])
+    sasl_access = run_command(["postconf", "-e", f"smtpd_sender_restrictions=check_sasl_access hash:{SMTP_SUSPENDED},reject_non_fqdn_sender,reject_unknown_sender_domain"])
     reload_result = reload_mail_services()
-    require_command_success(postmap_domains, postmap, *reload_result.values())
-    return {"ok": settings.allow_live_system_commands, "dryRun": not settings.allow_live_system_commands, "synced": len(results), "vmail": vmail, "mailboxes": results, "pruned": pruned, "postmapDomains": postmap_domains, "postmap": postmap, "reload": reload_result}
+    require_command_success(postmap_domains, postmap, postmap_suspended, sasl_access, *reload_result.values())
+    return {"ok": settings.allow_live_system_commands, "dryRun": not settings.allow_live_system_commands, "synced": len(results), "vmail": vmail, "mailboxes": results, "pruned": pruned, "postmapDomains": postmap_domains, "postmap": postmap, "postmapSuspended": postmap_suspended, "saslAccess": sasl_access, "reload": reload_result}
 
 
 @router.delete("/mailbox")
@@ -474,10 +505,12 @@ def delete_mailbox(payload: MailboxDeleteRequest) -> dict:
     email, user, domain = safe_email(payload.email)
     vmailbox = merge_key_value_line(VMAILBOX, email, None)
     dovecot_user = merge_dovecot_user(email, None, maildir_for(user, domain), 1024, False)
+    smtp_access = merge_key_value_line(SMTP_SUSPENDED, email, None)
     postmap = run_command(["postmap", str(VMAILBOX)])
+    postmap_suspended = run_command(["postmap", str(SMTP_SUSPENDED)])
     reload_result = reload_mail_services()
-    require_command_success(postmap, *reload_result.values())
-    return {"ok": settings.allow_live_system_commands, "dryRun": not settings.allow_live_system_commands, "email": email, "maildirRetained": True, "vmailbox": vmailbox, "dovecotUser": dovecot_user, "postmap": postmap, "reload": reload_result}
+    require_command_success(postmap, postmap_suspended, *reload_result.values())
+    return {"ok": settings.allow_live_system_commands, "dryRun": not settings.allow_live_system_commands, "email": email, "maildirRetained": True, "vmailbox": vmailbox, "dovecotUser": dovecot_user, "smtpAccess": smtp_access, "postmap": postmap, "postmapSuspended": postmap_suspended, "reload": reload_result}
 
 
 @router.post("/alias")
@@ -519,6 +552,9 @@ def configure_smtp(payload: MailDomain) -> dict:
     ]
     vdomains = merge_key_value_line(VMAILDOMAINS, domain, f"{domain} OK")
     postmap_domains = run_command(["postmap", str(VMAILDOMAINS)])
+    smtp_suspended = dry_write(SMTP_SUSPENDED, SMTP_SUSPENDED.read_text(encoding="utf-8") if SMTP_SUSPENDED.exists() else "")
+    postmap_suspended = run_command(["postmap", str(SMTP_SUSPENDED)])
+    sasl_access = run_command(["postconf", "-e", f"smtpd_sender_restrictions=check_sasl_access hash:{SMTP_SUSPENDED},reject_non_fqdn_sender,reject_unknown_sender_domain"])
     submission = run_command(["postconf", "-M", "submission/inet=submission inet n - y - - smtpd"])
     submission_tls = run_command(["postconf", "-P", "submission/inet/syslog_name=postfix/submission"])
     submission_auth = run_command(["postconf", "-P", "submission/inet/smtpd_sasl_auth_enable=yes"])
@@ -558,7 +594,7 @@ service auth {
   }
 }
 """.lstrip()
-    mail_conf = """
+    mail_conf = f"protocols = imap lmtp{' pop3' if payload.pop3Enabled else ''}\n" + """
 mail_location = maildir:/var/mail/vhosts/%d/%n
 mail_plugins = $mail_plugins quota
 namespace inbox {
@@ -608,11 +644,17 @@ ssl_key = <{key_path}
             except OSError:
                 pass
     certbot_timer = run_command(["sh", "-lc", "systemctl enable --now certbot.timer 2>/dev/null || true"])
+    pop3_package = None
+    if payload.pop3Enabled:
+        info = current_os()
+        pop3_package = run_command(["apt-get", "install", "-y", "dovecot-pop3d"], env={"DEBIAN_FRONTEND": "noninteractive"}, timeout=900) if info.is_debian else run_command(["dnf", "install", "-y", "dovecot"], timeout=900)
     postfix_validation = run_command(["postfix", "check"])
     dovecot_validation = run_command(["doveconf", "-n"])
     require_command_success(
         *postfix,
         postmap_domains,
+        postmap_suspended,
+        sasl_access,
         submission,
         submission_tls,
         submission_auth,
@@ -623,6 +665,7 @@ ssl_key = <{key_path}
         *smtps_settings,
         postfix_validation,
         dovecot_validation,
+        *([pop3_package] if pop3_package else []),
     )
     reload_result = reload_mail_services()
     require_command_success(*reload_result.values())
@@ -639,12 +682,16 @@ ssl_key = <{key_path}
         "postfix": postfix,
         "vdomains": vdomains,
         "postmapDomains": postmap_domains,
+        "smtpSuspended": smtp_suspended,
+        "postmapSuspended": postmap_suspended,
+        "saslAccess": sasl_access,
         "submission": [submission, submission_tls, submission_auth, submission_relay, submission_tls_only, *submission_rate],
         "smtps": [smtps, *smtps_settings],
         "rateLimit": {"messagesPerClient": payload.messageRateLimit, "windowSeconds": 60, "recipientsPerClient": payload.messageRateLimit * 10, "connectionsPerClient": max(10, payload.messageRateLimit // 2)},
         "files": files,
         "certbotTimer": certbot_timer,
         "validation": {"postfix": postfix_validation, "dovecot": dovecot_validation},
+        "pop3": {"enabled": payload.pop3Enabled, "package": pop3_package},
         "reload": reload_result,
         "commandsAvailable": {
             "postconf": shutil.which("postconf") is not None,
@@ -835,7 +882,7 @@ upstream "local" {
         "fail2ban": run_command(["fail2ban-client", "-t"]),
         "relay": relay_abuse_check(),
     }
-    return {"ok": all(result.get("returncode") == 0 for result in install + postfix + services) and all(result.get("returncode") == 0 for key, result in validation.items() if key != "relay") and validation["relay"]["ok"], "packages": packages, "install": install, "files": {"fail2ban": fail2ban, "rspamd": rspamd, "antivirus": antivirus}, "postfix": postfix, "services": services, "validation": validation}
+    return {"ok": settings.allow_live_system_commands and all(result.get("returncode") == 0 for result in install + postfix + services) and all(result.get("returncode") == 0 for key, result in validation.items() if key != "relay") and validation["relay"]["ok"], "dryRun": not settings.allow_live_system_commands, "packages": packages, "install": install, "files": {"fail2ban": fail2ban, "rspamd": rspamd, "antivirus": antivirus}, "postfix": postfix, "services": services, "validation": validation}
 
 
 @router.post("/reload")
@@ -845,3 +892,64 @@ def reload_mail_services() -> dict:
         "dovecot": run_command(["systemctl", "reload", "dovecot"]),
         "opendkim": run_command(["systemctl", "reload", "opendkim"]),
     }
+
+
+@router.post("/diagnostics")
+def mail_diagnostics(payload: MailDomain) -> dict:
+    hostname = (payload.hostname or f"mail.{payload.domain}").strip().lower()
+    listeners = run_command(["ss", "-ltn"])
+    listener_text = listeners.get("stdout", "")
+    services = {name: run_command(["systemctl", "is-active", name]) for name in ("postfix", "dovecot", "opendkim")}
+    certificate = Path(payload.certificatePath or f"/etc/letsencrypt/live/{hostname}/fullchain.pem")
+    tls = run_command(["openssl", "x509", "-in", str(certificate), "-noout", "-checkend", "0", "-enddate"])
+    fail2ban = run_command(["fail2ban-client", "status", "postfix-sasl"])
+    auth_log = run_command(["journalctl", "--since", "24 hours ago", "-u", "postfix", "-u", "dovecot", "--no-pager", "-n", "500"])
+    failed_lines = [line for line in auth_log.get("stdout", "").splitlines() if re.search(r"auth(?:entication)? failed|sasl.*fail|password mismatch", line, re.I)]
+    live = settings.allow_live_system_commands
+    checks = [
+        *[health_check(f"service_{name}", f"{name.title()} running", live and result.get("returncode") == 0 and result.get("stdout", "").strip() == "active", result.get("stdout", "").strip() or result.get("stderr", "Not tested")) for name, result in services.items()],
+        *[health_check(f"port_{port}", f"Port {port} listening", live and (f":{port} " in listener_text or f":{port}\n" in listener_text), "Listening" if live and f":{port}" in listener_text else "No live listener found") for port in (25, 465, 587, 993)],
+        health_check("tls", "TLS certificate valid", live and tls.get("returncode") == 0, tls.get("stdout", "").strip() or tls.get("stderr", "Certificate unavailable")),
+        health_check("fail2ban", "SMTP failed-login monitor", live and fail2ban.get("returncode") == 0, fail2ban.get("stdout", "").strip() or fail2ban.get("stderr", "Fail2Ban jail unavailable")),
+        health_check("failed_logins", "Failed logins (24h)", live and auth_log.get("returncode") == 0, f"{len(failed_lines)} authentication failure(s) found in the last 24 hours" if live else "Not tested"),
+    ]
+    return {"ok": live and all(check["ok"] for check in checks), "dryRun": not live, "hostname": hostname, "checks": checks, "services": services, "listeners": listeners, "tls": tls, "fail2ban": fail2ban, "failedLoginCount": len(failed_lines), "failedLoginEvents": failed_lines[-20:]}
+
+
+@router.get("/queue")
+def mail_queue() -> dict:
+    result = run_command(["postqueue", "-j"])
+    items = []
+    if result.get("returncode") == 0:
+        for line in result.get("stdout", "").splitlines():
+            try:
+                entry = json.loads(line)
+                items.append({
+                    "queueId": entry.get("queue_id"),
+                    "queueName": entry.get("queue_name", "unknown"),
+                    "arrivalTime": entry.get("arrival_time"),
+                    "messageSize": entry.get("message_size", 0),
+                    "sender": entry.get("sender", ""),
+                    "status": "bounced" if not entry.get("sender") else ("deferred" if entry.get("queue_name") == "deferred" else "queued"),
+                    "recipients": entry.get("recipients", []),
+                })
+            except json.JSONDecodeError:
+                continue
+    return {"ok": settings.allow_live_system_commands and result.get("returncode") == 0, "dryRun": not settings.allow_live_system_commands, "items": items, "result": result}
+
+
+@router.post("/queue/action")
+def mail_queue_action(payload: MailQueueActionRequest) -> dict:
+    if payload.action == "flush":
+        result = run_command(["postqueue", "-f"])
+    elif payload.action == "retry" and payload.queueId:
+        result = run_command(["postsuper", "-r", payload.queueId])
+    elif payload.action == "delete" and payload.queueId:
+        result = run_command(["postsuper", "-d", payload.queueId])
+    else:
+        raise HTTPException(status_code=400, detail="A queue ID is required for retry and delete")
+    require_command_success(result)
+    flush = run_command(["postqueue", "-f"]) if payload.action == "retry" else None
+    if flush:
+        require_command_success(flush)
+    return {"ok": settings.allow_live_system_commands, "dryRun": not settings.allow_live_system_commands, "action": payload.action, "queueId": payload.queueId, "result": result, "flush": flush}

@@ -9,7 +9,7 @@ import { apiDelete, apiGet, apiPatch, apiPost } from "@/lib/api";
 type DomainDetail = {
   id: string;
   name: string;
-  mailAccounts: Array<{ id: string; username: string; quotaMb: number; enabled: boolean }>;
+  mailAccounts: Array<{ id: string; username: string; quotaMb: number; enabled: boolean; smtpSuspended: boolean; dailySendLimit: number; minuteSendLimit: number; sentToday: number }>;
 };
 
 type Alias = {
@@ -52,7 +52,7 @@ export function MailAccountsClient({ domainId }: { domainId: string }) {
     }
   });
   const updateAccount = useMutation({
-    mutationFn: ({ id, quotaMb, enabled }: { id: string; quotaMb?: number; enabled?: boolean }) => apiPatch(`/mail/accounts/${id}`, { quotaMb, enabled }),
+    mutationFn: ({ id, ...patch }: { id: string; quotaMb?: number; enabled?: boolean; smtpSuspended?: boolean; dailySendLimit?: number; minuteSendLimit?: number }) => apiPatch(`/mail/accounts/${id}`, patch),
     onSuccess: invalidate
   });
   const resetPassword = useMutation({
@@ -150,9 +150,9 @@ export function MailAccountsClient({ domainId }: { domainId: string }) {
 
         <div className="mb-6 rounded-md border border-panel-line bg-white">
           <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Mailboxes</div>
-          <table className="w-full text-sm">
+          <div className="overflow-x-auto"><table className="min-w-[1180px] w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs uppercase text-panel-muted">
-              <tr><th className="px-4 py-3">Mailbox</th><th className="px-4 py-3">Quota</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Password</th><th className="px-4 py-3">Actions</th></tr>
+              <tr><th className="px-4 py-3">Mailbox</th><th className="px-4 py-3">Quota</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Send policy</th><th className="px-4 py-3">Password</th><th className="px-4 py-3">Actions</th></tr>
             </thead>
             <tbody>
               {(domain.data?.mailAccounts ?? []).map((account) => {
@@ -175,6 +175,10 @@ export function MailAccountsClient({ domainId }: { domainId: string }) {
                     </button>
                   </td>
                   <td className="px-4 py-3">
+                    <div className="flex items-center gap-2"><input className="h-8 w-20 rounded-md border border-panel-line px-2" min={1} onBlur={(event) => updateAccount.mutate({ id: account.id, minuteSendLimit: Number(event.target.value) })} title="Per-minute limit" type="number" defaultValue={account.minuteSendLimit} /><span className="text-xs text-panel-muted">/min</span><input className="h-8 w-20 rounded-md border border-panel-line px-2" min={1} onBlur={(event) => updateAccount.mutate({ id: account.id, dailySendLimit: Number(event.target.value) })} title="Daily limit" type="number" defaultValue={account.dailySendLimit} /><span className="text-xs text-panel-muted">/day</span></div>
+                    <button className={`mt-2 rounded-md px-2 py-1 text-xs font-semibold ${account.smtpSuspended ? "bg-red-50 text-red-700" : "bg-slate-100"}`} onClick={() => updateAccount.mutate({ id: account.id, smtpSuspended: !account.smtpSuspended })} type="button">{account.smtpSuspended ? "SMTP suspended" : `SMTP active (${account.sentToday} today)`}</button>
+                  </td>
+                  <td className="px-4 py-3">
                     <div className="flex gap-2">
                       <input className="h-9 w-44 rounded-md border border-panel-line px-2" onChange={(event) => setResetPasswords((current) => ({ ...current, [account.id]: event.target.value }))} placeholder="new password" type="password" value={resetPasswords[account.id] ?? ""} />
                       <button className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line hover:bg-slate-50" disabled={(resetPasswords[account.id] ?? "").length < 10} onClick={() => resetPassword.mutate({ id: account.id, password: resetPasswords[account.id] })} type="button"><KeyRound size={15} /></button>
@@ -187,7 +191,7 @@ export function MailAccountsClient({ domainId }: { domainId: string }) {
                 );
               })}
             </tbody>
-          </table>
+          </table></div>
         </div>
 
         <div className="rounded-md border border-panel-line bg-white">

@@ -1,10 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, CheckCircle2, CircleAlert, Copy, Download, LockKeyhole, MailCheck, RefreshCw, Server, Shield, ShieldCheck } from "lucide-react";
-import { apiGet, apiPost } from "@/lib/api";
+import { apiGet, apiPatch, apiPost } from "@/lib/api";
 
 type AuthStatus = {
   domain: string;
@@ -22,6 +22,7 @@ type SmtpSettings = {
   rateLimit: number;
   rateWindowSeconds: number;
   notes: string[];
+  protocols: Array<{ protocol: string; host: string; port: number; security: string }>;
 };
 
 type DnsRecommendation = {
@@ -65,6 +66,8 @@ type SecurityStatus = {
   relay?: { ok: boolean; detail: string };
 };
 
+type Deliverability = { dkimSelector: string; dmarcPolicy: "none" | "quarantine" | "reject"; spfInclude: string | null; spfCustom: string | null; bounceAddress: string | null; pop3Enabled: boolean };
+
 export function MailSettingsClient({ domainId }: { domainId: string }) {
   const queryClient = useQueryClient();
   const [notice, setNotice] = useState("");
@@ -73,12 +76,16 @@ export function MailSettingsClient({ domainId }: { domainId: string }) {
   const [smtpPassword, setSmtpPassword] = useState("");
   const [testRecipient, setTestRecipient] = useState("");
   const [enableClamav, setEnableClamav] = useState(false);
+  const [enableRspamd, setEnableRspamd] = useState(true);
+  const [deliverabilityDraft, setDeliverabilityDraft] = useState<Deliverability | null>(null);
   const authStatus = useQuery({ queryKey: ["mail-auth-status", domainId], queryFn: () => apiGet<AuthStatus>(`/mail/domains/${domainId}/auth-status`) });
   const smtp = useQuery({ queryKey: ["mail-smtp-settings", domainId], queryFn: () => apiGet<SmtpSettings>(`/mail/domains/${domainId}/smtp-settings`) });
   const dns = useQuery({ queryKey: ["mail-dns-recommendations", domainId], queryFn: () => apiGet<DnsRecommendation>(`/mail/domains/${domainId}/dns-recommendations`) });
   const server = useQuery({ queryKey: ["mail-server-status"], queryFn: () => apiGet<ServerStatus>("/mail/server/status") });
   const tls = useQuery({ queryKey: ["mail-tls-status", domainId], queryFn: () => apiGet<MailTlsStatus>(`/mail/domains/${domainId}/tls/status`) });
   const security = useQuery({ queryKey: ["mail-security-status"], queryFn: () => apiGet<SecurityStatus>("/mail/server/security/status") });
+  const deliverability = useQuery({ queryKey: ["mail-deliverability", domainId], queryFn: () => apiGet<Deliverability>(`/mail/domains/${domainId}/deliverability`) });
+  useEffect(() => { if (deliverability.data && !deliverabilityDraft) setDeliverabilityDraft(deliverability.data); }, [deliverability.data, deliverabilityDraft]);
   const effectiveMailboxId = selectedMailboxId || smtp.data?.mailboxes.find((mailbox) => mailbox.enabled)?.id || "";
 
   const invalidate = async () => {
@@ -90,7 +97,7 @@ export function MailSettingsClient({ domainId }: { domainId: string }) {
   };
 
   const installStack = useMutation({
-    mutationFn: () => apiPost("/mail/server/install", {}),
+    mutationFn: () => apiPost("/mail/server/install", { enableRspamd }),
     onSuccess: async () => {
       setNotice("Postfix, Dovecot, OpenDKIM, and Certbot installed and started.");
       await invalidate();
@@ -185,6 +192,12 @@ export function MailSettingsClient({ domainId }: { domainId: string }) {
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not setup DKIM.")
   });
 
+  const saveDeliverability = useMutation({
+    mutationFn: () => apiPatch(`/mail/domains/${domainId}/deliverability`, deliverabilityDraft),
+    onSuccess: async () => { setNotice("Deliverability policy saved and DNS records republished."); await invalidate(); },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not save deliverability settings.")
+  });
+
   const copyText = async (value: string, message: string) => {
     await navigator.clipboard.writeText(value);
     setNotice(message);
@@ -197,10 +210,22 @@ export function MailSettingsClient({ domainId }: { domainId: string }) {
     "Username: full mailbox address",
     "Password: mailbox password"
   ].join("\n") : "";
+  const protocolText = smtp.data ? [...smtp.data.protocols.map((item) => `${item.protocol}: ${item.host}:${item.port} (${item.security})`), `${typeof window === "undefined" ? "" : window.location.origin}/webmail/login`, "Username: full mailbox address", "Password: mailbox password"].join("\n") : "";
 
   return (
     <section className="space-y-6 p-8">
       {notice ? <div className="rounded-md border border-panel-line bg-white p-3 text-sm text-slate-700">{notice}</div> : null}
+
+      <div className="rounded-md border border-panel-line bg-white">
+        <div className="border-b border-panel-line px-4 py-3"><div className="text-sm font-semibold">Domain Mail Setup Wizard</div><div className="text-xs text-panel-muted">Complete each stage in order. Live validation determines readiness.</div></div>
+        <div className="grid gap-2 p-4 sm:grid-cols-2 xl:grid-cols-5">
+          <WizardStep index={1} label="Apply DNS" ready={Boolean(dns.data?.records.every((record) => record.exists))} busy={applyDns.isPending} onClick={() => applyDns.mutate()} />
+          <WizardStep index={2} label="Issue SSL" ready={Boolean(tls.data?.exists)} busy={issueTls.isPending} onClick={() => issueTls.mutate()} />
+          <WizardStep index={3} label="Configure SMTP" ready={Boolean(server.data?.stack.services?.postfix?.returncode === 0)} busy={configureSmtp.isPending} onClick={() => configureSmtp.mutate()} />
+          <WizardStep index={4} label="Configure DKIM" ready={Boolean(authStatus.data?.checks.find((check) => check.key === "dkim")?.ok)} busy={setupDkim.isPending} onClick={() => setupDkim.mutate()} />
+          <WizardStep index={5} label="Test send / receive" ready={Boolean(smtpHealth.data?.ok && incomingHealth.data?.ok)} busy={smtpHealth.isPending || incomingHealth.isPending} onClick={() => setNotice("Use Live Mail Health below with a mailbox password to complete both tests.")} />
+        </div>
+      </div>
 
       <div className="grid gap-4 lg:grid-cols-3">
         <SetupCard
@@ -215,10 +240,10 @@ export function MailSettingsClient({ domainId }: { domainId: string }) {
         <SetupCard
           action="Open ports"
           busy={applyFirewall.isPending}
-          description="TCP 25, 143, 465, 587, and 993"
+          description="TCP 25, 143, 465, 587, 993, and optional 995"
           icon={<Shield size={18} />}
           onClick={() => applyFirewall.mutate()}
-          ready={Boolean(server.data?.firewall.rules?.stdout && [25, 143, 465, 587, 993].every((port) => server.data?.firewall.rules?.stdout?.includes(String(port))))}
+          ready={Boolean(server.data?.firewall.rules?.stdout && [25, 143, 465, 587, 993, 995].every((port) => server.data?.firewall.rules?.stdout?.includes(String(port))))}
           title="Mail firewall"
         />
         <SetupCard
@@ -230,6 +255,13 @@ export function MailSettingsClient({ domainId }: { domainId: string }) {
           ready={Boolean(tls.data?.exists)}
           title="Mail TLS"
         />
+      </div>
+
+      <label className="flex items-center gap-2 text-xs text-panel-muted"><input checked={enableRspamd} onChange={(event) => setEnableRspamd(event.target.checked)} type="checkbox" />Install Rspamd and Fail2Ban with the mail server stack</label>
+
+      <div className="rounded-md border border-panel-line bg-white">
+        <div className="flex items-center justify-between border-b border-panel-line px-4 py-3"><div><div className="text-sm font-semibold">Full Protocol Settings</div><div className="text-xs text-panel-muted">Mailbox apps and individual webmail login.</div></div><button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-xs font-semibold" disabled={!smtp.data} onClick={() => copyText(protocolText, "All protocol settings copied.")} type="button"><Copy size={14} />Copy all</button></div>
+        <div className="grid gap-3 p-4 md:grid-cols-2 xl:grid-cols-4">{(smtp.data?.protocols ?? []).map((protocol) => <div className="rounded-md border border-panel-line p-3" key={`${protocol.protocol}-${protocol.port}`}><div className="font-semibold">{protocol.protocol}</div><div className="mt-2 font-mono text-xs">{protocol.host}:{protocol.port}</div><div className="mt-1 text-xs text-panel-muted">{protocol.security}</div></div>)}<div className="rounded-md border border-panel-line p-3"><div className="font-semibold">Webmail</div><div className="mt-2 font-mono text-xs">/webmail/login</div><div className="mt-1 text-xs text-panel-muted">Full email address + mailbox password</div></div></div>
       </div>
 
       <div className="grid gap-6 xl:grid-cols-[1fr_1fr]">
@@ -322,6 +354,16 @@ export function MailSettingsClient({ domainId }: { domainId: string }) {
           ))}
         </div>
       </div>
+
+      {deliverabilityDraft ? <div className="rounded-md border border-panel-line bg-white"><div className="border-b border-panel-line px-4 py-3"><div className="text-sm font-semibold">Deliverability Policy</div><div className="text-xs text-panel-muted">DKIM selector, DMARC enforcement, SPF extension, bounce identity, and optional POP3.</div></div><div className="grid gap-4 p-4 md:grid-cols-2">
+        <label className="text-xs font-medium text-panel-muted">DKIM selector<input className="mt-1 h-10 w-full rounded-md border border-panel-line px-3 text-sm" value={deliverabilityDraft.dkimSelector} onChange={(event) => setDeliverabilityDraft({ ...deliverabilityDraft, dkimSelector: event.target.value.toLowerCase() })} /></label>
+        <label className="text-xs font-medium text-panel-muted">DMARC policy<select className="mt-1 h-10 w-full rounded-md border border-panel-line bg-white px-3 text-sm" value={deliverabilityDraft.dmarcPolicy} onChange={(event) => setDeliverabilityDraft({ ...deliverabilityDraft, dmarcPolicy: event.target.value as Deliverability["dmarcPolicy"] })}><option value="none">Monitor only</option><option value="quarantine">Quarantine</option><option value="reject">Reject</option></select></label>
+        <label className="text-xs font-medium text-panel-muted">SPF include<input className="mt-1 h-10 w-full rounded-md border border-panel-line px-3 text-sm" placeholder="_spf.provider.com" value={deliverabilityDraft.spfInclude ?? ""} onChange={(event) => setDeliverabilityDraft({ ...deliverabilityDraft, spfInclude: event.target.value || null })} /></label>
+        <label className="text-xs font-medium text-panel-muted">Bounce address<input className="mt-1 h-10 w-full rounded-md border border-panel-line px-3 text-sm" placeholder="bounce@example.com" type="email" value={deliverabilityDraft.bounceAddress ?? ""} onChange={(event) => setDeliverabilityDraft({ ...deliverabilityDraft, bounceAddress: event.target.value || null })} /></label>
+        <label className="text-xs font-medium text-panel-muted md:col-span-2">Custom SPF record<input className="mt-1 h-10 w-full rounded-md border border-panel-line px-3 font-mono text-xs" placeholder="Leave empty to generate automatically" value={deliverabilityDraft.spfCustom ?? ""} onChange={(event) => setDeliverabilityDraft({ ...deliverabilityDraft, spfCustom: event.target.value || null })} /></label>
+        <label className="flex items-center gap-2 text-sm"><input checked={deliverabilityDraft.pop3Enabled} onChange={(event) => setDeliverabilityDraft({ ...deliverabilityDraft, pop3Enabled: event.target.checked })} type="checkbox" />Enable optional POP3 settings</label>
+        <button className="h-10 rounded-md bg-panel-accent px-4 text-sm font-semibold text-white disabled:opacity-60" disabled={saveDeliverability.isPending} onClick={() => saveDeliverability.mutate()} type="button">{saveDeliverability.isPending ? "Saving..." : "Save and publish DNS"}</button>
+      </div><div className="border-t border-panel-line bg-slate-50 px-4 py-3 text-xs text-panel-muted">PTR checklist: set the VPS IP reverse DNS to <span className="font-mono">{smtp.data?.host ?? "mail.domain"}</span>, then verify it on Diagnostics.</div></div> : null}
 
       <div className="grid gap-6 xl:grid-cols-[1fr_1fr]">
         <div className="rounded-md border border-panel-line bg-white">
@@ -418,4 +460,8 @@ function SetupCard({ title, description, action, ready, busy, icon, onClick }: {
       </button>
     </div>
   );
+}
+
+function WizardStep({ index, label, ready, busy, onClick }: { index: number; label: string; ready: boolean; busy: boolean; onClick: () => void }) {
+  return <button className="flex min-h-16 items-center gap-3 rounded-md border border-panel-line p-3 text-left hover:bg-slate-50 disabled:opacity-60" disabled={busy} onClick={onClick} type="button"><span className={`grid h-7 w-7 shrink-0 place-items-center rounded-full text-xs font-bold ${ready ? "bg-emerald-100 text-emerald-700" : "bg-slate-100"}`}>{ready ? "OK" : index}</span><span className="text-xs font-semibold">{busy ? "Working..." : label}</span></button>;
 }

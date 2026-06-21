@@ -21,9 +21,9 @@ function renderMessage(payload: { from: string; to: string; subject: string; htm
   ].join("\n");
 }
 
-function sendmail(payload: { from: string; to: string; subject: string; html: string; text?: string }) {
+function sendmail(payload: { from: string; envelopeFrom?: string; to: string; subject: string; html: string; text?: string }) {
   return new Promise<void>((resolve, reject) => {
-    const child = spawn("sendmail", ["-f", payload.from, payload.to], { stdio: ["pipe", "ignore", "pipe"] });
+    const child = spawn("sendmail", ["-f", payload.envelopeFrom || payload.from, payload.to], { stdio: ["pipe", "ignore", "pipe"] });
     let stderr = "";
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
@@ -49,7 +49,7 @@ export const mailWorker = new Worker(
   "mail",
   async (job) => {
     if (job.name === "send") {
-      const payload = job.data as { mailId: string; from: string; to: string; subject: string; html: string; text?: string };
+      const payload = job.data as { mailId: string; from: string; envelopeFrom?: string; to: string; subject: string; html: string; text?: string };
       logger.info("mail send job accepted", {
         id: job.id,
         from: payload.from,
