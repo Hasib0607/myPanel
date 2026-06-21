@@ -324,6 +324,8 @@ export const sysagent = {
     request("/mail-config/mailbox", { method: "POST", body: JSON.stringify(body) }),
   updateMailAlias: (body: unknown) =>
     request("/mail-config/alias", { method: "POST", body: JSON.stringify(body) }),
+  configureSmtp: (body: unknown) =>
+    request("/mail-config/smtp/configure", { method: "POST", body: JSON.stringify(body) }),
   reloadMailServices: () =>
     request("/mail-config/reload", { method: "POST" })
 };

@@ -3331,16 +3331,17 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     });
     assertLimit(account._count.mailAccounts, account.mailboxLimit, "Mailbox");
     const domain = await prisma.domain.findFirstOrThrow({ where: { id: body.domainId, accountId: account.id } });
+    const passwordHash = await bcrypt.hash(body.password, 12);
     const mailbox = await prisma.mailAccount.create({
       data: {
         accountId: account.id,
         domainId: domain.id,
         username: body.username,
-        passwordHash: await bcrypt.hash(body.password, 12),
+        passwordHash,
         quotaMb: body.quotaMb
       }
     });
-    const sysagentResult = await sysagent.createMailbox({ email: `${mailbox.username}@${domain.name}`, quotaMb: mailbox.quotaMb }).catch((error) => {
+    const sysagentResult = await sysagent.createMailbox({ email: `${mailbox.username}@${domain.name}`, quotaMb: mailbox.quotaMb, passwordHash }).catch((error) => {
       request.log.warn({ error }, "account mailbox sysagent bridge failed");
       return { dryRun: true, unavailable: true, error: error instanceof Error ? error.message : "sysagent unavailable" };
     });
@@ -3361,6 +3362,15 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       data
     });
     if (mailbox.count === 0) throw app.httpErrors.notFound("Mailbox not found");
+    if (body.password) {
+      const synced = await prisma.mailAccount.findFirst({ where: { id: mailboxId, accountId: accountId(request) }, include: { domain: true } });
+      if (synced) {
+        await sysagent.createMailbox({ email: `${synced.username}@${synced.domain.name}`, quotaMb: synced.quotaMb, passwordHash: data.passwordHash }).catch((error) => {
+          request.log.warn({ error }, "account mailbox password sysagent sync failed");
+          return null;
+        });
+      }
+    }
     await audit(request, { action: "UPDATE", resource: "mail_account", resourceId: mailboxId, description: "Account updated mailbox" });
     return { ok: true };
   });

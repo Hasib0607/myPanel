@@ -357,6 +357,13 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
 
   const mailboxAddress = (mailbox: Mailbox) => `${mailbox.username}@${mailbox.domain?.name ?? ""}`;
   const webmailUrl = typeof window === "undefined" ? "/webmail/login" : `${window.location.origin}/webmail/login`;
+  const mailboxSmtpSettings = (mailbox: Mailbox) => [
+    `SMTP host: mail.${mailbox.domain?.name ?? ""}`,
+    "SMTP port: 587",
+    "Security: STARTTLS",
+    `Username: ${mailboxAddress(mailbox)}`,
+    "Password: mailbox password"
+  ].join("\n");
 
   const data = dashboard.data;
   const domains = data?.domains ?? [];
@@ -495,6 +502,7 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
                       <div className="mt-1 flex flex-wrap gap-2 text-xs">
                         <button className="text-panel-accent hover:underline" onClick={() => copyText(mailboxAddress(mailbox), "Mailbox address copied.")} type="button">Copy email</button>
                         <button className="text-panel-accent hover:underline" onClick={() => copyText(`${webmailUrl}\nEmail: ${mailboxAddress(mailbox)}`, "Webmail login details copied.")} type="button">Copy login</button>
+                        <button className="text-panel-accent hover:underline" onClick={() => copyText(mailboxSmtpSettings(mailbox), "SMTP settings copied.")} type="button">Copy SMTP</button>
                       </div>
                     </td>
                     <td className="px-4 py-3">

@@ -2,7 +2,7 @@
 
 import { FormEvent, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, CircleAlert, KeyRound, Plus, Trash2 } from "lucide-react";
+import { CheckCircle2, CircleAlert, Copy, KeyRound, Plus, Trash2 } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { apiDelete, apiGet, apiPatch, apiPost } from "@/lib/api";
 
@@ -31,6 +31,7 @@ export function MailAccountsClient({ domainId }: { domainId: string }) {
   const [aliasSource, setAliasSource] = useState("");
   const [aliasTarget, setAliasTarget] = useState("");
   const [resetPasswords, setResetPasswords] = useState<Record<string, string>>({});
+  const [notice, setNotice] = useState("");
   const domain = useQuery({ queryKey: ["domain", domainId], queryFn: () => apiGet<DomainDetail>(`/domains/${domainId}`) });
   const aliases = useQuery({ queryKey: ["mail-aliases", domainId], queryFn: () => apiGet<Alias[]>(`/mail/aliases?domainId=${domainId}`) });
   const authStatus = useQuery({ queryKey: ["mail-auth-status", domainId], queryFn: () => apiGet<AuthStatus>(`/mail/domains/${domainId}/auth-status`) });
@@ -85,6 +86,19 @@ export function MailAccountsClient({ domainId }: { domainId: string }) {
     mutationFn: () => apiPost("/mail/services/reload", {})
   });
 
+  const copyText = async (value: string, message: string) => {
+    await navigator.clipboard.writeText(value);
+    setNotice(message);
+  };
+
+  const smtpSettings = (address: string) => [
+    `SMTP host: mail.${domain.data?.name ?? ""}`,
+    "SMTP port: 587",
+    "Security: STARTTLS",
+    `Username: ${address}`,
+    "Password: mailbox password"
+  ].join("\n");
+
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     create.mutate();
@@ -109,6 +123,7 @@ export function MailAccountsClient({ domainId }: { domainId: string }) {
         }
       />
       <section className="p-8">
+        {notice ? <div className="mb-4 rounded-md border border-panel-line bg-white p-3 text-sm text-slate-700">{notice}</div> : null}
         <div className="mb-6 rounded-md border border-panel-line bg-white p-4">
           <div className="mb-4 flex items-center justify-between">
             <div>
@@ -140,9 +155,17 @@ export function MailAccountsClient({ domainId }: { domainId: string }) {
               <tr><th className="px-4 py-3">Mailbox</th><th className="px-4 py-3">Quota</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Password</th><th className="px-4 py-3">Actions</th></tr>
             </thead>
             <tbody>
-              {(domain.data?.mailAccounts ?? []).map((account) => (
+              {(domain.data?.mailAccounts ?? []).map((account) => {
+                const address = `${account.username}@${domain.data?.name}`;
+                return (
                 <tr key={account.id} className="border-t border-panel-line">
-                  <td className="px-4 py-3 font-medium">{account.username}@{domain.data?.name}</td>
+                  <td className="px-4 py-3">
+                    <div className="font-medium">{address}</div>
+                    <button className="mt-1 flex items-center gap-1 text-xs text-panel-accent hover:underline" onClick={() => copyText(smtpSettings(address), "SMTP settings copied.")} type="button">
+                      <Copy size={12} />
+                      Copy SMTP
+                    </button>
+                  </td>
                   <td className="px-4 py-3">
                     <input className="h-9 w-28 rounded-md border border-panel-line px-2" min={128} onBlur={(event) => updateAccount.mutate({ id: account.id, quotaMb: Number(event.target.value) })} type="number" defaultValue={account.quotaMb} /> MB
                   </td>
@@ -161,7 +184,8 @@ export function MailAccountsClient({ domainId }: { domainId: string }) {
                     <button className="flex h-9 w-9 items-center justify-center rounded-md border border-panel-line text-panel-danger hover:bg-red-50" onClick={() => deleteAccount.mutate(account.id)} type="button"><Trash2 size={15} /></button>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
