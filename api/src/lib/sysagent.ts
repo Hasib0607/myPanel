@@ -328,6 +328,14 @@ export const sysagent = {
     request("/mail-config/alias", { method: "POST", body: JSON.stringify(body) }),
   configureSmtp: (body: unknown) =>
     request("/mail-config/smtp/configure", { method: "POST", body: JSON.stringify(body) }),
+  testSmtpHealth: (body: unknown) =>
+    request("/mail-config/health/smtp", { method: "POST", body: JSON.stringify(body) }),
+  testIncomingMail: (body: unknown) =>
+    request("/mail-config/health/incoming", { method: "POST", body: JSON.stringify(body) }),
+  mailSecurityStatus: () =>
+    request("/mail-config/security/status"),
+  configureMailSecurity: (body: unknown) =>
+    request("/mail-config/security/configure", { method: "POST", body: JSON.stringify(body) }),
   mailStackStatus: () =>
     request("/mail-config/stack/status"),
   installMailStack: () =>

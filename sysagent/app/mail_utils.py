@@ -36,3 +36,33 @@ def smtp_settings(hostname: str, certificate_path: str | None, key_path: str | N
             ("smtpd_tls_key_file", key_path),
         ])
     return settings_map
+
+
+def mail_security_profile(is_debian: bool, enable_clamav: bool) -> dict:
+    if is_debian:
+        return {
+            "packages": ["fail2ban", "rspamd", "redis-server", *(["clamav", "clamav-daemon"] if enable_clamav else [])],
+            "redisService": "redis-server",
+            "clamService": "clamav-daemon",
+            "clamSocket": "/run/clamav/clamd.ctl",
+        }
+    return {
+        "packages": ["fail2ban", "rspamd", "redis", *(["clamav", "clamav-update", "clamd"] if enable_clamav else [])],
+        "redisService": "redis",
+        "clamService": "clamd@scan",
+        "clamSocket": "/run/clamd.scan/clamd.sock",
+    }
+
+
+def mail_security_postfix_settings() -> list[tuple[str, str]]:
+    return [
+        ("smtpd_milters", "inet:127.0.0.1:8891,inet:127.0.0.1:11332"),
+        ("non_smtpd_milters", "inet:127.0.0.1:8891,inet:127.0.0.1:11332"),
+        ("milter_default_action", "accept"),
+        ("milter_protocol", "6"),
+        ("smtpd_sender_restrictions", "reject_non_fqdn_sender,reject_unknown_sender_domain"),
+        ("smtpd_helo_restrictions", "reject_invalid_helo_hostname,reject_non_fqdn_helo_hostname"),
+        ("smtpd_relay_restrictions", "permit_mynetworks,permit_sasl_authenticated,defer_unauth_destination"),
+        ("mynetworks", "127.0.0.0/8,[::1]/128"),
+        ("disable_vrfy_command", "yes"),
+    ]

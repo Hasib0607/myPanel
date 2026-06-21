@@ -3,7 +3,7 @@
 import { useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, CircleAlert, Copy, Download, LockKeyhole, RefreshCw, Server, Shield, ShieldCheck } from "lucide-react";
+import { Activity, CheckCircle2, CircleAlert, Copy, Download, LockKeyhole, MailCheck, RefreshCw, Server, Shield, ShieldCheck } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
 
 type AuthStatus = {
@@ -18,6 +18,7 @@ type SmtpSettings = {
   ports: Array<{ port: number; security: string; recommended: boolean }>;
   auth: string;
   usernames: string[];
+  mailboxes: Array<{ id: string; email: string; enabled: boolean }>;
   rateLimit: number;
   rateWindowSeconds: number;
   notes: string[];
@@ -53,21 +54,39 @@ type MailTlsStatus = {
   names?: string[];
 };
 
+type HealthResult = {
+  ok: boolean;
+  checks: Array<{ key: string; label: string; ok: boolean; detail: string }>;
+};
+
+type SecurityStatus = {
+  commands?: Record<string, boolean>;
+  services?: Record<string, { returncode?: number; stdout?: string }>;
+  relay?: { ok: boolean; detail: string };
+};
+
 export function MailSettingsClient({ domainId }: { domainId: string }) {
   const queryClient = useQueryClient();
   const [notice, setNotice] = useState("");
   const [rateLimit, setRateLimit] = useState(60);
+  const [selectedMailboxId, setSelectedMailboxId] = useState("");
+  const [smtpPassword, setSmtpPassword] = useState("");
+  const [testRecipient, setTestRecipient] = useState("");
+  const [enableClamav, setEnableClamav] = useState(false);
   const authStatus = useQuery({ queryKey: ["mail-auth-status", domainId], queryFn: () => apiGet<AuthStatus>(`/mail/domains/${domainId}/auth-status`) });
   const smtp = useQuery({ queryKey: ["mail-smtp-settings", domainId], queryFn: () => apiGet<SmtpSettings>(`/mail/domains/${domainId}/smtp-settings`) });
   const dns = useQuery({ queryKey: ["mail-dns-recommendations", domainId], queryFn: () => apiGet<DnsRecommendation>(`/mail/domains/${domainId}/dns-recommendations`) });
   const server = useQuery({ queryKey: ["mail-server-status"], queryFn: () => apiGet<ServerStatus>("/mail/server/status") });
   const tls = useQuery({ queryKey: ["mail-tls-status", domainId], queryFn: () => apiGet<MailTlsStatus>(`/mail/domains/${domainId}/tls/status`) });
+  const security = useQuery({ queryKey: ["mail-security-status"], queryFn: () => apiGet<SecurityStatus>("/mail/server/security/status") });
+  const effectiveMailboxId = selectedMailboxId || smtp.data?.mailboxes.find((mailbox) => mailbox.enabled)?.id || "";
 
   const invalidate = async () => {
     await queryClient.invalidateQueries({ queryKey: ["mail-auth-status", domainId] });
     await queryClient.invalidateQueries({ queryKey: ["mail-dns-recommendations", domainId] });
     await queryClient.invalidateQueries({ queryKey: ["mail-server-status"] });
     await queryClient.invalidateQueries({ queryKey: ["mail-tls-status", domainId] });
+    await queryClient.invalidateQueries({ queryKey: ["mail-security-status"] });
   };
 
   const installStack = useMutation({
@@ -122,6 +141,30 @@ export function MailSettingsClient({ domainId }: { domainId: string }) {
       await invalidate();
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not sync mailboxes.")
+  });
+
+  const smtpHealth = useMutation({
+    mutationFn: () => apiPost<HealthResult>(`/mail/domains/${domainId}/health/smtp`, { accountId: effectiveMailboxId, password: smtpPassword, recipient: testRecipient || undefined }),
+    onSuccess: (result) => {
+      setSmtpPassword("");
+      setNotice(result.ok ? "SMTP login and test send passed." : "SMTP test completed with failures. Review the checks below.");
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not test SMTP.")
+  });
+
+  const incomingHealth = useMutation({
+    mutationFn: () => apiPost<HealthResult>(`/mail/domains/${domainId}/health/incoming`, { accountId: effectiveMailboxId }),
+    onSuccess: (result) => setNotice(result.ok ? "Inbound delivery path passed end to end." : "Inbound test completed with failures. Review the checks below."),
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not test incoming delivery.")
+  });
+
+  const configureSecurity = useMutation({
+    mutationFn: () => apiPost("/mail/server/security/configure", { enableClamav }),
+    onSuccess: async () => {
+      setNotice(`Mail security profile applied${enableClamav ? " with ClamAV" : ""}.`);
+      await invalidate();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not configure mail security.")
   });
 
   const applyDns = useMutation({
@@ -278,8 +321,73 @@ export function MailSettingsClient({ domainId }: { domainId: string }) {
           ))}
         </div>
       </div>
+
+      <div className="grid gap-6 xl:grid-cols-[1fr_1fr]">
+        <div className="rounded-md border border-panel-line bg-white">
+          <div className="border-b border-panel-line px-4 py-3">
+            <div className="flex items-center gap-2 text-sm font-semibold"><Activity size={16} /> Live Mail Health</div>
+            <div className="text-xs text-panel-muted">Test authenticated sending and real Postfix to LMTP delivery.</div>
+          </div>
+          <div className="space-y-4 p-4">
+            <label className="block text-xs font-medium text-panel-muted" htmlFor="health-mailbox">Mailbox</label>
+            <select className="h-10 w-full rounded-md border border-panel-line bg-white px-3 text-sm" id="health-mailbox" onChange={(event) => setSelectedMailboxId(event.target.value)} value={effectiveMailboxId}>
+              {(smtp.data?.mailboxes ?? []).filter((mailbox) => mailbox.enabled).map((mailbox) => <option key={mailbox.id} value={mailbox.id}>{mailbox.email}</option>)}
+            </select>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <input autoComplete="new-password" className="h-10 rounded-md border border-panel-line px-3 text-sm" onChange={(event) => setSmtpPassword(event.target.value)} placeholder="Mailbox password" type="password" value={smtpPassword} />
+              <input className="h-10 rounded-md border border-panel-line px-3 text-sm" onChange={(event) => setTestRecipient(event.target.value)} placeholder="Recipient (defaults to self)" type="email" value={testRecipient} />
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button className="flex h-9 items-center gap-2 rounded-md bg-panel-accent px-3 text-xs font-semibold text-white disabled:opacity-60" disabled={!effectiveMailboxId || !smtpPassword || smtpHealth.isPending} onClick={() => smtpHealth.mutate()} type="button"><MailCheck size={14} />{smtpHealth.isPending ? "Testing..." : "Test SMTP login/send"}</button>
+              <button className="h-9 rounded-md border border-panel-line px-3 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60" disabled={!effectiveMailboxId || incomingHealth.isPending} onClick={() => incomingHealth.mutate()} type="button">{incomingHealth.isPending ? "Testing..." : "Test incoming delivery"}</button>
+            </div>
+            <HealthChecks result={smtpHealth.data} />
+            <HealthChecks result={incomingHealth.data} />
+          </div>
+        </div>
+
+        <div className="rounded-md border border-panel-line bg-white">
+          <div className="flex items-center justify-between gap-3 border-b border-panel-line px-4 py-3">
+            <div>
+              <div className="flex items-center gap-2 text-sm font-semibold"><ShieldCheck size={16} /> Mail Security</div>
+              <div className="text-xs text-panel-muted">Fail2Ban, Rspamd, relay protection, and sender validation.</div>
+            </div>
+            {security.data?.commands?.["fail2ban-client"] && security.data?.services?.fail2ban?.returncode === 0 && security.data?.commands?.rspamd && security.data?.services?.rspamd?.returncode === 0 ? <CheckCircle2 className="text-emerald-600" size={18} /> : <CircleAlert className="text-panel-warn" size={18} />}
+          </div>
+          <div className="space-y-4 p-4 text-sm">
+            <SecurityRow label="Fail2Ban" ready={Boolean(security.data?.commands?.["fail2ban-client"] && security.data?.services?.fail2ban?.returncode === 0)} />
+            <SecurityRow label="Rspamd" ready={Boolean(security.data?.commands?.rspamd && security.data?.services?.rspamd?.returncode === 0)} />
+            {security.data?.commands?.clamdscan ? <SecurityRow label="ClamAV" ready={Object.entries(security.data.services ?? {}).some(([name, result]) => name.startsWith("clam") && result.returncode === 0)} /> : null}
+            <SecurityRow label="Relay blocked" ready={Boolean(security.data?.relay?.ok)} detail={security.data?.relay?.detail} />
+            <label className="flex items-center gap-2 rounded-md border border-panel-line bg-slate-50 p-3 text-xs">
+              <input checked={enableClamav} onChange={(event) => setEnableClamav(event.target.checked)} type="checkbox" />
+              Install and connect ClamAV malware scanning (uses additional RAM)
+            </label>
+            <button className="h-9 w-full rounded-md bg-panel-accent px-3 text-xs font-semibold text-white disabled:opacity-60" disabled={configureSecurity.isPending} onClick={() => configureSecurity.mutate()} type="button">{configureSecurity.isPending ? "Applying security..." : "Install / apply security profile"}</button>
+          </div>
+        </div>
+      </div>
     </section>
   );
+}
+
+function HealthChecks({ result }: { result?: HealthResult }) {
+  if (!result) return null;
+  return (
+    <div className="divide-y divide-panel-line rounded-md border border-panel-line">
+      {result.checks.map((check) => (
+        <div className="flex items-start gap-3 p-3" key={check.key}>
+          {check.ok ? <CheckCircle2 className="mt-0.5 shrink-0 text-emerald-600" size={15} /> : <CircleAlert className="mt-0.5 shrink-0 text-red-600" size={15} />}
+          <div className="min-w-0"><div className="text-xs font-semibold">{check.label}</div><div className="mt-1 break-words text-xs text-panel-muted">{check.detail}</div></div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SecurityRow({ label, ready, detail }: { label: string; ready: boolean; detail?: string }) {
+  return <div className="flex items-start justify-between gap-3"><div><div className="font-medium">{label}</div>{detail ? <div className="mt-1 text-xs text-panel-muted">{detail}</div> : null}</div>{ready ? <CheckCircle2 className="text-emerald-600" size={16} /> : <CircleAlert className="text-panel-warn" size={16} />}</div>;
 }
 
 function Row({ label, value }: { label: string; value: string }) {

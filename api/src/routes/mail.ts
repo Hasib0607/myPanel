@@ -55,6 +55,15 @@ const smtpConfigureSchema = z.object({
   messageRateLimit: z.coerce.number().int().min(1).max(10000).default(60)
 });
 
+const smtpHealthSchema = z.object({
+  accountId: z.string(),
+  password: z.string().min(1),
+  recipient: z.string().email().optional()
+});
+
+const mailboxHealthSchema = z.object({ accountId: z.string() });
+const mailSecuritySchema = z.object({ enableClamav: z.boolean().default(false) });
+
 export const mailRoutes: FastifyPluginAsync = async (app) => {
   app.addHook("preHandler", app.requireAuth);
 
@@ -71,6 +80,15 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
       sysagent.mailFirewallStatus()
     ]);
     return { stack, firewall };
+  });
+
+  app.get("/server/security/status", async () => sysagent.mailSecurityStatus());
+
+  app.post("/server/security/configure", async (request, reply) => {
+    const body = mailSecuritySchema.parse(request.body ?? {});
+    const result = await sysagent.configureMailSecurity(body);
+    await audit(request, { action: "APPLY", resource: "mail_security", description: `Configured Fail2Ban, Rspamd${body.enableClamav ? ", and ClamAV" : ""}` });
+    return reply.code(202).send(result);
   });
 
   app.post("/server/install", async (request, reply) => {
@@ -284,6 +302,7 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
       ],
       auth: "Use full mailbox address and mailbox password.",
       usernames: domain.mailAccounts.map((account) => `${account.username}@${domain.name}`),
+      mailboxes: domain.mailAccounts.map((account) => ({ id: account.id, email: `${account.username}@${domain.name}`, enabled: account.enabled })),
       rateLimit: 60,
       rateWindowSeconds: 60,
       notes: [
@@ -435,6 +454,26 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
     const result = await sysagent.syncMailboxes({ mailboxes });
     await audit(request, { action: "APPLY", resource: "mailbox_sync", resourceId: domainId, description: `Synced ${mailboxes.length} mailboxes for ${domain.name}`, metadata: { count: mailboxes.length } });
     return reply.code(202).send({ ok: true, synced: mailboxes.length, result });
+  });
+
+  app.post("/domains/:domainId/health/smtp", async (request) => {
+    const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
+    const body = smtpHealthSchema.parse(request.body);
+    const account = await prisma.mailAccount.findFirstOrThrow({ where: { id: body.accountId, domainId, enabled: true }, include: { domain: true } });
+    const username = `${account.username}@${account.domain.name}`;
+    const result = await sysagent.testSmtpHealth({ hostname: `mail.${account.domain.name}`, port: 587, username, password: body.password, recipient: body.recipient ?? username });
+    await audit(request, { action: "APPLY", resource: "smtp_health", resourceId: account.id, description: `Tested authenticated SMTP for ${username}` });
+    return result;
+  });
+
+  app.post("/domains/:domainId/health/incoming", async (request) => {
+    const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
+    const body = mailboxHealthSchema.parse(request.body);
+    const account = await prisma.mailAccount.findFirstOrThrow({ where: { id: body.accountId, domainId, enabled: true }, include: { domain: true } });
+    const email = `${account.username}@${account.domain.name}`;
+    const result = await sysagent.testIncomingMail({ domain: account.domain.name, email });
+    await audit(request, { action: "APPLY", resource: "incoming_mail_health", resourceId: account.id, description: `Tested inbound delivery for ${email}` });
+    return result;
   });
 
   app.post("/domains/:domainId/smtp/configure", async (request, reply) => {

@@ -1,6 +1,6 @@
 import unittest
 
-from app.mail_utils import dovecot_password_hash, dovecot_user_line, smtp_settings
+from app.mail_utils import dovecot_password_hash, dovecot_user_line, mail_security_postfix_settings, mail_security_profile, smtp_settings
 
 
 class MailConfigTests(unittest.TestCase):
@@ -24,6 +24,21 @@ class MailConfigTests(unittest.TestCase):
         self.assertIn("{BLF-CRYPT}$2y$12$hash", line)
         self.assertIn("userdb_mail=maildir:/var/mail/vhosts/example.com/sales", line)
         self.assertIn("userdb_quota_rule=*:storage=2048M", line)
+
+    def test_security_profile_selects_platform_packages_and_optional_clamav(self):
+        debian = mail_security_profile(True, True)
+        rhel = mail_security_profile(False, False)
+        self.assertIn("clamav-daemon", debian["packages"])
+        self.assertEqual(debian["clamSocket"], "/run/clamav/clamd.ctl")
+        self.assertNotIn("clamav", rhel["packages"])
+        self.assertEqual(rhel["redisService"], "redis")
+
+    def test_security_postfix_settings_block_relay_and_chain_milters(self):
+        config = dict(mail_security_postfix_settings())
+        self.assertIn("127.0.0.1:8891", config["smtpd_milters"])
+        self.assertIn("127.0.0.1:11332", config["smtpd_milters"])
+        self.assertIn("defer_unauth_destination", config["smtpd_relay_restrictions"])
+        self.assertEqual(config["mynetworks"], "127.0.0.0/8,[::1]/128")
 
 
 if __name__ == "__main__":

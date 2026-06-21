@@ -1,7 +1,14 @@
 from pathlib import Path
+from email.message import EmailMessage
 import os
 import re
 import shutil
+import smtplib
+import socket
+import ssl
+import stat as stat_module
+import time
+import uuid
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
@@ -9,7 +16,7 @@ from pydantic import BaseModel, Field
 from app.command import run_command, run_install_plan
 from app.config import settings
 from app.firewall_backend import apply_rule_command, list_rules_command
-from app.mail_utils import dovecot_user_line, smtp_settings
+from app.mail_utils import dovecot_user_line, mail_security_postfix_settings, mail_security_profile, smtp_settings
 from app.platform import current_os, install_plan_for
 
 router = APIRouter()
@@ -39,6 +46,23 @@ class AliasRequest(BaseModel):
     target: str
 
 
+class SmtpHealthRequest(BaseModel):
+    hostname: str
+    username: str
+    password: str = Field(min_length=1)
+    recipient: str
+    port: int = Field(default=587, ge=1, le=65535)
+
+
+class IncomingHealthRequest(BaseModel):
+    domain: str
+    email: str
+
+
+class MailSecurityRequest(BaseModel):
+    enableClamav: bool = False
+
+
 VMAILBOX = Path("/etc/postfix/vmailbox")
 VMAILDOMAINS = Path("/etc/postfix/vmaildomains")
 DOVECOT_USERS = Path("/etc/dovecot/users")
@@ -50,6 +74,9 @@ OPENDKIM_CONFIG = Path("/etc/opendkim.conf")
 OPENDKIM_KEY_TABLE = Path("/etc/opendkim/KeyTable")
 OPENDKIM_SIGNING_TABLE = Path("/etc/opendkim/SigningTable")
 OPENDKIM_TRUSTED_HOSTS = Path("/etc/opendkim/TrustedHosts")
+FAIL2BAN_MAIL_JAIL = Path("/etc/fail2ban/jail.d/vps-panel-mail.conf")
+RSPAMD_MILTER_CONFIG = Path("/etc/rspamd/local.d/worker-proxy.inc")
+RSPAMD_ANTIVIRUS_CONFIG = Path("/etc/rspamd/local.d/antivirus.conf")
 
 
 def dry_write(path: Path, content: str) -> dict:
@@ -136,6 +163,29 @@ def sync_mailbox(payload: MailboxRequest) -> dict:
     vmailbox = merge_key_value_line(VMAILBOX, email, f"{email} {domain}/{user}/" if payload.enabled else None)
     dovecot_user = merge_dovecot_user(email, payload.passwordHash, maildir, payload.quotaMb, payload.enabled)
     return {"email": email, "enabled": payload.enabled, "maildir": str(maildir), "mkdir": mkdir, "vdomains": vdomains, "vmailbox": vmailbox, "dovecotUser": dovecot_user}
+
+
+def health_check(key: str, label: str, ok: bool, detail: str) -> dict:
+    return {"key": key, "label": label, "ok": ok, "detail": detail}
+
+
+def relay_abuse_check() -> dict:
+    if not settings.allow_live_system_commands:
+        return health_check("relay", "Unauthenticated relay", True, "Dry run: RCPT relay rejection will be tested on the live server.")
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("8.8.8.8", 53))
+            server_ip = probe.getsockname()[0]
+        if server_ip.startswith("127."):
+            return health_check("relay", "Unauthenticated relay", False, "No non-loopback server IP was available for a trustworthy relay test.")
+        with smtplib.SMTP(server_ip, 25, timeout=10) as client:
+            client.ehlo_or_helo_if_needed()
+            client.mail("probe@localhost")
+            code, response = client.rcpt("probe@invalid.example")
+        rejected = code >= 500
+        return health_check("relay", "Unauthenticated relay", rejected, f"Unauthenticated test via {server_ip}: RCPT returned {code}: {response.decode(errors='replace')}")
+    except Exception as error:
+        return health_check("relay", "Unauthenticated relay", False, f"Could not test localhost SMTP: {error}")
 
 
 @router.get("/stack/status")
@@ -383,6 +433,190 @@ ssl_key = <{key_path}
             "dovecot": shutil.which("dovecot") is not None,
         },
     }
+
+
+@router.post("/health/smtp")
+def smtp_health_test(payload: SmtpHealthRequest) -> dict:
+    username, _, _ = safe_email(payload.username)
+    recipient, _, _ = safe_email(payload.recipient)
+    hostname = payload.hostname.strip().lower()
+    if not re.match(r"^[a-z0-9.-]+$", hostname):
+        raise ValueError("Invalid SMTP hostname")
+    if not settings.allow_live_system_commands:
+        return {"ok": True, "dryRun": True, "checks": [
+            health_check("connect", "SMTP connection", True, f"Would connect to {hostname}:{payload.port}"),
+            health_check("starttls", "STARTTLS", True, "Would negotiate and validate TLS"),
+            health_check("auth", "Mailbox login", True, f"Would authenticate {username}"),
+            health_check("send", "Test message", True, f"Would send to {recipient}"),
+        ]}
+    checks = []
+    try:
+        context = ssl.create_default_context()
+        with smtplib.SMTP(hostname, payload.port, timeout=20) as client:
+            client.ehlo()
+            checks.append(health_check("connect", "SMTP connection", True, f"Connected to {hostname}:{payload.port}"))
+            client.starttls(context=context)
+            client.ehlo()
+            checks.append(health_check("starttls", "STARTTLS", True, "TLS negotiation and certificate validation passed"))
+            client.login(username, payload.password)
+            checks.append(health_check("auth", "Mailbox login", True, f"Authenticated as {username}"))
+            message = EmailMessage()
+            message["From"] = username
+            message["To"] = recipient
+            message["Subject"] = "VPS Panel SMTP health test"
+            message.set_content(f"SMTP health test completed at {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}.")
+            client.send_message(message)
+            checks.append(health_check("send", "Test message", True, f"Accepted for delivery to {recipient}"))
+    except Exception as error:
+        failed_key = "connect" if not checks else "starttls" if len(checks) == 1 else "auth" if len(checks) == 2 else "send"
+        checks.append(health_check(failed_key, {"connect": "SMTP connection", "starttls": "STARTTLS", "auth": "Mailbox login", "send": "Test message"}[failed_key], False, str(error)))
+    return {"ok": all(check["ok"] for check in checks) and len(checks) == 4, "checks": checks}
+
+
+@router.post("/health/incoming")
+def incoming_health_test(payload: IncomingHealthRequest) -> dict:
+    email, user, email_domain = safe_email(payload.email)
+    domain = payload.domain.strip().lower()
+    if domain != email_domain:
+        raise ValueError("Mailbox does not belong to the requested domain")
+    maildir = maildir_for(user, domain)
+    mx = run_command(["dig", "+short", "MX", domain])
+    mx_output = mx.get("stdout", "").strip()
+    expected_mx = f"mail.{domain}."
+    map_check = run_command(["postmap", "-q", email, "hash:/etc/postfix/vmailbox"])
+    lmtp_socket = Path("/var/spool/postfix/private/dovecot-lmtp")
+    dovecot_config = run_command(["doveconf", "-n"])
+    dry_run = not settings.allow_live_system_commands
+    checks = [
+        health_check("mx", "Public MX", dry_run or (mx.get("returncode") == 0 and expected_mx in mx_output.lower()), mx_output or (f"Dry run: would verify MX points to {expected_mx}" if dry_run else mx.get("stderr", "No MX record returned"))),
+        health_check("postfix_map", "Postfix mailbox map", dry_run or (map_check.get("returncode") == 0 and bool(map_check.get("stdout", "").strip())), map_check.get("stdout", "").strip() or ("Dry run: would query vmailbox map" if dry_run else "Mailbox is missing from vmailbox map")),
+        health_check("lmtp", "Dovecot LMTP socket", dry_run or (lmtp_socket.exists() and stat_module.S_ISSOCK(lmtp_socket.stat().st_mode) and "protocol lmtp" in dovecot_config.get("stdout", "")), str(lmtp_socket) if dry_run or lmtp_socket.exists() else "LMTP socket is missing"),
+    ]
+    if settings.allow_live_system_commands:
+        try:
+            directories = [maildir, maildir / "cur", maildir / "new", maildir / "tmp"]
+            stats = [(directory, directory.stat()) for directory in directories]
+            permissions_ok = all(item.st_uid == 5000 and item.st_gid == 5000 and (item.st_mode & 0o700) == 0o700 for _directory, item in stats)
+            detail = ", ".join(f"{directory.name or user}:uid={item.st_uid}/gid={item.st_gid}/{oct(item.st_mode & 0o777)}" for directory, item in stats)
+        except OSError as error:
+            permissions_ok, detail = False, str(error)
+    else:
+        permissions_ok, detail = True, f"Dry run: would inspect {maildir}"
+    checks.append(health_check("permissions", "Maildir permissions", permissions_ok, detail))
+
+    token = f"vps-panel-{uuid.uuid4().hex}"
+    delivered = False
+    delivery_detail = "Dry run: would inject a unique message through localhost Postfix and poll Maildir."
+    if settings.allow_live_system_commands and all(check["ok"] for check in checks[1:]):
+        try:
+            message = EmailMessage()
+            message["From"] = f"healthcheck@{domain}"
+            message["To"] = email
+            message["Subject"] = "VPS Panel inbound delivery test"
+            message["Message-ID"] = f"<{token}@{domain}>"
+            message.set_content(f"Inbound delivery probe {token}")
+            with smtplib.SMTP("127.0.0.1", 25, timeout=15) as client:
+                client.send_message(message)
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not delivered:
+                for folder in (maildir / "new", maildir / "cur"):
+                    for item in folder.glob("*"):
+                        try:
+                            if token.encode() in item.read_bytes():
+                                delivered = True
+                                delivery_detail = f"Probe arrived in {item.parent.name}/{item.name}"
+                                break
+                        except OSError:
+                            continue
+                    if delivered:
+                        break
+                if not delivered:
+                    time.sleep(0.5)
+            if not delivered:
+                delivery_detail = "Postfix accepted the probe, but it did not appear in Maildir within 10 seconds."
+        except Exception as error:
+            delivery_detail = str(error)
+    checks.append(health_check("delivery", "Postfix to LMTP delivery", delivered if settings.allow_live_system_commands else True, delivery_detail))
+    return {"ok": all(check["ok"] for check in checks), "mailbox": email, "checks": checks}
+
+
+@router.get("/security/status")
+def mail_security_status() -> dict:
+    services = ["fail2ban", "rspamd"]
+    if shutil.which("clamd") or shutil.which("clamdscan"):
+        services.append("clamav-daemon" if current_os().is_debian else "clamd@scan")
+    return {
+        "commands": {name: shutil.which(name) is not None for name in ["fail2ban-client", "rspamd", "clamdscan"]},
+        "services": {service: run_command(["systemctl", "is-active", service]) for service in services},
+        "postfix": run_command(["postconf", "-n"]),
+        "relay": relay_abuse_check(),
+    }
+
+
+@router.post("/security/configure")
+def configure_mail_security(payload: MailSecurityRequest) -> dict:
+    info = current_os()
+    if not info.is_debian and not info.is_rhel:
+        return {"ok": False, "error": f"Mail security automation is not supported on {info.pretty_name}."}
+    profile = mail_security_profile(info.is_debian, payload.enableClamav)
+    packages = profile["packages"]
+    if info.is_debian:
+        install = [run_command(["apt-get", "update"], timeout=900), run_command(["apt-get", "install", "-y", *packages], env={"DEBIAN_FRONTEND": "noninteractive"}, timeout=1800)]
+    else:
+        install = [run_command(["dnf", "install", "-y", "epel-release"], timeout=900), run_command(["dnf", "install", "-y", *packages], timeout=1800)]
+    redis_service = profile["redisService"]
+    clam_service = profile["clamService"]
+    clam_socket = profile["clamSocket"]
+
+    fail2ban = dry_write(FAIL2BAN_MAIL_JAIL, """[postfix-sasl]
+enabled = true
+port = smtp,submission,465
+filter = postfix[mode=auth]
+maxretry = 5
+findtime = 10m
+bantime = 1h
+
+[dovecot]
+enabled = true
+port = pop3,pop3s,imap,imaps,submission,465
+maxretry = 5
+findtime = 10m
+bantime = 1h
+""")
+    rspamd = dry_write(RSPAMD_MILTER_CONFIG, """bind_socket = "127.0.0.1:11332";
+milter = yes;
+timeout = 120s;
+upstream "local" {
+  default = yes;
+  self_scan = yes;
+}
+""")
+    antivirus = dry_write(RSPAMD_ANTIVIRUS_CONFIG, f"""clamav {{
+  type = "clamav";
+  servers = "{clam_socket}";
+  symbol = "CLAM_VIRUS";
+  action = "reject";
+}}
+""") if payload.enableClamav else {"skipped": True, "reason": "ClamAV not requested"}
+
+    postfix_values = mail_security_postfix_settings()
+    postfix = [run_command(["postconf", "-e", f"{key}={value}"]) for key, value in postfix_values]
+    services = [
+        run_command(["systemctl", "enable", "--now", redis_service]),
+        run_command(["systemctl", "enable", "--now", "rspamd"]),
+        run_command(["systemctl", "enable", "--now", "fail2ban"]),
+        *([run_command(["systemctl", "enable", "--now", clam_service])] if payload.enableClamav else []),
+        run_command(["systemctl", "restart", "rspamd"]),
+        run_command(["systemctl", "restart", "fail2ban"]),
+        run_command(["systemctl", "reload", "postfix"]),
+    ]
+    validation = {
+        "postfix": run_command(["postfix", "check"]),
+        "rspamd": run_command(["rspamadm", "configtest"]),
+        "fail2ban": run_command(["fail2ban-client", "-t"]),
+        "relay": relay_abuse_check(),
+    }
+    return {"ok": all(result.get("returncode") == 0 for result in install + postfix + services) and all(result.get("returncode") == 0 for key, result in validation.items() if key != "relay") and validation["relay"]["ok"], "packages": packages, "install": install, "files": {"fail2ban": fail2ban, "rspamd": rspamd, "antivirus": antivirus}, "postfix": postfix, "services": services, "validation": validation}
 
 
 @router.post("/reload")
