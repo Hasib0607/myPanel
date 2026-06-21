@@ -146,6 +146,15 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not create mailbox.")
   });
 
+  const configureSmtp = useMutation({
+    mutationFn: (domainId: string) => apiPost(`/mail/domains/${domainId}/smtp/configure`, { messageRateLimit: 60 }),
+    onSuccess: async () => {
+      setNotice("SMTP services, firewall ports, and listener checks were applied.");
+      await refresh();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not configure SMTP.")
+  });
+
   const createFile = useMutation({
     mutationFn: () => apiPost<FileEntry>("/account/files/files", { parentPath: filePath, name: fileDraft.name, content: fileDraft.content }),
     onSuccess: async () => {
@@ -367,6 +376,8 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
 
   const data = dashboard.data;
   const domains = data?.domains ?? [];
+  const mailOpsDomainId = mailDraft.domainId || domains[0]?.id || "";
+  const mailOpsDomainName = domains.find((domain) => domain.id === mailOpsDomainId)?.name || domains[0]?.name || "domain";
   const isDashboard = view === "dashboard";
   const showDomains = view === "domains";
   const showMail = view === "mail";
@@ -462,10 +473,24 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
                 <div className="font-semibold text-panel-text">Create email account</div>
                 <div className="text-xs text-panel-muted">Mailbox users can sign in separately at /webmail/login.</div>
               </div>
-              <Link className="flex h-9 items-center gap-2 rounded-md border border-panel-line bg-white px-3 text-xs font-semibold hover:bg-slate-50" href="/webmail/login" target="_blank">
-                <ExternalLink size={14} />
-                Webmail
-              </Link>
+              <div className="flex flex-wrap justify-end gap-2">
+                <Link className="flex h-9 items-center gap-2 rounded-md border border-panel-line bg-white px-3 text-xs font-semibold hover:bg-slate-50" href="/webmail/login" target="_blank">
+                  <ExternalLink size={14} />
+                  Webmail
+                </Link>
+                <Link className={`flex h-9 items-center gap-2 rounded-md border border-panel-line bg-white px-3 text-xs font-semibold hover:bg-slate-50 ${mailOpsDomainId ? "" : "pointer-events-none opacity-50"}`} href={mailOpsDomainId ? `/domains/${mailOpsDomainId}/mail/settings` : "#"}>
+                  <Mail size={14} />
+                  Mail Settings
+                </Link>
+                <Link className={`flex h-9 items-center gap-2 rounded-md border border-panel-line bg-white px-3 text-xs font-semibold hover:bg-slate-50 ${mailOpsDomainId ? "" : "pointer-events-none opacity-50"}`} href={mailOpsDomainId ? `/domains/${mailOpsDomainId}/mail/diagnostics` : "#"}>
+                  <CheckCircle2 size={14} />
+                  Diagnostics
+                </Link>
+                <button className="flex h-9 items-center gap-2 rounded-md bg-panel-accent px-3 text-xs font-semibold text-white disabled:opacity-60" disabled={!mailOpsDomainId || configureSmtp.isPending} onClick={() => configureSmtp.mutate(mailOpsDomainId)} title={`Apply SMTP repair for ${mailOpsDomainName}`} type="button">
+                  <RotateCw size={14} />
+                  {configureSmtp.isPending ? "Configuring..." : "Configure SMTP"}
+                </button>
+              </div>
             </div>
             <div className="grid gap-2 lg:grid-cols-[1fr_1fr_1fr_140px_auto]">
               <select className="h-10 rounded-md border border-panel-line bg-white px-2 text-sm" onChange={(event) => setMailDraft({ ...mailDraft, domainId: event.target.value })} value={mailDraft.domainId}>
