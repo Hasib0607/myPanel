@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from app.mail_utils import dovecot_password_hash, dovecot_user_line, mail_milter_settings, mail_security_postfix_settings, mail_security_profile, smtp_settings
 from app.routers import mail_config
-from app.routers.mail_config import IncomingHealthRequest, MailDomain, MailQueueActionRequest, MailboxRequest, SmtpHealthRequest, dry_write, incoming_health_test, mail_diagnostics, mail_queue_action, parse_maildir_message, policy_config_from_mailboxes, policy_restriction, policy_script_source, policy_service_restriction, smtp_health_test
+from app.routers.mail_config import IncomingHealthRequest, MailDomain, MailQueueActionRequest, MailboxRequest, SmtpHealthRequest, dry_write, incoming_health_test, mail_diagnostics, mail_queue_action, optional_reload_service, parse_maildir_message, policy_config_from_mailboxes, policy_restriction, policy_script_source, policy_service_restriction, smtp_health_test
 
 
 class MailConfigTests(unittest.TestCase):
@@ -65,6 +65,12 @@ class MailConfigTests(unittest.TestCase):
         self.assertEqual(policy_service_restriction(), "vps_panel_policy,permit_sasl_authenticated,reject")
         self.assertNotIn(" ", policy_service_restriction())
         self.assertIn("Daily SMTP limit reached", policy_script_source())
+
+    def test_missing_opendkim_reload_is_optional_for_smtp_repair(self):
+        with patch.object(mail_config, "run_command", return_value={"returncode": 5, "stderr": "Unit opendkim.service not found."}):
+            result = optional_reload_service("opendkim")
+        self.assertEqual(result["returncode"], 0)
+        self.assertTrue(result["skipped"])
 
     def test_maildir_message_parser_extracts_body_and_stable_headers(self):
         message = EmailMessage()

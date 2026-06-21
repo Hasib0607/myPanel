@@ -517,6 +517,19 @@ def require_command_success(*results: dict) -> None:
         raise HTTPException(status_code=500, detail=detail or "Mail configuration command failed")
 
 
+def optional_reload_service(service: str) -> dict:
+    result = run_command(["systemctl", "reload", service])
+    text = f"{result.get('stderr', '')}\n{result.get('stdout', '')}".lower()
+    if result.get("returncode") != 0 and ("not found" in text or "could not be found" in text or "loaded: not-found" in text):
+        return {
+            **result,
+            "returncode": 0,
+            "skipped": True,
+            "reason": f"{service}.service is not installed",
+        }
+    return result
+
+
 def health_check(key: str, label: str, ok: bool, detail: str) -> dict:
     return {"key": key, "label": label, "ok": ok, "detail": detail}
 
@@ -993,7 +1006,7 @@ ssl_key = <{key_path}
     restart_result = {
         "postfix": run_command(["systemctl", "restart", "postfix"]),
         "dovecot": run_command(["systemctl", "restart", "dovecot"]),
-        "opendkim": run_command(["systemctl", "reload", "opendkim"]),
+        "opendkim": optional_reload_service("opendkim"),
     }
     require_command_success(*restart_result.values())
     listeners = run_command(["ss", "-ltn"])
@@ -1264,7 +1277,7 @@ def reload_mail_services() -> dict:
     return {
         "postfix": run_command(["systemctl", "reload", "postfix"]),
         "dovecot": run_command(["systemctl", "reload", "dovecot"]),
-        "opendkim": run_command(["systemctl", "reload", "opendkim"]),
+        "opendkim": optional_reload_service("opendkim"),
     }
 
 
