@@ -3375,8 +3375,9 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
 
   app.delete("/mail/:mailboxId", async (request: any) => {
     const { mailboxId } = z.object({ mailboxId: z.string() }).parse(request.params);
-    const mailbox = await prisma.mailAccount.findFirst({ where: { id: mailboxId, accountId: accountId(request) } });
+    const mailbox = await prisma.mailAccount.findFirst({ where: { id: mailboxId, accountId: accountId(request) }, include: { domain: true } });
     if (!mailbox) throw app.httpErrors.notFound("Mailbox not found");
+    await sysagent.deleteMailbox({ email: `${mailbox.username}@${mailbox.domain.name}` });
     await prisma.mailAccount.delete({ where: { id: mailbox.id } });
     await audit(request, { action: "DELETE", resource: "mail_account", resourceId: mailbox.id, description: "Account deleted mailbox" });
     return { ok: true };

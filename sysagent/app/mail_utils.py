@@ -57,12 +57,22 @@ def mail_security_profile(is_debian: bool, enable_clamav: bool) -> dict:
     }
 
 
-def mail_security_postfix_settings() -> list[tuple[str, str]]:
+def mail_milter_settings(include_rspamd: bool) -> list[tuple[str, str]]:
+    milters = ["inet:127.0.0.1:8891"]
+    if include_rspamd:
+        milters.append("inet:127.0.0.1:11332")
+    value = ",".join(milters)
     return [
-        ("smtpd_milters", "inet:127.0.0.1:8891,inet:127.0.0.1:11332"),
-        ("non_smtpd_milters", "inet:127.0.0.1:8891,inet:127.0.0.1:11332"),
+        ("smtpd_milters", value),
+        ("non_smtpd_milters", value),
         ("milter_default_action", "accept"),
         ("milter_protocol", "6"),
+    ]
+
+
+def mail_security_postfix_settings() -> list[tuple[str, str]]:
+    return [
+        *mail_milter_settings(include_rspamd=True),
         ("smtpd_sender_restrictions", "reject_non_fqdn_sender,reject_unknown_sender_domain"),
         ("smtpd_helo_restrictions", "reject_invalid_helo_hostname,reject_non_fqdn_helo_hostname"),
         ("smtpd_relay_restrictions", "permit_mynetworks,permit_sasl_authenticated,defer_unauth_destination"),

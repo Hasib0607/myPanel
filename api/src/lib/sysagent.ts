@@ -322,10 +322,16 @@ export const sysagent = {
     request("/mail-config/dkim", { method: "POST", body: JSON.stringify(body) }),
   createMailbox: (body: unknown) =>
     request("/mail-config/mailbox", { method: "POST", body: JSON.stringify(body) }),
+  deleteMailbox: (body: { email: string }) =>
+    request<{ ok: boolean; email: string; maildirRetained: boolean }>("/mail-config/mailbox", { method: "DELETE", body: JSON.stringify(body) }),
+  mailboxMessages: (body: { email: string; maxMessages?: number }) =>
+    request<{ email: string; messages: Array<{ messageId: string; fromAddress: string; toAddress: string; subject: string; bodyText?: string | null; bodyHtml?: string | null; receivedAt: string }> }>("/mail-config/mailbox/messages", { method: "POST", body: JSON.stringify(body) }),
   syncMailboxes: (body: unknown) =>
     request("/mail-config/mailboxes/sync", { method: "POST", body: JSON.stringify(body) }),
   updateMailAlias: (body: unknown) =>
     request("/mail-config/alias", { method: "POST", body: JSON.stringify(body) }),
+  deleteMailAlias: (body: { source: string }) =>
+    request("/mail-config/alias", { method: "DELETE", body: JSON.stringify(body) }),
   configureSmtp: (body: unknown) =>
     request("/mail-config/smtp/configure", { method: "POST", body: JSON.stringify(body) }),
   testSmtpHealth: (body: unknown) =>

@@ -26,11 +26,19 @@ type MailMessage = {
   fromAddress: string;
   toAddress: string;
   subject: string;
+  bodyText?: string | null;
+  bodyHtml?: string | null;
+  deliveryStatus: string;
+  deliveryError?: string | null;
   folder: Folder;
   isRead: boolean;
   isStarred: boolean;
   receivedAt: string;
 };
+
+function displayBody(message: MailMessage) {
+  return message.bodyText || message.bodyHtml?.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim() || "No message body.";
+}
 
 const folders: Array<{ key: Folder; label: string; icon: typeof Inbox }> = [
   { key: "INBOX", label: "Inbox", icon: Inbox },
@@ -158,7 +166,7 @@ export function MailClient({ domainId, composeFirst = false }: { domainId?: stri
         </div>
         <div className="rounded-md border border-amber-200 bg-amber-50 p-4">
           <div className="text-xs text-amber-700">Transport</div>
-          <div className="mt-1 text-sm font-semibold text-amber-800">Dry-run queue</div>
+          <div className="mt-1 text-sm font-semibold text-amber-800">Postfix queue</div>
         </div>
       </div>
 
@@ -289,6 +297,7 @@ export function MailClient({ domainId, composeFirst = false }: { domainId?: stri
                   <h2 className="truncate text-xl font-semibold">{selectedMessage.subject}</h2>
                   <div className="mt-2 text-sm text-panel-muted">From {selectedMessage.fromAddress}</div>
                   <div className="text-sm text-panel-muted">To {selectedMessage.toAddress}</div>
+                  {selectedMessage.folder === "SENT" ? <div className={`mt-2 text-xs font-semibold ${selectedMessage.deliveryStatus === "FAILED" ? "text-red-600" : selectedMessage.deliveryStatus === "SENT" ? "text-emerald-600" : "text-amber-600"}`}>{selectedMessage.deliveryStatus}</div> : null}
                 </div>
                 <div className="flex items-center gap-2">
                   <button
@@ -309,9 +318,8 @@ export function MailClient({ domainId, composeFirst = false }: { domainId?: stri
                   </button>
                 </div>
               </div>
-              <div className="rounded-md border border-dashed border-panel-line bg-slate-50 p-6 text-sm leading-6 text-slate-700">
-                Message body sync is pending IMAP ingestion. Current Phase 8 stores searchable metadata and outgoing queue records in PostgreSQL.
-              </div>
+              {selectedMessage.deliveryError ? <div className="mb-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">{selectedMessage.deliveryError}</div> : null}
+              <div className="whitespace-pre-wrap rounded-md border border-panel-line bg-slate-50 p-6 text-sm leading-6 text-slate-700">{displayBody(selectedMessage)}</div>
             </article>
           ) : (
             <div className="rounded-md border border-dashed border-panel-line p-8 text-center text-sm text-panel-muted">

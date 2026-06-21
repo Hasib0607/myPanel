@@ -1,7 +1,10 @@
 import unittest
+from email.message import EmailMessage
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
-from app.mail_utils import dovecot_password_hash, dovecot_user_line, mail_security_postfix_settings, mail_security_profile, smtp_settings
-from app.routers.mail_config import MailDomain
+from app.mail_utils import dovecot_password_hash, dovecot_user_line, mail_milter_settings, mail_security_postfix_settings, mail_security_profile, smtp_settings
+from app.routers.mail_config import MailDomain, parse_maildir_message
 
 
 class MailConfigTests(unittest.TestCase):
@@ -44,6 +47,29 @@ class MailConfigTests(unittest.TestCase):
         self.assertIn("127.0.0.1:11332", config["smtpd_milters"])
         self.assertIn("defer_unauth_destination", config["smtpd_relay_restrictions"])
         self.assertEqual(config["mynetworks"], "127.0.0.0/8,[::1]/128")
+
+    def test_dkim_milter_chain_preserves_rspamd_when_enabled(self):
+        with_rspamd = dict(mail_milter_settings(True))
+        without_rspamd = dict(mail_milter_settings(False))
+        self.assertEqual(with_rspamd["smtpd_milters"], "inet:127.0.0.1:8891,inet:127.0.0.1:11332")
+        self.assertEqual(without_rspamd["smtpd_milters"], "inet:127.0.0.1:8891")
+
+    def test_maildir_message_parser_extracts_body_and_stable_headers(self):
+        message = EmailMessage()
+        message["Message-ID"] = "<incoming-1@example.com>"
+        message["From"] = "Sender <sender@example.com>"
+        message["To"] = "user@example.com"
+        message["Subject"] = "Inbound test"
+        message["Date"] = "Sat, 21 Jun 2026 10:00:00 +0000"
+        message.set_content("Hello from Maildir")
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "message"
+            path.write_bytes(message.as_bytes())
+            parsed = parse_maildir_message(path)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["messageId"], "incoming-1@example.com")
+        self.assertEqual(parsed["subject"], "Inbound test")
+        self.assertIn("Hello from Maildir", parsed["bodyText"])
 
 
 if __name__ == "__main__":

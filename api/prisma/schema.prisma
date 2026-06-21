@@ -421,17 +421,23 @@ model MailAlias {
 model Mail {
   id          String      @id @default(cuid())
   accountId   String      @map("account_id")
-  messageId   String      @unique @map("message_id")
+  messageId   String      @map("message_id")
   fromAddress String      @map("from_address")
   toAddress   String      @map("to_address")
   subject     String
+  bodyText    String?     @map("body_text")
+  bodyHtml    String?     @map("body_html")
   folder      MailFolder  @default(INBOX)
+  deliveryStatus String   @default("RECEIVED") @map("delivery_status")
+  deliveryError  String?  @map("delivery_error")
+  sentAt         DateTime? @map("sent_at")
   isRead      Boolean     @default(false) @map("is_read")
   isStarred   Boolean     @default(false) @map("is_starred")
   receivedAt  DateTime    @map("received_at")
   account     MailAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
   @@index([accountId, folder])
+  @@unique([accountId, messageId])
   @@index([receivedAt])
   @@map("mails")
 }

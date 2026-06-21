@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 from email.message import EmailMessage
+from email import policy
+from email.parser import BytesParser
+from email.utils import parsedate_to_datetime
+from datetime import datetime, timezone
+import hashlib
 import os
 import re
 import shutil
@@ -12,13 +17,13 @@ import stat as stat_module
 import time
 import uuid
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.command import run_command, run_install_plan
 from app.config import settings
 from app.firewall_backend import apply_rule_command, list_rules_command
-from app.mail_utils import dovecot_user_line, mail_security_postfix_settings, mail_security_profile, smtp_settings
+from app.mail_utils import dovecot_user_line, mail_milter_settings, mail_security_postfix_settings, mail_security_profile, smtp_settings
 from app.platform import current_os, install_plan_for
 
 router = APIRouter()
@@ -40,12 +45,21 @@ class MailboxRequest(BaseModel):
 
 
 class MailboxSyncRequest(BaseModel):
+    domain: str
     mailboxes: list[MailboxRequest]
 
 
 class AliasRequest(BaseModel):
     source: str
     target: str
+
+
+class AliasDeleteRequest(BaseModel):
+    source: str
+
+
+class MailboxDeleteRequest(BaseModel):
+    email: str
 
 
 class SmtpHealthRequest(BaseModel):
@@ -65,8 +79,14 @@ class MailSecurityRequest(BaseModel):
     enableClamav: bool = False
 
 
+class MailboxMessagesRequest(BaseModel):
+    email: str
+    maxMessages: int = Field(default=250, ge=1, le=1000)
+
+
 VMAILBOX = Path("/etc/postfix/vmailbox")
 VMAILDOMAINS = Path("/etc/postfix/vmaildomains")
+VIRTUAL_ALIASES = Path("/etc/postfix/virtual")
 DOVECOT_USERS = Path("/etc/dovecot/users")
 DOVECOT_PANEL_AUTH = Path("/etc/dovecot/conf.d/10-vps-panel-auth.conf")
 DOVECOT_PANEL_MAIL = Path("/etc/dovecot/conf.d/10-vps-panel-mail.conf")
@@ -103,8 +123,50 @@ def safe_email(email: str) -> tuple[str, str, str]:
     return normalized, user, domain
 
 
+def safe_domain(domain: str) -> str:
+    normalized = domain.strip().lower()
+    if not re.match(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$", normalized):
+        raise ValueError("Invalid mail domain")
+    return normalized
+
+
 def maildir_for(user: str, domain: str) -> Path:
     return Path("/var/mail/vhosts") / domain / user
+
+
+def message_text(message, subtype: str) -> str | None:
+    part = message.get_body(preferencelist=(subtype,)) if message.is_multipart() else message
+    if part is None or part.get_content_maintype() != "text":
+        return None
+    try:
+        return str(part.get_content())[:200_000]
+    except (LookupError, UnicodeError):
+        return part.get_payload(decode=True).decode("utf-8", errors="replace")[:200_000]
+
+
+def parse_maildir_message(path: Path) -> dict | None:
+    try:
+        raw = path.read_bytes()
+        message = BytesParser(policy=policy.default).parsebytes(raw)
+        raw_message_id = str(message.get("Message-ID", "")).strip().strip("<>")
+        message_id = raw_message_id or f"maildir-{hashlib.sha256(raw).hexdigest()}"
+        try:
+            received = parsedate_to_datetime(str(message.get("Date", "")))
+            if received.tzinfo is None:
+                received = received.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError, OverflowError):
+            received = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        return {
+            "messageId": message_id[:998],
+            "fromAddress": str(message.get("From", "unknown@localhost"))[:998],
+            "toAddress": str(message.get("To", ""))[:998],
+            "subject": str(message.get("Subject", "(no subject)"))[:998],
+            "bodyText": message_text(message, "plain"),
+            "bodyHtml": message_text(message, "html"),
+            "receivedAt": received.astimezone(timezone.utc).isoformat(),
+        }
+    except (OSError, ValueError):
+        return None
 
 
 def merge_key_value_line(path: Path, key: str, line: str | None) -> dict:
@@ -165,6 +227,23 @@ def sync_mailbox(payload: MailboxRequest) -> dict:
     vmailbox = merge_key_value_line(VMAILBOX, email, f"{email} {domain}/{user}/" if payload.enabled else None)
     dovecot_user = merge_dovecot_user(email, payload.passwordHash, maildir, payload.quotaMb, payload.enabled)
     return {"email": email, "enabled": payload.enabled, "maildir": str(maildir), "mkdir": mkdir, "vdomains": vdomains, "vmailbox": vmailbox, "dovecotUser": dovecot_user}
+
+
+def prune_domain_mailboxes(domain: str, wanted: set[str]) -> dict:
+    vmailbox_lines = VMAILBOX.read_text(encoding="utf-8").splitlines() if VMAILBOX.exists() else []
+    kept_vmailbox = [line for line in vmailbox_lines if not line.strip() or line.split()[0].split("@")[-1].lower() != domain or line.split()[0].lower() in wanted]
+    dovecot_lines = DOVECOT_USERS.read_text(encoding="utf-8").splitlines() if DOVECOT_USERS.exists() else []
+    kept_dovecot = [line for line in dovecot_lines if not line.strip() or line.split(":", 1)[0].split("@")[-1].lower() != domain or line.split(":", 1)[0].lower() in wanted]
+    return {
+        "vmailbox": dry_write(VMAILBOX, "\n".join(kept_vmailbox).strip() + "\n"),
+        "dovecotUsers": dry_write(DOVECOT_USERS, "\n".join(kept_dovecot).strip() + "\n"),
+    }
+
+
+def require_command_success(*results: dict) -> None:
+    if settings.allow_live_system_commands and any(result.get("returncode") != 0 for result in results):
+        detail = "; ".join(result.get("stderr", "command failed").strip() for result in results if result.get("returncode") != 0)
+        raise HTTPException(status_code=500, detail=detail or "Mail configuration command failed")
 
 
 def health_check(key: str, label: str, ok: bool, detail: str) -> dict:
@@ -266,12 +345,10 @@ def setup_dkim(payload: MailDomain) -> dict:
     key_table = merge_key_value_line(OPENDKIM_KEY_TABLE, f"mail._domainkey.{domain}", f"mail._domainkey.{domain} {domain}:mail:{private_key}")
     signing_table = merge_key_value_line(OPENDKIM_SIGNING_TABLE, f"*@{domain}", f"*@{domain} mail._domainkey.{domain}")
     trusted_hosts = merge_unique_lines(OPENDKIM_TRUSTED_HOSTS, ["127.0.0.1", "localhost", "::1", domain, f"*.{domain}"])
-    postfix = [run_command(["postconf", "-e", f"{key}={value}"]) for key, value in [
-        ("milter_default_action", "accept"),
-        ("milter_protocol", "6"),
-        ("smtpd_milters", "inet:127.0.0.1:8891"),
-        ("non_smtpd_milters", "inet:127.0.0.1:8891"),
-    ]]
+    postfix = [
+        run_command(["postconf", "-e", f"{key}={value}"])
+        for key, value in mail_milter_settings(include_rspamd=shutil.which("rspamd") is not None)
+    ]
     permissions = [
         run_command(["chown", "-R", "opendkim:opendkim", str(key_dir), str(OPENDKIM_KEY_TABLE), str(OPENDKIM_SIGNING_TABLE), str(OPENDKIM_TRUSTED_HOSTS)]),
         run_command(["chmod", "600", str(private_key)]),
@@ -304,19 +381,66 @@ def create_mailbox(payload: MailboxRequest) -> dict:
     return {**synced, "vmail": vmail, "postmapDomains": postmap_domains, "postmap": postmap, "reload": reload_result}
 
 
+@router.post("/mailbox/messages")
+def mailbox_messages(payload: MailboxMessagesRequest) -> dict:
+    email, user, domain = safe_email(payload.email)
+    maildir = maildir_for(user, domain)
+    files = []
+    for folder in (maildir / "new", maildir / "cur"):
+        if folder.is_dir():
+            files.extend(item for item in folder.iterdir() if item.is_file())
+    files.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+    messages = [message for path in files[:payload.maxMessages] if (message := parse_maildir_message(path)) is not None]
+    return {"email": email, "messages": messages}
+
+
 @router.post("/mailboxes/sync")
 def sync_mailboxes(payload: MailboxSyncRequest) -> dict:
+    domain = safe_domain(payload.domain)
+    if any(safe_email(mailbox.email)[2] != domain for mailbox in payload.mailboxes):
+        raise HTTPException(status_code=400, detail="All mailboxes must belong to the requested domain")
     vmail = ensure_vmail_user()
     results = [sync_mailbox(mailbox) for mailbox in payload.mailboxes]
+    wanted = {safe_email(mailbox.email)[0] for mailbox in payload.mailboxes if mailbox.enabled}
+    pruned = prune_domain_mailboxes(domain, wanted)
     postmap_domains = run_command(["postmap", str(VMAILDOMAINS)])
     postmap = run_command(["postmap", str(VMAILBOX)])
     reload_result = reload_mail_services()
-    return {"ok": True, "synced": len(results), "vmail": vmail, "mailboxes": results, "postmapDomains": postmap_domains, "postmap": postmap, "reload": reload_result}
+    require_command_success(postmap_domains, postmap, *reload_result.values())
+    return {"ok": True, "synced": len(results), "vmail": vmail, "mailboxes": results, "pruned": pruned, "postmapDomains": postmap_domains, "postmap": postmap, "reload": reload_result}
+
+
+@router.delete("/mailbox")
+def delete_mailbox(payload: MailboxDeleteRequest) -> dict:
+    email, user, domain = safe_email(payload.email)
+    vmailbox = merge_key_value_line(VMAILBOX, email, None)
+    dovecot_user = merge_dovecot_user(email, None, maildir_for(user, domain), 1024, False)
+    postmap = run_command(["postmap", str(VMAILBOX)])
+    reload_result = reload_mail_services()
+    require_command_success(postmap, *reload_result.values())
+    return {"ok": True, "email": email, "maildirRetained": True, "vmailbox": vmailbox, "dovecotUser": dovecot_user, "postmap": postmap, "reload": reload_result}
 
 
 @router.post("/alias")
 def update_alias(payload: AliasRequest) -> dict:
-    return run_command(["postmap", "/etc/postfix/virtual"])
+    source, _, _ = safe_email(payload.source)
+    target, _, _ = safe_email(payload.target)
+    config = merge_key_value_line(VIRTUAL_ALIASES, source, f"{source} {target}")
+    postmap = run_command(["postmap", str(VIRTUAL_ALIASES)])
+    postconf = run_command(["postconf", "-e", f"virtual_alias_maps=hash:{VIRTUAL_ALIASES}"])
+    reload_result = run_command(["systemctl", "reload", "postfix"])
+    require_command_success(postmap, postconf, reload_result)
+    return {"ok": True, "source": source, "target": target, "config": config, "postmap": postmap, "postconf": postconf, "reload": reload_result}
+
+
+@router.delete("/alias")
+def delete_alias(payload: AliasDeleteRequest) -> dict:
+    source, _, _ = safe_email(payload.source)
+    config = merge_key_value_line(VIRTUAL_ALIASES, source, None)
+    postmap = run_command(["postmap", str(VIRTUAL_ALIASES)])
+    reload_result = run_command(["systemctl", "reload", "postfix"])
+    require_command_success(postmap, reload_result)
+    return {"ok": True, "source": source, "config": config, "postmap": postmap, "reload": reload_result}
 
 
 @router.post("/smtp/configure")
