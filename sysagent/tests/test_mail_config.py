@@ -1,9 +1,14 @@
 import unittest
 
 from app.mail_utils import dovecot_password_hash, dovecot_user_line, mail_security_postfix_settings, mail_security_profile, smtp_settings
+from app.routers.mail_config import MailDomain
 
 
 class MailConfigTests(unittest.TestCase):
+    def test_annotations_are_postponed_for_python39_runtime(self):
+        self.assertIsInstance(smtp_settings.__annotations__["certificate_path"], str)
+        self.assertIsInstance(MailDomain.__annotations__["hostname"], str)
+
     def test_bcrypt_hash_is_normalized_for_dovecot(self):
         value = "$2b$12$abcdefghijklmnopqrstuuuuuuuuuuuuuuuuuuuuuuuuuuu"
         self.assertEqual(dovecot_password_hash(value), "{BLF-CRYPT}$2y$12$abcdefghijklmnopqrstuuuuuuuuuuuuuuuuuuuuuuuuuuu")

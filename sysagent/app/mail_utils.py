@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+
 def dovecot_password_hash(password_hash: str) -> str:
     if password_hash.startswith("{"):
         return password_hash

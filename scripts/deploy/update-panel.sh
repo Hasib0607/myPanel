@@ -692,7 +692,7 @@ repair_sysagent_runtime() {
   run "$venv_python" -m pip install --upgrade pip
   run "$venv_python" -m pip install -r "$sysagent_dir/requirements.txt"
   run "$venv_python" -m pip check
-  run "$venv_python" -c 'import app.main; assert app.main.app.routes'
+  run "$venv_python" -c 'import sys; sys.path.insert(0, sys.argv[1]); import app.main; assert app.main.app.routes' "$sysagent_dir"
 }
 
 diagnose_sysagent_failure() {
