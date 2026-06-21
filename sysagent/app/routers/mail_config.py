@@ -520,12 +520,12 @@ def require_command_success(*results: dict) -> None:
 def optional_reload_service(service: str) -> dict:
     result = run_command(["systemctl", "reload", service])
     text = f"{result.get('stderr', '')}\n{result.get('stdout', '')}".lower()
-    if result.get("returncode") != 0 and ("not found" in text or "could not be found" in text or "loaded: not-found" in text):
+    if result.get("returncode") != 0 and ("not found" in text or "could not be found" in text or "loaded: not-found" in text or "not active" in text or "inactive" in text):
         return {
             **result,
             "returncode": 0,
             "skipped": True,
-            "reason": f"{service}.service is not installed",
+            "reason": f"{service}.service is not installed or not active",
         }
     return result
 

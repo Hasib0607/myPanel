@@ -77,6 +77,10 @@ class MailConfigTests(unittest.TestCase):
             result = optional_reload_service("opendkim")
         self.assertEqual(result["returncode"], 0)
         self.assertTrue(result["skipped"])
+        with patch.object(mail_config, "run_command", return_value={"returncode": 1, "stderr": "opendkim.service is not active, cannot reload."}):
+            inactive = optional_reload_service("opendkim")
+        self.assertEqual(inactive["returncode"], 0)
+        self.assertTrue(inactive["skipped"])
 
     def test_maildir_message_parser_extracts_body_and_stable_headers(self):
         message = EmailMessage()
