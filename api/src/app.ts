@@ -26,6 +26,7 @@ import { fileRoutes } from "./routes/files.js";
 import { firewallRoutes } from "./routes/firewall.js";
 import { guardianRoutes } from "./routes/guardian.js";
 import { mailRoutes } from "./routes/mail.js";
+import { webmailRoutes } from "./routes/webmail.js";
 import { packageRoutes } from "./routes/packages.js";
 import { settingsRoutes } from "./routes/settings.js";
 import { sslRoutes } from "./routes/ssl.js";
@@ -72,7 +73,7 @@ export function buildApp() {
 
   app.addHook("preHandler", async (request, reply) => {
     const unsafe = !["GET", "HEAD", "OPTIONS"].includes(request.method);
-    if (!unsafe || request.url.startsWith("/api/v1/auth/login") || request.url.startsWith("/api/v1/auth/account/login") || request.url.startsWith("/api/v1/webhooks/")) return;
+    if (!unsafe || request.url.startsWith("/api/v1/auth/login") || request.url.startsWith("/api/v1/auth/account/login") || request.url.startsWith("/api/v1/auth/mail/login") || request.url.startsWith("/api/v1/webhooks/")) return;
     if (bearerToken(request.headers.authorization)) return;
 
     if (!validCsrfPair(request.cookies[csrfCookieName], request.headers[csrfHeaderName])) {
@@ -102,6 +103,26 @@ export function buildApp() {
       const account = await prisma.account.findUnique({ where: { id: request.user.accountId }, select: { status: true } });
       if (!account || account.status !== "ACTIVE") {
         return reply.code(403).send({ error: "Account is suspended or unavailable" });
+      }
+    } catch {
+      return reply.code(401).send({ error: "Unauthorized" });
+    }
+  });
+
+  app.decorate("requireMail", async (request: any, reply: any) => {
+    try {
+      const token = bearerToken(request.headers.authorization) ?? request.cookies.mail_session;
+      if (!token) return reply.code(401).send({ error: "Unauthorized" });
+      request.user = app.jwt.verify(token);
+      if (request.user?.role !== "mail" || !request.user?.mailAccountId) {
+        return reply.code(403).send({ error: "Mailbox access required" });
+      }
+      const mailbox = await prisma.mailAccount.findUnique({
+        where: { id: request.user.mailAccountId },
+        include: { account: { select: { status: true } } }
+      });
+      if (!mailbox || !mailbox.enabled || mailbox.account?.status === "SUSPENDED") {
+        return reply.code(403).send({ error: "Mailbox is disabled or unavailable" });
       }
     } catch {
       return reply.code(401).send({ error: "Unauthorized" });
@@ -143,6 +164,7 @@ export function buildApp() {
   app.register(domainRoutes, { prefix: "/api/v1/domains" });
   app.register(dnsRoutes, { prefix: "/api/v1/dns" });
   app.register(mailRoutes, { prefix: "/api/v1/mail" });
+  app.register(webmailRoutes, { prefix: "/api/v1/webmail" });
   app.register(sslRoutes, { prefix: "/api/v1/ssl" });
   app.register(firewallRoutes, { prefix: "/api/v1/firewall" });
   app.register(guardianRoutes, { prefix: "/api/v1/guardian" });

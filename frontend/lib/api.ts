@@ -57,8 +57,9 @@ async function fetchJson<T>(path: string, init: RequestInit): Promise<T> {
 
   const data = await response.json().catch(() => null);
   if (!response.ok) {
-    if (response.status === 401 && typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
-      window.location.assign(apiUrl("/auth/logout?next=/login"));
+    if (response.status === 401 && typeof window !== "undefined" && !window.location.pathname.startsWith("/login") && !window.location.pathname.startsWith("/webmail/login")) {
+      const next = window.location.pathname.startsWith("/webmail") ? "/webmail/login" : "/login";
+      window.location.assign(apiUrl(`/auth/logout?next=${encodeURIComponent(next)}`));
     }
     const issueText = Array.isArray(data?.issues)
       ? data.issues

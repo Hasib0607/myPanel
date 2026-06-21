@@ -1,7 +1,8 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Copy, Database, FileText, FolderPlus, Globe2, Inbox, KeyRound, Play, Plus, RefreshCw, RotateCw, Save, Square, Trash2 } from "lucide-react";
+import { CheckCircle2, Copy, Database, ExternalLink, FileText, FolderPlus, Globe2, Inbox, KeyRound, Mail, Play, Plus, RefreshCw, RotateCw, Save, Square, Trash2 } from "lucide-react";
+import Link from "next/link";
 import type { ReactNode } from "react";
 import { useState } from "react";
 import { ApiError, apiDelete, apiDeleteBody, apiGet, apiPatch, apiPost, apiPut } from "@/lib/api";
@@ -92,6 +93,7 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
   const [domainName, setDomainName] = useState("");
   const [mailDraft, setMailDraft] = useState({ domainId: "", username: "", password: "", quotaMb: "1024" });
   const [mailReset, setMailReset] = useState<Record<string, string>>({});
+  const [mailEdit, setMailEdit] = useState<Record<string, { quotaMb: string; enabled: boolean }>>({});
   const [deploymentDraft, setDeploymentDraft] = useState({ name: "", framework: "STATIC", domainId: "", gitUrl: "", startCommand: "" });
   const [databaseDraft, setDatabaseDraft] = useState({ engine: "POSTGRESQL", database: "", username: "", password: "" });
   const [filePath, setFilePath] = useState(".");
@@ -313,7 +315,8 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
 
   const updateMailbox = useMutation({
     mutationFn: ({ id, body }: { id: string; body: unknown }) => apiPatch(`/account/mail/${id}`, body),
-    onSuccess: async () => {
+    onSuccess: async (_result, variables) => {
+      setMailReset(({ [variables.id]: _cleared, ...rest }) => rest);
       setNotice("Mailbox updated.");
       await refresh();
     },
@@ -351,6 +354,9 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
     await navigator.clipboard.writeText(value);
     setNotice(message);
   };
+
+  const mailboxAddress = (mailbox: Mailbox) => `${mailbox.username}@${mailbox.domain?.name ?? ""}`;
+  const webmailUrl = typeof window === "undefined" ? "/webmail/login" : `${window.location.origin}/webmail/login`;
 
   const data = dashboard.data;
   const domains = data?.domains ?? [];
@@ -443,18 +449,30 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
         </Panel> : null}
 
         {showMail ? <Panel id="mail" title="Mailboxes" icon={<Inbox size={17} />}>
-          <div className="mb-4 grid grid-cols-2 gap-2">
-            <select className="h-10 rounded-md border border-panel-line px-2 text-sm" onChange={(event) => setMailDraft({ ...mailDraft, domainId: event.target.value })} value={mailDraft.domainId}>
-              <option value="">Domain</option>
-              {domains.map((domain) => <option key={domain.id} value={domain.id}>{domain.name}</option>)}
-            </select>
-            <input className="h-10 rounded-md border border-panel-line px-3 text-sm" onChange={(event) => setMailDraft({ ...mailDraft, username: event.target.value })} placeholder="user" value={mailDraft.username} />
-            <input className="h-10 rounded-md border border-panel-line px-3 text-sm" onChange={(event) => setMailDraft({ ...mailDraft, password: event.target.value })} placeholder="Password" type="password" value={mailDraft.password} />
-            <input className="h-10 rounded-md border border-panel-line px-3 text-sm" onChange={(event) => setMailDraft({ ...mailDraft, quotaMb: event.target.value.replace(/\D/g, "") })} placeholder="Quota MB" value={mailDraft.quotaMb} />
-            <button className="col-span-2 flex h-10 items-center justify-center gap-2 rounded-md bg-panel-accent text-sm font-semibold text-white disabled:opacity-60" disabled={!mailDraft.domainId || !mailDraft.username || !mailDraft.password || createMailbox.isPending} onClick={() => createMailbox.mutate()} type="button">
-              <Plus size={15} />
-              Create Mailbox
-            </button>
+          <div className="mb-4 rounded-md border border-panel-line bg-slate-50 p-4">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div>
+                <div className="font-semibold text-panel-text">Create email account</div>
+                <div className="text-xs text-panel-muted">Mailbox users can sign in separately at /webmail/login.</div>
+              </div>
+              <Link className="flex h-9 items-center gap-2 rounded-md border border-panel-line bg-white px-3 text-xs font-semibold hover:bg-slate-50" href="/webmail/login" target="_blank">
+                <ExternalLink size={14} />
+                Webmail
+              </Link>
+            </div>
+            <div className="grid gap-2 lg:grid-cols-[1fr_1fr_1fr_140px_auto]">
+              <select className="h-10 rounded-md border border-panel-line bg-white px-2 text-sm" onChange={(event) => setMailDraft({ ...mailDraft, domainId: event.target.value })} value={mailDraft.domainId}>
+                <option value="">Select domain</option>
+                {domains.map((domain) => <option key={domain.id} value={domain.id}>{domain.name}</option>)}
+              </select>
+              <input className="h-10 rounded-md border border-panel-line bg-white px-3 text-sm" onChange={(event) => setMailDraft({ ...mailDraft, username: event.target.value.trim().toLowerCase() })} placeholder="name" value={mailDraft.username} />
+              <input className="h-10 rounded-md border border-panel-line bg-white px-3 text-sm" onChange={(event) => setMailDraft({ ...mailDraft, password: event.target.value })} placeholder="Password" type="password" value={mailDraft.password} />
+              <input className="h-10 rounded-md border border-panel-line bg-white px-3 text-sm" onChange={(event) => setMailDraft({ ...mailDraft, quotaMb: event.target.value.replace(/\D/g, "") })} placeholder="Quota MB" value={mailDraft.quotaMb} />
+              <button className="flex h-10 items-center justify-center gap-2 rounded-md bg-panel-accent px-4 text-sm font-semibold text-white disabled:opacity-60" disabled={!mailDraft.domainId || !mailDraft.username || mailDraft.password.length < 10 || createMailbox.isPending} onClick={() => createMailbox.mutate()} type="button">
+                <Plus size={15} />
+                Create
+              </button>
+            </div>
           </div>
           <div className="overflow-hidden rounded-md border border-panel-line">
             <table className="w-full text-sm">
@@ -468,23 +486,47 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
                 </tr>
               </thead>
               <tbody>
-                {(data?.mailAccounts ?? []).map((mailbox) => (
-                  <tr className="border-t border-panel-line" key={mailbox.id}>
-                    <td className="px-4 py-3 font-medium">{mailbox.username}@{mailbox.domain?.name ?? ""}</td>
-                    <td className="px-4 py-3">{mailbox.enabled ? "enabled" : "disabled"}</td>
-                    <td className="px-4 py-3">{mailbox.quotaMb} MB</td>
+                {(data?.mailAccounts ?? []).map((mailbox) => {
+                  const edit = mailEdit[mailbox.id] ?? { quotaMb: String(mailbox.quotaMb), enabled: mailbox.enabled };
+                  return (
+                  <tr className="border-t border-panel-line align-top" key={mailbox.id}>
+                    <td className="px-4 py-3">
+                      <div className="font-medium">{mailboxAddress(mailbox)}</div>
+                      <div className="mt-1 flex flex-wrap gap-2 text-xs">
+                        <button className="text-panel-accent hover:underline" onClick={() => copyText(mailboxAddress(mailbox), "Mailbox address copied.")} type="button">Copy email</button>
+                        <button className="text-panel-accent hover:underline" onClick={() => copyText(`${webmailUrl}\nEmail: ${mailboxAddress(mailbox)}`, "Webmail login details copied.")} type="button">Copy login</button>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <label className="flex items-center gap-2">
+                        <input checked={edit.enabled} onChange={(event) => setMailEdit({ ...mailEdit, [mailbox.id]: { ...edit, enabled: event.target.checked } })} type="checkbox" />
+                        <span className={edit.enabled ? "text-emerald-700" : "text-panel-danger"}>{edit.enabled ? "Enabled" : "Disabled"}</span>
+                      </label>
+                    </td>
+                    <td className="px-4 py-3">
+                      <input className="h-9 w-28 rounded-md border border-panel-line px-3 text-xs" onChange={(event) => setMailEdit({ ...mailEdit, [mailbox.id]: { ...edit, quotaMb: event.target.value.replace(/\D/g, "") } })} value={edit.quotaMb} />
+                      <span className="ml-2 text-xs text-panel-muted">MB</span>
+                    </td>
                     <td className="px-4 py-3">
                       <input className="h-9 w-full rounded-md border border-panel-line px-3 text-xs" onChange={(event) => setMailReset({ ...mailReset, [mailbox.id]: event.target.value })} placeholder="New password" type="password" value={mailReset[mailbox.id] ?? ""} />
                     </td>
                     <td className="px-4 py-3">
-                      <div className="flex justify-end gap-2">
-                        <button className="rounded-md border border-panel-line px-2 py-1 text-xs hover:bg-slate-50" disabled={(mailReset[mailbox.id] ?? "").length < 10} onClick={() => updateMailbox.mutate({ id: mailbox.id, body: { password: mailReset[mailbox.id] } })} type="button">Reset</button>
-                        <button className="rounded-md border border-panel-line px-2 py-1 text-xs hover:bg-slate-50" onClick={() => updateMailbox.mutate({ id: mailbox.id, body: { enabled: !mailbox.enabled } })} type="button">{mailbox.enabled ? "Disable" : "Enable"}</button>
+                      <div className="flex flex-wrap justify-end gap-2">
+                        <button className="flex items-center gap-1 rounded-md border border-panel-line px-2 py-1 text-xs hover:bg-slate-50" onClick={() => updateMailbox.mutate({ id: mailbox.id, body: { quotaMb: Number(edit.quotaMb || mailbox.quotaMb), enabled: edit.enabled } })} type="button">
+                          <Save size={13} />
+                          Save
+                        </button>
+                        <button className="rounded-md border border-panel-line px-2 py-1 text-xs hover:bg-slate-50" disabled={(mailReset[mailbox.id] ?? "").length < 10} onClick={() => updateMailbox.mutate({ id: mailbox.id, body: { password: mailReset[mailbox.id] } })} type="button">Reset password</button>
+                        <Link className="flex items-center gap-1 rounded-md border border-panel-line px-2 py-1 text-xs hover:bg-slate-50" href="/webmail/login" target="_blank">
+                          <Mail size={13} />
+                          Login
+                        </Link>
                         <button className="rounded-md border border-red-200 px-2 py-1 text-xs text-panel-danger hover:bg-red-50" onClick={() => deleteMailbox.mutate(mailbox.id)} type="button">Delete</button>
                       </div>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
                 {!data?.mailAccounts.length ? (
                   <tr>
                     <td className="px-4 py-8 text-center text-panel-muted" colSpan={5}>No mailboxes yet.</td>

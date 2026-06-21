@@ -22,6 +22,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
   function clearAuthCookies(reply: any) {
     reply.clearCookie("panel_session", { path: "/" });
     reply.clearCookie("account_session", { path: "/" });
+    reply.clearCookie("mail_session", { path: "/" });
     reply.clearCookie(csrfCookieName, { path: "/" });
   }
 
@@ -106,6 +107,51 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     setCsrfCookie(reply);
     await audit(request, { action: "LOGIN", resource: "account_auth", resourceId: account.id, description: `Account ${account.username} logged in` });
     return { ok: true, role: "account" };
+  });
+
+  app.post("/mail/login", { config: { rateLimit: { max: 8, timeWindow: "15 minutes" } } }, async (request, reply) => {
+    const body = loginSchema.parse(request.body);
+    const [username, domainName] = body.username.trim().toLowerCase().split("@");
+    if (!username || !domainName) {
+      return reply.code(401).send({ error: "Invalid mailbox credentials" });
+    }
+
+    const mailbox = await prisma.mailAccount.findFirst({
+      where: {
+        username,
+        domain: { name: domainName }
+      },
+      include: {
+        domain: { select: { name: true } },
+        account: { select: { status: true } }
+      }
+    });
+    const passwordMatches = mailbox ? await bcrypt.compare(body.password, mailbox.passwordHash) : false;
+
+    if (!mailbox || !passwordMatches || !mailbox.enabled || mailbox.account?.status === "SUSPENDED") {
+      await audit(request, {
+        action: "LOGIN",
+        resource: "mail_auth",
+        description: "Failed mailbox login",
+        metadata: { username: body.username, success: false }
+      });
+      return reply.code(401).send({ error: "Invalid mailbox credentials" });
+    }
+
+    const email = `${mailbox.username}@${mailbox.domain.name}`;
+    const token = app.jwt.sign({ sub: email, role: "mail", mailAccountId: mailbox.id }, { expiresIn: env.JWT_EXPIRY });
+    reply.clearCookie("panel_session", { path: "/" });
+    reply.clearCookie("account_session", { path: "/" });
+    reply.setCookie("mail_session", token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+      path: "/",
+      maxAge: env.JWT_EXPIRY
+    });
+    setCsrfCookie(reply);
+    await audit(request, { action: "LOGIN", resource: "mail_auth", resourceId: mailbox.id, description: `Mailbox ${email} logged in` });
+    return { ok: true, role: "mail", email, redirectTo: "/webmail" };
   });
 
   app.post("/account/:accountId/impersonate", { preHandler: app.requireAuth }, async (request, reply) => {
@@ -215,7 +261,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     try {
       await request.jwtVerify();
     } catch {
-      const token = request.cookies.account_session;
+      const token = request.cookies.account_session ?? request.cookies.mail_session;
       if (!token) return reply.code(401).send({ error: "Unauthorized" });
       try {
         request.user = app.jwt.verify(token);
@@ -231,6 +277,19 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           role: "account",
           accountId: request.user.accountId,
           status: account?.status ?? "UNKNOWN"
+        };
+      }
+      if (request.user?.role === "mail") {
+        const mailbox = await prisma.mailAccount.findUnique({
+          where: { id: request.user.mailAccountId },
+          include: { domain: { select: { name: true } } }
+        });
+        if (!mailbox) return reply.code(401).send({ error: "Unauthorized" });
+        return {
+          username: `${mailbox.username}@${mailbox.domain.name}`,
+          role: "mail",
+          mailAccountId: mailbox.id,
+          status: mailbox.enabled ? "ACTIVE" : "DISABLED"
         };
       }
     } catch {

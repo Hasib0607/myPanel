@@ -3340,8 +3340,12 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
         quotaMb: body.quotaMb
       }
     });
+    const sysagentResult = await sysagent.createMailbox({ email: `${mailbox.username}@${domain.name}`, quotaMb: mailbox.quotaMb }).catch((error) => {
+      request.log.warn({ error }, "account mailbox sysagent bridge failed");
+      return { dryRun: true, unavailable: true, error: error instanceof Error ? error.message : "sysagent unavailable" };
+    });
     await audit(request, { action: "CREATE", resource: "mail_account", resourceId: mailbox.id, description: `Account created mailbox ${mailbox.username}@${domain.name}` });
-    return reply.code(201).send({ ...mailbox, domain });
+    return reply.code(201).send({ ...mailbox, domain, sysagentResult });
   });
 
   app.patch("/mail/:mailboxId", async (request: any) => {

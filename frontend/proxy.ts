@@ -14,6 +14,9 @@ const protectedRoutes = [
   "/security"
 ];
 
+const accountRoutes = ["/account"];
+const webmailRoutes = ["/webmail"];
+
 function requestPort(request: NextRequest) {
   const forwardedPort = request.headers.get("x-forwarded-port");
   if (forwardedPort) return forwardedPort;
@@ -46,7 +49,11 @@ function redirectToPanelPort(request: NextRequest, pathname: string, hasSession:
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const isProtected = protectedRoutes.some((route) => pathname === route || pathname.startsWith(`${route}/`));
+  const isAccountProtected = accountRoutes.some((route) => pathname === route || pathname.startsWith(`${route}/`));
+  const isWebmailProtected = webmailRoutes.some((route) => pathname === route || pathname.startsWith(`${route}/`));
   const hasSession = request.cookies.has("panel_session");
+  const hasAccountSession = request.cookies.has("account_session");
+  const hasMailSession = request.cookies.has("mail_session");
 
   if (pathname === "/") {
     return redirectToPanelPort(request, pathname, hasSession) ?? NextResponse.redirect(new URL(hasSession ? "/dashboard" : "/login", request.url));
@@ -58,6 +65,22 @@ export function proxy(request: NextRequest) {
 
   if (isProtected && !hasSession) {
     const loginUrl = new URL("/login", request.url);
+    loginUrl.searchParams.set("next", pathname);
+    return NextResponse.redirect(loginUrl);
+  }
+
+  if (isAccountProtected && !hasAccountSession) {
+    const loginUrl = new URL("/login", request.url);
+    loginUrl.searchParams.set("next", pathname);
+    return NextResponse.redirect(loginUrl);
+  }
+
+  if (pathname === "/webmail/login" && hasMailSession) {
+    return NextResponse.redirect(new URL("/webmail", request.url));
+  }
+
+  if (isWebmailProtected && pathname !== "/webmail/login" && !hasMailSession) {
+    const loginUrl = new URL("/webmail/login", request.url);
     loginUrl.searchParams.set("next", pathname);
     return NextResponse.redirect(loginUrl);
   }
@@ -83,6 +106,8 @@ export const config = {
     "/deployments/:path*",
     "/terminal/:path*",
     "/security/:path*",
+    "/account/:path*",
+    "/webmail/:path*",
     "/login"
   ]
 };
