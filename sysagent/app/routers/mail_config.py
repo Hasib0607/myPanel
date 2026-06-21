@@ -845,6 +845,11 @@ def configure_smtp(payload: MailDomain) -> dict:
     effective_cert = certificate_path if tls_available else None
     effective_key = key_path if tls_available else None
 
+    service_start = [
+        run_command(["systemctl", "enable", "--now", "postfix"]),
+        run_command(["systemctl", "enable", "--now", "dovecot"]),
+    ]
+    firewall = [run_command(apply_rule_command(action="ALLOW", port=port, protocol="tcp", source_ip=None)) for port in (25, 465, 587, 993, *([995] if payload.pop3Enabled else []))]
     postfix = [
         run_command(["postconf", "-e", f"{key}={value}"])
         for key, value in smtp_settings(hostname, effective_cert, effective_key, payload.messageRateLimit)
@@ -951,6 +956,8 @@ ssl_key = <{key_path}
     postfix_validation = run_command(["postfix", "check"])
     dovecot_validation = run_command(["doveconf", "-n"])
     require_command_success(
+        *service_start,
+        *firewall,
         *postfix,
         postmap_domains,
         postmap_suspended,
@@ -969,8 +976,17 @@ ssl_key = <{key_path}
         dovecot_validation,
         *([pop3_package] if pop3_package else []),
     )
-    reload_result = reload_mail_services()
-    require_command_success(*reload_result.values())
+    restart_result = {
+        "postfix": run_command(["systemctl", "restart", "postfix"]),
+        "dovecot": run_command(["systemctl", "restart", "dovecot"]),
+        "opendkim": run_command(["systemctl", "reload", "opendkim"]),
+    }
+    require_command_success(*restart_result.values())
+    listeners = run_command(["ss", "-ltn"])
+    listener_text = listeners.get("stdout", "")
+    missing_ports = [port for port in (587, 465) if f":{port} " not in listener_text and f":{port}\n" not in listener_text]
+    if settings.allow_live_system_commands and missing_ports:
+        raise HTTPException(status_code=500, detail=f"Postfix configured but submission listener(s) missing: {', '.join(str(port) for port in missing_ports)}")
     return {
         "ok": settings.allow_live_system_commands,
         "dryRun": not settings.allow_live_system_commands,
@@ -981,6 +997,8 @@ ssl_key = <{key_path}
         "tlsAvailable": tls_available,
         "certificatePath": certificate_path,
         "keyPath": key_path,
+        "serviceStart": service_start,
+        "firewall": firewall,
         "postfix": postfix,
         "vdomains": vdomains,
         "postmapDomains": postmap_domains,
@@ -995,7 +1013,9 @@ ssl_key = <{key_path}
         "certbotTimer": certbot_timer,
         "validation": {"postfix": postfix_validation, "dovecot": dovecot_validation},
         "pop3": {"enabled": payload.pop3Enabled, "package": pop3_package},
-        "reload": reload_result,
+        "restart": restart_result,
+        "listeners": listeners,
+        "listenerCheck": {"ok": not missing_ports, "missingPorts": missing_ports},
         "commandsAvailable": {
             "postconf": shutil.which("postconf") is not None,
             "postmap": shutil.which("postmap") is not None,

@@ -144,7 +144,7 @@ export function MailSettingsClient({ domainId }: { domainId: string }) {
   const configureSmtp = useMutation({
     mutationFn: () => apiPost(`/mail/domains/${domainId}/smtp/configure`, { messageRateLimit: rateLimit }),
     onSuccess: async () => {
-      setNotice("SMTP submission configuration applied.");
+      setNotice("SMTP submission, mail services, firewall ports, and listener checks were applied.");
       await invalidate();
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not configure SMTP.")

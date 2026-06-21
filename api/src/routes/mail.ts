@@ -647,9 +647,10 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
     const body = smtpConfigureSchema.parse(request.body ?? {});
     const domain = await prisma.domain.findUniqueOrThrow({ where: { id: domainId } });
     const hostname = body.hostname || `mail.${domain.name}`;
+    const firewall = assertLiveMailProvisioning(await sysagent.applyMailFirewall(), "Mail firewall configuration");
     const result = assertLiveMailProvisioning(await sysagent.configureSmtp({ domain: domain.name, hostname, messageRateLimit: body.messageRateLimit, pop3Enabled: domain.mailPop3Enabled }), `SMTP configuration for ${domain.name}`);
-    await audit(request, { action: "APPLY", resource: "smtp", resourceId: domainId, description: `Configured SMTP submission for ${domain.name}`, metadata: { hostname, messageRateLimit: body.messageRateLimit } });
-    return reply.code(202).send({ queued: false, result });
+    await audit(request, { action: "APPLY", resource: "smtp", resourceId: domainId, description: `Configured SMTP submission and firewall for ${domain.name}`, metadata: { hostname, messageRateLimit: body.messageRateLimit } });
+    return reply.code(202).send({ queued: false, firewall, result });
   });
 
   app.get("/domains/:domainId/bounces", async (request) => {
