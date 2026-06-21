@@ -49,6 +49,8 @@ class MailboxRequest(BaseModel):
     passwordHash: str | None = None
     enabled: bool = True
     smtpSuspended: bool = False
+    dailySendLimit: int = Field(default=500, ge=1, le=100000)
+    minuteSendLimit: int = Field(default=60, ge=1, le=10000)
 
 
 class MailboxSyncRequest(BaseModel):
@@ -100,6 +102,15 @@ class MailQueueActionRequest(BaseModel):
     queueId: str | None = Field(default=None, pattern=r"^[A-Fa-f0-9*!]{5,30}$")
 
 
+class MailBackupRestoreRequest(BaseModel):
+    archivePath: str
+
+
+class ReputationRequest(BaseModel):
+    domains: list[str]
+    publicIp: str | None = None
+
+
 VMAILBOX = Path("/etc/postfix/vmailbox")
 VMAILDOMAINS = Path("/etc/postfix/vmaildomains")
 VIRTUAL_ALIASES = Path("/etc/postfix/virtual")
@@ -116,6 +127,15 @@ OPENDKIM_TRUSTED_HOSTS = Path("/etc/opendkim/TrustedHosts")
 FAIL2BAN_MAIL_JAIL = Path("/etc/fail2ban/jail.d/vps-panel-mail.conf")
 RSPAMD_MILTER_CONFIG = Path("/etc/rspamd/local.d/worker-proxy.inc")
 RSPAMD_ANTIVIRUS_CONFIG = Path("/etc/rspamd/local.d/antivirus.conf")
+RSPAMD_ACTIONS_CONFIG = Path("/etc/rspamd/local.d/actions.conf")
+RSPAMD_GREYLIST_CONFIG = Path("/etc/rspamd/local.d/greylist.conf")
+RSPAMD_MILTER_HEADERS_CONFIG = Path("/etc/rspamd/local.d/milter_headers.conf")
+RSPAMD_RATELIMIT_CONFIG = Path("/etc/rspamd/local.d/ratelimit.conf")
+MAIL_POLICY_CONFIG = Path("/etc/vps-panel/mail-policy.json")
+MAIL_POLICY_STATE = Path("/var/lib/vps-panel/mail-policy-state.json")
+MAIL_POLICY_SCRIPT = Path("/usr/local/bin/vps-panel-mail-policy.py")
+MAIL_POLICY_SERVICE = Path("/etc/systemd/system/vps-panel-mail-policy.service")
+MAIL_BACKUP_ROOT = Path("/var/backups/vps-panel/mail")
 CONFIG_LOCK = threading.RLock()
 
 
@@ -292,6 +312,170 @@ def ensure_vmail_user() -> dict:
     return {"group": group, "user": user}
 
 
+def policy_script_source() -> str:
+    return f"""#!/usr/bin/env python3
+import datetime
+import json
+import socketserver
+from pathlib import Path
+
+CONFIG = Path("{MAIL_POLICY_CONFIG}")
+STATE = Path("{MAIL_POLICY_STATE}")
+
+
+def load_json(path, fallback):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return fallback
+
+
+def save_state(state):
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    STATE.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+
+
+class Handler(socketserver.StreamRequestHandler):
+    def handle(self):
+        request = {{}}
+        while True:
+            line = self.rfile.readline().decode("utf-8", errors="replace").strip()
+            if not line:
+                break
+            if "=" in line:
+                key, value = line.split("=", 1)
+                request[key] = value
+        user = (request.get("sasl_username") or request.get("sender") or "").lower()
+        config = load_json(CONFIG, {{"users": {{}}}})
+        rule = config.get("users", {{}}).get(user)
+        if not rule:
+            self.wfile.write(b"action=OK\\n\\n")
+            return
+        if not rule.get("enabled", True) or rule.get("smtpSuspended", False):
+            self.wfile.write(b"action=REJECT SMTP sending suspended for this mailbox\\n\\n")
+            return
+        now = datetime.datetime.utcnow()
+        today = now.strftime("%Y-%m-%d")
+        minute = now.strftime("%Y-%m-%dT%H:%M")
+        state = load_json(STATE, {{"users": {{}}}})
+        item = state.setdefault("users", {{}}).setdefault(user, {{"day": today, "dayCount": 0, "minute": minute, "minuteCount": 0}})
+        if item.get("day") != today:
+            item["day"] = today
+            item["dayCount"] = 0
+        if item.get("minute") != minute:
+            item["minute"] = minute
+            item["minuteCount"] = 0
+        daily = int(rule.get("dailySendLimit") or 500)
+        per_minute = int(rule.get("minuteSendLimit") or 60)
+        if item["dayCount"] >= daily:
+            self.wfile.write(f"action=DEFER_IF_PERMIT Daily SMTP limit reached for {{user}}\\n\\n".encode())
+            return
+        if item["minuteCount"] >= per_minute:
+            self.wfile.write(f"action=DEFER_IF_PERMIT Per-minute SMTP limit reached for {{user}}\\n\\n".encode())
+            return
+        item["dayCount"] += 1
+        item["minuteCount"] += 1
+        save_state(state)
+        self.wfile.write(b"action=OK\\n\\n")
+
+
+with socketserver.ThreadingTCPServer(("127.0.0.1", 10031), Handler) as server:
+    server.allow_reuse_address = True
+    server.serve_forever()
+"""
+
+
+def mail_policy_service_unit() -> str:
+    return f"""[Unit]
+Description=VPS Panel per-mailbox SMTP policy service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env python3 {MAIL_POLICY_SCRIPT}
+Restart=always
+RestartSec=2
+User=root
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def policy_config_from_mailboxes(mailboxes: list[MailboxRequest]) -> dict:
+    users = {}
+    for mailbox in mailboxes:
+        email, _, _ = safe_email(mailbox.email)
+        users[email] = {
+            "enabled": mailbox.enabled,
+            "smtpSuspended": mailbox.smtpSuspended,
+            "dailySendLimit": mailbox.dailySendLimit,
+            "minuteSendLimit": mailbox.minuteSendLimit,
+        }
+    return {"users": users}
+
+
+def merge_policy_mailbox(payload: MailboxRequest) -> dict:
+    email, _, _ = safe_email(payload.email)
+    existing = {"users": {}}
+    if MAIL_POLICY_CONFIG.exists():
+        try:
+            existing = json.loads(MAIL_POLICY_CONFIG.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            existing = {"users": {}}
+    users = existing.setdefault("users", {})
+    users[email] = {
+        "enabled": payload.enabled,
+        "smtpSuspended": payload.smtpSuspended,
+        "dailySendLimit": payload.dailySendLimit,
+        "minuteSendLimit": payload.minuteSendLimit,
+    }
+    return dry_write(MAIL_POLICY_CONFIG, json.dumps(existing, indent=2, sort_keys=True) + "\n")
+
+
+def prune_policy_domain(domain: str, wanted: set[str]) -> dict:
+    if not MAIL_POLICY_CONFIG.exists():
+        return dry_write(MAIL_POLICY_CONFIG, json.dumps({"users": {}}, indent=2) + "\n")
+    try:
+        existing = json.loads(MAIL_POLICY_CONFIG.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        existing = {"users": {}}
+    existing["users"] = {
+        email: rule
+        for email, rule in existing.get("users", {}).items()
+        if email.split("@")[-1].lower() != domain or email.lower() in wanted
+    }
+    return dry_write(MAIL_POLICY_CONFIG, json.dumps(existing, indent=2, sort_keys=True) + "\n")
+
+
+def remove_policy_mailbox(email: str) -> dict:
+    existing = {"users": {}}
+    if MAIL_POLICY_CONFIG.exists():
+        try:
+            existing = json.loads(MAIL_POLICY_CONFIG.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            existing = {"users": {}}
+    existing.setdefault("users", {}).pop(email.lower(), None)
+    return dry_write(MAIL_POLICY_CONFIG, json.dumps(existing, indent=2, sort_keys=True) + "\n")
+
+
+def ensure_mail_policy_service() -> dict:
+    script = dry_write(MAIL_POLICY_SCRIPT, policy_script_source())
+    unit = dry_write(MAIL_POLICY_SERVICE, mail_policy_service_unit())
+    if settings.allow_live_system_commands:
+        try:
+            os.chmod(MAIL_POLICY_SCRIPT, 0o755)
+        except OSError:
+            pass
+    daemon = run_command(["systemctl", "daemon-reload"])
+    service = run_command(["systemctl", "enable", "--now", "vps-panel-mail-policy"])
+    return {"script": script, "unit": unit, "daemonReload": daemon, "service": service}
+
+
+def policy_restriction() -> str:
+    return "check_policy_service inet:127.0.0.1:10031,permit_sasl_authenticated,reject"
+
+
 def sync_mailbox(payload: MailboxRequest) -> dict:
     email, user, domain = safe_email(payload.email)
     maildir = maildir_for(user, domain)
@@ -300,7 +484,8 @@ def sync_mailbox(payload: MailboxRequest) -> dict:
     vmailbox = merge_key_value_line(VMAILBOX, email, f"{email} {domain}/{user}/" if payload.enabled else None)
     dovecot_user = merge_dovecot_user(email, payload.passwordHash, maildir, payload.quotaMb, payload.enabled)
     smtp_access = merge_key_value_line(SMTP_SUSPENDED, email, f"{email} REJECT SMTP sending suspended by administrator" if payload.smtpSuspended else None)
-    return {"email": email, "enabled": payload.enabled, "smtpSuspended": payload.smtpSuspended, "maildir": str(maildir), "mkdir": mkdir, "vdomains": vdomains, "vmailbox": vmailbox, "dovecotUser": dovecot_user, "smtpAccess": smtp_access}
+    policy = merge_policy_mailbox(payload)
+    return {"email": email, "enabled": payload.enabled, "smtpSuspended": payload.smtpSuspended, "dailySendLimit": payload.dailySendLimit, "minuteSendLimit": payload.minuteSendLimit, "maildir": str(maildir), "mkdir": mkdir, "vdomains": vdomains, "vmailbox": vmailbox, "dovecotUser": dovecot_user, "smtpAccess": smtp_access, "policy": policy}
 
 
 def prune_domain_mailboxes(domain: str, wanted: set[str]) -> dict:
@@ -314,6 +499,7 @@ def prune_domain_mailboxes(domain: str, wanted: set[str]) -> dict:
         "vmailbox": dry_write(VMAILBOX, "\n".join(kept_vmailbox).strip() + "\n"),
         "dovecotUsers": dry_write(DOVECOT_USERS, "\n".join(kept_dovecot).strip() + "\n"),
         "smtpSuspended": dry_write(SMTP_SUSPENDED, "\n".join(kept_suspended).strip() + "\n"),
+        "policy": prune_policy_domain(domain, wanted),
     }
 
 
@@ -346,6 +532,44 @@ def relay_abuse_check() -> dict:
         return health_check("relay", "Unauthenticated relay", False, f"Could not test localhost SMTP: {error}")
 
 
+def public_ip() -> str | None:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("8.8.8.8", 53))
+            return probe.getsockname()[0]
+    except OSError:
+        return None
+
+
+def reverse_ip(ip: str) -> str:
+    return ".".join(reversed(ip.split(".")))
+
+
+def dnsbl_checks(ip: str | None) -> list[dict]:
+    if not ip or not re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", ip):
+        return []
+    zones = ["zen.spamhaus.org", "bl.spamcop.net", "b.barracudacentral.org"]
+    checks = []
+    reversed_ip = reverse_ip(ip)
+    for zone in zones:
+        query = f"{reversed_ip}.{zone}"
+        result = run_command(["dig", "+short", query])
+        listed = settings.allow_live_system_commands and bool(result.get("stdout", "").strip())
+        checks.append({"zone": zone, "listed": listed, "query": query, "result": result})
+    return checks
+
+
+def ptr_check(ip: str | None, expected: str) -> dict:
+    if not ip:
+        return {"ok": False, "expected": expected, "current": "", "detail": "Could not determine the public IP."}
+    result = run_command(["dig", "+short", "-x", ip])
+    current = result.get("stdout", "").strip().rstrip(".")
+    expected_clean = expected.strip().lower().rstrip(".")
+    current_values = [item.strip().lower().rstrip(".") for item in result.get("stdout", "").splitlines() if item.strip()]
+    ok = settings.allow_live_system_commands and expected_clean in current_values
+    return {"ok": ok, "ip": ip, "expected": expected_clean, "current": current, "result": result, "detail": current or f"Set rDNS/PTR at the VPS provider to {expected_clean}"}
+
+
 @router.get("/stack/status")
 def mail_stack_status() -> dict:
     return {
@@ -355,13 +579,85 @@ def mail_stack_status() -> dict:
             "dovecot": shutil.which("dovecot") is not None,
             "opendkim": shutil.which("opendkim") is not None,
             "certbot": shutil.which("certbot") is not None,
+            "policy": MAIL_POLICY_SCRIPT.exists(),
         },
         "services": {
             service: run_command(["systemctl", "is-active", service])
-            for service in ["postfix", "dovecot", "opendkim"]
+            for service in ["postfix", "dovecot", "opendkim", "vps-panel-mail-policy"]
         },
         "ports": run_command(["ss", "-ltn"]),
         "liveCommandsEnabled": settings.allow_live_system_commands,
+    }
+
+
+@router.get("/backup")
+def mail_backups() -> dict:
+    items = []
+    if MAIL_BACKUP_ROOT.exists():
+        for item in MAIL_BACKUP_ROOT.glob("mail-*.tar.gz"):
+            stat = item.stat()
+            items.append({"path": str(item), "name": item.name, "sizeBytes": stat.st_size, "modifiedAt": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()})
+    items.sort(key=lambda item: item["modifiedAt"], reverse=True)
+    return {"ok": True, "backupRoot": str(MAIL_BACKUP_ROOT), "items": items}
+
+
+@router.post("/backup")
+def create_mail_backup() -> dict:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    archive = MAIL_BACKUP_ROOT / f"mail-{stamp}.tar.gz"
+    includes = [
+        "/var/mail/vhosts",
+        str(DOVECOT_USERS),
+        str(VMAILBOX),
+        str(VMAILDOMAINS),
+        str(VIRTUAL_ALIASES),
+        str(SMTP_SUSPENDED),
+        str(MAIL_POLICY_CONFIG),
+        "/etc/postfix/main.cf",
+        "/etc/postfix/master.cf",
+        str(DOVECOT_PANEL_AUTH),
+        str(DOVECOT_PANEL_MAIL),
+        str(DOVECOT_PANEL_SSL),
+        "/etc/opendkim.conf",
+        "/etc/opendkim",
+        "/etc/rspamd/local.d",
+    ]
+    if settings.allow_live_system_commands:
+        MAIL_BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
+    existing = [path for path in includes if Path(path).exists()]
+    result = run_command(["tar", "-czf", str(archive), *existing], timeout=1800)
+    return {"ok": settings.allow_live_system_commands and result.get("returncode") == 0, "dryRun": not settings.allow_live_system_commands, "archivePath": str(archive), "includes": existing, "result": result}
+
+
+@router.post("/restore")
+def restore_mail_backup(payload: MailBackupRestoreRequest) -> dict:
+    archive = Path(payload.archivePath)
+    if not str(archive).startswith(str(MAIL_BACKUP_ROOT)) or archive.suffixes[-2:] != [".tar", ".gz"]:
+        raise HTTPException(status_code=400, detail="Restore is limited to mail backup archives created by the panel")
+    rollback = create_mail_backup()
+    result = run_command(["tar", "-xzf", str(archive), "-C", "/"], timeout=1800)
+    maps = [run_command(["postmap", str(path)]) for path in (VMAILBOX, VMAILDOMAINS, VIRTUAL_ALIASES, SMTP_SUSPENDED) if path.exists()]
+    reload_result = reload_mail_services()
+    require_command_success(result, *maps, *reload_result.values())
+    return {"ok": settings.allow_live_system_commands, "dryRun": not settings.allow_live_system_commands, "archivePath": str(archive), "rollbackBackup": rollback, "result": result, "postmaps": maps, "reload": reload_result}
+
+
+@router.post("/reputation")
+def reputation(payload: ReputationRequest) -> dict:
+    ip = payload.publicIp or public_ip()
+    domains = [safe_domain(domain) for domain in payload.domains]
+    ptr = {domain: ptr_check(ip, f"mail.{domain}") for domain in domains}
+    return {
+        "ok": settings.allow_live_system_commands,
+        "dryRun": not settings.allow_live_system_commands,
+        "publicIp": ip,
+        "domains": [{"domain": domain, "expectedPtr": f"mail.{domain}", "ptr": ptr[domain]} for domain in domains],
+        "dnsbl": dnsbl_checks(ip),
+        "providerChecklist": [
+            "Set rDNS/PTR at the VPS provider to the primary mail hostname.",
+            "Keep one consistent HELO hostname for the shared IP.",
+            "Check Google Postmaster Tools and Microsoft SNDS externally for reputation trends.",
+        ],
     }
 
 
@@ -464,9 +760,10 @@ def create_mailbox(payload: MailboxRequest) -> dict:
     postmap = run_command(["postmap", str(VMAILBOX)])
     postmap_suspended = run_command(["postmap", str(SMTP_SUSPENDED)])
     sasl_access = run_command(["postconf", "-e", f"smtpd_sender_restrictions=check_sasl_access hash:{SMTP_SUSPENDED},reject_non_fqdn_sender,reject_unknown_sender_domain"])
+    policy_service = ensure_mail_policy_service()
     reload_result = reload_mail_services()
-    require_command_success(postmap_domains, postmap, postmap_suspended, sasl_access, *reload_result.values())
-    return {**synced, "ok": settings.allow_live_system_commands, "dryRun": not settings.allow_live_system_commands, "vmail": vmail, "postmapDomains": postmap_domains, "postmap": postmap, "postmapSuspended": postmap_suspended, "saslAccess": sasl_access, "reload": reload_result}
+    require_command_success(postmap_domains, postmap, postmap_suspended, sasl_access, policy_service["daemonReload"], policy_service["service"], *reload_result.values())
+    return {**synced, "ok": settings.allow_live_system_commands, "dryRun": not settings.allow_live_system_commands, "vmail": vmail, "postmapDomains": postmap_domains, "postmap": postmap, "postmapSuspended": postmap_suspended, "saslAccess": sasl_access, "policyService": policy_service, "reload": reload_result}
 
 
 @router.post("/mailbox/messages")
@@ -495,9 +792,10 @@ def sync_mailboxes(payload: MailboxSyncRequest) -> dict:
     postmap = run_command(["postmap", str(VMAILBOX)])
     postmap_suspended = run_command(["postmap", str(SMTP_SUSPENDED)])
     sasl_access = run_command(["postconf", "-e", f"smtpd_sender_restrictions=check_sasl_access hash:{SMTP_SUSPENDED},reject_non_fqdn_sender,reject_unknown_sender_domain"])
+    policy_service = ensure_mail_policy_service()
     reload_result = reload_mail_services()
-    require_command_success(postmap_domains, postmap, postmap_suspended, sasl_access, *reload_result.values())
-    return {"ok": settings.allow_live_system_commands, "dryRun": not settings.allow_live_system_commands, "synced": len(results), "vmail": vmail, "mailboxes": results, "pruned": pruned, "postmapDomains": postmap_domains, "postmap": postmap, "postmapSuspended": postmap_suspended, "saslAccess": sasl_access, "reload": reload_result}
+    require_command_success(postmap_domains, postmap, postmap_suspended, sasl_access, policy_service["daemonReload"], policy_service["service"], *reload_result.values())
+    return {"ok": settings.allow_live_system_commands, "dryRun": not settings.allow_live_system_commands, "synced": len(results), "vmail": vmail, "mailboxes": results, "pruned": pruned, "postmapDomains": postmap_domains, "postmap": postmap, "postmapSuspended": postmap_suspended, "saslAccess": sasl_access, "policyService": policy_service, "reload": reload_result}
 
 
 @router.delete("/mailbox")
@@ -506,11 +804,12 @@ def delete_mailbox(payload: MailboxDeleteRequest) -> dict:
     vmailbox = merge_key_value_line(VMAILBOX, email, None)
     dovecot_user = merge_dovecot_user(email, None, maildir_for(user, domain), 1024, False)
     smtp_access = merge_key_value_line(SMTP_SUSPENDED, email, None)
+    policy = remove_policy_mailbox(email)
     postmap = run_command(["postmap", str(VMAILBOX)])
     postmap_suspended = run_command(["postmap", str(SMTP_SUSPENDED)])
     reload_result = reload_mail_services()
     require_command_success(postmap, postmap_suspended, *reload_result.values())
-    return {"ok": settings.allow_live_system_commands, "dryRun": not settings.allow_live_system_commands, "email": email, "maildirRetained": True, "vmailbox": vmailbox, "dovecotUser": dovecot_user, "smtpAccess": smtp_access, "postmap": postmap, "postmapSuspended": postmap_suspended, "reload": reload_result}
+    return {"ok": settings.allow_live_system_commands, "dryRun": not settings.allow_live_system_commands, "email": email, "maildirRetained": True, "vmailbox": vmailbox, "dovecotUser": dovecot_user, "smtpAccess": smtp_access, "policy": policy, "postmap": postmap, "postmapSuspended": postmap_suspended, "reload": reload_result}
 
 
 @router.post("/alias")
@@ -558,7 +857,7 @@ def configure_smtp(payload: MailDomain) -> dict:
     submission = run_command(["postconf", "-M", "submission/inet=submission inet n - y - - smtpd"])
     submission_tls = run_command(["postconf", "-P", "submission/inet/syslog_name=postfix/submission"])
     submission_auth = run_command(["postconf", "-P", "submission/inet/smtpd_sasl_auth_enable=yes"])
-    submission_relay = run_command(["postconf", "-P", "submission/inet/smtpd_recipient_restrictions=permit_sasl_authenticated,reject"])
+    submission_relay = run_command(["postconf", "-P", f"submission/inet/smtpd_recipient_restrictions={policy_restriction()}"])
     submission_tls_only = run_command(["postconf", "-P", "submission/inet/smtpd_tls_security_level=encrypt"])
     submission_rate = [
         run_command(["postconf", "-P", f"submission/inet/smtpd_client_message_rate_limit={payload.messageRateLimit}"]),
@@ -570,7 +869,7 @@ def configure_smtp(payload: MailDomain) -> dict:
         run_command(["postconf", "-P", "smtps/inet/syslog_name=postfix/smtps"]),
         run_command(["postconf", "-P", "smtps/inet/smtpd_tls_wrappermode=yes"]),
         run_command(["postconf", "-P", "smtps/inet/smtpd_sasl_auth_enable=yes"]),
-        run_command(["postconf", "-P", "smtps/inet/smtpd_recipient_restrictions=permit_sasl_authenticated,reject"]),
+        run_command(["postconf", "-P", f"smtps/inet/smtpd_recipient_restrictions={policy_restriction()}"]),
         run_command(["postconf", "-P", f"smtps/inet/smtpd_client_message_rate_limit={payload.messageRateLimit}"]),
         run_command(["postconf", "-P", f"smtps/inet/smtpd_client_recipient_rate_limit={payload.messageRateLimit * 10}"]),
         run_command(["postconf", "-P", f"smtps/inet/smtpd_client_connection_rate_limit={max(10, payload.messageRateLimit // 2)}"]),
@@ -644,6 +943,7 @@ ssl_key = <{key_path}
             except OSError:
                 pass
     certbot_timer = run_command(["sh", "-lc", "systemctl enable --now certbot.timer 2>/dev/null || true"])
+    policy_service = ensure_mail_policy_service()
     pop3_package = None
     if payload.pop3Enabled:
         info = current_os()
@@ -663,6 +963,8 @@ ssl_key = <{key_path}
         *submission_rate,
         smtps,
         *smtps_settings,
+        policy_service["daemonReload"],
+        policy_service["service"],
         postfix_validation,
         dovecot_validation,
         *([pop3_package] if pop3_package else []),
@@ -688,6 +990,7 @@ ssl_key = <{key_path}
         "submission": [submission, submission_tls, submission_auth, submission_relay, submission_tls_only, *submission_rate],
         "smtps": [smtps, *smtps_settings],
         "rateLimit": {"messagesPerClient": payload.messageRateLimit, "windowSeconds": 60, "recipientsPerClient": payload.messageRateLimit * 10, "connectionsPerClient": max(10, payload.messageRateLimit // 2)},
+        "policyService": policy_service,
         "files": files,
         "certbotTimer": certbot_timer,
         "validation": {"postfix": postfix_validation, "dovecot": dovecot_validation},
@@ -857,6 +1160,42 @@ upstream "local" {
   self_scan = yes;
 }
 """)
+    actions = dry_write(RSPAMD_ACTIONS_CONFIG, """reject = 15;
+add_header = 6;
+greylist = 4;
+""")
+    greylist = dry_write(RSPAMD_GREYLIST_CONFIG, """enabled = true;
+timeout = 5min;
+expire = 1d;
+message = "Try again later";
+""")
+    milter_headers = dry_write(RSPAMD_MILTER_HEADERS_CONFIG, """extended_spam_headers = true;
+use = ["x-spamd-bar", "x-spam-level", "authentication-results"];
+authenticated_headers = ["authentication-results"];
+""")
+    ratelimit = dry_write(RSPAMD_RATELIMIT_CONFIG, """rates {
+  authenticated_user = {
+    selector = "user";
+    bucket = [
+      {
+        burst = 100;
+        rate = "60 / 1min";
+      },
+      {
+        burst = 1000;
+        rate = "500 / 1d";
+      }
+    ]
+  }
+  ip = {
+    selector = "ip";
+    bucket = {
+      burst = 120;
+      rate = "120 / 1min";
+    }
+  }
+}
+""")
     antivirus = dry_write(RSPAMD_ANTIVIRUS_CONFIG, f"""clamav {{
   type = "clamav";
   servers = "{clam_socket}";
@@ -882,7 +1221,7 @@ upstream "local" {
         "fail2ban": run_command(["fail2ban-client", "-t"]),
         "relay": relay_abuse_check(),
     }
-    return {"ok": settings.allow_live_system_commands and all(result.get("returncode") == 0 for result in install + postfix + services) and all(result.get("returncode") == 0 for key, result in validation.items() if key != "relay") and validation["relay"]["ok"], "dryRun": not settings.allow_live_system_commands, "packages": packages, "install": install, "files": {"fail2ban": fail2ban, "rspamd": rspamd, "antivirus": antivirus}, "postfix": postfix, "services": services, "validation": validation}
+    return {"ok": settings.allow_live_system_commands and all(result.get("returncode") == 0 for result in install + postfix + services) and all(result.get("returncode") == 0 for key, result in validation.items() if key != "relay") and validation["relay"]["ok"], "dryRun": not settings.allow_live_system_commands, "packages": packages, "install": install, "files": {"fail2ban": fail2ban, "rspamd": rspamd, "actions": actions, "greylist": greylist, "headers": milter_headers, "ratelimit": ratelimit, "antivirus": antivirus}, "postfix": postfix, "services": services, "validation": validation}
 
 
 @router.post("/reload")
@@ -908,7 +1247,9 @@ def mail_diagnostics(payload: MailDomain) -> dict:
     live = settings.allow_live_system_commands
     checks = [
         *[health_check(f"service_{name}", f"{name.title()} running", live and result.get("returncode") == 0 and result.get("stdout", "").strip() == "active", result.get("stdout", "").strip() or result.get("stderr", "Not tested")) for name, result in services.items()],
-        *[health_check(f"port_{port}", f"Port {port} listening", live and (f":{port} " in listener_text or f":{port}\n" in listener_text), "Listening" if live and f":{port}" in listener_text else "No live listener found") for port in (25, 465, 587, 993)],
+        *[health_check(f"port_{port}", f"Port {port} listening", live and (f":{port} " in listener_text or f":{port}\n" in listener_text), "Listening" if live and f":{port}" in listener_text else "No live listener found") for port in (25, 465, 587, 993, *([995] if payload.pop3Enabled else []))],
+        health_check("policy_service", "Per-mailbox SMTP policy", live and run_command(["systemctl", "is-active", "vps-panel-mail-policy"]).get("stdout", "").strip() == "active", "Postfix policy service on 127.0.0.1:10031"),
+        health_check("pop3_config", "POP3 production validation", live and ((not payload.pop3Enabled) or " pop3" in run_command(["doveconf", "-n"]).get("stdout", "")), "POP3 disabled" if not payload.pop3Enabled else "Dovecot POP3 protocol and port 995 checked"),
         health_check("tls", "TLS certificate valid", live and tls.get("returncode") == 0, tls.get("stdout", "").strip() or tls.get("stderr", "Certificate unavailable")),
         health_check("fail2ban", "SMTP failed-login monitor", live and fail2ban.get("returncode") == 0, fail2ban.get("stdout", "").strip() or fail2ban.get("stderr", "Fail2Ban jail unavailable")),
         health_check("failed_logins", "Failed logins (24h)", live and auth_log.get("returncode") == 0, f"{len(failed_lines)} authentication failure(s) found in the last 24 hours" if live else "Not tested"),

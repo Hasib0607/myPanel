@@ -279,6 +279,7 @@ model Domain {
   subdomains   Subdomain[]
   dnsRecords   DnsRecord[]
   mailAccounts MailAccount[]
+  mailBounces  MailBounce[]
   deployments  Deployment[]
   deploymentBindings DeploymentDomain[]
   account      Account?      @relation(fields: [accountId], references: [id], onDelete: SetNull)
@@ -410,6 +411,7 @@ model MailAccount {
   domain       Domain      @relation(fields: [domainId], references: [id], onDelete: Cascade)
   account      Account?    @relation(fields: [accountId], references: [id], onDelete: SetNull)
   mails        Mail[]
+  bounces      MailBounce[]
   aliases      MailAlias[]
 
   @@unique([domainId, username])
@@ -451,6 +453,24 @@ model Mail {
   @@unique([accountId, messageId])
   @@index([receivedAt])
   @@map("mails")
+}
+
+model MailBounce {
+  id              String       @id @default(cuid())
+  domainId        String       @map("domain_id")
+  accountId       String?      @map("account_id")
+  recipient       String
+  status          String?
+  diagnostic      String?
+  sourceMessageId String?      @map("source_message_id")
+  createdAt       DateTime     @default(now()) @map("created_at")
+  domain          Domain       @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  account         MailAccount? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+
+  @@unique([domainId, sourceMessageId])
+  @@index([domainId, createdAt])
+  @@index([recipient])
+  @@map("mail_bounces")
 }
 
 model Deployment {

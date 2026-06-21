@@ -344,6 +344,14 @@ export const sysagent = {
     request("/mail-config/security/configure", { method: "POST", body: JSON.stringify(body) }),
   mailStackStatus: () =>
     request("/mail-config/stack/status"),
+  mailBackups: () =>
+    request("/mail-config/backup"),
+  createMailBackup: () =>
+    request("/mail-config/backup", { method: "POST" }),
+  restoreMailBackup: (body: unknown) =>
+    request("/mail-config/restore", { method: "POST", body: JSON.stringify(body) }),
+  mailReputation: (body: unknown) =>
+    request("/mail-config/reputation", { method: "POST", body: JSON.stringify(body) }),
   installMailStack: (body: { enableRspamd?: boolean } = {}) =>
     request("/mail-config/stack/install", { method: "POST", body: JSON.stringify(body) }),
   mailFirewallStatus: () =>

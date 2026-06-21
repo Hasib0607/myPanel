@@ -67,6 +67,9 @@ type SecurityStatus = {
 };
 
 type Deliverability = { dkimSelector: string; dmarcPolicy: "none" | "quarantine" | "reject"; spfInclude: string | null; spfCustom: string | null; bounceAddress: string | null; pop3Enabled: boolean };
+type Reputation = { localDns: { spf: string | null; dkim: string[]; dmarc: string | null }; live: { publicIp?: string | null; domains?: Array<{ domain: string; expectedPtr: string; ptr: { ok: boolean; current?: string; detail: string } }>; dnsbl?: Array<{ zone: string; listed: boolean }> } };
+type MailBackup = { items: Array<{ path: string; name: string; sizeBytes: number; modifiedAt: string }> };
+type BounceResult = { bounces?: Array<{ id: string; recipient: string; status: string | null; diagnostic: string | null; createdAt: string }>; ok?: boolean; mailbox?: string; scanned?: number; created?: number };
 
 export function MailSettingsClient({ domainId }: { domainId: string }) {
   const queryClient = useQueryClient();
@@ -78,6 +81,8 @@ export function MailSettingsClient({ domainId }: { domainId: string }) {
   const [enableClamav, setEnableClamav] = useState(false);
   const [enableRspamd, setEnableRspamd] = useState(true);
   const [deliverabilityDraft, setDeliverabilityDraft] = useState<Deliverability | null>(null);
+  const [dkimSelector, setDkimSelector] = useState("mail2");
+  const [restorePath, setRestorePath] = useState("");
   const authStatus = useQuery({ queryKey: ["mail-auth-status", domainId], queryFn: () => apiGet<AuthStatus>(`/mail/domains/${domainId}/auth-status`) });
   const smtp = useQuery({ queryKey: ["mail-smtp-settings", domainId], queryFn: () => apiGet<SmtpSettings>(`/mail/domains/${domainId}/smtp-settings`) });
   const dns = useQuery({ queryKey: ["mail-dns-recommendations", domainId], queryFn: () => apiGet<DnsRecommendation>(`/mail/domains/${domainId}/dns-recommendations`) });
@@ -85,6 +90,9 @@ export function MailSettingsClient({ domainId }: { domainId: string }) {
   const tls = useQuery({ queryKey: ["mail-tls-status", domainId], queryFn: () => apiGet<MailTlsStatus>(`/mail/domains/${domainId}/tls/status`) });
   const security = useQuery({ queryKey: ["mail-security-status"], queryFn: () => apiGet<SecurityStatus>("/mail/server/security/status") });
   const deliverability = useQuery({ queryKey: ["mail-deliverability", domainId], queryFn: () => apiGet<Deliverability>(`/mail/domains/${domainId}/deliverability`) });
+  const reputation = useQuery({ queryKey: ["mail-reputation", domainId], queryFn: () => apiGet<Reputation>(`/mail/domains/${domainId}/reputation`) });
+  const backups = useQuery({ queryKey: ["mail-backups"], queryFn: () => apiGet<MailBackup>("/mail/server/backups") });
+  const bounces = useQuery({ queryKey: ["mail-bounces", domainId], queryFn: () => apiGet<BounceResult>(`/mail/domains/${domainId}/bounces`) });
   useEffect(() => { if (deliverability.data && !deliverabilityDraft) setDeliverabilityDraft(deliverability.data); }, [deliverability.data, deliverabilityDraft]);
   const effectiveMailboxId = selectedMailboxId || smtp.data?.mailboxes.find((mailbox) => mailbox.enabled)?.id || "";
 
@@ -94,6 +102,7 @@ export function MailSettingsClient({ domainId }: { domainId: string }) {
     await queryClient.invalidateQueries({ queryKey: ["mail-server-status"] });
     await queryClient.invalidateQueries({ queryKey: ["mail-tls-status", domainId] });
     await queryClient.invalidateQueries({ queryKey: ["mail-security-status"] });
+    await queryClient.invalidateQueries({ queryKey: ["mail-reputation", domainId] });
   };
 
   const installStack = useMutation({
@@ -196,6 +205,30 @@ export function MailSettingsClient({ domainId }: { domainId: string }) {
     mutationFn: () => apiPatch(`/mail/domains/${domainId}/deliverability`, deliverabilityDraft),
     onSuccess: async () => { setNotice("Deliverability policy saved and DNS records republished."); await invalidate(); },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not save deliverability settings.")
+  });
+
+  const rotateDkim = useMutation({
+    mutationFn: () => apiPost(`/mail/domains/${domainId}/dkim/rotate`, { selector: dkimSelector }),
+    onSuccess: async () => { setNotice(`DKIM rotated to selector ${dkimSelector}. Keep old DNS until receivers cache expires.`); await invalidate(); await queryClient.invalidateQueries({ queryKey: ["mail-deliverability", domainId] }); },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not rotate DKIM.")
+  });
+
+  const createBackup = useMutation({
+    mutationFn: () => apiPost("/mail/server/backups", {}),
+    onSuccess: async () => { setNotice("Mail backup created."); await queryClient.invalidateQueries({ queryKey: ["mail-backups"] }); },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not create mail backup.")
+  });
+
+  const restoreBackup = useMutation({
+    mutationFn: () => apiPost("/mail/server/restore", { archivePath: restorePath }),
+    onSuccess: async () => { setNotice("Mail backup restored and mail services reloaded."); await invalidate(); },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not restore mail backup.")
+  });
+
+  const processBounces = useMutation({
+    mutationFn: () => apiPost<BounceResult>(`/mail/domains/${domainId}/bounces/process`, {}),
+    onSuccess: async (result) => { setNotice(`Bounce processing scanned ${result.scanned ?? 0}, created ${result.created ?? 0}.`); await queryClient.invalidateQueries({ queryKey: ["mail-bounces", domainId] }); },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not process bounces.")
   });
 
   const copyText = async (value: string, message: string) => {
@@ -364,6 +397,44 @@ export function MailSettingsClient({ domainId }: { domainId: string }) {
         <label className="flex items-center gap-2 text-sm"><input checked={deliverabilityDraft.pop3Enabled} onChange={(event) => setDeliverabilityDraft({ ...deliverabilityDraft, pop3Enabled: event.target.checked })} type="checkbox" />Enable optional POP3 settings</label>
         <button className="h-10 rounded-md bg-panel-accent px-4 text-sm font-semibold text-white disabled:opacity-60" disabled={saveDeliverability.isPending} onClick={() => saveDeliverability.mutate()} type="button">{saveDeliverability.isPending ? "Saving..." : "Save and publish DNS"}</button>
       </div><div className="border-t border-panel-line bg-slate-50 px-4 py-3 text-xs text-panel-muted">PTR checklist: set the VPS IP reverse DNS to <span className="font-mono">{smtp.data?.host ?? "mail.domain"}</span>, then verify it on Diagnostics.</div></div> : null}
+
+      <div className="grid gap-6 xl:grid-cols-2">
+        <div className="rounded-md border border-panel-line bg-white">
+          <div className="border-b border-panel-line px-4 py-3"><div className="text-sm font-semibold">Deliverability Monitor</div><div className="text-xs text-panel-muted">Shared IP PTR reminder, DNSBL checks, and local DNS posture.</div></div>
+          <div className="space-y-3 p-4 text-sm">
+            <Row label="Public IP" value={reputation.data?.live.publicIp || "checking"} />
+            <Row label="SPF" value={reputation.data?.localDns.spf || "missing"} />
+            <Row label="DKIM" value={(reputation.data?.localDns.dkim ?? []).join(", ") || "missing"} />
+            <Row label="DMARC" value={reputation.data?.localDns.dmarc || "missing"} />
+            {(reputation.data?.live.domains ?? []).map((item) => <div className="rounded-md border border-panel-line p-3" key={item.domain}><div className="flex items-center gap-2 font-semibold">{item.ptr.ok ? <CheckCircle2 className="text-emerald-600" size={15} /> : <CircleAlert className="text-panel-warn" size={15} />}PTR / rDNS</div><div className="mt-1 break-words text-xs text-panel-muted">Expected {item.expectedPtr}; current {item.ptr.current || item.ptr.detail}</div></div>)}
+            <div className="grid gap-2 sm:grid-cols-3">{(reputation.data?.live.dnsbl ?? []).map((item) => <div className={`rounded-md border p-3 text-xs ${item.listed ? "border-red-200 bg-red-50 text-red-700" : "border-panel-line"}`} key={item.zone}>{item.zone}<div className="mt-1 font-semibold">{item.listed ? "Listed" : "Clear"}</div></div>)}</div>
+          </div>
+        </div>
+
+        <div className="rounded-md border border-panel-line bg-white">
+          <div className="border-b border-panel-line px-4 py-3"><div className="text-sm font-semibold">DKIM Rotation</div><div className="text-xs text-panel-muted">Generate a new selector while keeping old DNS records for cache expiry.</div></div>
+          <div className="space-y-3 p-4">
+            <input className="h-10 w-full rounded-md border border-panel-line px-3 text-sm" value={dkimSelector} onChange={(event) => setDkimSelector(event.target.value.toLowerCase())} placeholder="mail2" />
+            <button className="h-9 rounded-md bg-panel-accent px-3 text-xs font-semibold text-white disabled:opacity-60" disabled={rotateDkim.isPending || !dkimSelector} onClick={() => rotateDkim.mutate()} type="button">{rotateDkim.isPending ? "Rotating..." : "Rotate DKIM selector"}</button>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid gap-6 xl:grid-cols-2">
+        <div className="rounded-md border border-panel-line bg-white">
+          <div className="border-b border-panel-line px-4 py-3"><div className="text-sm font-semibold">Mail Backup / Restore</div><div className="text-xs text-panel-muted">Backs up Maildir, Dovecot users, Postfix maps, OpenDKIM, Rspamd, and policy config.</div></div>
+          <div className="space-y-3 p-4 text-sm">
+            <button className="h-9 rounded-md bg-panel-accent px-3 text-xs font-semibold text-white disabled:opacity-60" disabled={createBackup.isPending} onClick={() => createBackup.mutate()} type="button">{createBackup.isPending ? "Creating..." : "Create mail backup"}</button>
+            <div className="space-y-2">{(backups.data?.items ?? []).slice(0, 5).map((item) => <button className="flex w-full items-center justify-between rounded-md border border-panel-line p-3 text-left text-xs hover:bg-slate-50" key={item.path} onClick={() => setRestorePath(item.path)} type="button"><span className="font-mono">{item.name}</span><span className="text-panel-muted">{Math.round(item.sizeBytes / 1024)} KB</span></button>)}</div>
+            <div className="flex gap-2"><input className="h-10 min-w-0 flex-1 rounded-md border border-panel-line px-3 font-mono text-xs" value={restorePath} onChange={(event) => setRestorePath(event.target.value)} placeholder="/var/backups/vps-panel/mail/mail-..." /><button className="h-10 rounded-md border border-panel-line px-3 text-xs font-semibold disabled:opacity-60" disabled={!restorePath || restoreBackup.isPending} onClick={() => restoreBackup.mutate()} type="button">Restore</button></div>
+          </div>
+        </div>
+
+        <div className="rounded-md border border-panel-line bg-white">
+          <div className="flex items-center justify-between border-b border-panel-line px-4 py-3"><div><div className="text-sm font-semibold">Bounce Processing</div><div className="text-xs text-panel-muted">Parse DSN reports from bounce/postmaster mailbox for failed-recipient analytics.</div></div><button className="h-9 rounded-md border border-panel-line px-3 text-xs font-semibold disabled:opacity-60" disabled={processBounces.isPending} onClick={() => processBounces.mutate()} type="button">{processBounces.isPending ? "Processing..." : "Process bounces"}</button></div>
+          <div className="divide-y divide-panel-line text-sm">{(bounces.data?.bounces ?? []).slice(0, 8).map((item) => <div className="px-4 py-3" key={item.id}><div className="font-mono text-xs">{item.recipient}</div><div className="mt-1 text-xs text-panel-muted">{item.status || "unknown"} · {item.diagnostic || "No diagnostic text"}</div></div>)}{(bounces.data?.bounces ?? []).length === 0 ? <div className="p-6 text-center text-sm text-panel-muted">No bounce reports processed yet.</div> : null}</div>
+        </div>
+      </div>
 
       <div className="grid gap-6 xl:grid-cols-[1fr_1fr]">
         <div className="rounded-md border border-panel-line bg-white">

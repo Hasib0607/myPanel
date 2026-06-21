@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from app.mail_utils import dovecot_password_hash, dovecot_user_line, mail_milter_settings, mail_security_postfix_settings, mail_security_profile, smtp_settings
 from app.routers import mail_config
-from app.routers.mail_config import IncomingHealthRequest, MailDomain, MailQueueActionRequest, SmtpHealthRequest, dry_write, incoming_health_test, mail_diagnostics, mail_queue_action, parse_maildir_message, smtp_health_test
+from app.routers.mail_config import IncomingHealthRequest, MailDomain, MailQueueActionRequest, MailboxRequest, SmtpHealthRequest, dry_write, incoming_health_test, mail_diagnostics, mail_queue_action, parse_maildir_message, policy_config_from_mailboxes, policy_restriction, policy_script_source, smtp_health_test
 
 
 class MailConfigTests(unittest.TestCase):
@@ -56,6 +56,13 @@ class MailConfigTests(unittest.TestCase):
         without_rspamd = dict(mail_milter_settings(False))
         self.assertEqual(with_rspamd["smtpd_milters"], "inet:127.0.0.1:8891,inet:127.0.0.1:11332")
         self.assertEqual(without_rspamd["smtpd_milters"], "inet:127.0.0.1:8891")
+
+    def test_policy_server_config_enforces_per_mailbox_smtp_limits(self):
+        config = policy_config_from_mailboxes([MailboxRequest(email="sales@example.com", dailySendLimit=250, minuteSendLimit=25, smtpSuspended=True)])
+        self.assertEqual(config["users"]["sales@example.com"]["dailySendLimit"], 250)
+        self.assertTrue(config["users"]["sales@example.com"]["smtpSuspended"])
+        self.assertIn("check_policy_service inet:127.0.0.1:10031", policy_restriction())
+        self.assertIn("Daily SMTP limit reached", policy_script_source())
 
     def test_maildir_message_parser_extracts_body_and_stable_headers(self):
         message = EmailMessage()
