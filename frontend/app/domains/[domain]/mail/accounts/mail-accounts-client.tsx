@@ -93,8 +93,8 @@ export function MailAccountsClient({ domainId }: { domainId: string }) {
 
   const smtpSettings = (address: string) => [
     `SMTP host: mail.${domain.data?.name ?? ""}`,
-    "SMTP port: 587",
-    "Security: STARTTLS",
+    "SMTP port: 587 (STARTTLS, recommended)",
+    "Alternative: 465 (SSL/TLS)",
     `Username: ${address}`,
     "Password: mailbox password"
   ].join("\n");

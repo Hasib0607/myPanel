@@ -192,8 +192,8 @@ export function MailSettingsClient({ domainId }: { domainId: string }) {
 
   const smtpText = smtp.data ? [
     `SMTP host: ${smtp.data.host}`,
-    "SMTP port: 587",
-    "Security: STARTTLS",
+    "SMTP port: 587 (STARTTLS, recommended)",
+    "Alternative: 465 (SSL/TLS)",
     "Username: full mailbox address",
     "Password: mailbox password"
   ].join("\n") : "";
@@ -237,7 +237,7 @@ export function MailSettingsClient({ domainId }: { domainId: string }) {
           <div className="flex items-center justify-between gap-3 border-b border-panel-line px-4 py-3">
             <div>
               <div className="flex items-center gap-2 text-sm font-semibold"><Server size={16} /> SMTP Submission</div>
-              <div className="text-xs text-panel-muted">Port 587 with Dovecot SASL auth for mailbox users.</div>
+              <div className="text-xs text-panel-muted">Ports 587 (STARTTLS) and 465 (SSL/TLS) with Dovecot SASL auth.</div>
             </div>
             <div className="flex gap-2">
               <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-xs font-semibold hover:bg-slate-50" disabled={!smtp.data} onClick={() => copyText(smtpText, "SMTP settings copied.")} type="button">
@@ -252,7 +252,8 @@ export function MailSettingsClient({ domainId }: { domainId: string }) {
           </div>
           <div className="space-y-3 p-4 text-sm">
             <Row label="Host" value={smtp.data?.host ?? "mail.domain"} />
-            <Row label="Port" value="587" />
+            <Row label="Submission" value="587 / STARTTLS" />
+            <Row label="SMTPS" value="465 / SSL/TLS" />
             <Row label="Security" value="STARTTLS" />
             <Row label="Auth" value={smtp.data?.auth ?? "Full mailbox address and password"} />
             <div className="grid grid-cols-[110px_1fr] items-center gap-3">

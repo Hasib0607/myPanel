@@ -2,9 +2,12 @@ import unittest
 from email.message import EmailMessage
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from app.mail_utils import dovecot_password_hash, dovecot_user_line, mail_milter_settings, mail_security_postfix_settings, mail_security_profile, smtp_settings
-from app.routers.mail_config import MailDomain, parse_maildir_message
+from app.routers import mail_config
+from app.routers.mail_config import IncomingHealthRequest, MailDomain, SmtpHealthRequest, dry_write, incoming_health_test, parse_maildir_message, smtp_health_test
 
 
 class MailConfigTests(unittest.TestCase):
@@ -70,6 +73,28 @@ class MailConfigTests(unittest.TestCase):
         self.assertEqual(parsed["messageId"], "incoming-1@example.com")
         self.assertEqual(parsed["subject"], "Inbound test")
         self.assertIn("Hello from Maildir", parsed["bodyText"])
+
+    def test_atomic_write_preserves_existing_mode(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mail.conf"
+            path.write_text("old\n", encoding="utf-8")
+            path.chmod(0o640)
+            with patch.object(mail_config, "settings", SimpleNamespace(allow_live_system_commands=True)):
+                result = dry_write(path, "new\n")
+            self.assertFalse(result["dryRun"])
+            self.assertEqual(path.read_text(encoding="utf-8"), "new\n")
+            self.assertEqual(path.stat().st_mode & 0o777, 0o640)
+
+    def test_dry_run_health_checks_are_not_reported_as_success(self):
+        disabled = SimpleNamespace(allow_live_system_commands=False)
+        with patch.object(mail_config, "settings", disabled):
+            smtp = smtp_health_test(SmtpHealthRequest(hostname="mail.example.com", username="user@example.com", password="password", recipient="user@example.com"))
+            incoming = incoming_health_test(IncomingHealthRequest(domain="example.com", email="user@example.com"))
+        self.assertFalse(smtp["ok"])
+        self.assertTrue(smtp["dryRun"])
+        self.assertTrue(all(not check["ok"] for check in smtp["checks"]))
+        self.assertFalse(incoming["ok"])
+        self.assertTrue(incoming["dryRun"])
 
 
 if __name__ == "__main__":

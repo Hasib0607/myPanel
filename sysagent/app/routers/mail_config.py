@@ -14,8 +14,11 @@ import smtplib
 import socket
 import ssl
 import stat as stat_module
+import tempfile
+import threading
 import time
 import uuid
+from functools import wraps
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -99,6 +102,42 @@ OPENDKIM_TRUSTED_HOSTS = Path("/etc/opendkim/TrustedHosts")
 FAIL2BAN_MAIL_JAIL = Path("/etc/fail2ban/jail.d/vps-panel-mail.conf")
 RSPAMD_MILTER_CONFIG = Path("/etc/rspamd/local.d/worker-proxy.inc")
 RSPAMD_ANTIVIRUS_CONFIG = Path("/etc/rspamd/local.d/antivirus.conf")
+CONFIG_LOCK = threading.RLock()
+
+
+def mail_config_transaction(function):
+    tracked = [
+        Path("/etc/postfix/main.cf"),
+        Path("/etc/postfix/master.cf"),
+        VMAILDOMAINS,
+        DOVECOT_PANEL_AUTH,
+        DOVECOT_PANEL_MAIL,
+        DOVECOT_PANEL_SSL,
+        DOVECOT_USERS,
+        CERTBOT_MAIL_DEPLOY_HOOK,
+    ]
+
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        if not settings.allow_live_system_commands:
+            return function(*args, **kwargs)
+        with CONFIG_LOCK:
+            snapshots = {path: (path.exists(), path.read_text(encoding="utf-8") if path.exists() else "") for path in tracked}
+            try:
+                return function(*args, **kwargs)
+            except Exception:
+                for path, (existed, content) in snapshots.items():
+                    try:
+                        if existed:
+                            dry_write(path, content)
+                        elif path.exists():
+                            path.unlink()
+                    except OSError:
+                        pass
+                run_command(["postmap", str(VMAILDOMAINS)])
+                raise
+
+    return wrapped
 
 
 def dry_write(path: Path, content: str) -> dict:
@@ -110,8 +149,29 @@ def dry_write(path: Path, content: str) -> dict:
             "content": content,
             "returncode": 0,
         }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    with CONFIG_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        previous = path.stat() if path.exists() else None
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if previous:
+                os.chmod(temporary, stat_module.S_IMODE(previous.st_mode))
+                os.chown(temporary, previous.st_uid, previous.st_gid)
+            else:
+                os.chmod(temporary, 0o644)
+            os.replace(temporary, path)
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
     return {"dryRun": False, "path": str(path), "returncode": 0}
 
 
@@ -170,25 +230,21 @@ def parse_maildir_message(path: Path) -> dict | None:
 
 
 def merge_key_value_line(path: Path, key: str, line: str | None) -> dict:
-    existing = ""
-    if path.exists():
-        existing = path.read_text(encoding="utf-8")
-    lines = [item for item in existing.splitlines() if not item.startswith(f"{key} ")]
-    if line:
-        lines.append(line)
-    content = "\n".join(lines).strip() + "\n"
-    return dry_write(path, content)
+    with CONFIG_LOCK:
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        lines = [item for item in existing.splitlines() if not item.startswith(f"{key} ")]
+        if line:
+            lines.append(line)
+        return dry_write(path, "\n".join(lines).strip() + "\n")
 
 
 def merge_dovecot_user(email: str, password_hash: str | None, maildir: Path, quota_mb: int, enabled: bool) -> dict:
-    existing = ""
-    if DOVECOT_USERS.exists():
-        existing = DOVECOT_USERS.read_text(encoding="utf-8")
-    lines = [item for item in existing.splitlines() if not item.startswith(f"{email}:")]
-    if enabled and password_hash:
-        lines.append(dovecot_user_line(email, password_hash, str(maildir), quota_mb))
-    content = "\n".join(lines).strip() + "\n"
-    result = dry_write(DOVECOT_USERS, content)
+    with CONFIG_LOCK:
+        existing = DOVECOT_USERS.read_text(encoding="utf-8") if DOVECOT_USERS.exists() else ""
+        lines = [item for item in existing.splitlines() if not item.startswith(f"{email}:")]
+        if enabled and password_hash:
+            lines.append(dovecot_user_line(email, password_hash, str(maildir), quota_mb))
+        result = dry_write(DOVECOT_USERS, "\n".join(lines).strip() + "\n")
     if settings.allow_live_system_commands:
         try:
             os.chmod(DOVECOT_USERS, 0o640)
@@ -198,17 +254,19 @@ def merge_dovecot_user(email: str, password_hash: str | None, maildir: Path, quo
 
 
 def merge_opendkim_config(directives: dict[str, str]) -> dict:
-    existing = OPENDKIM_CONFIG.read_text(encoding="utf-8") if OPENDKIM_CONFIG.exists() else ""
-    keys = {key.lower() for key in directives}
-    lines = [line for line in existing.splitlines() if not (line.strip() and not line.lstrip().startswith("#") and line.split()[0].lower() in keys)]
-    lines.extend(f"{key:<22} {value}" for key, value in directives.items())
-    return dry_write(OPENDKIM_CONFIG, "\n".join(lines).strip() + "\n")
+    with CONFIG_LOCK:
+        existing = OPENDKIM_CONFIG.read_text(encoding="utf-8") if OPENDKIM_CONFIG.exists() else ""
+        keys = {key.lower() for key in directives}
+        lines = [line for line in existing.splitlines() if not (line.strip() and not line.lstrip().startswith("#") and line.split()[0].lower() in keys)]
+        lines.extend(f"{key:<22} {value}" for key, value in directives.items())
+        return dry_write(OPENDKIM_CONFIG, "\n".join(lines).strip() + "\n")
 
 
 def merge_unique_lines(path: Path, required: list[str]) -> dict:
-    existing = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-    content = "\n".join(dict.fromkeys([line.strip() for line in existing if line.strip()] + required)) + "\n"
-    return dry_write(path, content)
+    with CONFIG_LOCK:
+        existing = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        content = "\n".join(dict.fromkeys([line.strip() for line in existing if line.strip()] + required)) + "\n"
+        return dry_write(path, content)
 
 
 def ensure_vmail_user() -> dict:
@@ -252,7 +310,7 @@ def health_check(key: str, label: str, ok: bool, detail: str) -> dict:
 
 def relay_abuse_check() -> dict:
     if not settings.allow_live_system_commands:
-        return health_check("relay", "Unauthenticated relay", True, "Dry run: RCPT relay rejection will be tested on the live server.")
+        return health_check("relay", "Unauthenticated relay", False, "Not tested: live system commands are disabled.")
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
             probe.connect(("8.8.8.8", 53))
@@ -378,7 +436,8 @@ def create_mailbox(payload: MailboxRequest) -> dict:
     postmap_domains = run_command(["postmap", str(VMAILDOMAINS)])
     postmap = run_command(["postmap", str(VMAILBOX)])
     reload_result = reload_mail_services()
-    return {**synced, "vmail": vmail, "postmapDomains": postmap_domains, "postmap": postmap, "reload": reload_result}
+    require_command_success(postmap_domains, postmap, *reload_result.values())
+    return {**synced, "ok": settings.allow_live_system_commands, "dryRun": not settings.allow_live_system_commands, "vmail": vmail, "postmapDomains": postmap_domains, "postmap": postmap, "reload": reload_result}
 
 
 @router.post("/mailbox/messages")
@@ -407,7 +466,7 @@ def sync_mailboxes(payload: MailboxSyncRequest) -> dict:
     postmap = run_command(["postmap", str(VMAILBOX)])
     reload_result = reload_mail_services()
     require_command_success(postmap_domains, postmap, *reload_result.values())
-    return {"ok": True, "synced": len(results), "vmail": vmail, "mailboxes": results, "pruned": pruned, "postmapDomains": postmap_domains, "postmap": postmap, "reload": reload_result}
+    return {"ok": settings.allow_live_system_commands, "dryRun": not settings.allow_live_system_commands, "synced": len(results), "vmail": vmail, "mailboxes": results, "pruned": pruned, "postmapDomains": postmap_domains, "postmap": postmap, "reload": reload_result}
 
 
 @router.delete("/mailbox")
@@ -418,7 +477,7 @@ def delete_mailbox(payload: MailboxDeleteRequest) -> dict:
     postmap = run_command(["postmap", str(VMAILBOX)])
     reload_result = reload_mail_services()
     require_command_success(postmap, *reload_result.values())
-    return {"ok": True, "email": email, "maildirRetained": True, "vmailbox": vmailbox, "dovecotUser": dovecot_user, "postmap": postmap, "reload": reload_result}
+    return {"ok": settings.allow_live_system_commands, "dryRun": not settings.allow_live_system_commands, "email": email, "maildirRetained": True, "vmailbox": vmailbox, "dovecotUser": dovecot_user, "postmap": postmap, "reload": reload_result}
 
 
 @router.post("/alias")
@@ -430,7 +489,7 @@ def update_alias(payload: AliasRequest) -> dict:
     postconf = run_command(["postconf", "-e", f"virtual_alias_maps=hash:{VIRTUAL_ALIASES}"])
     reload_result = run_command(["systemctl", "reload", "postfix"])
     require_command_success(postmap, postconf, reload_result)
-    return {"ok": True, "source": source, "target": target, "config": config, "postmap": postmap, "postconf": postconf, "reload": reload_result}
+    return {"ok": settings.allow_live_system_commands, "dryRun": not settings.allow_live_system_commands, "source": source, "target": target, "config": config, "postmap": postmap, "postconf": postconf, "reload": reload_result}
 
 
 @router.delete("/alias")
@@ -440,10 +499,11 @@ def delete_alias(payload: AliasDeleteRequest) -> dict:
     postmap = run_command(["postmap", str(VIRTUAL_ALIASES)])
     reload_result = run_command(["systemctl", "reload", "postfix"])
     require_command_success(postmap, reload_result)
-    return {"ok": True, "source": source, "config": config, "postmap": postmap, "reload": reload_result}
+    return {"ok": settings.allow_live_system_commands, "dryRun": not settings.allow_live_system_commands, "source": source, "config": config, "postmap": postmap, "reload": reload_result}
 
 
 @router.post("/smtp/configure")
+@mail_config_transaction
 def configure_smtp(payload: MailDomain) -> dict:
     domain = payload.domain.strip().lower()
     hostname = (payload.hostname or f"mail.{domain}").strip().lower()
@@ -468,6 +528,16 @@ def configure_smtp(payload: MailDomain) -> dict:
         run_command(["postconf", "-P", f"submission/inet/smtpd_client_message_rate_limit={payload.messageRateLimit}"]),
         run_command(["postconf", "-P", f"submission/inet/smtpd_client_recipient_rate_limit={payload.messageRateLimit * 10}"]),
         run_command(["postconf", "-P", f"submission/inet/smtpd_client_connection_rate_limit={max(10, payload.messageRateLimit // 2)}"]),
+    ]
+    smtps = run_command(["postconf", "-M", "smtps/inet=smtps inet n - y - - smtpd"])
+    smtps_settings = [
+        run_command(["postconf", "-P", "smtps/inet/syslog_name=postfix/smtps"]),
+        run_command(["postconf", "-P", "smtps/inet/smtpd_tls_wrappermode=yes"]),
+        run_command(["postconf", "-P", "smtps/inet/smtpd_sasl_auth_enable=yes"]),
+        run_command(["postconf", "-P", "smtps/inet/smtpd_recipient_restrictions=permit_sasl_authenticated,reject"]),
+        run_command(["postconf", "-P", f"smtps/inet/smtpd_client_message_rate_limit={payload.messageRateLimit}"]),
+        run_command(["postconf", "-P", f"smtps/inet/smtpd_client_recipient_rate_limit={payload.messageRateLimit * 10}"]),
+        run_command(["postconf", "-P", f"smtps/inet/smtpd_client_connection_rate_limit={max(10, payload.messageRateLimit // 2)}"]),
     ]
 
     auth_conf = """
@@ -532,16 +602,37 @@ ssl_key = <{key_path}
         ),
     }
     if settings.allow_live_system_commands:
-        try:
-            os.chmod(CERTBOT_MAIL_DEPLOY_HOOK, 0o750)
-        except OSError:
-            pass
+        for path, mode in ((CERTBOT_MAIL_DEPLOY_HOOK, 0o750), (DOVECOT_USERS, 0o640)):
+            try:
+                os.chmod(path, mode)
+            except OSError:
+                pass
     certbot_timer = run_command(["sh", "-lc", "systemctl enable --now certbot.timer 2>/dev/null || true"])
+    postfix_validation = run_command(["postfix", "check"])
+    dovecot_validation = run_command(["doveconf", "-n"])
+    require_command_success(
+        *postfix,
+        postmap_domains,
+        submission,
+        submission_tls,
+        submission_auth,
+        submission_relay,
+        submission_tls_only,
+        *submission_rate,
+        smtps,
+        *smtps_settings,
+        postfix_validation,
+        dovecot_validation,
+    )
     reload_result = reload_mail_services()
+    require_command_success(*reload_result.values())
     return {
+        "ok": settings.allow_live_system_commands,
+        "dryRun": not settings.allow_live_system_commands,
         "domain": domain,
         "hostname": hostname,
         "submissionPort": 587,
+        "submissionPorts": [587, 465],
         "tlsAvailable": tls_available,
         "certificatePath": certificate_path,
         "keyPath": key_path,
@@ -549,9 +640,11 @@ ssl_key = <{key_path}
         "vdomains": vdomains,
         "postmapDomains": postmap_domains,
         "submission": [submission, submission_tls, submission_auth, submission_relay, submission_tls_only, *submission_rate],
+        "smtps": [smtps, *smtps_settings],
         "rateLimit": {"messagesPerClient": payload.messageRateLimit, "windowSeconds": 60, "recipientsPerClient": payload.messageRateLimit * 10, "connectionsPerClient": max(10, payload.messageRateLimit // 2)},
         "files": files,
         "certbotTimer": certbot_timer,
+        "validation": {"postfix": postfix_validation, "dovecot": dovecot_validation},
         "reload": reload_result,
         "commandsAvailable": {
             "postconf": shutil.which("postconf") is not None,
@@ -569,11 +662,11 @@ def smtp_health_test(payload: SmtpHealthRequest) -> dict:
     if not re.match(r"^[a-z0-9.-]+$", hostname):
         raise ValueError("Invalid SMTP hostname")
     if not settings.allow_live_system_commands:
-        return {"ok": True, "dryRun": True, "checks": [
-            health_check("connect", "SMTP connection", True, f"Would connect to {hostname}:{payload.port}"),
-            health_check("starttls", "STARTTLS", True, "Would negotiate and validate TLS"),
-            health_check("auth", "Mailbox login", True, f"Would authenticate {username}"),
-            health_check("send", "Test message", True, f"Would send to {recipient}"),
+        return {"ok": False, "dryRun": True, "checks": [
+            health_check("connect", "SMTP connection", False, f"Not tested: would connect to {hostname}:{payload.port}"),
+            health_check("starttls", "STARTTLS", False, "Not tested: live system commands are disabled"),
+            health_check("auth", "Mailbox login", False, f"Not tested: would authenticate {username}"),
+            health_check("send", "Test message", False, f"Not tested: would send to {recipient}"),
         ]}
     checks = []
     try:
@@ -614,9 +707,9 @@ def incoming_health_test(payload: IncomingHealthRequest) -> dict:
     dovecot_config = run_command(["doveconf", "-n"])
     dry_run = not settings.allow_live_system_commands
     checks = [
-        health_check("mx", "Public MX", dry_run or (mx.get("returncode") == 0 and expected_mx in mx_output.lower()), mx_output or (f"Dry run: would verify MX points to {expected_mx}" if dry_run else mx.get("stderr", "No MX record returned"))),
-        health_check("postfix_map", "Postfix mailbox map", dry_run or (map_check.get("returncode") == 0 and bool(map_check.get("stdout", "").strip())), map_check.get("stdout", "").strip() or ("Dry run: would query vmailbox map" if dry_run else "Mailbox is missing from vmailbox map")),
-        health_check("lmtp", "Dovecot LMTP socket", dry_run or (lmtp_socket.exists() and stat_module.S_ISSOCK(lmtp_socket.stat().st_mode) and "protocol lmtp" in dovecot_config.get("stdout", "")), str(lmtp_socket) if dry_run or lmtp_socket.exists() else "LMTP socket is missing"),
+        health_check("mx", "Public MX", not dry_run and mx.get("returncode") == 0 and expected_mx in mx_output.lower(), mx_output or (f"Not tested: would verify MX points to {expected_mx}" if dry_run else mx.get("stderr", "No MX record returned"))),
+        health_check("postfix_map", "Postfix mailbox map", not dry_run and map_check.get("returncode") == 0 and bool(map_check.get("stdout", "").strip()), map_check.get("stdout", "").strip() or ("Not tested: would query vmailbox map" if dry_run else "Mailbox is missing from vmailbox map")),
+        health_check("lmtp", "Dovecot LMTP socket", not dry_run and lmtp_socket.exists() and stat_module.S_ISSOCK(lmtp_socket.stat().st_mode) and "protocol lmtp" in dovecot_config.get("stdout", ""), str(lmtp_socket) if not dry_run and lmtp_socket.exists() else ("Not tested: live system commands are disabled" if dry_run else "LMTP socket is missing")),
     ]
     if settings.allow_live_system_commands:
         try:
@@ -627,12 +720,12 @@ def incoming_health_test(payload: IncomingHealthRequest) -> dict:
         except OSError as error:
             permissions_ok, detail = False, str(error)
     else:
-        permissions_ok, detail = True, f"Dry run: would inspect {maildir}"
+        permissions_ok, detail = False, f"Not tested: would inspect {maildir}"
     checks.append(health_check("permissions", "Maildir permissions", permissions_ok, detail))
 
     token = f"vps-panel-{uuid.uuid4().hex}"
     delivered = False
-    delivery_detail = "Dry run: would inject a unique message through localhost Postfix and poll Maildir."
+    delivery_detail = "Not tested: would inject a unique message through localhost Postfix and poll Maildir."
     if settings.allow_live_system_commands and all(check["ok"] for check in checks[1:]):
         try:
             message = EmailMessage()
@@ -662,8 +755,8 @@ def incoming_health_test(payload: IncomingHealthRequest) -> dict:
                 delivery_detail = "Postfix accepted the probe, but it did not appear in Maildir within 10 seconds."
         except Exception as error:
             delivery_detail = str(error)
-    checks.append(health_check("delivery", "Postfix to LMTP delivery", delivered if settings.allow_live_system_commands else True, delivery_detail))
-    return {"ok": all(check["ok"] for check in checks), "mailbox": email, "checks": checks}
+    checks.append(health_check("delivery", "Postfix to LMTP delivery", delivered, delivery_detail))
+    return {"ok": all(check["ok"] for check in checks), "dryRun": dry_run, "mailbox": email, "checks": checks}
 
 
 @router.get("/security/status")

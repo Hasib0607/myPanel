@@ -359,8 +359,8 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
   const webmailUrl = typeof window === "undefined" ? "/webmail/login" : `${window.location.origin}/webmail/login`;
   const mailboxSmtpSettings = (mailbox: Mailbox) => [
     `SMTP host: mail.${mailbox.domain?.name ?? ""}`,
-    "SMTP port: 587",
-    "Security: STARTTLS",
+    "SMTP port: 587 (STARTTLS, recommended)",
+    "Alternative: 465 (SSL/TLS)",
     `Username: ${mailboxAddress(mailbox)}`,
     "Password: mailbox password"
   ].join("\n");

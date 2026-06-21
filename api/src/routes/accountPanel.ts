@@ -25,6 +25,7 @@ import { deleteSecret, getSecret, putSecret } from "../lib/secrets.js";
 import { sysagent } from "../lib/sysagent.js";
 import { certbotCertificateName, isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
 import { currentVpsIp } from "../lib/serverIp.js";
+import { assertLiveMailProvisioning } from "../lib/mailProvisioning.js";
 import {
   deploymentWorkerMax,
   inferredLaravelManagedProcesses,
@@ -3341,10 +3342,13 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
         quotaMb: body.quotaMb
       }
     });
-    const sysagentResult = await sysagent.createMailbox({ email: `${mailbox.username}@${domain.name}`, quotaMb: mailbox.quotaMb, passwordHash, enabled: mailbox.enabled }).catch((error) => {
-      request.log.warn({ error }, "account mailbox sysagent bridge failed");
-      return { dryRun: true, unavailable: true, error: error instanceof Error ? error.message : "sysagent unavailable" };
-    });
+    let sysagentResult: unknown;
+    try {
+      sysagentResult = assertLiveMailProvisioning(await sysagent.createMailbox({ email: `${mailbox.username}@${domain.name}`, quotaMb: mailbox.quotaMb, passwordHash, enabled: mailbox.enabled }), `Mailbox ${mailbox.username}@${domain.name}`);
+    } catch (error) {
+      await prisma.mailAccount.delete({ where: { id: mailbox.id } });
+      throw error;
+    }
     await audit(request, { action: "CREATE", resource: "mail_account", resourceId: mailbox.id, description: `Account created mailbox ${mailbox.username}@${domain.name}` });
     return reply.code(201).send({ ...mailbox, domain, sysagentResult });
   });
@@ -3352,23 +3356,17 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
   app.patch("/mail/:mailboxId", async (request: any) => {
     const { mailboxId } = z.object({ mailboxId: z.string() }).parse(request.params);
     const body = mailboxUpdateSchema.parse(request.body);
-    const data = {
-      quotaMb: body.quotaMb,
-      enabled: body.enabled,
-      ...(body.password ? { passwordHash: await bcrypt.hash(body.password, 12) } : {})
-    };
-    const mailbox = await prisma.mailAccount.updateMany({
-      where: { id: mailboxId, accountId: accountId(request) },
-      data
-    });
-    if (mailbox.count === 0) throw app.httpErrors.notFound("Mailbox not found");
-    const synced = await prisma.mailAccount.findFirst({ where: { id: mailboxId, accountId: accountId(request) }, include: { domain: true } });
-    if (synced) {
-      await sysagent.createMailbox({ email: `${synced.username}@${synced.domain.name}`, quotaMb: synced.quotaMb, passwordHash: synced.passwordHash, enabled: synced.enabled }).catch((error) => {
-        request.log.warn({ error }, "account mailbox sysagent sync failed");
-        return null;
-      });
-    }
+    const mailbox = await prisma.mailAccount.findFirst({ where: { id: mailboxId, accountId: accountId(request) }, include: { domain: true } });
+    if (!mailbox) throw app.httpErrors.notFound("Mailbox not found");
+    const passwordHash = body.password ? await bcrypt.hash(body.password, 12) : mailbox.passwordHash;
+    const data = { quotaMb: body.quotaMb, enabled: body.enabled, ...(body.password ? { passwordHash } : {}) };
+    assertLiveMailProvisioning(await sysagent.createMailbox({
+      email: `${mailbox.username}@${mailbox.domain.name}`,
+      quotaMb: body.quotaMb ?? mailbox.quotaMb,
+      passwordHash,
+      enabled: body.enabled ?? mailbox.enabled
+    }), `Mailbox ${mailbox.username}@${mailbox.domain.name}`);
+    await prisma.mailAccount.update({ where: { id: mailbox.id }, data });
     await audit(request, { action: "UPDATE", resource: "mail_account", resourceId: mailboxId, description: "Account updated mailbox" });
     return { ok: true };
   });
@@ -3377,7 +3375,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const { mailboxId } = z.object({ mailboxId: z.string() }).parse(request.params);
     const mailbox = await prisma.mailAccount.findFirst({ where: { id: mailboxId, accountId: accountId(request) }, include: { domain: true } });
     if (!mailbox) throw app.httpErrors.notFound("Mailbox not found");
-    await sysagent.deleteMailbox({ email: `${mailbox.username}@${mailbox.domain.name}` });
+    assertLiveMailProvisioning(await sysagent.deleteMailbox({ email: `${mailbox.username}@${mailbox.domain.name}` }), `Delete mailbox ${mailbox.username}@${mailbox.domain.name}`);
     await prisma.mailAccount.delete({ where: { id: mailbox.id } });
     await audit(request, { action: "DELETE", resource: "mail_account", resourceId: mailbox.id, description: "Account deleted mailbox" });
     return { ok: true };

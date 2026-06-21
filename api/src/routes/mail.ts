@@ -12,6 +12,8 @@ import { prisma } from "../lib/prisma.js";
 import { currentVpsIp } from "../lib/serverIp.js";
 import { sysagent } from "../lib/sysagent.js";
 import { syncMailboxInbox } from "../lib/mailInboxSync.js";
+import { managedMailDnsValuePrefix } from "../lib/mailDns.js";
+import { assertLiveMailProvisioning } from "../lib/mailProvisioning.js";
 
 const mailboxSchema = z.object({
   domainId: z.string(),
@@ -69,13 +71,6 @@ const mailSecuritySchema = z.object({ enableClamav: z.boolean().default(false) }
 export const mailRoutes: FastifyPluginAsync = async (app) => {
   app.addHook("preHandler", app.requireAuth);
 
-  async function bestEffortSysagent(request: any, action: () => Promise<unknown>) {
-    return action().catch((error) => {
-      request.log.warn({ error }, "mail sysagent bridge failed");
-      return { dryRun: true, unavailable: true, error: error instanceof Error ? error.message : "sysagent unavailable" };
-    });
-  }
-
   app.get("/server/status", async () => {
     const [stack, firewall] = await Promise.all([
       sysagent.mailStackStatus(),
@@ -123,6 +118,7 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
 
   app.post("/accounts", async (request, reply) => {
     const body = mailboxSchema.parse(request.body);
+    const domain = await prisma.domain.findUniqueOrThrow({ where: { id: body.domainId } });
     const passwordHash = await bcrypt.hash(body.password, 12);
     const account = await prisma.mailAccount.create({
       data: {
@@ -132,8 +128,15 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
         quotaMb: body.quotaMb
       }
     });
-    const domain = await prisma.domain.findUniqueOrThrow({ where: { id: account.domainId } });
-    await bestEffortSysagent(request, () => sysagent.createMailbox({ email: `${account.username}@${domain.name}`, quotaMb: account.quotaMb, passwordHash, enabled: account.enabled }));
+    try {
+      assertLiveMailProvisioning(
+        await sysagent.createMailbox({ email: `${account.username}@${domain.name}`, quotaMb: account.quotaMb, passwordHash, enabled: account.enabled }),
+        `Mailbox ${account.username}@${domain.name}`
+      );
+    } catch (error) {
+      await prisma.mailAccount.delete({ where: { id: account.id } });
+      throw error;
+    }
     await audit(request, { action: "CREATE", resource: "mail_account", resourceId: account.id, description: `Created mailbox ${account.username}` });
     return reply.code(201).send(account);
   });
@@ -141,29 +144,30 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
   app.patch("/accounts/:accountId", async (request) => {
     const { accountId } = z.object({ accountId: z.string() }).parse(request.params);
     const body = updateMailboxSchema.parse(request.body);
-    const account = await prisma.mailAccount.update({ where: { id: accountId }, data: body, include: { domain: true } });
-    await bestEffortSysagent(request, () => sysagent.createMailbox({
+    const account = await prisma.mailAccount.findUniqueOrThrow({ where: { id: accountId }, include: { domain: true } });
+    const next = { quotaMb: body.quotaMb ?? account.quotaMb, enabled: body.enabled ?? account.enabled };
+    assertLiveMailProvisioning(await sysagent.createMailbox({
       email: `${account.username}@${account.domain.name}`,
-      quotaMb: account.quotaMb,
+      quotaMb: next.quotaMb,
       passwordHash: account.passwordHash,
-      enabled: account.enabled
-    }));
-    return account;
+      enabled: next.enabled
+    }), `Mailbox ${account.username}@${account.domain.name}`);
+    return prisma.mailAccount.update({ where: { id: accountId }, data: body, include: { domain: true } });
   });
 
   app.post("/accounts/:accountId/reset-password", async (request) => {
     const { accountId } = z.object({ accountId: z.string() }).parse(request.params);
     const body = resetPasswordSchema.parse(request.body);
     const passwordHash = await bcrypt.hash(body.password, 12);
-    const account = await prisma.mailAccount.update({ where: { id: accountId }, data: { passwordHash }, include: { domain: true } });
-    await bestEffortSysagent(request, () => sysagent.createMailbox({ email: `${account.username}@${account.domain.name}`, quotaMb: account.quotaMb, passwordHash, enabled: account.enabled }));
-    return account;
+    const account = await prisma.mailAccount.findUniqueOrThrow({ where: { id: accountId }, include: { domain: true } });
+    assertLiveMailProvisioning(await sysagent.createMailbox({ email: `${account.username}@${account.domain.name}`, quotaMb: account.quotaMb, passwordHash, enabled: account.enabled }), `Mailbox ${account.username}@${account.domain.name}`);
+    return prisma.mailAccount.update({ where: { id: accountId }, data: { passwordHash }, include: { domain: true } });
   });
 
   app.delete("/accounts/:accountId", async (request) => {
     const { accountId } = z.object({ accountId: z.string() }).parse(request.params);
     const account = await prisma.mailAccount.findUniqueOrThrow({ where: { id: accountId }, include: { domain: true } });
-    await sysagent.deleteMailbox({ email: `${account.username}@${account.domain.name}` });
+    assertLiveMailProvisioning(await sysagent.deleteMailbox({ email: `${account.username}@${account.domain.name}` }), `Delete mailbox ${account.username}@${account.domain.name}`);
     await prisma.mailAccount.delete({ where: { id: accountId } });
     return { ok: true };
   });
@@ -269,7 +273,7 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
     const domain = await prisma.domain.findUniqueOrThrow({ where: { id: body.domainId } });
     const source = body.source.includes("@") ? body.source : `${body.source}@${domain.name}`;
     if (!source.endsWith(`@${domain.name}`)) throw app.httpErrors.badRequest("Alias source must belong to the selected domain");
-    await sysagent.updateMailAlias({ source, target: body.target });
+    assertLiveMailProvisioning(await sysagent.updateMailAlias({ source, target: body.target }), `Alias ${source}`);
     const alias = await prisma.mailAlias.create({ data: body });
     await audit(request, { action: "CREATE", resource: "mail_alias", resourceId: alias.id, description: `Created mail alias ${alias.source}` });
     return reply.code(201).send(alias);
@@ -280,7 +284,7 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
     const alias = await prisma.mailAlias.findUniqueOrThrow({ where: { id: aliasId } });
     const domain = await prisma.domain.findUniqueOrThrow({ where: { id: alias.domainId } });
     const source = alias.source.includes("@") ? alias.source : `${alias.source}@${domain.name}`;
-    await sysagent.deleteMailAlias({ source });
+    assertLiveMailProvisioning(await sysagent.deleteMailAlias({ source }), `Delete alias ${source}`);
     await prisma.mailAlias.delete({ where: { id: aliasId } });
     return { ok: true };
   });
@@ -434,7 +438,7 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
     const records = mailDnsRecords(domain.id, domain.name, vpsIp);
     const changed = [];
     for (const record of records) {
-      const existing = await prisma.dnsRecord.findFirst({ where: { domainId, type: record.type, name: record.name } });
+      const existing = await findManagedMailDnsRecord(domainId, record);
       if (existing) {
         await prisma.dnsRecord.update({ where: { id: existing.id }, data: { value: record.value, ttl: record.ttl, priority: record.priority } });
         changed.push({ action: "updated", record });
@@ -454,7 +458,7 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
     const result = await sysagent.setupDkim({ domain: domain.name });
     const recordValue = typeof (result as any)?.recordValue === "string" ? (result as any).recordValue : null;
     if (recordValue) {
-      const existing = await prisma.dnsRecord.findFirst({ where: { domainId, type: "TXT", name: "mail._domainkey" } });
+      const existing = await findManagedMailDnsRecord(domainId, { type: "TXT", name: "mail._domainkey", value: recordValue });
       if (existing) {
         await prisma.dnsRecord.update({ where: { id: existing.id }, data: { value: recordValue, ttl: 3600 } });
       } else {
@@ -477,7 +481,7 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
       passwordHash: account.passwordHash,
       enabled: account.enabled
     }));
-    const result = await sysagent.syncMailboxes({ domain: domain.name, mailboxes });
+    const result = assertLiveMailProvisioning(await sysagent.syncMailboxes({ domain: domain.name, mailboxes }), `Mailbox sync for ${domain.name}`);
     await audit(request, { action: "APPLY", resource: "mailbox_sync", resourceId: domainId, description: `Synced ${mailboxes.length} mailboxes for ${domain.name}`, metadata: { count: mailboxes.length } });
     return reply.code(202).send({ ok: true, synced: mailboxes.length, result });
   });
@@ -507,7 +511,7 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
     const body = smtpConfigureSchema.parse(request.body ?? {});
     const domain = await prisma.domain.findUniqueOrThrow({ where: { id: domainId } });
     const hostname = body.hostname || `mail.${domain.name}`;
-    const result = await sysagent.configureSmtp({ domain: domain.name, hostname, messageRateLimit: body.messageRateLimit });
+    const result = assertLiveMailProvisioning(await sysagent.configureSmtp({ domain: domain.name, hostname, messageRateLimit: body.messageRateLimit }), `SMTP configuration for ${domain.name}`);
     await audit(request, { action: "APPLY", resource: "smtp", resourceId: domainId, description: `Configured SMTP submission for ${domain.name}`, metadata: { hostname, messageRateLimit: body.messageRateLimit } });
     return reply.code(202).send({ queued: false, result });
   });
@@ -534,7 +538,7 @@ function sameMailDnsRecord(existing: { type: string; name: string; value: string
 async function ensureMailDns(domainId: string, domainName: string) {
   const vpsIp = await currentVpsIp();
   for (const record of mailDnsRecords(domainId, domainName, vpsIp)) {
-    const existing = await prisma.dnsRecord.findFirst({ where: { domainId, type: record.type, name: record.name } });
+    const existing = await findManagedMailDnsRecord(domainId, record);
     if (existing) {
       await prisma.dnsRecord.update({ where: { id: existing.id }, data: { value: record.value, ttl: record.ttl, priority: record.priority } });
     } else {
@@ -545,5 +549,17 @@ async function ensureMailDns(domainId: string, domainName: string) {
 }
 
 function mailCommandSucceeded(result: { returncode?: number; dryRun?: boolean }) {
-  return result.dryRun === true || result.returncode === 0;
+  return result.dryRun !== true && result.returncode === 0;
+}
+
+async function findManagedMailDnsRecord(domainId: string, record: { type: string; name: string; value: string }) {
+  const prefix = managedMailDnsValuePrefix(record.type, record.value);
+  return prisma.dnsRecord.findFirst({
+    where: {
+      domainId,
+      type: record.type as any,
+      name: record.name,
+      ...(prefix ? { value: { startsWith: prefix, mode: "insensitive" as const } } : {})
+    }
+  });
 }
