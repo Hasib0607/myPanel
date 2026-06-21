@@ -32,7 +32,7 @@ type RuntimeReviewError = {
     failed?: Array<{ tool?: string; error?: string }>;
   } | null;
 };
-type Mailbox = { id: string; username: string; quotaMb: number; enabled: boolean; domain?: { name: string } };
+type Mailbox = { id: string; username: string; quotaMb: number; enabled: boolean; domain?: { id: string; name: string } };
 type AccountDatabase = { id: string; engine: string; database: string; username: string };
 type FileEntry = { name: string; path: string; type: "directory" | "file"; size: number; modifiedAt: string };
 type Dashboard = {
@@ -376,8 +376,8 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
 
   const data = dashboard.data;
   const domains = data?.domains ?? [];
-  const mailOpsDomainId = mailDraft.domainId || domains[0]?.id || "";
-  const mailOpsDomainName = domains.find((domain) => domain.id === mailOpsDomainId)?.name || domains[0]?.name || "domain";
+  const mailOpsDomainId = mailDraft.domainId;
+  const mailOpsDomainName = domains.find((domain) => domain.id === mailOpsDomainId)?.name || "selected domain";
   const isDashboard = view === "dashboard";
   const showDomains = view === "domains";
   const showMail = view === "mail";
@@ -528,6 +528,7 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
                         <button className="text-panel-accent hover:underline" onClick={() => copyText(mailboxAddress(mailbox), "Mailbox address copied.")} type="button">Copy email</button>
                         <button className="text-panel-accent hover:underline" onClick={() => copyText(`${webmailUrl}\nEmail: ${mailboxAddress(mailbox)}`, "Webmail login details copied.")} type="button">Copy login</button>
                         <button className="text-panel-accent hover:underline" onClick={() => copyText(mailboxSmtpSettings(mailbox), "SMTP settings copied.")} type="button">Copy SMTP</button>
+                        <button className="text-panel-accent hover:underline disabled:cursor-not-allowed disabled:opacity-50" disabled={!mailbox.domain?.id || configureSmtp.isPending} onClick={() => mailbox.domain?.id && configureSmtp.mutate(mailbox.domain.id)} type="button">Configure SMTP</button>
                       </div>
                     </td>
                     <td className="px-4 py-3">
