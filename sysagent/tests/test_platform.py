@@ -174,6 +174,20 @@ class PlatformMappingTests(unittest.TestCase):
         self.assertEqual(packages_for("dovecot", self.alma), ["dovecot"])
         self.assertEqual(service_spec("dovecot", self.alma).packages, ("dovecot",))
 
+    def test_mail_stack_install_plan_covers_packages_and_services(self) -> None:
+        ubuntu_plan = install_plan_for("mail_stack", self.ubuntu)
+        self.assertIn("postfix", ubuntu_plan.packages)
+        self.assertIn("dovecot-imapd", ubuntu_plan.packages)
+        self.assertIn("opendkim", ubuntu_plan.packages)
+        self.assertIn("certbot", ubuntu_plan.packages)
+        self.assertEqual([step.command[-1] for step in ubuntu_plan.steps[-3:]], ["postfix", "dovecot", "opendkim"])
+
+        alma_plan = install_plan_for("mail_stack", self.alma)
+        self.assertIn("postfix", alma_plan.packages)
+        self.assertIn("dovecot", alma_plan.packages)
+        self.assertIn("opendkim", alma_plan.packages)
+        self.assertEqual(alma_plan.steps[0].command, CRB_ENABLE_COMMAND)
+
     def test_platform_paths(self) -> None:
         ubuntu_paths = platform_paths(self.ubuntu)
         alma_paths = platform_paths(self.alma)

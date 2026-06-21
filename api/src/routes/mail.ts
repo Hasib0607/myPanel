@@ -1,9 +1,12 @@
 import bcrypt from "bcrypt";
+import path from "node:path";
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
+import { env } from "../config/env.js";
 import { mailQueue } from "../jobs/queues.js";
 import { audit } from "../lib/audit.js";
 import { publishDomainDnsZone } from "../lib/domainDnsPublish.js";
+import { nginxResourceName } from "../lib/nginxNames.js";
 import { prisma } from "../lib/prisma.js";
 import { currentVpsIp } from "../lib/serverIp.js";
 import { sysagent } from "../lib/sysagent.js";
@@ -49,7 +52,7 @@ const composeSchema = z.object({
 
 const smtpConfigureSchema = z.object({
   hostname: z.string().trim().min(1).optional(),
-  messageRateLimit: z.string().trim().min(1).max(40).default("60/minute")
+  messageRateLimit: z.string().trim().regex(/^\d+$/).default("60")
 });
 
 export const mailRoutes: FastifyPluginAsync = async (app) => {
@@ -61,6 +64,33 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
       return { dryRun: true, unavailable: true, error: error instanceof Error ? error.message : "sysagent unavailable" };
     });
   }
+
+  app.get("/server/status", async () => {
+    const [stack, firewall] = await Promise.all([
+      sysagent.mailStackStatus(),
+      sysagent.mailFirewallStatus()
+    ]);
+    return { stack, firewall };
+  });
+
+  app.post("/server/install", async (request, reply) => {
+    const result = await sysagent.installMailStack();
+    await audit(request, { action: "APPLY", resource: "mail_stack", description: "Installed and started the mail server stack" });
+    return reply.code(202).send(result);
+  });
+
+  app.post("/server/firewall/apply", async (request, reply) => {
+    const result = await sysagent.applyMailFirewall();
+    const ports = [25, 143, 465, 587, 993];
+    for (const port of ports) {
+      const existing = await prisma.firewallRule.findFirst({ where: { port, protocol: "tcp", direction: "IN", action: "ALLOW" } });
+      if (!existing) {
+        await prisma.firewallRule.create({ data: { port, protocol: "tcp", direction: "IN", action: "ALLOW", note: "Mail server preset" } });
+      }
+    }
+    await audit(request, { action: "APPLY", resource: "mail_firewall", description: "Opened mail server firewall ports", metadata: { ports } });
+    return reply.code(202).send(result);
+  });
 
   app.get("/accounts", async (request) => {
     const query = z.object({ domainId: z.string().optional() }).parse(request.query);
@@ -256,6 +286,79 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
     };
   });
 
+  app.get("/domains/:domainId/tls/status", async (request) => {
+    const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
+    const domain = await prisma.domain.findUniqueOrThrow({ where: { id: domainId } });
+    const hostname = `mail.${domain.name}`;
+    const certificate = await sysagent.certificateStatus(hostname);
+    return { hostname, ...certificate };
+  });
+
+  app.post("/domains/:domainId/tls/issue", async (request, reply) => {
+    const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
+    const body = z.object({ email: z.string().email().optional() }).parse(request.body ?? {});
+    const domain = await prisma.domain.findUniqueOrThrow({ where: { id: domainId } });
+    const hostname = `mail.${domain.name}`;
+    await ensureMailDns(domain.id, domain.name);
+    const webRoot = path.join(env.FILE_MANAGER_ROOT, domain.name, domain.documentRoot || "public_html");
+    await sysagent.writeStaticNginxVhost({
+      name: `mail-${nginxResourceName(domain.name)}`,
+      serverName: hostname,
+      rootPath: webRoot,
+      forceHttps: false
+    });
+    const preflight = await sysagent.sslPreflight({ domain: hostname, webRoot, includeWww: false });
+    if (!mailCommandSucceeded(preflight.certbot)) {
+      throw Object.assign(new Error(`Certbot is not ready for ${hostname}: ${preflight.certbot.stderr || "preflight failed"}`), { statusCode: 400 });
+    }
+    const checks = preflight.localChecks?.length ? preflight.localChecks : preflight.checks;
+    const failed = checks.find((check) => !mailCommandSucceeded(check));
+    if (failed) {
+      throw Object.assign(new Error(`ACME challenge failed for ${hostname}: ${failed.stderr || failed.stdout || "HTTP validation failed"}`), { statusCode: 400 });
+    }
+    const issue = await sysagent.issueCertificate({
+      domain: hostname,
+      email: body.email ?? `admin@${domain.name}`,
+      webRoot,
+      includeWww: false,
+      certName: hostname
+    });
+    if (!mailCommandSucceeded(issue)) {
+      throw Object.assign(new Error(`Certificate issue failed for ${hostname}: ${issue.stderr || issue.stdout || "Certbot failed"}`), { statusCode: 400 });
+    }
+    const certificate = await sysagent.certificateStatus(hostname);
+    if (!certificate.exists) throw Object.assign(new Error(`Certbot completed but no certificate was found for ${hostname}`), { statusCode: 500 });
+    const attach = await sysagent.configureSmtp({
+      domain: domain.name,
+      hostname,
+      certificatePath: certificate.certificate,
+      keyPath: certificate.privateKey,
+      messageRateLimit: "60"
+    });
+    await audit(request, { action: "APPLY", resource: "mail_tls", resourceId: domainId, description: `Issued and attached mail TLS for ${hostname}` });
+    return reply.code(202).send({ hostname, preflight, issue, certificate, attach });
+  });
+
+  app.post("/domains/:domainId/tls/renew", async (request, reply) => {
+    const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
+    const domain = await prisma.domain.findUniqueOrThrow({ where: { id: domainId } });
+    const hostname = `mail.${domain.name}`;
+    const renew = await sysagent.renewCertificate(hostname);
+    if (!mailCommandSucceeded(renew)) {
+      throw Object.assign(new Error(`Certificate renewal failed for ${hostname}: ${renew.stderr || renew.stdout || "Certbot failed"}`), { statusCode: 400 });
+    }
+    const certificate = await sysagent.certificateStatus(hostname);
+    const attach = await sysagent.configureSmtp({
+      domain: domain.name,
+      hostname,
+      certificatePath: certificate.certificate,
+      keyPath: certificate.privateKey,
+      messageRateLimit: "60"
+    });
+    await audit(request, { action: "APPLY", resource: "mail_tls", resourceId: domainId, description: `Renewed and reattached mail TLS for ${hostname}` });
+    return reply.code(202).send({ hostname, renew, certificate, attach });
+  });
+
   app.get("/domains/:domainId/dns-recommendations", async (request) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const domain = await prisma.domain.findUniqueOrThrow({ where: { id: domainId }, include: { dnsRecords: true } });
@@ -336,4 +439,21 @@ function mailDnsRecords(domainId: string, domain: string, vpsIp: string) {
 
 function sameMailDnsRecord(existing: { type: string; name: string; value: string; priority: number | null }, record: { type: string; name: string; value: string; priority: number | null }) {
   return existing.type === record.type && existing.name === record.name && existing.value === record.value && (existing.priority ?? null) === (record.priority ?? null);
+}
+
+async function ensureMailDns(domainId: string, domainName: string) {
+  const vpsIp = await currentVpsIp();
+  for (const record of mailDnsRecords(domainId, domainName, vpsIp)) {
+    const existing = await prisma.dnsRecord.findFirst({ where: { domainId, type: record.type, name: record.name } });
+    if (existing) {
+      await prisma.dnsRecord.update({ where: { id: existing.id }, data: { value: record.value, ttl: record.ttl, priority: record.priority } });
+    } else {
+      await prisma.dnsRecord.create({ data: record });
+    }
+  }
+  return publishDomainDnsZone(domainId);
+}
+
+function mailCommandSucceeded(result: { returncode?: number; dryRun?: boolean }) {
+  return result.dryRun === true || result.returncode === 0;
 }

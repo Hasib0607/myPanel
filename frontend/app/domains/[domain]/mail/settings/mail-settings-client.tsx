@@ -1,8 +1,9 @@
 "use client";
 
 import { useState } from "react";
+import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, CircleAlert, Copy, RefreshCw, Server, ShieldCheck } from "lucide-react";
+import { CheckCircle2, CircleAlert, Copy, Download, LockKeyhole, RefreshCw, Server, Shield, ShieldCheck } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
 
 type AuthStatus = {
@@ -33,20 +34,78 @@ type DnsRecommendation = {
   }>;
 };
 
+type ServerStatus = {
+  stack: {
+    commands?: Record<string, boolean>;
+    services?: Record<string, { returncode?: number; stdout?: string }>;
+  };
+  firewall: {
+    requiredPorts?: number[];
+    rules?: { stdout?: string };
+  };
+};
+
+type MailTlsStatus = {
+  hostname: string;
+  exists: boolean;
+  expiry: string | null;
+  names?: string[];
+};
+
 export function MailSettingsClient({ domainId }: { domainId: string }) {
   const queryClient = useQueryClient();
   const [notice, setNotice] = useState("");
   const authStatus = useQuery({ queryKey: ["mail-auth-status", domainId], queryFn: () => apiGet<AuthStatus>(`/mail/domains/${domainId}/auth-status`) });
   const smtp = useQuery({ queryKey: ["mail-smtp-settings", domainId], queryFn: () => apiGet<SmtpSettings>(`/mail/domains/${domainId}/smtp-settings`) });
   const dns = useQuery({ queryKey: ["mail-dns-recommendations", domainId], queryFn: () => apiGet<DnsRecommendation>(`/mail/domains/${domainId}/dns-recommendations`) });
+  const server = useQuery({ queryKey: ["mail-server-status"], queryFn: () => apiGet<ServerStatus>("/mail/server/status") });
+  const tls = useQuery({ queryKey: ["mail-tls-status", domainId], queryFn: () => apiGet<MailTlsStatus>(`/mail/domains/${domainId}/tls/status`) });
 
   const invalidate = async () => {
     await queryClient.invalidateQueries({ queryKey: ["mail-auth-status", domainId] });
     await queryClient.invalidateQueries({ queryKey: ["mail-dns-recommendations", domainId] });
+    await queryClient.invalidateQueries({ queryKey: ["mail-server-status"] });
+    await queryClient.invalidateQueries({ queryKey: ["mail-tls-status", domainId] });
   };
 
+  const installStack = useMutation({
+    mutationFn: () => apiPost("/mail/server/install", {}),
+    onSuccess: async () => {
+      setNotice("Postfix, Dovecot, OpenDKIM, and Certbot installed and started.");
+      await invalidate();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not install mail stack.")
+  });
+
+  const applyFirewall = useMutation({
+    mutationFn: () => apiPost("/mail/server/firewall/apply", {}),
+    onSuccess: async () => {
+      setNotice("Mail ports opened in the active firewall backend.");
+      await invalidate();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not apply mail firewall ports.")
+  });
+
+  const issueTls = useMutation({
+    mutationFn: () => apiPost(`/mail/domains/${domainId}/tls/issue`, {}),
+    onSuccess: async () => {
+      setNotice("Mail TLS certificate issued and attached to Postfix/Dovecot.");
+      await invalidate();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not issue mail TLS.")
+  });
+
+  const renewTls = useMutation({
+    mutationFn: () => apiPost(`/mail/domains/${domainId}/tls/renew`, {}),
+    onSuccess: async () => {
+      setNotice("Mail TLS certificate renewed and reattached.");
+      await invalidate();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not renew mail TLS.")
+  });
+
   const configureSmtp = useMutation({
-    mutationFn: () => apiPost(`/mail/domains/${domainId}/smtp/configure`, { messageRateLimit: "60/minute" }),
+    mutationFn: () => apiPost(`/mail/domains/${domainId}/smtp/configure`, { messageRateLimit: "60" }),
     onSuccess: async () => {
       setNotice("SMTP submission configuration applied.");
       await invalidate();
@@ -88,6 +147,36 @@ export function MailSettingsClient({ domainId }: { domainId: string }) {
   return (
     <section className="space-y-6 p-8">
       {notice ? <div className="rounded-md border border-panel-line bg-white p-3 text-sm text-slate-700">{notice}</div> : null}
+
+      <div className="grid gap-4 lg:grid-cols-3">
+        <SetupCard
+          action={server.data?.stack.commands && Object.values(server.data.stack.commands).every(Boolean) ? "Installed" : "Install stack"}
+          busy={installStack.isPending}
+          description="Postfix, Dovecot, OpenDKIM, and Certbot"
+          icon={<Download size={18} />}
+          onClick={() => installStack.mutate()}
+          ready={Boolean(server.data?.stack.commands && Object.values(server.data.stack.commands).every(Boolean))}
+          title="Mail packages"
+        />
+        <SetupCard
+          action="Open ports"
+          busy={applyFirewall.isPending}
+          description="TCP 25, 143, 465, 587, and 993"
+          icon={<Shield size={18} />}
+          onClick={() => applyFirewall.mutate()}
+          ready={Boolean(server.data?.firewall.rules?.stdout && [25, 143, 465, 587, 993].every((port) => server.data?.firewall.rules?.stdout?.includes(String(port))))}
+          title="Mail firewall"
+        />
+        <SetupCard
+          action={tls.data?.exists ? "Renew TLS" : "Issue TLS"}
+          busy={issueTls.isPending || renewTls.isPending}
+          description={tls.data?.exists ? `${tls.data.hostname} · expires ${tls.data.expiry ? new Date(tls.data.expiry).toLocaleDateString() : "unknown"}` : (tls.data?.hostname ?? "mail.domain.com")}
+          icon={<LockKeyhole size={18} />}
+          onClick={() => tls.data?.exists ? renewTls.mutate() : issueTls.mutate()}
+          ready={Boolean(tls.data?.exists)}
+          title="Mail TLS"
+        />
+      </div>
 
       <div className="grid gap-6 xl:grid-cols-[1fr_1fr]">
         <div className="rounded-md border border-panel-line bg-white">
@@ -175,6 +264,26 @@ function Row({ label, value }: { label: string; value: string }) {
     <div className="grid grid-cols-[110px_1fr] gap-3">
       <div className="text-panel-muted">{label}</div>
       <div className="font-medium">{value}</div>
+    </div>
+  );
+}
+
+function SetupCard({ title, description, action, ready, busy, icon, onClick }: { title: string; description: string; action: string; ready: boolean; busy: boolean; icon: ReactNode; onClick: () => void }) {
+  return (
+    <div className="rounded-md border border-panel-line bg-white p-4">
+      <div className="mb-4 flex items-start justify-between gap-3">
+        <div className="flex items-start gap-3">
+          <span className="grid h-9 w-9 place-items-center rounded-md bg-slate-100 text-panel-text">{icon}</span>
+          <div>
+            <div className="font-semibold text-panel-text">{title}</div>
+            <div className="mt-1 text-xs text-panel-muted">{description}</div>
+          </div>
+        </div>
+        {ready ? <CheckCircle2 className="shrink-0 text-emerald-600" size={18} /> : <CircleAlert className="shrink-0 text-panel-warn" size={18} />}
+      </div>
+      <button className="h-9 w-full rounded-md border border-panel-line text-sm font-semibold hover:bg-slate-50 disabled:opacity-60" disabled={busy} onClick={onClick} type="button">
+        {busy ? "Working..." : action}
+      </button>
     </div>
   );
 }

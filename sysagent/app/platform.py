@@ -330,6 +330,7 @@ PACKAGE_SETS: dict[OsFamily, dict[str, tuple[str, ...]]] = {
         "bind9": ("bind9", "bind9utils", "bind9-doc"),
         "postfix": ("postfix",),
         "dovecot": DEBIAN_DOVECOT_PACKAGES,
+        "mail_stack": ("postfix", *DEBIAN_DOVECOT_PACKAGES, "opendkim", "opendkim-tools", "certbot"),
         "redis": ("redis-server",),
         "postgresql": ("postgresql", "postgresql-contrib"),
         "mysql_database": ("mariadb-server", "mariadb-client"),
@@ -405,6 +406,7 @@ PACKAGE_SETS: dict[OsFamily, dict[str, tuple[str, ...]]] = {
         "bind9": ("bind", "bind-utils"),
         "postfix": ("postfix",),
         "dovecot": RHEL_DOVECOT_PACKAGES,
+        "mail_stack": ("postfix", *RHEL_DOVECOT_PACKAGES, "opendkim", "certbot"),
         "redis": ("redis",),
         "postgresql": ("postgresql-server", "postgresql-contrib"),
         "mysql_database": ("mariadb", "mariadb-server"),
@@ -435,7 +437,7 @@ PACKAGE_SETS: dict[OsFamily, dict[str, tuple[str, ...]]] = {
 }
 
 # Package keys that require EPEL on AlmaLinux/RHEL before dnf install.
-EPEL_PACKAGE_KEYS = frozenset({"certbot", "composer", "supervisor", "rclone"})
+EPEL_PACKAGE_KEYS = frozenset({"certbot", "composer", "supervisor", "rclone", "mail_stack"})
 
 SERVICE_SPECS: dict[OsFamily, dict[str, ServiceSpec]] = {
     OsFamily.DEBIAN: {
@@ -977,6 +979,28 @@ def dovecot_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPla
     )
 
 
+def mail_stack_install_plan(info: OsReleaseInfo | None = None) -> PackageInstallPlan:
+    packages = tuple(packages_for("mail_stack", info))
+    prerequisites = epel_prerequisite_steps(info) if package_requires_epel("mail_stack", info) else ()
+    return PackageInstallPlan(
+        key="mail_stack",
+        packages=packages,
+        steps=(
+            *prerequisites,
+            InstallStep(
+                "Install Postfix, Dovecot, OpenDKIM, and Certbot",
+                tuple(package_install_command(list(packages), info)),
+                env=package_install_env(info),
+                skip_if=package_installed_command(packages, info),
+            ),
+            InstallStep("Enable and start Postfix", ("systemctl", "enable", "--now", service_unit("postfix", info))),
+            InstallStep("Enable and start Dovecot", ("systemctl", "enable", "--now", service_unit("dovecot", info))),
+            InstallStep("Enable and start OpenDKIM", ("systemctl", "enable", "--now", "opendkim")),
+        ),
+        notes="Installs and starts the complete SMTP/IMAP signing stack plus Certbot for mail-host TLS.",
+    )
+
+
 def install_plan_for(key: str, info: OsReleaseInfo | None = None) -> PackageInstallPlan:
     if key == "certbot":
         return certbot_install_plan(info)
@@ -996,6 +1020,8 @@ def install_plan_for(key: str, info: OsReleaseInfo | None = None) -> PackageInst
         return php_sodium_install_plan(info)
     if key == "dovecot":
         return dovecot_install_plan(info)
+    if key == "mail_stack":
+        return mail_stack_install_plan(info)
 
     packages = tuple(packages_for(key, info))
     if package_requires_epel(key, info):

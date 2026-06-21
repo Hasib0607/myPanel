@@ -6,8 +6,10 @@ import shutil
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from app.command import run_command
+from app.command import run_command, run_install_plan
 from app.config import settings
+from app.firewall_backend import apply_rule_command, list_rules_command
+from app.platform import current_os, install_plan_for
 
 router = APIRouter()
 
@@ -17,7 +19,7 @@ class MailDomain(BaseModel):
     hostname: str | None = None
     certificatePath: str | None = None
     keyPath: str | None = None
-    messageRateLimit: str = "60/minute"
+    messageRateLimit: str = "60"
 
 
 class MailboxRequest(BaseModel):
@@ -37,6 +39,7 @@ DOVECOT_USERS = Path("/etc/dovecot/users")
 DOVECOT_PANEL_AUTH = Path("/etc/dovecot/conf.d/10-vps-panel-auth.conf")
 DOVECOT_PANEL_MAIL = Path("/etc/dovecot/conf.d/10-vps-panel-mail.conf")
 DOVECOT_PANEL_SSL = Path("/etc/dovecot/conf.d/10-vps-panel-ssl.conf")
+CERTBOT_MAIL_DEPLOY_HOOK = Path("/etc/letsencrypt/renewal-hooks/deploy/vps-panel-mail-reload.sh")
 
 
 def dry_write(path: Path, content: str) -> dict:
@@ -113,6 +116,53 @@ def smtp_settings(hostname: str, certificate_path: str | None, key_path: str | N
             ("smtpd_tls_key_file", key_path),
         ])
     return settings_map
+
+
+@router.get("/stack/status")
+def mail_stack_status() -> dict:
+    return {
+        "platform": current_os().pretty_name,
+        "commands": {
+            "postfix": shutil.which("postfix") is not None,
+            "dovecot": shutil.which("dovecot") is not None,
+            "opendkim": shutil.which("opendkim") is not None,
+            "certbot": shutil.which("certbot") is not None,
+        },
+        "services": {
+            service: run_command(["systemctl", "is-active", service])
+            for service in ["postfix", "dovecot", "opendkim"]
+        },
+        "ports": run_command(["ss", "-ltn"]),
+        "liveCommandsEnabled": settings.allow_live_system_commands,
+    }
+
+
+@router.post("/stack/install")
+def install_mail_stack() -> dict:
+    plan = install_plan_for("mail_stack", current_os())
+    return run_install_plan(plan, timeout=1800)
+
+
+@router.get("/firewall/status")
+def mail_firewall_status() -> dict:
+    return {
+        "requiredPorts": [25, 143, 465, 587, 993],
+        "rules": run_command(list_rules_command()),
+        "listeners": run_command(["ss", "-ltn"]),
+    }
+
+
+@router.post("/firewall/apply")
+def apply_mail_firewall() -> dict:
+    ports = [25, 143, 465, 587, 993]
+    return {
+        "ports": ports,
+        "results": [
+            run_command(apply_rule_command(action="ALLOW", port=port, protocol="tcp", source_ip=None))
+            for port in ports
+        ],
+        "rules": run_command(list_rules_command()),
+    }
 
 
 @router.post("/dkim")
@@ -229,7 +279,17 @@ ssl_key = <{key_path}
         "mail": dry_write(DOVECOT_PANEL_MAIL, mail_conf),
         "ssl": dry_write(DOVECOT_PANEL_SSL, ssl_conf),
         "users": dry_write(DOVECOT_USERS, DOVECOT_USERS.read_text(encoding="utf-8") if DOVECOT_USERS.exists() else ""),
+        "certbotDeployHook": dry_write(
+            CERTBOT_MAIL_DEPLOY_HOOK,
+            "#!/usr/bin/env bash\nset -euo pipefail\nsystemctl reload postfix dovecot opendkim\n",
+        ),
     }
+    if settings.allow_live_system_commands:
+        try:
+            os.chmod(CERTBOT_MAIL_DEPLOY_HOOK, 0o750)
+        except OSError:
+            pass
+    certbot_timer = run_command(["sh", "-lc", "systemctl enable --now certbot.timer 2>/dev/null || true"])
     reload_result = reload_mail_services()
     return {
         "domain": domain,
@@ -243,6 +303,7 @@ ssl_key = <{key_path}
         "postmapDomains": postmap_domains,
         "submission": [submission, submission_tls, submission_auth, submission_relay, submission_tls_only],
         "files": files,
+        "certbotTimer": certbot_timer,
         "reload": reload_result,
         "commandsAvailable": {
             "postconf": shutil.which("postconf") is not None,
