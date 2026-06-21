@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from app.mail_utils import dovecot_password_hash, dovecot_user_line, mail_milter_settings, mail_security_postfix_settings, mail_security_profile, smtp_settings
 from app.routers import mail_config
-from app.routers.mail_config import IncomingHealthRequest, MailDomain, MailQueueActionRequest, MailboxRequest, SmtpHealthRequest, dry_write, incoming_health_test, mail_diagnostics, mail_queue_action, optional_reload_service, parse_maildir_message, policy_config_from_mailboxes, policy_restriction, policy_script_source, policy_service_restriction, smtp_health_test
+from app.routers.mail_config import IncomingHealthRequest, MailDomain, MailQueueActionRequest, MailboxRequest, SmtpHealthRequest, dry_write, incoming_health_test, listener_is_public, mail_diagnostics, mail_queue_action, optional_reload_service, parse_maildir_message, policy_config_from_mailboxes, policy_restriction, policy_script_source, policy_service_restriction, smtp_health_test
 
 
 class MailConfigTests(unittest.TestCase):
@@ -29,6 +29,12 @@ class MailConfigTests(unittest.TestCase):
         self.assertEqual(config["smtpd_client_message_rate_limit"], "60")
         self.assertEqual(config["smtpd_client_recipient_rate_limit"], "600")
         self.assertEqual(config["smtpd_client_connection_rate_limit"], "30")
+        self.assertEqual(config["inet_interfaces"], "all")
+        self.assertEqual(config["inet_protocols"], "ipv4")
+
+    def test_listener_public_bind_detection_distinguishes_loopback(self):
+        self.assertFalse(listener_is_public("LISTEN 0 100 127.0.0.1:587 0.0.0.0:*", 587))
+        self.assertTrue(listener_is_public("LISTEN 0 100 0.0.0.0:587 0.0.0.0:*", 587))
 
     def test_dovecot_user_has_maildir_and_per_mailbox_quota(self):
         line = dovecot_user_line("sales@example.com", "$2b$12$hash", "/var/mail/vhosts/example.com/sales", 2048)

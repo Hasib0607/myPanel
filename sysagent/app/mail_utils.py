@@ -23,6 +23,8 @@ def smtp_settings(hostname: str, certificate_path: str | None, key_path: str | N
         ("smtpd_tls_security_level", "may"),
         ("smtpd_tls_auth_only", "yes"),
         ("smtpd_recipient_restrictions", "permit_sasl_authenticated,reject_unauth_destination"),
+        ("inet_interfaces", "all"),
+        ("inet_protocols", "ipv4"),
         ("virtual_mailbox_domains", "hash:/etc/postfix/vmaildomains"),
         ("virtual_mailbox_maps", "hash:/etc/postfix/vmailbox"),
         ("virtual_transport", "lmtp:unix:private/dovecot-lmtp"),

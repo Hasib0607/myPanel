@@ -534,6 +534,17 @@ def health_check(key: str, label: str, ok: bool, detail: str) -> dict:
     return {"key": key, "label": label, "ok": ok, "detail": detail}
 
 
+def listener_lines(listener_text: str, port: int) -> list[str]:
+    return [line for line in listener_text.splitlines() if re.search(rf"[:.]({port})\s", line) or re.search(rf"[:.]({port})$", line)]
+
+
+def listener_is_public(listener_text: str, port: int) -> bool:
+    lines = listener_lines(listener_text, port)
+    public_markers = ("0.0.0.0", "*:", "[::]", ":::", f":{port} ")
+    loopback_markers = ("127.0.0.1", "::1", "localhost")
+    return any(any(marker in line for marker in public_markers) and not any(marker in line for marker in loopback_markers) for line in lines)
+
+
 def relay_abuse_check() -> dict:
     if not settings.allow_live_system_commands:
         return health_check("relay", "Unauthenticated relay", False, "Not tested: live system commands are disabled.")
@@ -1293,9 +1304,11 @@ def mail_diagnostics(payload: MailDomain) -> dict:
     auth_log = run_command(["journalctl", "--since", "24 hours ago", "-u", "postfix", "-u", "dovecot", "--no-pager", "-n", "500"])
     failed_lines = [line for line in auth_log.get("stdout", "").splitlines() if re.search(r"auth(?:entication)? failed|sasl.*fail|password mismatch", line, re.I)]
     live = settings.allow_live_system_commands
+    mail_ports = (25, 465, 587, 993, *([995] if payload.pop3Enabled else []))
     checks = [
         *[health_check(f"service_{name}", f"{name.title()} running", live and result.get("returncode") == 0 and result.get("stdout", "").strip() == "active", result.get("stdout", "").strip() or result.get("stderr", "Not tested")) for name, result in services.items()],
-        *[health_check(f"port_{port}", f"Port {port} listening", live and (f":{port} " in listener_text or f":{port}\n" in listener_text), "Listening" if live and f":{port}" in listener_text else "No live listener found") for port in (25, 465, 587, 993, *([995] if payload.pop3Enabled else []))],
+        *[health_check(f"port_{port}", f"Port {port} listening", live and bool(listener_lines(listener_text, port)), "\n".join(listener_lines(listener_text, port)) or "No live listener found") for port in mail_ports],
+        *[health_check(f"public_bind_{port}", f"Port {port} public bind", live and listener_is_public(listener_text, port), "\n".join(listener_lines(listener_text, port)) or "No public listener found") for port in (25, 465, 587)],
         health_check("policy_service", "Per-mailbox SMTP policy", live and run_command(["systemctl", "is-active", "vps-panel-mail-policy"]).get("stdout", "").strip() == "active", "Postfix policy service on 127.0.0.1:10031"),
         health_check("pop3_config", "POP3 production validation", live and ((not payload.pop3Enabled) or " pop3" in run_command(["doveconf", "-n"]).get("stdout", "")), "POP3 disabled" if not payload.pop3Enabled else "Dovecot POP3 protocol and port 995 checked"),
         health_check("tls", "TLS certificate valid", live and tls.get("returncode") == 0, tls.get("stdout", "").strip() or tls.get("stderr", "Certificate unavailable")),
