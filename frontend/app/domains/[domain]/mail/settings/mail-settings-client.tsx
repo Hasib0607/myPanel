@@ -18,7 +18,8 @@ type SmtpSettings = {
   ports: Array<{ port: number; security: string; recommended: boolean }>;
   auth: string;
   usernames: string[];
-  rateLimit: string;
+  rateLimit: number;
+  rateWindowSeconds: number;
   notes: string[];
 };
 
@@ -55,6 +56,7 @@ type MailTlsStatus = {
 export function MailSettingsClient({ domainId }: { domainId: string }) {
   const queryClient = useQueryClient();
   const [notice, setNotice] = useState("");
+  const [rateLimit, setRateLimit] = useState(60);
   const authStatus = useQuery({ queryKey: ["mail-auth-status", domainId], queryFn: () => apiGet<AuthStatus>(`/mail/domains/${domainId}/auth-status`) });
   const smtp = useQuery({ queryKey: ["mail-smtp-settings", domainId], queryFn: () => apiGet<SmtpSettings>(`/mail/domains/${domainId}/smtp-settings`) });
   const dns = useQuery({ queryKey: ["mail-dns-recommendations", domainId], queryFn: () => apiGet<DnsRecommendation>(`/mail/domains/${domainId}/dns-recommendations`) });
@@ -105,12 +107,21 @@ export function MailSettingsClient({ domainId }: { domainId: string }) {
   });
 
   const configureSmtp = useMutation({
-    mutationFn: () => apiPost(`/mail/domains/${domainId}/smtp/configure`, { messageRateLimit: "60" }),
+    mutationFn: () => apiPost(`/mail/domains/${domainId}/smtp/configure`, { messageRateLimit: rateLimit }),
     onSuccess: async () => {
       setNotice("SMTP submission configuration applied.");
       await invalidate();
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not configure SMTP.")
+  });
+
+  const syncMailboxes = useMutation({
+    mutationFn: () => apiPost<{ synced: number }>(`/mail/domains/${domainId}/mailboxes/sync`, {}),
+    onSuccess: async (result) => {
+      setNotice(`${result.synced} mailbox(es) synced to Dovecot with passwords and quotas.`);
+      await invalidate();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not sync mailboxes.")
   });
 
   const applyDns = useMutation({
@@ -201,9 +212,21 @@ export function MailSettingsClient({ domainId }: { domainId: string }) {
             <Row label="Port" value="587" />
             <Row label="Security" value="STARTTLS" />
             <Row label="Auth" value={smtp.data?.auth ?? "Full mailbox address and password"} />
-            <Row label="Rate limit" value={smtp.data?.rateLimit ?? "60/minute"} />
-            <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
-              Existing mailboxes need one password reset after SMTP is enabled so Dovecot can authenticate them.
+            <div className="grid grid-cols-[110px_1fr] items-center gap-3">
+              <label className="text-panel-muted" htmlFor="smtp-rate-limit">Rate limit</label>
+              <div className="flex items-center gap-2">
+                <input className="h-9 w-28 rounded-md border border-panel-line px-3 text-sm" id="smtp-rate-limit" min={1} max={10000} onChange={(event) => setRateLimit(Math.max(1, Math.min(10000, Number(event.target.value) || 1)))} type="number" value={rateLimit} />
+                <span className="text-xs text-panel-muted">messages/client/60 sec</span>
+              </div>
+            </div>
+            <div className="flex flex-col gap-3 rounded-md border border-panel-line bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <div className="text-xs font-semibold">Mailbox authentication and quota</div>
+                <div className="mt-1 text-xs text-panel-muted">Sync stored hashes, enabled state, and per-mailbox storage limits.</div>
+              </div>
+              <button className="h-9 shrink-0 rounded-md border border-panel-line bg-white px-3 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60" disabled={syncMailboxes.isPending} onClick={() => syncMailboxes.mutate()} type="button">
+                {syncMailboxes.isPending ? "Syncing..." : "Sync all mailboxes"}
+              </button>
             </div>
           </div>
         </div>

@@ -322,6 +322,8 @@ export const sysagent = {
     request("/mail-config/dkim", { method: "POST", body: JSON.stringify(body) }),
   createMailbox: (body: unknown) =>
     request("/mail-config/mailbox", { method: "POST", body: JSON.stringify(body) }),
+  syncMailboxes: (body: unknown) =>
+    request("/mail-config/mailboxes/sync", { method: "POST", body: JSON.stringify(body) }),
   updateMailAlias: (body: unknown) =>
     request("/mail-config/alias", { method: "POST", body: JSON.stringify(body) }),
   configureSmtp: (body: unknown) =>

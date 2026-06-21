@@ -52,7 +52,7 @@ const composeSchema = z.object({
 
 const smtpConfigureSchema = z.object({
   hostname: z.string().trim().min(1).optional(),
-  messageRateLimit: z.string().trim().regex(/^\d+$/).default("60")
+  messageRateLimit: z.coerce.number().int().min(1).max(10000).default(60)
 });
 
 export const mailRoutes: FastifyPluginAsync = async (app) => {
@@ -113,7 +113,7 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
       }
     });
     const domain = await prisma.domain.findUniqueOrThrow({ where: { id: account.domainId } });
-    await bestEffortSysagent(request, () => sysagent.createMailbox({ email: `${account.username}@${domain.name}`, quotaMb: account.quotaMb, passwordHash }));
+    await bestEffortSysagent(request, () => sysagent.createMailbox({ email: `${account.username}@${domain.name}`, quotaMb: account.quotaMb, passwordHash, enabled: account.enabled }));
     await audit(request, { action: "CREATE", resource: "mail_account", resourceId: account.id, description: `Created mailbox ${account.username}` });
     return reply.code(201).send(account);
   });
@@ -121,7 +121,14 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
   app.patch("/accounts/:accountId", async (request) => {
     const { accountId } = z.object({ accountId: z.string() }).parse(request.params);
     const body = updateMailboxSchema.parse(request.body);
-    return prisma.mailAccount.update({ where: { id: accountId }, data: body });
+    const account = await prisma.mailAccount.update({ where: { id: accountId }, data: body, include: { domain: true } });
+    await bestEffortSysagent(request, () => sysagent.createMailbox({
+      email: `${account.username}@${account.domain.name}`,
+      quotaMb: account.quotaMb,
+      passwordHash: account.passwordHash,
+      enabled: account.enabled
+    }));
+    return account;
   });
 
   app.post("/accounts/:accountId/reset-password", async (request) => {
@@ -129,7 +136,7 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
     const body = resetPasswordSchema.parse(request.body);
     const passwordHash = await bcrypt.hash(body.password, 12);
     const account = await prisma.mailAccount.update({ where: { id: accountId }, data: { passwordHash }, include: { domain: true } });
-    await bestEffortSysagent(request, () => sysagent.createMailbox({ email: `${account.username}@${account.domain.name}`, quotaMb: account.quotaMb, passwordHash }));
+    await bestEffortSysagent(request, () => sysagent.createMailbox({ email: `${account.username}@${account.domain.name}`, quotaMb: account.quotaMb, passwordHash, enabled: account.enabled }));
     return account;
   });
 
@@ -277,10 +284,11 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
       ],
       auth: "Use full mailbox address and mailbox password.",
       usernames: domain.mailAccounts.map((account) => `${account.username}@${domain.name}`),
-      rateLimit: "60/minute",
+      rateLimit: 60,
+      rateWindowSeconds: 60,
       notes: [
         "Submission port 587 requires TLS before auth.",
-        "Existing mailboxes need one password reset after SMTP auth is enabled so Dovecot receives the current auth hash.",
+        "Use Sync all mailboxes after enabling SMTP to provision existing password hashes and quotas.",
         "PTR/rDNS must be set at the VPS provider."
       ]
     };
@@ -333,7 +341,7 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
       hostname,
       certificatePath: certificate.certificate,
       keyPath: certificate.privateKey,
-      messageRateLimit: "60"
+      messageRateLimit: 60
     });
     await audit(request, { action: "APPLY", resource: "mail_tls", resourceId: domainId, description: `Issued and attached mail TLS for ${hostname}` });
     return reply.code(202).send({ hostname, preflight, issue, certificate, attach });
@@ -353,7 +361,7 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
       hostname,
       certificatePath: certificate.certificate,
       keyPath: certificate.privateKey,
-      messageRateLimit: "60"
+      messageRateLimit: 60
     });
     await audit(request, { action: "APPLY", resource: "mail_tls", resourceId: domainId, description: `Renewed and reattached mail TLS for ${hostname}` });
     return reply.code(202).send({ hostname, renew, certificate, attach });
@@ -410,6 +418,23 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
       await publishDomainDnsZone(domainId);
     }
     return reply.code(202).send({ queued: false, dryRunResult: result });
+  });
+
+  app.post("/domains/:domainId/mailboxes/sync", async (request, reply) => {
+    const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
+    const domain = await prisma.domain.findUniqueOrThrow({
+      where: { id: domainId },
+      include: { mailAccounts: { orderBy: { username: "asc" } } }
+    });
+    const mailboxes = domain.mailAccounts.map((account) => ({
+      email: `${account.username}@${domain.name}`,
+      quotaMb: account.quotaMb,
+      passwordHash: account.passwordHash,
+      enabled: account.enabled
+    }));
+    const result = await sysagent.syncMailboxes({ mailboxes });
+    await audit(request, { action: "APPLY", resource: "mailbox_sync", resourceId: domainId, description: `Synced ${mailboxes.length} mailboxes for ${domain.name}`, metadata: { count: mailboxes.length } });
+    return reply.code(202).send({ ok: true, synced: mailboxes.length, result });
   });
 
   app.post("/domains/:domainId/smtp/configure", async (request, reply) => {
