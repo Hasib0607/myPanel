@@ -31,6 +31,12 @@ class MailConfigTests(unittest.TestCase):
         self.assertNotIn("command", result)
         self.assertNotIn("secret-password", str(result))
 
+    def test_dovecot_auth_verification_rejects_false_positive_exit_code(self):
+        with patch.object(mail_config, "run_command", return_value={"returncode": 0, "stdout": "passdb: user auth failed", "stderr": ""}):
+            result = verify_dovecot_auth("sales@example.com", "secret-password")
+        self.assertEqual(result["returncode"], 1)
+        self.assertIn("auth failed", result["stderr"])
+
     def test_dovecot_generates_its_own_compatible_password_hash(self):
         expected = "{BLF-CRYPT}$2y$05$generated"
         with patch.object(mail_config, "run_command", return_value={"returncode": 0, "stdout": expected + "\n", "stderr": ""}) as command:

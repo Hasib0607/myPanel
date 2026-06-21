@@ -501,11 +501,18 @@ def verify_dovecot_auth(email: str, password: str | None) -> dict:
     if not password:
         return {"returncode": 0, "skipped": True, "reason": "plaintext password not provided"}
     result = run_command(["doveadm", "auth", "test", email, password])
+    stdout = result.get("stdout", "")
+    stderr = result.get("stderr", "")
+    output = f"{stdout}\n{stderr}".lower()
+    returncode = result.get("returncode", 1)
+    if returncode == 0 and not result.get("dryRun", False) and "auth succeeded" not in output:
+        returncode = 1
+        stderr = (stderr.strip() or stdout.strip() or "Dovecot authentication test did not report success")
     # Never expose the command because it contains the plaintext password.
     return {
-        "returncode": result.get("returncode", 1),
-        "stdout": result.get("stdout", ""),
-        "stderr": result.get("stderr", ""),
+        "returncode": returncode,
+        "stdout": stdout,
+        "stderr": stderr,
         "dryRun": result.get("dryRun", False),
     }
 
@@ -957,6 +964,7 @@ def configure_smtp(payload: MailDomain) -> dict:
 
     auth_conf = """
 auth_mechanisms = plain login
+auth_username_format = %Lu
 passdb {
   driver = passwd-file
   args = scheme=BLF-CRYPT username_format=%u /etc/dovecot/users
