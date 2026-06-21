@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from app.mail_utils import dovecot_password_hash, dovecot_user_line, mail_milter_settings, mail_security_postfix_settings, mail_security_profile, smtp_settings
 from app.routers import mail_config
-from app.routers.mail_config import IncomingHealthRequest, MailDomain, MailQueueActionRequest, MailboxRequest, SmtpHealthRequest, dry_write, incoming_health_test, listener_is_public, mail_diagnostics, mail_queue_action, optional_reload_service, parse_maildir_message, policy_config_from_mailboxes, policy_restriction, policy_script_source, policy_service_restriction, smtp_health_test, verify_dovecot_auth
+from app.routers.mail_config import IncomingHealthRequest, MailDomain, MailQueueActionRequest, MailboxRequest, SmtpHealthRequest, dovecot_hash_from_password, dry_write, incoming_health_test, listener_is_public, mail_diagnostics, mail_queue_action, optional_reload_service, parse_maildir_message, policy_config_from_mailboxes, policy_restriction, policy_script_source, policy_service_restriction, smtp_health_test, verify_dovecot_auth
 
 
 class MailConfigTests(unittest.TestCase):
@@ -29,6 +29,15 @@ class MailConfigTests(unittest.TestCase):
         command.assert_called_once_with(["doveadm", "auth", "test", "sales@example.com", "secret-password"])
         self.assertEqual(result["returncode"], 0)
         self.assertNotIn("command", result)
+        self.assertNotIn("secret-password", str(result))
+
+    def test_dovecot_generates_its_own_compatible_password_hash(self):
+        expected = "{BLF-CRYPT}$2y$05$generated"
+        with patch.object(mail_config, "run_command", return_value={"returncode": 0, "stdout": expected + "\n", "stderr": ""}) as command:
+            password_hash, result = dovecot_hash_from_password("secret-password")
+        command.assert_called_once_with(["doveadm", "pw", "-s", "BLF-CRYPT", "-p", "secret-password"])
+        self.assertEqual(password_hash, expected)
+        self.assertEqual(result["returncode"], 0)
         self.assertNotIn("secret-password", str(result))
 
     def test_smtp_limits_use_numeric_anvil_window(self):

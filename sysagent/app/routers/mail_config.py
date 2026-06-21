@@ -510,6 +510,21 @@ def verify_dovecot_auth(email: str, password: str | None) -> dict:
     }
 
 
+def dovecot_hash_from_password(password: str | None) -> tuple[str | None, dict]:
+    if not password:
+        return None, {"returncode": 0, "skipped": True, "reason": "plaintext password not provided"}
+    result = run_command(["doveadm", "pw", "-s", "BLF-CRYPT", "-p", password])
+    password_hash = result.get("stdout", "").strip()
+    sanitized = {
+        "returncode": result.get("returncode", 1),
+        "stderr": result.get("stderr", ""),
+        "dryRun": result.get("dryRun", False),
+    }
+    if sanitized["returncode"] == 0 and not sanitized["dryRun"] and not password_hash.startswith("{BLF-CRYPT}"):
+        sanitized.update({"returncode": 1, "stderr": "doveadm did not return a BLF-CRYPT password hash"})
+    return (password_hash or None), sanitized
+
+
 def prune_domain_mailboxes(domain: str, wanted: set[str]) -> dict:
     vmailbox_lines = VMAILBOX.read_text(encoding="utf-8").splitlines() if VMAILBOX.exists() else []
     kept_vmailbox = [line for line in vmailbox_lines if not line.strip() or line.split()[0].split("@")[-1].lower() != domain or line.split()[0].lower() in wanted]
@@ -527,7 +542,11 @@ def prune_domain_mailboxes(domain: str, wanted: set[str]) -> dict:
 
 def require_command_success(*results: dict) -> None:
     if settings.allow_live_system_commands and any(result.get("returncode") != 0 for result in results):
-        detail = "; ".join(result.get("stderr", "command failed").strip() for result in results if result.get("returncode") != 0)
+        detail = "; ".join(
+            (result.get("stderr", "").strip() or result.get("stdout", "").strip() or "Mail configuration command failed")[:2000]
+            for result in results
+            if result.get("returncode") != 0
+        )
         raise HTTPException(status_code=500, detail=detail or "Mail configuration command failed")
 
 
@@ -801,7 +820,10 @@ def setup_dkim(payload: MailDomain) -> dict:
 @router.post("/mailbox")
 def create_mailbox(payload: MailboxRequest) -> dict:
     vmail = ensure_vmail_user()
-    synced = sync_mailbox(payload)
+    generated_hash, hash_result = dovecot_hash_from_password(payload.plainPassword)
+    require_command_success(hash_result)
+    effective_payload = payload.model_copy(update={"passwordHash": generated_hash}) if generated_hash else payload
+    synced = sync_mailbox(effective_payload)
     postmap_domains = run_command(["postmap", str(VMAILDOMAINS)])
     postmap = run_command(["postmap", str(VMAILBOX)])
     postmap_suspended = run_command(["postmap", str(SMTP_SUSPENDED)])
