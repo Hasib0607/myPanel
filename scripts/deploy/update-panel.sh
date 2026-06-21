@@ -691,10 +691,28 @@ repair_sysagent_runtime() {
   fi
   run "$venv_python" -m pip install --upgrade pip
   run "$venv_python" -m pip install -r "$sysagent_dir/requirements.txt"
-  local compile_target
-  compile_target="$(mktemp)"
-  run "$venv_python" -c 'import py_compile, sys; py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True)' "$sysagent_dir/app/main.py" "$compile_target"
-  rm -f "$compile_target"
+  run "$venv_python" -m pip check
+  run "$venv_python" -c 'import app.main; assert app.main.app.routes'
+}
+
+diagnose_sysagent_failure() {
+  log "sysagent failed readiness; collecting service diagnostics"
+  run_systemctl status vps-panel-sysagent || true
+  local cmd=()
+  if [[ -n "$SUDO_BIN" ]]; then
+    cmd=("$SUDO_BIN" -n)
+  fi
+  if command -v journalctl >/dev/null 2>&1; then
+    "${cmd[@]}" journalctl -u vps-panel-sysagent -n 80 --no-pager 2>&1 | tee -a "$LOG_FILE" || true
+  fi
+}
+
+recover_sysagent() {
+  diagnose_sysagent_failure
+  write_status "running" "repairing sysagent runtime after failed health check" "$NEW_COMMIT" "$NEW_COMMIT_SUBJECT"
+  repair_sysagent_runtime
+  restart_service_with_recovery vps-panel-sysagent
+  wait_http_ready "sysagent recovery" "$SYSAGENT_HEALTH_URL" 45
 }
 
 sudo_systemctl_output() {
@@ -1005,7 +1023,9 @@ done
 
 wait_http_ready "API health" "$HEALTH_URL" 30
 wait_http_ready "frontend" "$FRONTEND_HEALTH_URL" 30
-wait_http_ready "sysagent" "$SYSAGENT_HEALTH_URL" 45
+if ! wait_http_ready "sysagent" "$SYSAGENT_HEALTH_URL" 45; then
+  recover_sysagent
+fi
 recover_frontend_static_assets "http://127.0.0.1:$FRONTEND_PORT"
 
 write_status "succeeded" "panel self-update completed" "$NEW_COMMIT" "$NEW_COMMIT_SUBJECT"

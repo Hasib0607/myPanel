@@ -574,7 +574,7 @@ Environment=ALLOW_LIVE_NGINX=true
 Environment=ALLOW_LIVE_SSL=true
 Environment=ALLOW_LIVE_DNS=true
 Environment=ALLOW_LIVE_BACKUP=true
-ExecStart=$APP_DIR/sysagent/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port $SYSAGENT_PORT
+ExecStart=$APP_DIR/sysagent/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port $SYSAGENT_PORT
 Restart=always
 RestartSec=3
 KillMode=process

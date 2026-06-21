@@ -406,18 +406,6 @@ export const deploymentWebhookRoutes: FastifyPluginAsync = async (app) => {
     const recentLog = await fsPromises.readFile(logFile, "utf8")
       .then((content) => content.split(/\r?\n/).filter(Boolean).slice(-80))
       .catch(() => []);
-    const apiRestartRequested = recentLog.some((line) => line.includes(`--no-block restart ${env.PANEL_UPDATE_API_SERVICE}`) || line.includes(`restart ${env.PANEL_UPDATE_API_SERVICE}`));
-    const apiRestartStuck = status.state === "running" && typeof status.message === "string" && status.message.includes(`restarting ${env.PANEL_UPDATE_API_SERVICE}`);
-    const apiRestartHandoffKilled = status.state === "failed"
-      && typeof status.message === "string"
-      && status.message.includes("exit code 143")
-      && recentLog.some((line) => line.includes(`panel self-update completed; restarting ${env.PANEL_UPDATE_API_SERVICE}`))
-      && apiRestartRequested;
-    if ((apiRestartStuck || apiRestartHandoffKilled) && apiRestartRequested) {
-      status.state = "succeeded";
-      status.message = `panel self-update completed; ${env.PANEL_UPDATE_API_SERVICE} restart was requested`;
-      status.recoveredApiRestartStatus = true;
-    }
     if ((status.state === "running" || status.state === "queued") && status.updatedAt) {
       const ageMs = Date.now() - new Date(status.updatedAt).getTime();
       if (Number.isFinite(ageMs) && ageMs > env.PANEL_UPDATE_STALE_AFTER_SECONDS * 1000) {
