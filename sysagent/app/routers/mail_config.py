@@ -557,6 +557,16 @@ def require_command_success(*results: dict) -> None:
         raise HTTPException(status_code=500, detail=detail or "Mail configuration command failed")
 
 
+def secure_dovecot_credentials() -> dict[str, dict]:
+    results = {
+        "owner": run_command(["chown", "root:dovecot", str(DOVECOT_USERS)]),
+        "mode": run_command(["chmod", "0640", str(DOVECOT_USERS)]),
+    }
+    if shutil.which("restorecon"):
+        results["selinux"] = run_command(["restorecon", "-F", str(DOVECOT_USERS)])
+    return results
+
+
 def optional_reload_service(service: str) -> dict:
     result = run_command(["systemctl", "reload", service])
     text = f"{result.get('stderr', '')}\n{result.get('stdout', '')}".lower()
@@ -831,16 +841,17 @@ def create_mailbox(payload: MailboxRequest) -> dict:
     require_command_success(hash_result)
     effective_payload = payload.model_copy(update={"passwordHash": generated_hash}) if generated_hash else payload
     synced = sync_mailbox(effective_payload)
+    credentials = secure_dovecot_credentials()
     postmap_domains = run_command(["postmap", str(VMAILDOMAINS)])
     postmap = run_command(["postmap", str(VMAILBOX)])
     postmap_suspended = run_command(["postmap", str(SMTP_SUSPENDED)])
     sasl_access = run_command(["postconf", "-e", f"smtpd_sender_restrictions=check_sasl_access hash:{SMTP_SUSPENDED},reject_non_fqdn_sender,reject_unknown_sender_domain"])
     policy_service = ensure_mail_policy_service()
     reload_result = reload_mail_services()
-    require_command_success(postmap_domains, postmap, postmap_suspended, sasl_access, policy_service["daemonReload"], policy_service["service"], *reload_result.values())
+    require_command_success(*credentials.values(), postmap_domains, postmap, postmap_suspended, sasl_access, policy_service["daemonReload"], policy_service["service"], *reload_result.values())
     auth_test = verify_dovecot_auth(synced["email"], payload.plainPassword) if payload.enabled else {"returncode": 0, "skipped": True, "reason": "mailbox disabled"}
     require_command_success(auth_test)
-    return {**synced, "ok": settings.allow_live_system_commands, "dryRun": not settings.allow_live_system_commands, "vmail": vmail, "postmapDomains": postmap_domains, "postmap": postmap, "postmapSuspended": postmap_suspended, "saslAccess": sasl_access, "policyService": policy_service, "reload": reload_result, "authTest": auth_test}
+    return {**synced, "ok": settings.allow_live_system_commands, "dryRun": not settings.allow_live_system_commands, "vmail": vmail, "credentials": credentials, "postmapDomains": postmap_domains, "postmap": postmap, "postmapSuspended": postmap_suspended, "saslAccess": sasl_access, "policyService": policy_service, "reload": reload_result, "authTest": auth_test}
 
 
 @router.post("/mailbox/messages")
@@ -865,14 +876,15 @@ def sync_mailboxes(payload: MailboxSyncRequest) -> dict:
     results = [sync_mailbox(mailbox) for mailbox in payload.mailboxes]
     wanted = {safe_email(mailbox.email)[0] for mailbox in payload.mailboxes if mailbox.enabled}
     pruned = prune_domain_mailboxes(domain, wanted)
+    credentials = secure_dovecot_credentials()
     postmap_domains = run_command(["postmap", str(VMAILDOMAINS)])
     postmap = run_command(["postmap", str(VMAILBOX)])
     postmap_suspended = run_command(["postmap", str(SMTP_SUSPENDED)])
     sasl_access = run_command(["postconf", "-e", f"smtpd_sender_restrictions=check_sasl_access hash:{SMTP_SUSPENDED},reject_non_fqdn_sender,reject_unknown_sender_domain"])
     policy_service = ensure_mail_policy_service()
     reload_result = reload_mail_services()
-    require_command_success(postmap_domains, postmap, postmap_suspended, sasl_access, policy_service["daemonReload"], policy_service["service"], *reload_result.values())
-    return {"ok": settings.allow_live_system_commands, "dryRun": not settings.allow_live_system_commands, "synced": len(results), "vmail": vmail, "mailboxes": results, "pruned": pruned, "postmapDomains": postmap_domains, "postmap": postmap, "postmapSuspended": postmap_suspended, "saslAccess": sasl_access, "policyService": policy_service, "reload": reload_result}
+    require_command_success(*credentials.values(), postmap_domains, postmap, postmap_suspended, sasl_access, policy_service["daemonReload"], policy_service["service"], *reload_result.values())
+    return {"ok": settings.allow_live_system_commands, "dryRun": not settings.allow_live_system_commands, "synced": len(results), "vmail": vmail, "mailboxes": results, "pruned": pruned, "credentials": credentials, "postmapDomains": postmap_domains, "postmap": postmap, "postmapSuspended": postmap_suspended, "saslAccess": sasl_access, "policyService": policy_service, "reload": reload_result}
 
 
 @router.delete("/mailbox")
@@ -1024,6 +1036,7 @@ ssl_key = <{key_path}
             "#!/usr/bin/env bash\nset -euo pipefail\nsystemctl reload postfix dovecot opendkim\n",
         ),
     }
+    credentials = secure_dovecot_credentials()
     if settings.allow_live_system_commands:
         for path, mode in ((CERTBOT_MAIL_DEPLOY_HOOK, 0o750), (DOVECOT_USERS, 0o640)):
             try:
@@ -1054,6 +1067,7 @@ ssl_key = <{key_path}
         *submission_rate,
         smtps,
         *smtps_settings,
+        *credentials.values(),
         policy_service["daemonReload"],
         policy_service["service"],
         postfix_validation,
@@ -1095,6 +1109,7 @@ ssl_key = <{key_path}
         "rateLimit": {"messagesPerClient": payload.messageRateLimit, "windowSeconds": 60, "recipientsPerClient": payload.messageRateLimit * 10, "connectionsPerClient": max(10, payload.messageRateLimit // 2)},
         "policyService": policy_service,
         "files": files,
+        "credentials": credentials,
         "certbotTimer": certbot_timer,
         "validation": {"postfix": postfix_validation, "dovecot": dovecot_validation},
         "pop3": {"enabled": payload.pop3Enabled, "package": pop3_package},

@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from app.mail_utils import dovecot_password_hash, dovecot_user_line, mail_milter_settings, mail_security_postfix_settings, mail_security_profile, smtp_settings
 from app.routers import mail_config
-from app.routers.mail_config import IncomingHealthRequest, MailDomain, MailQueueActionRequest, MailboxRequest, SmtpHealthRequest, dovecot_hash_from_password, dry_write, incoming_health_test, listener_is_public, mail_diagnostics, mail_queue_action, optional_reload_service, parse_maildir_message, policy_config_from_mailboxes, policy_restriction, policy_script_source, policy_service_restriction, smtp_health_test, verify_dovecot_auth
+from app.routers.mail_config import IncomingHealthRequest, MailDomain, MailQueueActionRequest, MailboxRequest, SmtpHealthRequest, dovecot_hash_from_password, dry_write, incoming_health_test, listener_is_public, mail_diagnostics, mail_queue_action, optional_reload_service, parse_maildir_message, policy_config_from_mailboxes, policy_restriction, policy_script_source, policy_service_restriction, secure_dovecot_credentials, smtp_health_test, verify_dovecot_auth
 
 
 class MailConfigTests(unittest.TestCase):
@@ -45,6 +45,14 @@ class MailConfigTests(unittest.TestCase):
         self.assertEqual(password_hash, expected)
         self.assertEqual(result["returncode"], 0)
         self.assertNotIn("secret-password", str(result))
+
+    def test_dovecot_credentials_are_readable_by_auth_worker_and_relabelled(self):
+        with patch.object(mail_config.shutil, "which", return_value="/usr/sbin/restorecon"), patch.object(mail_config, "run_command", return_value={"returncode": 0}) as command:
+            result = secure_dovecot_credentials()
+        self.assertEqual(command.call_args_list[0].args[0], ["chown", "root:dovecot", "/etc/dovecot/users"])
+        self.assertEqual(command.call_args_list[1].args[0], ["chmod", "0640", "/etc/dovecot/users"])
+        self.assertEqual(command.call_args_list[2].args[0], ["restorecon", "-F", "/etc/dovecot/users"])
+        self.assertIn("selinux", result)
 
     def test_smtp_limits_use_numeric_anvil_window(self):
         config = dict(smtp_settings("mail.example.com", None, None, 60))
