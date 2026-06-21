@@ -47,6 +47,7 @@ class MailboxRequest(BaseModel):
     email: str
     quotaMb: int = Field(default=1024, ge=128)
     passwordHash: str | None = None
+    plainPassword: str | None = Field(default=None, min_length=10)
     enabled: bool = True
     smtpSuspended: bool = False
     dailySendLimit: int = Field(default=500, ge=1, le=100000)
@@ -496,6 +497,19 @@ def sync_mailbox(payload: MailboxRequest) -> dict:
     return {"email": email, "enabled": payload.enabled, "smtpSuspended": payload.smtpSuspended, "dailySendLimit": payload.dailySendLimit, "minuteSendLimit": payload.minuteSendLimit, "maildir": str(maildir), "mkdir": mkdir, "vdomains": vdomains, "vmailbox": vmailbox, "dovecotUser": dovecot_user, "smtpAccess": smtp_access, "policy": policy}
 
 
+def verify_dovecot_auth(email: str, password: str | None) -> dict:
+    if not password:
+        return {"returncode": 0, "skipped": True, "reason": "plaintext password not provided"}
+    result = run_command(["doveadm", "auth", "test", email, password])
+    # Never expose the command because it contains the plaintext password.
+    return {
+        "returncode": result.get("returncode", 1),
+        "stdout": result.get("stdout", ""),
+        "stderr": result.get("stderr", ""),
+        "dryRun": result.get("dryRun", False),
+    }
+
+
 def prune_domain_mailboxes(domain: str, wanted: set[str]) -> dict:
     vmailbox_lines = VMAILBOX.read_text(encoding="utf-8").splitlines() if VMAILBOX.exists() else []
     kept_vmailbox = [line for line in vmailbox_lines if not line.strip() or line.split()[0].split("@")[-1].lower() != domain or line.split()[0].lower() in wanted]
@@ -795,7 +809,9 @@ def create_mailbox(payload: MailboxRequest) -> dict:
     policy_service = ensure_mail_policy_service()
     reload_result = reload_mail_services()
     require_command_success(postmap_domains, postmap, postmap_suspended, sasl_access, policy_service["daemonReload"], policy_service["service"], *reload_result.values())
-    return {**synced, "ok": settings.allow_live_system_commands, "dryRun": not settings.allow_live_system_commands, "vmail": vmail, "postmapDomains": postmap_domains, "postmap": postmap, "postmapSuspended": postmap_suspended, "saslAccess": sasl_access, "policyService": policy_service, "reload": reload_result}
+    auth_test = verify_dovecot_auth(synced["email"], payload.plainPassword) if payload.enabled else {"returncode": 0, "skipped": True, "reason": "mailbox disabled"}
+    require_command_success(auth_test)
+    return {**synced, "ok": settings.allow_live_system_commands, "dryRun": not settings.allow_live_system_commands, "vmail": vmail, "postmapDomains": postmap_domains, "postmap": postmap, "postmapSuspended": postmap_suspended, "saslAccess": sasl_access, "policyService": policy_service, "reload": reload_result, "authTest": auth_test}
 
 
 @router.post("/mailbox/messages")

@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from app.mail_utils import dovecot_password_hash, dovecot_user_line, mail_milter_settings, mail_security_postfix_settings, mail_security_profile, smtp_settings
 from app.routers import mail_config
-from app.routers.mail_config import IncomingHealthRequest, MailDomain, MailQueueActionRequest, MailboxRequest, SmtpHealthRequest, dry_write, incoming_health_test, listener_is_public, mail_diagnostics, mail_queue_action, optional_reload_service, parse_maildir_message, policy_config_from_mailboxes, policy_restriction, policy_script_source, policy_service_restriction, smtp_health_test
+from app.routers.mail_config import IncomingHealthRequest, MailDomain, MailQueueActionRequest, MailboxRequest, SmtpHealthRequest, dry_write, incoming_health_test, listener_is_public, mail_diagnostics, mail_queue_action, optional_reload_service, parse_maildir_message, policy_config_from_mailboxes, policy_restriction, policy_script_source, policy_service_restriction, smtp_health_test, verify_dovecot_auth
 
 
 class MailConfigTests(unittest.TestCase):
@@ -22,6 +22,14 @@ class MailConfigTests(unittest.TestCase):
     def test_existing_dovecot_scheme_is_preserved(self):
         value = "{BLF-CRYPT}$2y$12$abcdefghijklmnopqrstuuuuuuuuuuuuuuuuuuuuuuuuuuu"
         self.assertEqual(dovecot_password_hash(value), value)
+
+    def test_dovecot_auth_verification_does_not_expose_password(self):
+        with patch.object(mail_config, "run_command", return_value={"returncode": 0, "stdout": "passdb: user auth succeeded", "stderr": ""}) as command:
+            result = verify_dovecot_auth("sales@example.com", "secret-password")
+        command.assert_called_once_with(["doveadm", "auth", "test", "sales@example.com", "secret-password"])
+        self.assertEqual(result["returncode"], 0)
+        self.assertNotIn("command", result)
+        self.assertNotIn("secret-password", str(result))
 
     def test_smtp_limits_use_numeric_anvil_window(self):
         config = dict(smtp_settings("mail.example.com", None, None, 60))

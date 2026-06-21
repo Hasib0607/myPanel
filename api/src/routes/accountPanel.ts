@@ -3344,7 +3344,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     });
     let sysagentResult: unknown;
     try {
-      sysagentResult = assertLiveMailProvisioning(await sysagent.createMailbox({ email: `${mailbox.username}@${domain.name}`, quotaMb: mailbox.quotaMb, passwordHash, enabled: mailbox.enabled }), `Mailbox ${mailbox.username}@${domain.name}`);
+      sysagentResult = assertLiveMailProvisioning(await sysagent.createMailbox({ email: `${mailbox.username}@${domain.name}`, quotaMb: mailbox.quotaMb, passwordHash, plainPassword: body.password, enabled: mailbox.enabled }), `Mailbox ${mailbox.username}@${domain.name}`);
     } catch (error) {
       await prisma.mailAccount.delete({ where: { id: mailbox.id } });
       throw error;
@@ -3364,6 +3364,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       email: `${mailbox.username}@${mailbox.domain.name}`,
       quotaMb: body.quotaMb ?? mailbox.quotaMb,
       passwordHash,
+      plainPassword: body.password,
       enabled: body.enabled ?? mailbox.enabled,
       smtpSuspended: mailbox.smtpSuspended
     }), `Mailbox ${mailbox.username}@${mailbox.domain.name}`);

@@ -174,6 +174,7 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
           email: `${account.username}@${domain.name}`,
           quotaMb: account.quotaMb,
           passwordHash,
+          plainPassword: body.password,
           enabled: account.enabled,
           smtpSuspended: account.smtpSuspended,
           dailySendLimit: account.dailySendLimit,
@@ -217,7 +218,7 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
     const body = resetPasswordSchema.parse(request.body);
     const passwordHash = await bcrypt.hash(body.password, 12);
     const account = await prisma.mailAccount.findUniqueOrThrow({ where: { id: accountId }, include: { domain: true } });
-    assertLiveMailProvisioning(await sysagent.createMailbox({ email: `${account.username}@${account.domain.name}`, quotaMb: account.quotaMb, passwordHash, enabled: account.enabled, smtpSuspended: account.smtpSuspended, dailySendLimit: account.dailySendLimit, minuteSendLimit: account.minuteSendLimit }), `Mailbox ${account.username}@${account.domain.name}`);
+    assertLiveMailProvisioning(await sysagent.createMailbox({ email: `${account.username}@${account.domain.name}`, quotaMb: account.quotaMb, passwordHash, plainPassword: body.password, enabled: account.enabled, smtpSuspended: account.smtpSuspended, dailySendLimit: account.dailySendLimit, minuteSendLimit: account.minuteSendLimit }), `Mailbox ${account.username}@${account.domain.name}`);
     return prisma.mailAccount.update({ where: { id: accountId }, data: { passwordHash }, include: { domain: true } });
   });
 
