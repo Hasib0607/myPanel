@@ -604,6 +604,10 @@ function githubTokenSecretRef() {
   return "github:superadmin:token";
 }
 
+function projectDomainApiTokenSecretRef(deploymentId: string) {
+  return `project-domain:${deploymentId}:api-token`;
+}
+
 function deploymentEnvSecretRef(deploymentSlug: string, key: string) {
   return `deployment:${deploymentSlug}:env:${key}`;
 }
@@ -2441,25 +2445,52 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     if (!deployment.accountId) {
       throw app.httpErrors.badRequest("Project domain API tokens are available only for account-owned projects.");
     }
-    const token = app.jwt.sign(
-      {
-        sub: deployment.slug,
-        role: "project_domain",
-        accountId: deployment.accountId,
-        deploymentId: deployment.id
-      },
-      { expiresIn: body.expiresInSeconds }
-    );
+    const tokenRef = projectDomainApiTokenSecretRef(deployment.id);
+    let token = await getSecret(tokenRef);
+    let reusedToken = Boolean(token);
+    let expiresInSeconds = body.expiresInSeconds;
+    if (token) {
+      try {
+        const claims = app.jwt.verify(token) as any;
+        if (claims?.role !== "project_domain" || claims?.accountId !== deployment.accountId || claims?.deploymentId !== deployment.id) {
+          token = null;
+          reusedToken = false;
+        } else if (typeof claims.exp === "number") {
+          expiresInSeconds = Math.max(0, claims.exp - Math.floor(Date.now() / 1000));
+        }
+      } catch {
+        token = null;
+        reusedToken = false;
+      }
+    }
+    if (!token) {
+      token = app.jwt.sign(
+        {
+          sub: deployment.slug,
+          role: "project_domain",
+          accountId: deployment.accountId,
+          deploymentId: deployment.id
+        },
+        { expiresIn: body.expiresInSeconds }
+      );
+      await putSecret({
+        ref: tokenRef,
+        value: token,
+        kind: "GENERIC",
+        label: `Project domain API token for ${deployment.slug}`,
+        metadata: { accountId: deployment.accountId, deploymentId: deployment.id, stableApiToken: true }
+      });
+    }
     await audit(request, {
-      action: "CREATE",
+      action: reusedToken ? "UPDATE" : "CREATE",
       resource: "project_domain_api_token",
       resourceId: deployment.id,
-      description: `Generated project domain API token for ${deployment.slug}`
+      description: reusedToken ? `Loaded project domain API token for ${deployment.slug}` : `Generated project domain API token for ${deployment.slug}`
     });
     return {
       token,
       tokenType: "Bearer",
-      expiresInSeconds: body.expiresInSeconds,
+      expiresInSeconds,
       apiBaseUrl: `http://${env.VPS_IP}:${env.PANEL_PORT}/api/v1/account/project-domain`,
       endpoint: "POST /domains",
       deployment: { id: deployment.id, slug: deployment.slug, name: deployment.name }

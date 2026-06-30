@@ -345,6 +345,14 @@ function accountGithubTokenSecretRef(accountId: string) {
   return `github:account:${accountId}:token`;
 }
 
+function accountApiTokenSecretRef(accountId: string) {
+  return `account:${accountId}:api-token`;
+}
+
+function projectDomainApiTokenSecretRef(deploymentId: string) {
+  return `project-domain:${deploymentId}:api-token`;
+}
+
 async function applyAccountDnsZone(domainId: string, ownerAccountId: string) {
   const domain = await prisma.domain.findFirstOrThrow({
     where: { id: domainId, accountId: ownerAccountId },
@@ -2573,25 +2581,53 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const body = projectDomainApiTokenSchema.parse(request.body ?? {});
     const deployment = await findAccountDeployment(request, deploymentId);
-    const token = app.jwt.sign(
-      {
-        sub: deployment.slug,
-        role: "project_domain",
-        accountId: accountId(request),
-        deploymentId: deployment.id
-      },
-      { expiresIn: body.expiresInSeconds }
-    );
+    const ownerAccountId = accountId(request);
+    const tokenRef = projectDomainApiTokenSecretRef(deployment.id);
+    let token = await getSecret(tokenRef);
+    let reusedToken = Boolean(token);
+    let expiresInSeconds = body.expiresInSeconds;
+    if (token) {
+      try {
+        const claims = app.jwt.verify(token) as any;
+        if (claims?.role !== "project_domain" || claims?.accountId !== ownerAccountId || claims?.deploymentId !== deployment.id) {
+          token = null;
+          reusedToken = false;
+        } else if (typeof claims.exp === "number") {
+          expiresInSeconds = Math.max(0, claims.exp - Math.floor(Date.now() / 1000));
+        }
+      } catch {
+        token = null;
+        reusedToken = false;
+      }
+    }
+    if (!token) {
+      token = app.jwt.sign(
+        {
+          sub: deployment.slug,
+          role: "project_domain",
+          accountId: ownerAccountId,
+          deploymentId: deployment.id
+        },
+        { expiresIn: body.expiresInSeconds }
+      );
+      await putSecret({
+        ref: tokenRef,
+        value: token,
+        kind: "GENERIC",
+        label: `Project domain API token for ${deployment.slug}`,
+        metadata: { accountId: ownerAccountId, deploymentId: deployment.id, stableApiToken: true }
+      });
+    }
     await audit(request, {
-      action: "CREATE",
+      action: reusedToken ? "UPDATE" : "CREATE",
       resource: "project_domain_api_token",
       resourceId: deployment.id,
-      description: `Account generated project domain API token for ${deployment.slug}`
+      description: reusedToken ? `Account loaded project domain API token for ${deployment.slug}` : `Account generated project domain API token for ${deployment.slug}`
     });
     return {
       token,
       tokenType: "Bearer",
-      expiresInSeconds: body.expiresInSeconds,
+      expiresInSeconds,
       apiBaseUrl: `http://${env.VPS_IP}:${env.PANEL_PORT}/api/v1/account/project-domain`,
       endpoint: "POST /domains",
       deployment: { id: deployment.id, slug: deployment.slug, name: deployment.name }
@@ -3691,20 +3727,47 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       expiresInSeconds: z.coerce.number().int().min(3600).max(60 * 60 * 24 * 365).default(env.JWT_EXPIRY)
     }).parse(request.body ?? {});
     const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
-    const token = app.jwt.sign(
-      { sub: account.username, role: "account", accountId: account.id },
-      { expiresIn: body.expiresInSeconds }
-    );
+    const tokenRef = accountApiTokenSecretRef(account.id);
+    let token = await getSecret(tokenRef);
+    let reusedToken = Boolean(token);
+    let expiresInSeconds = body.expiresInSeconds;
+    if (token) {
+      try {
+        const claims = app.jwt.verify(token) as any;
+        if (claims?.role !== "account" || claims?.accountId !== account.id) {
+          token = null;
+          reusedToken = false;
+        } else if (typeof claims.exp === "number") {
+          expiresInSeconds = Math.max(0, claims.exp - Math.floor(Date.now() / 1000));
+        }
+      } catch {
+        token = null;
+        reusedToken = false;
+      }
+    }
+    if (!token) {
+      token = app.jwt.sign(
+        { sub: account.username, role: "account", accountId: account.id },
+        { expiresIn: body.expiresInSeconds }
+      );
+      await putSecret({
+        ref: tokenRef,
+        value: token,
+        kind: "GENERIC",
+        label: `Account API token for ${account.username}`,
+        metadata: { accountId: account.id, stableApiToken: true }
+      });
+    }
     await audit(request, {
-      action: "CREATE",
+      action: reusedToken ? "UPDATE" : "CREATE",
       resource: "account_api_token",
       resourceId: account.id,
-      description: `Account generated API token for ${account.username}`
+      description: reusedToken ? `Account loaded API token for ${account.username}` : `Account generated API token for ${account.username}`
     });
     return {
       token,
       tokenType: "Bearer",
-      expiresInSeconds: body.expiresInSeconds,
+      expiresInSeconds,
       apiBaseUrl: `http://${env.VPS_IP}:${env.PANEL_PORT}/api/v1`
     };
   });
