@@ -45,6 +45,15 @@ export class ApiError extends Error {
   }
 }
 
+function shouldRedirectToLogout(path: string, status: number) {
+  if (status !== 401 || typeof window === "undefined") return false;
+  const pathname = window.location.pathname;
+  if (pathname.startsWith("/login") || pathname.startsWith("/webmail/login")) return false;
+  if (pathname.startsWith("/webmail")) return path.startsWith("/webmail") || path.startsWith("/auth/me");
+  if (pathname.startsWith("/account")) return path.startsWith("/account") || path.startsWith("/auth/me");
+  return !path.startsWith("/account") && !path.startsWith("/webmail");
+}
+
 async function fetchJson<T>(path: string, init: RequestInit): Promise<T> {
   const url = apiUrl(path);
   let response: Response;
@@ -57,7 +66,7 @@ async function fetchJson<T>(path: string, init: RequestInit): Promise<T> {
 
   const data = await response.json().catch(() => null);
   if (!response.ok) {
-    if (response.status === 401 && typeof window !== "undefined" && !window.location.pathname.startsWith("/login") && !window.location.pathname.startsWith("/webmail/login")) {
+    if (shouldRedirectToLogout(path, response.status)) {
       const next = window.location.pathname.startsWith("/webmail") ? "/webmail/login" : "/login";
       window.location.assign(apiUrl(`/auth/logout?next=${encodeURIComponent(next)}`));
     }
