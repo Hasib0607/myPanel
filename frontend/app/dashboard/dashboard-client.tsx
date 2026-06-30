@@ -2,8 +2,9 @@
 
 import type { ReactNode } from "react";
 import { useState } from "react";
+import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, CheckCircle2, Clock3, Download, Play, Plus, RefreshCw, RotateCw, ServerCrash, Square, Terminal, Trash2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Clock3, Cpu, Download, HardDrive, Play, Plus, RefreshCw, RotateCw, ServerCrash, Square, Terminal, Trash2 } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { StatCard } from "@/components/stat-card";
 import { apiDelete, apiGet, apiPost } from "@/lib/api";
@@ -42,6 +43,19 @@ type DashboardData = {
     installed?: boolean;
     manageable?: boolean;
     availableActions?: string[];
+  }>;
+  topResourceUsers: Array<{
+    id: string;
+    slug: string;
+    name: string;
+    status: string;
+    framework: string;
+    priorityTier: string;
+    memoryMaxMb: number;
+    cpuQuotaPercent: number;
+    memoryBytes: number;
+    cpuPercent: number;
+    processCount: number;
   }>;
   generatedAt: string;
 };
@@ -147,6 +161,30 @@ function ServiceActions({ serviceKey, status, installed, disabled, onAction }: {
         <RotateCw size={14} />
       </ServiceActionButton>
     </div>
+  );
+}
+
+function ResourceUserCard({ project, rank }: { project: DashboardData["topResourceUsers"][number]; rank: number }) {
+  const memoryPercent = project.memoryMaxMb > 0 ? (project.memoryBytes / (project.memoryMaxMb * 1024 * 1024)) * 100 : 0;
+  const cpuPercent = project.cpuQuotaPercent > 0 ? (project.cpuPercent / project.cpuQuotaPercent) * 100 : 0;
+
+  return (
+    <Link className="block rounded-md border border-panel-line bg-white p-4 transition-colors hover:border-panel-accent hover:bg-slate-50" href={`/deployments/${project.slug}/settings`}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-slate-900 text-xs font-semibold text-white">{rank}</span>
+            <span className="truncate text-sm font-semibold text-panel-ink">{project.name}</span>
+          </div>
+          <div className="mt-1 truncate text-xs text-panel-muted">{project.framework} / {project.status} / {project.processCount || 0} process{project.processCount === 1 ? "" : "es"}</div>
+        </div>
+        <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-semibold text-panel-muted">{project.priorityTier}</span>
+      </div>
+      <div className="mt-4 space-y-3">
+        <Meter label="RAM" value={memoryPercent} detail={`${formatBytes(project.memoryBytes)} of ${project.memoryMaxMb} MB cap`} />
+        <Meter label="CPU" value={cpuPercent} detail={`${project.cpuPercent.toFixed(1)}% of ${project.cpuQuotaPercent}% quota`} />
+      </div>
+    </Link>
   );
 }
 
@@ -314,6 +352,36 @@ export function DashboardClient() {
               </tbody>
             </table>
             {serviceNotice ? <div className="border-t border-panel-line px-4 py-3 text-xs text-panel-muted">{serviceNotice}</div> : null}
+          </div>
+
+          <div className="rounded-md border border-panel-line bg-white p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold">Top Resource Projects</div>
+                <div className="mt-1 text-xs text-panel-muted">Highest live RAM and CPU usage across running projects.</div>
+              </div>
+              <div className="flex items-center gap-2 text-panel-muted">
+                <HardDrive size={16} />
+                <Cpu size={16} />
+              </div>
+            </div>
+            <div className="mt-4 grid grid-cols-3 gap-3">
+              {(data?.topResourceUsers ?? []).map((project, index) => (
+                <ResourceUserCard key={project.id} project={project} rank={index + 1} />
+              ))}
+              {data && data.topResourceUsers.length === 0 ? (
+                <div className="col-span-3 rounded-md border border-dashed border-panel-line p-5 text-sm text-panel-muted">No running project resource metrics available right now.</div>
+              ) : null}
+              {!data ? (
+                [1, 2, 3].map((item) => (
+                  <div className="rounded-md border border-panel-line bg-white p-4" key={item}>
+                    <div className="h-4 w-2/3 rounded bg-slate-100" />
+                    <div className="mt-4 h-2 rounded bg-slate-100" />
+                    <div className="mt-5 h-2 rounded bg-slate-100" />
+                  </div>
+                ))
+              ) : null}
+            </div>
           </div>
 
           </div>

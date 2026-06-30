@@ -1,6 +1,8 @@
 import type { FastifyPluginAsync } from "fastify";
+import path from "node:path";
 import { z } from "zod";
 import { audit } from "../lib/audit.js";
+import { normalizeDeploymentResourcePolicy } from "../lib/deploymentResourcePolicy.js";
 import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
 import { sysagent } from "../lib/sysagent.js";
@@ -23,6 +25,20 @@ type DashboardService = {
   availableActions?: string[];
 };
 
+type DashboardResourceUser = {
+  id: string;
+  slug: string;
+  name: string;
+  status: string;
+  framework: string;
+  priorityTier: string;
+  memoryMaxMb: number;
+  cpuQuotaPercent: number;
+  memoryBytes: number;
+  cpuPercent: number;
+  processCount: number;
+};
+
 function normalizeService(service: DashboardService): DashboardService {
   const manageable = manageableServices[service.name];
   if (!manageable) return service;
@@ -34,6 +50,45 @@ function normalizeService(service: DashboardService): DashboardService {
     manageable: service.manageable ?? true,
     availableActions: service.availableActions ?? (installed ? ["start", "stop", "restart", "enable", "disable"] : ["install"])
   };
+}
+
+async function topDeploymentResourceUsers(): Promise<DashboardResourceUser[]> {
+  const deployments = await prisma.deployment.findMany({
+    where: { status: { in: ["RUNNING", "DEPLOYING", "BUILDING"] } },
+    orderBy: { updatedAt: "desc" },
+    take: 12
+  });
+  const rows = await Promise.all(deployments.map(async (deployment) => {
+    const policy = normalizeDeploymentResourcePolicy(deployment.processConfig);
+    const appPath = path.resolve(deployment.rootPath, deployment.rootDirectory || ".");
+    const metrics = await sysagent.deploymentMetrics({
+      deploymentId: deployment.id,
+      name: deployment.slug,
+      rootPath: appPath,
+      port: deployment.port,
+      processManager: deployment.processManager,
+      dbType: deployment.dbType,
+      dbName: deployment.dbName,
+      serverNames: [],
+      logLines: 10
+    }).catch(() => null) as any;
+    return {
+      id: deployment.id,
+      slug: deployment.slug,
+      name: deployment.name,
+      status: deployment.status,
+      framework: deployment.framework,
+      priorityTier: policy.priorityTier,
+      memoryMaxMb: policy.memoryMaxMb,
+      cpuQuotaPercent: policy.cpuQuotaPercent,
+      memoryBytes: Number(metrics?.process?.memoryBytes ?? 0),
+      cpuPercent: Number(metrics?.process?.cpuPercent ?? 0),
+      processCount: Number(metrics?.process?.processCount ?? 0)
+    };
+  }));
+  return rows
+    .sort((a, b) => (b.memoryBytes + b.cpuPercent * 10_000_000) - (a.memoryBytes + a.cpuPercent * 10_000_000))
+    .slice(0, 3);
 }
 
 export const dashboardRoutes: FastifyPluginAsync = async (app) => {
@@ -64,6 +119,7 @@ export const dashboardRoutes: FastifyPluginAsync = async (app) => {
     } catch {
       systemStats = { unavailable: true };
     }
+    const topResourceUsers = sysagentHealthy ? await topDeploymentResourceUsers().catch(() => []) : [];
 
     const services = [];
 
@@ -105,6 +161,7 @@ export const dashboardRoutes: FastifyPluginAsync = async (app) => {
       deploymentStatus: deploymentStatus.map((item) => ({ status: item.status, count: item._count })),
       systemStats,
       services,
+      topResourceUsers,
       generatedAt: new Date().toISOString()
     };
   });
