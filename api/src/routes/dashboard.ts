@@ -52,26 +52,44 @@ function normalizeService(service: DashboardService): DashboardService {
   };
 }
 
+async function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), ms);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function topDeploymentResourceUsers(): Promise<DashboardResourceUser[]> {
   const deployments = await prisma.deployment.findMany({
     where: { status: { in: ["RUNNING", "DEPLOYING", "BUILDING"] } },
     orderBy: { updatedAt: "desc" },
-    take: 12
+    take: 6
   });
   const rows = await Promise.all(deployments.map(async (deployment) => {
     const policy = normalizeDeploymentResourcePolicy(deployment.processConfig);
     const appPath = path.resolve(deployment.rootPath, deployment.rootDirectory || ".");
-    const metrics = await sysagent.deploymentMetrics({
-      deploymentId: deployment.id,
-      name: deployment.slug,
-      rootPath: appPath,
-      port: deployment.port,
-      processManager: deployment.processManager,
-      dbType: deployment.dbType,
-      dbName: deployment.dbName,
-      serverNames: [],
-      logLines: 10
-    }).catch(() => null) as any;
+    const metrics = await withTimeout(
+      sysagent.deploymentMetrics({
+        deploymentId: deployment.id,
+        name: deployment.slug,
+        rootPath: appPath,
+        port: deployment.port,
+        processManager: deployment.processManager,
+        dbType: deployment.dbType,
+        dbName: deployment.dbName,
+        serverNames: [],
+        logLines: 10
+      }).catch(() => null) as Promise<any>,
+      900,
+      null
+    );
     return {
       id: deployment.id,
       slug: deployment.slug,
