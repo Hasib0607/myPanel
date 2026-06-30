@@ -226,6 +226,7 @@ class DeploymentMetricsRequest(BaseModel):
     name: str
     rootPath: str
     port: int | None = Field(default=None, ge=1, le=65535)
+    framework: str | None = None
     processManager: str | None = None
     logDir: str | None = None
     dbType: str | None = None
@@ -717,7 +718,7 @@ def process_matches(proc: psutil.Process, root_path: str, name: str, port_pids: 
         return False
 
 
-def deployment_process_metrics(root_path: str, name: str, port: int | None) -> dict:
+def deployment_process_metrics(root_path: str, name: str, port: int | None, deployment_id: str | None = None, framework: str | None = None) -> dict:
     port_pids: set[int] = set()
     if port:
         try:
@@ -727,12 +728,30 @@ def deployment_process_metrics(root_path: str, name: str, port: int | None) -> d
         except (psutil.AccessDenied, OSError):
             port_pids = set()
 
+    matched_pids: set[int] = set(port_pids)
     processes = []
     cpu_percent = 0.0
     memory_bytes = 0
-    for proc in psutil.process_iter(["pid", "name", "status", "memory_info", "cpu_percent"]):
+    candidates = list(psutil.process_iter(["pid", "ppid", "name", "status", "memory_info", "cpu_percent"]))
+    for proc in candidates:
         try:
-            if not process_matches(proc, root_path, name, port_pids):
+            if process_matches(proc, root_path, name, port_pids):
+                matched_pids.add(proc.pid)
+                for child in proc.children(recursive=True):
+                    matched_pids.add(child.pid)
+        except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+            continue
+
+    if deployment_id and str(framework or "").upper() == "LARAVEL":
+        pool_name = laravel_fpm_pool_name(deployment_id)
+        for item in _laravel_fpm_processes(pool_name):
+            pid = int(item.get("pid") or 0)
+            if pid:
+                matched_pids.add(pid)
+
+    for proc in candidates:
+        try:
+            if proc.pid not in matched_pids:
                 continue
             memory = proc.info.get("memory_info")
             rss = int(getattr(memory, "rss", 0) or 0)
@@ -1851,7 +1870,7 @@ def deployment_metrics(body: DeploymentMetricsRequest) -> dict:
         rootPath=root,
         lines=body.logLines,
     ))
-    process = deployment_process_metrics(root, body.name, body.port)
+    process = deployment_process_metrics(root, body.name, body.port, body.deploymentId, body.framework)
     history = update_metrics_history(body.name, process)
     return {
         "ok": True,

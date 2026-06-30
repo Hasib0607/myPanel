@@ -2651,6 +2651,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
         name: deployment.slug,
         rootPath: appPath,
         port: deployment.port,
+        framework: deployment.framework,
         processManager: deployment.processManager,
         logDir: accountDeploymentLogDir(deployment.slug),
         dbType: deployment.dbType,

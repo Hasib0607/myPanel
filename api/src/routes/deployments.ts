@@ -2667,6 +2667,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
         name: deployment.slug,
         rootPath: appPath,
         port: deployment.port,
+        framework: deployment.framework,
         processManager: deployment.processManager,
         logDir: deploymentLogDir(deployment.slug),
         dbType: deployment.dbType,

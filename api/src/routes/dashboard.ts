@@ -81,6 +81,7 @@ async function topDeploymentResourceUsers(): Promise<DashboardResourceUser[]> {
         name: deployment.slug,
         rootPath: appPath,
         port: deployment.port,
+        framework: deployment.framework,
         processManager: deployment.processManager,
         dbType: deployment.dbType,
         dbName: deployment.dbName,
