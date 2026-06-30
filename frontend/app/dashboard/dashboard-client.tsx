@@ -44,20 +44,26 @@ type DashboardData = {
     manageable?: boolean;
     availableActions?: string[];
   }>;
-  topResourceUsers: Array<{
-    id: string;
-    slug: string;
-    name: string;
-    status: string;
-    framework: string;
-    priorityTier: string;
-    memoryMaxMb: number;
-    cpuQuotaPercent: number;
-    memoryBytes: number;
-    cpuPercent: number;
-    processCount: number;
-  }>;
   generatedAt: string;
+};
+
+type ResourceUser = {
+  id: string;
+  slug: string;
+  name: string;
+  status: string;
+  framework: string;
+  priorityTier: string;
+  memoryMaxMb: number;
+  cpuQuotaPercent: number;
+  memoryBytes: number;
+  cpuPercent: number;
+  processCount: number;
+};
+
+type TopResourceUsersResponse = {
+  generatedAt: string;
+  items: ResourceUser[];
 };
 
 type NameServer = {
@@ -164,7 +170,7 @@ function ServiceActions({ serviceKey, status, installed, disabled, onAction }: {
   );
 }
 
-function ResourceUserCard({ project, rank }: { project: DashboardData["topResourceUsers"][number]; rank: number }) {
+function ResourceUserCard({ project, rank }: { project: ResourceUser; rank: number }) {
   const memoryPercent = project.memoryMaxMb > 0 ? (project.memoryBytes / (project.memoryMaxMb * 1024 * 1024)) * 100 : 0;
   const cpuPercent = project.cpuQuotaPercent > 0 ? (project.cpuPercent / project.cpuQuotaPercent) * 100 : 0;
 
@@ -198,6 +204,11 @@ export function DashboardClient() {
     queryKey: ["dashboard"],
     queryFn: () => apiGet<DashboardData>("/dashboard"),
     refetchInterval: 10_000
+  });
+  const topResourceUsers = useQuery({
+    queryKey: ["dashboard-top-resource-users"],
+    queryFn: () => apiGet<TopResourceUsersResponse>("/dashboard/top-resource-users"),
+    refetchInterval: 30_000
   });
   const nameServers = useQuery({
     queryKey: ["nameservers"],
@@ -358,21 +369,40 @@ export function DashboardClient() {
             <div className="flex items-center justify-between gap-3">
               <div>
                 <div className="text-sm font-semibold">Top Resource Projects</div>
-                <div className="mt-1 text-xs text-panel-muted">Highest live RAM and CPU usage across running projects.</div>
+                <div className="mt-1 text-xs text-panel-muted">
+                  {topResourceUsers.data?.generatedAt
+                    ? `Highest live RAM and CPU usage. Updated ${new Date(topResourceUsers.data.generatedAt).toLocaleTimeString()}.`
+                    : "Highest live RAM and CPU usage across running projects."}
+                </div>
               </div>
               <div className="flex items-center gap-2 text-panel-muted">
                 <HardDrive size={16} />
                 <Cpu size={16} />
+                <button
+                  aria-label="Refresh top resource projects"
+                  className="grid h-8 w-8 place-items-center rounded-md border border-panel-line hover:bg-slate-50 disabled:opacity-50"
+                  disabled={topResourceUsers.isFetching}
+                  onClick={() => topResourceUsers.refetch()}
+                  title="Refresh top resource projects"
+                  type="button"
+                >
+                  <RefreshCw className={topResourceUsers.isFetching ? "animate-spin" : ""} size={14} />
+                </button>
               </div>
             </div>
             <div className="mt-4 grid grid-cols-3 gap-3">
-              {(data?.topResourceUsers ?? []).map((project, index) => (
+              {(topResourceUsers.data?.items ?? []).map((project, index) => (
                 <ResourceUserCard key={project.id} project={project} rank={index + 1} />
               ))}
-              {data && data.topResourceUsers.length === 0 ? (
+              {topResourceUsers.isError ? (
+                <div className="col-span-3 rounded-md border border-red-200 bg-red-50 p-5 text-sm text-panel-danger">
+                  {topResourceUsers.error instanceof Error ? topResourceUsers.error.message : "Top resource projects could not be loaded."}
+                </div>
+              ) : null}
+              {topResourceUsers.data && topResourceUsers.data.items.length === 0 ? (
                 <div className="col-span-3 rounded-md border border-dashed border-panel-line p-5 text-sm text-panel-muted">No running project resource metrics available right now.</div>
               ) : null}
-              {!data ? (
+              {topResourceUsers.isLoading ? (
                 [1, 2, 3].map((item) => (
                   <div className="rounded-md border border-panel-line bg-white p-4" key={item}>
                     <div className="h-4 w-2/3 rounded bg-slate-100" />

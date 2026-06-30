@@ -137,8 +137,6 @@ export const dashboardRoutes: FastifyPluginAsync = async (app) => {
     } catch {
       systemStats = { unavailable: true };
     }
-    const topResourceUsers = sysagentHealthy ? await topDeploymentResourceUsers().catch(() => []) : [];
-
     const services = [];
 
     try {
@@ -179,7 +177,13 @@ export const dashboardRoutes: FastifyPluginAsync = async (app) => {
       deploymentStatus: deploymentStatus.map((item) => ({ status: item.status, count: item._count })),
       systemStats,
       services,
-      topResourceUsers,
+      generatedAt: new Date().toISOString()
+    };
+  });
+
+  app.get("/top-resource-users", { preHandler: app.requireAuth }, async () => {
+    return {
+      items: await topDeploymentResourceUsers().catch(() => []),
       generatedAt: new Date().toISOString()
     };
   });
