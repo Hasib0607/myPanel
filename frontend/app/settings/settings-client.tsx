@@ -1,8 +1,9 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Eye, EyeOff, KeyRound, RotateCcw, Save, Settings2 } from "lucide-react";
+import { Eye, EyeOff, Github, KeyRound, RotateCcw, Save, Settings2 } from "lucide-react";
 import { apiGet, apiPost, apiPut } from "@/lib/api";
 
 type SettingsResponse = {
@@ -72,27 +73,39 @@ export function SettingsClient() {
   return (
     <section className="space-y-5 p-6">
       <div className="grid gap-5 xl:grid-cols-[420px_1fr]">
-        <div className="rounded-md border border-panel-line bg-white">
-          <div className="flex items-center gap-3 border-b border-panel-line px-4 py-3">
-            <span className="grid h-9 w-9 place-items-center rounded-md bg-slate-950 text-white"><KeyRound size={17} /></span>
-            <div>
-              <div className="text-sm font-semibold text-panel-ink">Panel password</div>
-              <div className="text-xs text-panel-muted">Signed in as {settings.data?.username ?? "admin"}</div>
+        <div className="space-y-5">
+          <div className="rounded-md border border-panel-line bg-white">
+            <div className="flex items-center gap-3 border-b border-panel-line px-4 py-3">
+              <span className="grid h-9 w-9 place-items-center rounded-md bg-slate-950 text-white"><KeyRound size={17} /></span>
+              <div>
+                <div className="text-sm font-semibold text-panel-ink">Panel password</div>
+                <div className="text-xs text-panel-muted">Signed in as {settings.data?.username ?? "admin"}</div>
+              </div>
+            </div>
+            <div className="space-y-3 p-4">
+              <Field label="Current password" type="password" value={password.currentPassword} onChange={(currentPassword) => setPassword({ ...password, currentPassword })} />
+              <Field label="New password" type="password" value={password.newPassword} onChange={(newPassword) => setPassword({ ...password, newPassword })} />
+              <Field label="Confirm password" type="password" value={password.confirmPassword} onChange={(confirmPassword) => setPassword({ ...password, confirmPassword })} />
+              <button
+                className="flex h-10 w-full items-center justify-center gap-2 rounded-md bg-panel-accent text-sm font-semibold text-white disabled:opacity-60"
+                disabled={passwordInvalid || changePassword.isPending}
+                onClick={() => changePassword.mutate()}
+                type="button"
+              >
+                <Save size={16} /> {changePassword.isPending ? "Saving..." : "Change password"}
+              </button>
             </div>
           </div>
-          <div className="space-y-3 p-4">
-            <Field label="Current password" type="password" value={password.currentPassword} onChange={(currentPassword) => setPassword({ ...password, currentPassword })} />
-            <Field label="New password" type="password" value={password.newPassword} onChange={(newPassword) => setPassword({ ...password, newPassword })} />
-            <Field label="Confirm password" type="password" value={password.confirmPassword} onChange={(confirmPassword) => setPassword({ ...password, confirmPassword })} />
-            <button
-              className="flex h-10 w-full items-center justify-center gap-2 rounded-md bg-panel-accent text-sm font-semibold text-white disabled:opacity-60"
-              disabled={passwordInvalid || changePassword.isPending}
-              onClick={() => changePassword.mutate()}
-              type="button"
-            >
-              <Save size={16} /> {changePassword.isPending ? "Saving..." : "Change password"}
-            </button>
-          </div>
+
+          <Link className="block rounded-md border border-panel-line bg-white p-4 transition-colors hover:border-panel-accent hover:bg-slate-50" href="/settings/git">
+            <div className="flex items-center gap-3">
+              <span className="grid h-9 w-9 place-items-center rounded-md bg-slate-950 text-white"><Github size={17} /></span>
+              <div>
+                <div className="text-sm font-semibold text-panel-ink">Git connection</div>
+                <div className="text-xs text-panel-muted">Connect, reconnect, or disconnect GitHub for deploy source sync.</div>
+              </div>
+            </div>
+          </Link>
         </div>
 
         <div className="rounded-md border border-panel-line bg-white">

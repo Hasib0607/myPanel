@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Archive, Blocks, Database, Gauge, Globe2, HardDrive, Inbox, Lock, Network, Package, PanelLeftClose, PanelLeftOpen, Radar, ServerCog, Settings, Shield, SquareTerminal, Users, Zap } from "lucide-react";
+import { Archive, Blocks, Database, Gauge, Github, Globe2, HardDrive, Inbox, Lock, Network, Package, PanelLeftClose, PanelLeftOpen, Radar, ServerCog, Settings, Shield, SquareTerminal, Users, Zap } from "lucide-react";
 import { LogoutButton } from "@/components/logout-button";
 import { useSidebarCollapsed } from "@/hooks/use-sidebar-collapsed";
 
@@ -22,6 +22,7 @@ const nav = [
   { href: "/backups", label: "Backups", icon: Archive },
   { href: "/terminal", label: "Terminal", icon: SquareTerminal },
   { href: "/security", label: "Security", icon: Lock },
+  { href: "/settings/git", label: "Git", icon: Github },
   { href: "/settings", label: "Settings", icon: Settings }
 ];
 
@@ -57,7 +58,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <nav className="flex gap-1 overflow-x-auto pb-1 lg:block lg:space-y-1 lg:overflow-y-auto lg:overflow-x-visible">
           {nav.map((item) => {
             const Icon = item.icon;
-            const active = pathname === item.href || pathname.startsWith(item.href + "/");
+            const active = item.href === "/settings" ? pathname === "/settings" : pathname === item.href || pathname.startsWith(item.href + "/");
             return (
               <Link
                 key={item.href}
