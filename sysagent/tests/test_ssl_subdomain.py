@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from app.config import settings
 from app.routers import ssl as ssl_router
-from app.routers.ssl import DnsCertificateRequest, certbot_should_include_www, dns_hook_script
+from app.routers.ssl import CertificateRequest, DnsCertificateRequest, certbot_should_include_www, dns_hook_script
 
 
 class CertbotIncludeWwwTests(unittest.TestCase):
@@ -15,6 +15,28 @@ class CertbotIncludeWwwTests(unittest.TestCase):
     def test_subdomain_never_includes_www(self) -> None:
         self.assertFalse(certbot_should_include_www("admin.priceinbd.store", True))
         self.assertFalse(certbot_should_include_www("admin.priceinbd.store", False))
+
+    def test_http_issue_expands_existing_certificate_for_www(self) -> None:
+        captured = {}
+
+        def fake_run_command(command, **kwargs):
+            captured["command"] = command
+            return {"dryRun": False, "command": command, "stdout": "", "stderr": "", "returncode": 0}
+
+        with TemporaryDirectory() as tmp, \
+             patch.object(ssl_router, "ensure_acme_webroot"), \
+             patch.object(ssl_router, "safe_web_root", return_value=Path(tmp)), \
+             patch.object(ssl_router, "run_command", side_effect=fake_run_command):
+            ssl_router.issue_certificate(CertificateRequest(
+                domain="ebitans.com",
+                email="admin@ebitans.com",
+                webRoot=tmp,
+                includeWww=True,
+                certName="ebitans.com",
+            ))
+
+        self.assertIn("www.ebitans.com", captured["command"])
+        self.assertIn("--expand", captured["command"])
 
     def test_dns_issue_uses_ssl_certbot_timeout(self) -> None:
         captured = {}

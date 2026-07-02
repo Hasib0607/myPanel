@@ -57,3 +57,35 @@ test("wildcard deployment skips HTTP ACME webroot preparation", async () => {
 
   assert.equal(calls, 0);
 });
+
+test("Next.js proxy requests always preserve the public Host", async () => {
+  const { buildDeploymentNginxRequest } = await import("./deploymentDomainSsl.js");
+  const request = buildDeploymentNginxRequest({
+    deploymentId: "dep_1",
+    fqdn: "ebitans.com",
+    upstreamPort: 10002,
+    rootPath: "/var/www/ebitans",
+    framework: "NEXTJS",
+    startCommand: "npm run preview",
+    fallbackRootPath: null,
+    forceSsl: true
+  });
+
+  assert.equal(request.loopbackProxyHost, false);
+});
+
+test("Vite preview may use a loopback Host", async () => {
+  const { buildDeploymentNginxRequest } = await import("./deploymentDomainSsl.js");
+  const request = buildDeploymentNginxRequest({
+    deploymentId: "dep_2",
+    fqdn: "spa.example.com",
+    upstreamPort: 10003,
+    rootPath: "/var/www/spa",
+    framework: "NODEJS",
+    startCommand: "npm run preview",
+    fallbackRootPath: null,
+    forceSsl: true
+  });
+
+  assert.equal(request.loopbackProxyHost, true);
+});

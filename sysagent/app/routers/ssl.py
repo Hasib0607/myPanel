@@ -98,6 +98,22 @@ def certificate_expiry(domain: str) -> str | None:
     return parsed.replace(tzinfo=timezone.utc).isoformat()
 
 
+def certificate_names(domain: str) -> list[str]:
+    cert_name = safe_cert_lookup_name(domain)
+    cert_path = LETSENCRYPT_LIVE_DIR / cert_name / "fullchain.pem"
+    if not cert_path.exists():
+        return []
+    result = subprocess.run(
+        ["openssl", "x509", "-in", str(cert_path), "-noout", "-ext", "subjectAltName"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+    return sorted({name.lower() for name in re.findall(r"DNS:([^,\s]+)", result.stdout, re.IGNORECASE)})
+
+
 @router.get("/certificate-status/{domain}")
 def certificate_status(domain: str) -> dict:
     primary = safe_cert_lookup_name(domain)
@@ -106,6 +122,7 @@ def certificate_status(domain: str) -> dict:
         "domain": primary,
         "exists": letsencrypt_certificate_exists(primary),
         "expiry": expiry,
+        "names": certificate_names(primary),
         "certificate": f"/etc/letsencrypt/live/{primary}/fullchain.pem",
         "privateKey": f"/etc/letsencrypt/live/{primary}/privkey.pem",
     }
@@ -132,6 +149,7 @@ def reusable_certificate_candidates(requested: str) -> list[dict]:
             "domain": cert_name,
             "exists": exists,
             "expiry": expiry,
+            "names": certificate_names(cert_name),
             "certificate": str(item / "fullchain.pem"),
             "privateKey": str(item / "privkey.pem"),
         })
@@ -220,7 +238,7 @@ def issue_certificate(payload: CertificateRequest) -> dict:
     if payload.certName:
         command.extend(["--cert-name", payload.certName])
     if certbot_should_include_www(payload.domain, payload.includeWww):
-        command.extend(["-d", f"www.{payload.domain}"])
+        command.extend(["-d", f"www.{payload.domain}", "--expand"])
 
     return run_command(command, allow_live=settings.allow_live_ssl, timeout=settings.ssl_certbot_timeout_seconds)
 

@@ -63,6 +63,19 @@ class DeploymentNginxLaravelTests(unittest.TestCase):
         )
         self.assertIn("proxy_set_header Host 127.0.0.1:10005;", block)
 
+    def test_nextjs_never_uses_loopback_host_header(self) -> None:
+        block = nginx_app_locations(
+            deployment_id="example",
+            framework="NEXTJS",
+            public_root="/var/www/deployments/example/public",
+            upstream_port=10005,
+            fallback_error_page="",
+            fallback_location="",
+            loopback_proxy_host=True,
+        )
+        self.assertIn("proxy_set_header Host $http_host;", block)
+        self.assertNotIn("proxy_set_header Host 127.0.0.1:10005;", block)
+
     def test_upstream_proxy_location(self) -> None:
         block = nginx_upstream_proxy_locations(10005)
         self.assertIn("location / {", block)

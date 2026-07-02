@@ -89,7 +89,11 @@ def nginx_app_locations(
 ) -> str:
     normalized = (framework or "").upper()
     if normalized in {"NODEJS", "NEXTJS", "PYTHON", "GO"}:
-        return nginx_upstream_proxy_locations(upstream_port, loopback_host=loopback_proxy_host)
+        # Never replace the public Host for Next.js. Its middleware combines Host
+        # with X-Forwarded-Proto when constructing rewrite URLs; a loopback Host
+        # would turn an HTTPS request into https://localhost:<plain-http-port>.
+        effective_loopback_host = loopback_proxy_host and normalized == "NODEJS"
+        return nginx_upstream_proxy_locations(upstream_port, loopback_host=effective_loopback_host)
     if normalized == "STATIC":
         return nginx_spa_static_locations(public_root, upstream_port)
     return nginx_laravel_app_locations(

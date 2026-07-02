@@ -303,7 +303,9 @@ export function buildDeploymentNginxRequest(input: {
     upstreamPort: input.upstreamPort,
     rootPath: input.rootPath,
     framework: input.framework,
-    loopbackProxyHost: nodeStartUsesVitePreview(input.startCommand),
+    // Vite preview rejects unknown hosts, but Next.js middleware needs the public
+    // Host to construct same-origin rewrites behind an HTTPS reverse proxy.
+    loopbackProxyHost: input.framework === "NODEJS" && nodeStartUsesVitePreview(input.startCommand),
     publicDirectory: deploymentNginxPublicDirectory(input),
     fallbackRootPath: input.fallbackRootPath,
     forceSsl: input.forceSsl,

@@ -56,6 +56,7 @@ type ReusableCertificate = {
   domain: string;
   exists: boolean;
   expiry: string | null;
+  names: string[];
   certificate: string;
   privateKey: string;
 };
@@ -89,9 +90,11 @@ type ReusableCertificateLookup = {
   certificate: ReusableCertificate;
 };
 
-async function reusableCertificateResult(certName: string, reason: string): Promise<ReusableCertificateLookup | null> {
+async function reusableCertificateResult(certName: string, reason: string, requiredNames: string[]): Promise<ReusableCertificateLookup | null> {
   const status = await sysagent.certificateFindReusable(certName);
   if (!status.exists) return null;
+  const certificateNames = new Set((status.names ?? []).map((name) => name.toLowerCase()));
+  if (!requiredNames.every((name) => certificateNames.has(name.toLowerCase()))) return null;
   return {
     certificate: status,
     result: {
@@ -327,8 +330,9 @@ export const sslWorker = new Worker(
     if (job.name === "issue") {
       const includeWww = job.data.includeWww ?? true;
       const certName = job.data.certName ?? certbotCertificateName(job.data.domain);
+      const requiredNames = [job.data.domain, ...(includeWww && !isWildcardHostname(job.data.domain) ? [`www.${job.data.domain}`] : [])];
       let reusableCertificate: ReusableCertificate | null = null;
-      const existingCertificate = await reusableCertificateResult(certName, "Certbot issue skipped");
+      const existingCertificate = await reusableCertificateResult(certName, "Certbot issue skipped", requiredNames);
       let result: SysagentCommandResult | null = existingCertificate?.result ?? null;
       reusableCertificate = existingCertificate?.certificate ?? null;
       if (!result) {
@@ -367,7 +371,7 @@ export const sslWorker = new Worker(
           });
       }
       if (letsEncryptExactSetRateLimited(result)) {
-        const reusable = await reusableCertificateResult(certName, "Let's Encrypt exact-set rate limit hit");
+        const reusable = await reusableCertificateResult(certName, "Let's Encrypt exact-set rate limit hit", requiredNames);
         if (reusable) {
           result = reusable.result;
           reusableCertificate = reusable.certificate;
@@ -378,6 +382,11 @@ export const sslWorker = new Worker(
       }
       if (!result) throw new Error(`Certbot issue did not return a result for ${job.data.domain}`);
       assertLiveCommandSucceeded("Certbot issue", result);
+      const verifiedCertificate = await reusableCertificateResult(certName, "Certbot certificate SAN verified", requiredNames);
+      if (!verifiedCertificate) {
+        throw new Error(`Certbot completed, but the installed certificate does not cover ${requiredNames.join(", ")}. Nginx was not switched to the incomplete certificate.`);
+      }
+      reusableCertificate = verifiedCertificate.certificate;
 
       const domain = job.data.domainId
         ? await prisma.domain.findUnique({ where: { id: job.data.domainId }, select: { forceSsl: true } })
@@ -391,6 +400,8 @@ export const sslWorker = new Worker(
 
     if (job.name === "renew") {
       const certName = job.data.certName ?? certbotCertificateName(job.data.domain);
+      const includeWww = job.data.includeWww ?? true;
+      const requiredNames = [job.data.domain, ...(includeWww && !isWildcardHostname(job.data.domain) ? [`www.${job.data.domain}`] : [])];
       let reusableCertificate: ReusableCertificate | null = null;
       let result = isWildcardHostname(job.data.domain) || job.data.dnsChallenge
         ? await sysagent.issueDnsCertificate({
@@ -402,18 +413,23 @@ export const sslWorker = new Worker(
           })
         : await sysagent.renewCertificate(certName);
       if (letsEncryptExactSetRateLimited(result)) {
-        const reusable = await reusableCertificateResult(certName, "Let's Encrypt exact-set rate limit hit during renew");
+        const reusable = await reusableCertificateResult(certName, "Let's Encrypt exact-set rate limit hit during renew", requiredNames);
         if (reusable) {
           result = reusable.result;
           reusableCertificate = reusable.certificate;
         }
       }
       assertLiveCommandSucceeded("Certbot renew", result);
+      const verifiedCertificate = await reusableCertificateResult(certName, "Renewed certificate SAN verified", requiredNames);
+      if (!verifiedCertificate) {
+        throw new Error(`Certbot renewal completed, but the installed certificate does not cover ${requiredNames.join(", ")}. Nginx was not switched to the incomplete certificate.`);
+      }
+      reusableCertificate = verifiedCertificate.certificate;
 
       const domain = job.data.domainId
         ? await prisma.domain.findUnique({ where: { id: job.data.domainId }, select: { forceSsl: true } })
         : null;
-      const vhost = await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true, job.data.includeWww ?? true, job.data.webRoot, reusableCertificate);
+      const vhost = await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true, includeWww, job.data.webRoot, reusableCertificate);
       await markSslIssued(job, reusableCertificate);
 
       await redis.del("domain_list", `ssl_expiry:${job.data.domain}`);
