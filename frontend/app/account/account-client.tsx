@@ -4,9 +4,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Copy, Database, ExternalLink, FileText, FolderPlus, Globe2, Inbox, KeyRound, Mail, Play, Plus, RefreshCw, RotateCw, Save, Square, Trash2 } from "lucide-react";
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ApiError, apiDelete, apiDeleteBody, apiGet, apiPatch, apiPost, apiPut } from "@/lib/api";
 import { PageHeader } from "@/components/page-header";
+import { TokenExpiryControls, defaultTokenDateTimeLocal, tokenExpiryBody, tokenExpiryText } from "@/components/token-expiry-controls";
 
 type Domain = { id: string; name: string; status: string; documentRoot: string };
 type Deployment = { id: string; name: string; slug: string; status: string; healthStatus: string; port: number; dbType?: string | null };
@@ -64,7 +65,7 @@ type Dashboard = {
 };
 type FileList = { current: FileEntry; root: string; items: FileEntry[] };
 type FileRead = { file: FileEntry; content: string };
-type AccountApiToken = { token: string; tokenType: "Bearer"; expiresInSeconds: number; apiBaseUrl: string };
+type AccountApiToken = { token: string; tokenType: "Bearer"; expiresInSeconds: number | null; expiresAt: string | null; unlimited: boolean; apiBaseUrl: string };
 export type AccountView = "dashboard" | "domains" | "files" | "mail" | "deployments" | "databases" | "profile";
 
 const viewTitles: Record<AccountView, string> = {
@@ -104,11 +105,17 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
   const [dnsDraft, setDnsDraft] = useState({ domainId: "", type: "A", name: "@", value: "", ttl: "3600" });
   const [passwordDraft, setPasswordDraft] = useState({ currentPassword: "", newPassword: "" });
   const [apiToken, setApiToken] = useState<AccountApiToken | null>(null);
+  const [apiTokenExpiryMode, setApiTokenExpiryMode] = useState<"unlimited" | "date">("unlimited");
+  const [apiTokenExpiresAt, setApiTokenExpiresAt] = useState(defaultTokenDateTimeLocal);
   const [runtimeModal, setRuntimeModal] = useState<RuntimeModalState | null>(null);
 
   const dashboard = useQuery({
     queryKey: ["account-dashboard"],
     queryFn: () => apiGet<Dashboard>("/account/dashboard")
+  });
+  const savedApiToken = useQuery({
+    queryKey: ["account-api-token"],
+    queryFn: () => apiGet<AccountApiToken | { token: null }>("/account/api-token")
   });
   const files = useQuery({
     queryKey: ["account-files", filePath],
@@ -120,6 +127,10 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
       queryClient.invalidateQueries({ queryKey: ["account-files"] })
     ]);
   };
+
+  useEffect(() => {
+    if (savedApiToken.data?.token) setApiToken(savedApiToken.data);
+  }, [savedApiToken.data]);
 
   const createDomain = useMutation({
     mutationFn: () => apiPost<Domain>("/account/domains", { name: domainName }),
@@ -351,10 +362,11 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
   });
 
   const generateApiToken = useMutation({
-    mutationFn: () => apiPost<AccountApiToken>("/account/api-token", {}),
+    mutationFn: () => apiPost<AccountApiToken>("/account/api-token", tokenExpiryBody(apiTokenExpiryMode, apiTokenExpiresAt)),
     onSuccess: (result) => {
       setApiToken(result);
-      setNotice("API token generated. Copy it now and keep it private.");
+      setNotice("API token generated and saved. Copy it now and keep it private.");
+      queryClient.setQueryData(["account-api-token"], result);
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not generate API token.")
   });
@@ -754,9 +766,10 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
               <div className="text-sm text-panel-muted">
                 Generate a bearer token for account-scoped API calls like adding domains. The token is shown only after generation.
               </div>
+              <TokenExpiryControls mode={apiTokenExpiryMode} setMode={setApiTokenExpiryMode} expiresAt={apiTokenExpiresAt} setExpiresAt={setApiTokenExpiresAt} />
               <button className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={generateApiToken.isPending} onClick={() => generateApiToken.mutate()} type="button">
                 <KeyRound size={15} />
-                {generateApiToken.isPending ? "Generating" : "Generate API Token"}
+                {generateApiToken.isPending ? "Generating" : apiToken ? "Generate New Token" : "Generate API Token"}
               </button>
               {apiToken ? (
                 <div className="space-y-3">
@@ -780,7 +793,7 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
                     </div>
                     <pre className="whitespace-pre-wrap break-all font-mono text-xs text-panel-text">{accountDomainEnv(apiToken)}</pre>
                   </div>
-                  <div className="text-xs text-panel-muted">Expires in {Math.round(apiToken.expiresInSeconds / 86400)} day(s). Generate a new token anytime.</div>
+                  <div className="text-xs text-panel-muted">{tokenExpiryText(apiToken)}. Generate a new token anytime.</div>
                 </div>
               ) : null}
             </div>

@@ -4,6 +4,7 @@ import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "reac
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, ArrowDownToLine, ArrowUpFromLine, CheckCircle2, Clipboard, Clock3, Cpu, Database, Eye, EyeOff, FolderGit2, Gauge, GitBranch, Github, HardDrive, History, KeyRound, List, MemoryStick, Network, Pencil, Play, Plus, RefreshCw, Rocket, Save, Search, ServerCog, Settings2, ShieldCheck, Square, ToggleLeft, ToggleRight, Trash2, Wand2, X } from "lucide-react";
 import { ApiError, apiDelete, apiDeleteBody, apiGet, apiGetText, apiPatch, apiPost, apiPut } from "@/lib/api";
+import { TokenExpiryControls, defaultTokenDateTimeLocal, tokenExpiryBody, tokenExpiryText } from "@/components/token-expiry-controls";
 import { FileManagerClient } from "@/app/files/file-manager-client";
 import type { Deployment, DeploymentDomainBinding, DeploymentEnvVar, DeploymentFramework, DeploymentListResponse, DeploymentMetrics, DeploymentRelease, DetectionResponse, LaravelRuntimeStatus, LaravelTimingResult, PreflightResponse, QueueResponse, DeploymentSourceProvider } from "./deployment-types";
 import { frameworkOptions, sourceOptions } from "./deployment-types";
@@ -43,7 +44,9 @@ type RuntimeReviewError = {
 type ProjectDomainApiToken = {
   token: string;
   tokenType: "Bearer";
-  expiresInSeconds: number;
+  expiresInSeconds: number | null;
+  expiresAt: string | null;
+  unlimited: boolean;
   apiBaseUrl: string;
   endpoint: string;
   deployment: { id: string; slug: string; name: string };
@@ -1895,21 +1898,31 @@ function SettingsPanel({
   const [token, setToken] = useState<ProjectDomainApiToken | null>(null);
   const [tokenNotice, setTokenNotice] = useState("");
   const [settingsNotice, setSettingsNotice] = useState("");
+  const [tokenExpiryMode, setTokenExpiryMode] = useState<"unlimited" | "date">("unlimited");
+  const [tokenExpiresAt, setTokenExpiresAt] = useState(defaultTokenDateTimeLocal);
   const [cronDraft, setCronDraft] = useState(emptyCronDraft);
   const [cronEdits, setCronEdits] = useState<Record<string, typeof emptyCronDraft>>({});
+  const savedToken = useQuery({
+    queryKey: ["project-domain-api-token", apiBase, deployment.slug, "compact"],
+    queryFn: () => apiGet<ProjectDomainApiToken | { token: null }>(`${apiBase}/${deployment.slug}/domain-api-token`)
+  });
   const cronJobs = useQuery({
     queryKey: ["deployment", apiBase, deployment.slug, "cron-jobs", "compact"],
     queryFn: () => apiGet<{ items: CronJob[] }>(`${apiBase}/${deployment.slug}/cron-jobs`)
   });
   useEffect(() => {
+    if (savedToken.data?.token) setToken(savedToken.data);
+  }, [savedToken.data]);
+  useEffect(() => {
     if (!cronJobs.data?.items) return;
     setCronEdits(Object.fromEntries(cronJobs.data.items.map((item) => [item.id, cronJobToDraft(item)])));
   }, [cronJobs.data?.items]);
   const generateToken = useMutation({
-    mutationFn: () => apiPost<ProjectDomainApiToken>(`${apiBase}/${deployment.slug}/domain-api-token`, {}),
+    mutationFn: () => apiPost<ProjectDomainApiToken>(`${apiBase}/${deployment.slug}/domain-api-token`, tokenExpiryBody(tokenExpiryMode, tokenExpiresAt)),
     onSuccess: (result) => {
       setToken(result);
-      setTokenNotice("Project domain API token generated. Copy it now and keep it private.");
+      setTokenNotice("Project domain API token generated and saved. Copy it now and keep it private.");
+      queryClient.setQueryData(["project-domain-api-token", apiBase, deployment.slug, "compact"], result);
     },
     onError: (error) => setTokenNotice(error instanceof Error ? error.message : "Could not generate project domain API token.")
   });
@@ -2028,12 +2041,16 @@ function SettingsPanel({
             <p className="mt-1 text-sm text-panel-muted">Token adds domains only to this project and publishes DNS/vhost immediately.</p>
           </div>
           <button className="h-9 rounded-md bg-slate-900 px-3 text-sm font-semibold text-white disabled:opacity-60" disabled={generateToken.isPending} onClick={() => generateToken.mutate()} type="button">
-            Generate Token
+            {token ? "Generate New Token" : "Generate Token"}
           </button>
+        </div>
+        <div className="mt-3">
+          <TokenExpiryControls mode={tokenExpiryMode} setMode={setTokenExpiryMode} expiresAt={tokenExpiresAt} setExpiresAt={setTokenExpiresAt} />
         </div>
         {tokenNotice ? <div className={`mt-3 rounded-md border p-3 text-sm ${okNotice(tokenNotice) ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-red-200 bg-red-50 text-red-800"}`}>{tokenNotice}</div> : null}
         {token ? (
           <div className="mt-4 grid gap-3">
+            <div className="text-xs font-semibold text-panel-muted">{tokenExpiryText(token)}</div>
             <InlineSnippet label="API base URL" value={token.apiBaseUrl} />
             <InlineSnippet label="Bearer token" value={token.token} />
             <InlineSnippet label=".env" multiline value={envSnippet} />

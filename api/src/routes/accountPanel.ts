@@ -21,7 +21,8 @@ import { deploymentRuntimeReview, prepareDeploymentRuntimeTools } from "../lib/d
 import { buildDeploymentNginxRequest, deploymentIsRoutable, publishDeploymentProxyNginx } from "../lib/deploymentDomainSsl.js";
 import { prisma } from "../lib/prisma.js";
 import { resolvePublicA } from "../lib/publicDns.js";
-import { deleteSecret, getSecret, putSecret } from "../lib/secrets.js";
+import { deleteSecret, getSecret, getSecretRecord, putSecret } from "../lib/secrets.js";
+import { resolveStableApiTokenExpiry, stableApiTokenJwtOptions, stableApiTokenMetadata, stableApiTokenRequestSchema, storedStableTokenExpiry } from "../lib/stableApiTokens.js";
 import { sysagent } from "../lib/sysagent.js";
 import { certbotCertificateName, isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
 import { currentVpsIp } from "../lib/serverIp.js";
@@ -272,9 +273,7 @@ const sslSchema = z.object({
   email: z.string().email().optional(),
   includeWww: z.boolean().default(true)
 });
-const projectDomainApiTokenSchema = z.object({
-  expiresInSeconds: z.coerce.number().int().min(3600).max(60 * 60 * 24 * 365).default(env.JWT_EXPIRY)
-});
+const projectDomainApiTokenSchema = stableApiTokenRequestSchema;
 const projectDomainApiCreateSchema = z.object({
   name: domainNameSchema,
   forceSsl: z.boolean().default(true),
@@ -2577,60 +2576,112 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     return serializeAccountDeployment(updated);
   });
 
+  app.get("/deployments/:deploymentId/domain-api-token", async (request: any) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const deployment = await findAccountDeployment(request, deploymentId);
+    const ownerAccountId = accountId(request);
+    const tokenRef = projectDomainApiTokenSecretRef(deployment.id);
+    const secret = await getSecretRecord(tokenRef);
+    if (!secret) return { token: null };
+    const expiry = storedStableTokenExpiry(secret.value, secret.metadata);
+    return {
+      token: secret.value,
+      tokenType: "Bearer",
+      expiresInSeconds: expiry.expiresInSeconds,
+      expiresAt: expiry.expiresAt ? expiry.expiresAt.toISOString() : null,
+      unlimited: expiry.unlimited,
+      apiBaseUrl: `http://${env.VPS_IP}:${env.PANEL_PORT}/api/v1/account/project-domain`,
+      endpoint: "POST /domains",
+      deployment: { id: deployment.id, slug: deployment.slug, name: deployment.name }
+    };
+  });
+
   app.post("/deployments/:deploymentId/domain-api-token", async (request: any) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const body = projectDomainApiTokenSchema.parse(request.body ?? {});
     const deployment = await findAccountDeployment(request, deploymentId);
     const ownerAccountId = accountId(request);
     const tokenRef = projectDomainApiTokenSecretRef(deployment.id);
-    let token = await getSecret(tokenRef);
-    let reusedToken = Boolean(token);
-    let expiresInSeconds = body.expiresInSeconds;
-    if (token) {
-      try {
-        const claims = app.jwt.verify(token) as any;
-        if (claims?.role !== "project_domain" || claims?.accountId !== ownerAccountId || claims?.deploymentId !== deployment.id) {
-          token = null;
-          reusedToken = false;
-        } else if (typeof claims.exp === "number") {
-          expiresInSeconds = Math.max(0, claims.exp - Math.floor(Date.now() / 1000));
-        }
-      } catch {
-        token = null;
-        reusedToken = false;
-      }
-    }
-    if (!token) {
-      token = app.jwt.sign(
-        {
-          sub: deployment.slug,
-          role: "project_domain",
-          accountId: ownerAccountId,
-          deploymentId: deployment.id
-        },
-        { expiresIn: body.expiresInSeconds }
-      );
-      await putSecret({
-        ref: tokenRef,
-        value: token,
-        kind: "GENERIC",
-        label: `Project domain API token for ${deployment.slug}`,
-        metadata: { accountId: ownerAccountId, deploymentId: deployment.id, stableApiToken: true }
-      });
-    }
+    const expiry = resolveStableApiTokenExpiry(body);
+    const token = app.jwt.sign(
+      {
+        sub: deployment.slug,
+        role: "project_domain",
+        accountId: ownerAccountId,
+        deploymentId: deployment.id
+      },
+      stableApiTokenJwtOptions(expiry)
+    );
+    await putSecret({
+      ref: tokenRef,
+      value: token,
+      kind: "GENERIC",
+      label: `Project domain API token for ${deployment.slug}`,
+      metadata: stableApiTokenMetadata({ accountId: ownerAccountId, deploymentId: deployment.id }, expiry)
+    });
     await audit(request, {
-      action: reusedToken ? "UPDATE" : "CREATE",
+      action: "CREATE",
       resource: "project_domain_api_token",
       resourceId: deployment.id,
-      description: reusedToken ? `Account loaded project domain API token for ${deployment.slug}` : `Account generated project domain API token for ${deployment.slug}`
+      description: `Account generated project domain API token for ${deployment.slug}`
     });
     return {
       token,
       tokenType: "Bearer",
-      expiresInSeconds,
+      expiresInSeconds: expiry.expiresInSeconds,
+      expiresAt: expiry.expiresAt ? expiry.expiresAt.toISOString() : null,
+      unlimited: expiry.unlimited,
       apiBaseUrl: `http://${env.VPS_IP}:${env.PANEL_PORT}/api/v1/account/project-domain`,
       endpoint: "POST /domains",
       deployment: { id: deployment.id, slug: deployment.slug, name: deployment.name }
+    };
+  });
+
+  app.get("/api-token", async (request: any) => {
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    const tokenRef = accountApiTokenSecretRef(account.id);
+    const secret = await getSecretRecord(tokenRef);
+    if (!secret) return { token: null };
+    const expiry = storedStableTokenExpiry(secret.value, secret.metadata);
+    return {
+      token: secret.value,
+      tokenType: "Bearer",
+      expiresInSeconds: expiry.expiresInSeconds,
+      expiresAt: expiry.expiresAt ? expiry.expiresAt.toISOString() : null,
+      unlimited: expiry.unlimited,
+      apiBaseUrl: `http://${env.VPS_IP}:${env.PANEL_PORT}/api/v1`
+    };
+  });
+
+  app.post("/api-token", async (request: any) => {
+    const body = stableApiTokenRequestSchema.parse(request.body ?? {});
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    const tokenRef = accountApiTokenSecretRef(account.id);
+    const expiry = resolveStableApiTokenExpiry(body);
+    const token = app.jwt.sign(
+      { sub: account.username, role: "account", accountId: account.id },
+      stableApiTokenJwtOptions(expiry)
+    );
+    await putSecret({
+      ref: tokenRef,
+      value: token,
+      kind: "GENERIC",
+      label: `Account API token for ${account.username}`,
+      metadata: stableApiTokenMetadata({ accountId: account.id }, expiry)
+    });
+    await audit(request, {
+      action: "CREATE",
+      resource: "account_api_token",
+      resourceId: account.id,
+      description: `Account generated API token for ${account.username}`
+    });
+    return {
+      token,
+      tokenType: "Bearer",
+      expiresInSeconds: expiry.expiresInSeconds,
+      expiresAt: expiry.expiresAt ? expiry.expiresAt.toISOString() : null,
+      unlimited: expiry.unlimited,
+      apiBaseUrl: `http://${env.VPS_IP}:${env.PANEL_PORT}/api/v1`
     };
   });
 
@@ -3723,53 +3774,4 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     return { ok: true };
   });
 
-  app.post("/api-token", async (request: any) => {
-    const body = z.object({
-      expiresInSeconds: z.coerce.number().int().min(3600).max(60 * 60 * 24 * 365).default(env.JWT_EXPIRY)
-    }).parse(request.body ?? {});
-    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
-    const tokenRef = accountApiTokenSecretRef(account.id);
-    let token = await getSecret(tokenRef);
-    let reusedToken = Boolean(token);
-    let expiresInSeconds = body.expiresInSeconds;
-    if (token) {
-      try {
-        const claims = app.jwt.verify(token) as any;
-        if (claims?.role !== "account" || claims?.accountId !== account.id) {
-          token = null;
-          reusedToken = false;
-        } else if (typeof claims.exp === "number") {
-          expiresInSeconds = Math.max(0, claims.exp - Math.floor(Date.now() / 1000));
-        }
-      } catch {
-        token = null;
-        reusedToken = false;
-      }
-    }
-    if (!token) {
-      token = app.jwt.sign(
-        { sub: account.username, role: "account", accountId: account.id },
-        { expiresIn: body.expiresInSeconds }
-      );
-      await putSecret({
-        ref: tokenRef,
-        value: token,
-        kind: "GENERIC",
-        label: `Account API token for ${account.username}`,
-        metadata: { accountId: account.id, stableApiToken: true }
-      });
-    }
-    await audit(request, {
-      action: reusedToken ? "UPDATE" : "CREATE",
-      resource: "account_api_token",
-      resourceId: account.id,
-      description: reusedToken ? `Account loaded API token for ${account.username}` : `Account generated API token for ${account.username}`
-    });
-    return {
-      token,
-      tokenType: "Bearer",
-      expiresInSeconds,
-      apiBaseUrl: `http://${env.VPS_IP}:${env.PANEL_PORT}/api/v1`
-    };
-  });
 };

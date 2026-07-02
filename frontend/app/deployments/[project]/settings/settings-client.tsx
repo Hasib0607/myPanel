@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Clock3, Copy, Database, GitBranch, Globe2, KeyRound, Plus, Save, ServerCog, Settings2, ShieldCheck, Trash2, Workflow } from "lucide-react";
 import { apiDeleteBody, apiGet, apiPatch, apiPost } from "@/lib/api";
+import { TokenExpiryControls, defaultTokenDateTimeLocal, tokenExpiryBody, tokenExpiryText } from "@/components/token-expiry-controls";
 import type { Deployment, DeploymentFramework, DeploymentSourceProvider } from "../../deployment-types";
 import { ProjectTabs, ResultNotice } from "../../deployment-ui";
 
@@ -36,7 +37,9 @@ type WebhookSecretResponse = WebhookStatus & {
 type ProjectDomainApiToken = {
   token: string;
   tokenType: "Bearer";
-  expiresInSeconds: number;
+  expiresInSeconds: number | null;
+  expiresAt: string | null;
+  unlimited: boolean;
   apiBaseUrl: string;
   endpoint: string;
   deployment: { id: string; slug: string; name: string };
@@ -313,6 +316,8 @@ export function DeploymentSettingsClient({
   const [deleteText, setDeleteText] = useState("");
   const [newWebhookSecret, setNewWebhookSecret] = useState("");
   const [projectDomainToken, setProjectDomainToken] = useState<ProjectDomainApiToken | null>(null);
+  const [projectTokenExpiryMode, setProjectTokenExpiryMode] = useState<"unlimited" | "date">("unlimited");
+  const [projectTokenExpiresAt, setProjectTokenExpiresAt] = useState(defaultTokenDateTimeLocal);
   const [laravelProcessesJson, setLaravelProcessesJson] = useState("");
   const [cronDraft, setCronDraft] = useState(emptyCronDraft);
   const [cronEdits, setCronEdits] = useState<Record<string, typeof emptyCronDraft>>({});
@@ -324,6 +329,10 @@ export function DeploymentSettingsClient({
   const domains = useQuery({
     queryKey: ["domains", domainsApiBase, "deployment-settings"],
     queryFn: () => apiGet<DomainListResponse>(`${domainsApiBase}?page=1&pageSize=100`)
+  });
+  const savedProjectDomainToken = useQuery({
+    queryKey: ["project-domain-api-token", apiBase, project],
+    queryFn: () => apiGet<ProjectDomainApiToken | { token: null }>(`${apiBase}/${project}/domain-api-token`)
   });
   const webhook = useQuery({
     queryKey: ["deployment", apiBase, project, "webhook"],
@@ -351,6 +360,9 @@ export function DeploymentSettingsClient({
   useEffect(() => {
     if (laravelProcesses.data) setLaravelProcessesJson(JSON.stringify(laravelProcesses.data, null, 2));
   }, [laravelProcesses.data]);
+  useEffect(() => {
+    if (savedProjectDomainToken.data?.token) setProjectDomainToken(savedProjectDomainToken.data);
+  }, [savedProjectDomainToken.data]);
   useEffect(() => {
     if (!cronJobs.data?.items) return;
     setCronEdits(Object.fromEntries(cronJobs.data.items.map((item) => [item.id, cronJobToDraft(item)])));
@@ -488,10 +500,11 @@ export function DeploymentSettingsClient({
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not delete cron job")
   });
   const generateProjectDomainToken = useMutation({
-    mutationFn: () => apiPost<ProjectDomainApiToken>(`${apiBase}/${project}/domain-api-token`, {}),
+    mutationFn: () => apiPost<ProjectDomainApiToken>(`${apiBase}/${project}/domain-api-token`, tokenExpiryBody(projectTokenExpiryMode, projectTokenExpiresAt)),
     onSuccess: (result) => {
       setProjectDomainToken(result);
-      setNotice("Project domain API token generated. Copy it now and keep it private.");
+      setNotice("Project domain API token generated and saved. Copy it now and keep it private.");
+      queryClient.setQueryData(["project-domain-api-token", apiBase, project], result);
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not generate project domain API token")
   });
@@ -659,11 +672,13 @@ export function DeploymentSettingsClient({
                 type="button"
               >
                 <KeyRound size={15} />
-                Generate Token
+                {projectDomainToken ? "Generate New Token" : "Generate Token"}
               </button>
             </div>
+            <TokenExpiryControls mode={projectTokenExpiryMode} setMode={setProjectTokenExpiryMode} expiresAt={projectTokenExpiresAt} setExpiresAt={setProjectTokenExpiresAt} />
             {projectDomainToken ? (
               <div className="grid gap-3 rounded-md border border-emerald-200 bg-emerald-50 p-3">
+                <div className="text-xs font-semibold text-emerald-900">{tokenExpiryText(projectDomainToken)}</div>
                 <div className="grid grid-cols-[1fr_auto] gap-3">
                   <ReadOnlyValue label="API base URL" value={projectDomainToken.apiBaseUrl} />
                   <button className="mt-6 flex h-10 items-center gap-2 rounded-md border border-emerald-300 bg-white px-3 text-sm font-semibold text-emerald-900" onClick={() => navigator.clipboard.writeText(projectDomainToken.apiBaseUrl)} type="button">

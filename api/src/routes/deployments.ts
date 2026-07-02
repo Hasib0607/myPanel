@@ -21,7 +21,8 @@ import {
   publishPublicHtmlNginxVhost
 } from "../lib/deploymentDomainSsl.js";
 import { prisma } from "../lib/prisma.js";
-import { deleteSecret, getSecret, putSecret } from "../lib/secrets.js";
+import { deleteSecret, getSecret, getSecretRecord, putSecret } from "../lib/secrets.js";
+import { resolveStableApiTokenExpiry, stableApiTokenJwtOptions, stableApiTokenMetadata, stableApiTokenRequestSchema, storedStableTokenExpiry } from "../lib/stableApiTokens.js";
 import { sysagent } from "../lib/sysagent.js";
 import {
   deploymentWorkerMax,
@@ -83,9 +84,7 @@ const cronJobSchema = z.object({
   enabled: z.boolean().default(true)
 });
 const cronJobUpdateSchema = cronJobSchema.partial();
-const projectDomainApiTokenSchema = z.object({
-  expiresInSeconds: z.coerce.number().int().min(3600).max(60 * 60 * 24 * 365).default(env.JWT_EXPIRY)
-});
+const projectDomainApiTokenSchema = stableApiTokenRequestSchema;
 
 const baseDeploymentSchema = z.object({
   domainId: z.string().nullable().optional(),
@@ -2438,6 +2437,28 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     return { ok: true };
   });
 
+  app.get("/:deploymentId/domain-api-token", async (request) => {
+    const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
+    const deployment = await findDeployment(deploymentId);
+    if (!deployment.accountId) {
+      throw app.httpErrors.badRequest("Project domain API tokens are available only for account-owned projects.");
+    }
+    const tokenRef = projectDomainApiTokenSecretRef(deployment.id);
+    const secret = await getSecretRecord(tokenRef);
+    if (!secret) return { token: null };
+    const expiry = storedStableTokenExpiry(secret.value, secret.metadata);
+    return {
+      token: secret.value,
+      tokenType: "Bearer",
+      expiresInSeconds: expiry.expiresInSeconds,
+      expiresAt: expiry.expiresAt ? expiry.expiresAt.toISOString() : null,
+      unlimited: expiry.unlimited,
+      apiBaseUrl: `http://${env.VPS_IP}:${env.PANEL_PORT}/api/v1/account/project-domain`,
+      endpoint: "POST /domains",
+      deployment: { id: deployment.id, slug: deployment.slug, name: deployment.name }
+    };
+  });
+
   app.post("/:deploymentId/domain-api-token", async (request) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const body = projectDomainApiTokenSchema.parse(request.body ?? {});
@@ -2446,51 +2467,35 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       throw app.httpErrors.badRequest("Project domain API tokens are available only for account-owned projects.");
     }
     const tokenRef = projectDomainApiTokenSecretRef(deployment.id);
-    let token = await getSecret(tokenRef);
-    let reusedToken = Boolean(token);
-    let expiresInSeconds = body.expiresInSeconds;
-    if (token) {
-      try {
-        const claims = app.jwt.verify(token) as any;
-        if (claims?.role !== "project_domain" || claims?.accountId !== deployment.accountId || claims?.deploymentId !== deployment.id) {
-          token = null;
-          reusedToken = false;
-        } else if (typeof claims.exp === "number") {
-          expiresInSeconds = Math.max(0, claims.exp - Math.floor(Date.now() / 1000));
-        }
-      } catch {
-        token = null;
-        reusedToken = false;
-      }
-    }
-    if (!token) {
-      token = app.jwt.sign(
-        {
-          sub: deployment.slug,
-          role: "project_domain",
-          accountId: deployment.accountId,
-          deploymentId: deployment.id
-        },
-        { expiresIn: body.expiresInSeconds }
-      );
-      await putSecret({
-        ref: tokenRef,
-        value: token,
-        kind: "GENERIC",
-        label: `Project domain API token for ${deployment.slug}`,
-        metadata: { accountId: deployment.accountId, deploymentId: deployment.id, stableApiToken: true }
-      });
-    }
+    const expiry = resolveStableApiTokenExpiry(body);
+    const token = app.jwt.sign(
+      {
+        sub: deployment.slug,
+        role: "project_domain",
+        accountId: deployment.accountId,
+        deploymentId: deployment.id
+      },
+      stableApiTokenJwtOptions(expiry)
+    );
+    await putSecret({
+      ref: tokenRef,
+      value: token,
+      kind: "GENERIC",
+      label: `Project domain API token for ${deployment.slug}`,
+      metadata: stableApiTokenMetadata({ accountId: deployment.accountId, deploymentId: deployment.id }, expiry)
+    });
     await audit(request, {
-      action: reusedToken ? "UPDATE" : "CREATE",
+      action: "CREATE",
       resource: "project_domain_api_token",
       resourceId: deployment.id,
-      description: reusedToken ? `Loaded project domain API token for ${deployment.slug}` : `Generated project domain API token for ${deployment.slug}`
+      description: `Generated project domain API token for ${deployment.slug}`
     });
     return {
       token,
       tokenType: "Bearer",
-      expiresInSeconds,
+      expiresInSeconds: expiry.expiresInSeconds,
+      expiresAt: expiry.expiresAt ? expiry.expiresAt.toISOString() : null,
+      unlimited: expiry.unlimited,
       apiBaseUrl: `http://${env.VPS_IP}:${env.PANEL_PORT}/api/v1/account/project-domain`,
       endpoint: "POST /domains",
       deployment: { id: deployment.id, slug: deployment.slug, name: deployment.name }

@@ -41,6 +41,15 @@ export async function getSecret(ref: string) {
   return secret ? decryptSecret(secret.encryptedValue) : null;
 }
 
+export async function getSecretRecord(ref: string) {
+  const secret = await prisma.secret.findUnique({ where: { ref } });
+  if (!secret) return null;
+  return {
+    ...secret,
+    value: decryptSecret(secret.encryptedValue)
+  };
+}
+
 export async function deleteSecret(ref: string) {
   await prisma.secret.delete({ where: { ref } }).catch(() => null);
 }
