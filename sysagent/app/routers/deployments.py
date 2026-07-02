@@ -233,6 +233,7 @@ class DeploymentMetricsRequest(BaseModel):
     dbName: str | None = None
     serverNames: list[str] = Field(default_factory=list, max_length=50)
     logLines: int = Field(default=300, ge=1, le=2000)
+    processOnly: bool = False
 
 
 class RuntimeToolsRequest(BaseModel):
@@ -776,10 +777,18 @@ def deployment_process_metrics(root_path: str, name: str, port: int | None, depl
     for item in (pm2_list if isinstance(pm2_list, list) else []):
         pm2_env = item.get("pm2_env") if isinstance(item, dict) else {}
         pm2_env = pm2_env if isinstance(pm2_env, dict) else {}
+        pm2_inner_env = pm2_env.get("env") if isinstance(pm2_env.get("env"), dict) else {}
         pm2_name = str(item.get("name") or "")
-        pm2_cwd = str(pm2_env.get("pm_cwd") or pm2_env.get("cwd") or "")
-        pm2_args = json.dumps(pm2_env.get("args") or "")
-        if pm2_name != name and root_text not in pm2_cwd and root_text not in pm2_args:
+        pm2_text = " ".join([
+            pm2_name,
+            str(pm2_env.get("pm_cwd") or ""),
+            str(pm2_env.get("cwd") or ""),
+            str(pm2_inner_env.get("PWD") or ""),
+            str(pm2_env.get("pm_exec_path") or ""),
+            json.dumps(pm2_env.get("args") or ""),
+            json.dumps(pm2_inner_env),
+        ])
+        if pm2_name != name and root_text not in pm2_text:
             continue
         pid = int(item.get("pid") or 0)
         if pid and pid in matched_pids:
@@ -1850,6 +1859,15 @@ def deployment_metrics(body: DeploymentMetricsRequest) -> dict:
             "logs": {"ok": False, "text": "", "stdout": "", "stderr": "", "laravel": ""},
         }
 
+    if body.processOnly:
+        process = deployment_process_metrics(root, body.name, body.port, body.deploymentId, body.framework)
+        return {
+            "ok": True,
+            "generatedAt": datetime.now(timezone.utc).isoformat(),
+            "path": info,
+            "process": process,
+        }
+
     db_size = 0
     db_available = False
     if body.dbType and body.dbName:
@@ -1864,13 +1882,13 @@ def deployment_metrics(body: DeploymentMetricsRequest) -> dict:
         except Exception:
             db_available = False
 
+    process = deployment_process_metrics(root, body.name, body.port, body.deploymentId, body.framework)
     logs = runtime_logs(RuntimeLogsRequest(
         name=body.name,
         logDir=body.logDir,
         rootPath=root,
         lines=body.logLines,
     ))
-    process = deployment_process_metrics(root, body.name, body.port, body.deploymentId, body.framework)
     history = update_metrics_history(body.name, process)
     return {
         "ok": True,

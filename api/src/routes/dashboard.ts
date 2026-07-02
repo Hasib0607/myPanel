@@ -86,9 +86,10 @@ async function topDeploymentResourceUsers(): Promise<DashboardResourceUser[]> {
         dbType: deployment.dbType,
         dbName: deployment.dbName,
         serverNames: [],
-        logLines: 10
+        logLines: 10,
+        processOnly: true
       }).catch(() => null) as Promise<any>,
-      900,
+      2500,
       null
     );
     return {
