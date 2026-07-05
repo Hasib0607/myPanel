@@ -2,7 +2,7 @@
 
 import { FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Archive, FileText, Inbox, LogOut, Mail, Search, Send, Star, Trash2 } from "lucide-react";
+import { Archive, FileText, Inbox, LogOut, Mail, RefreshCw, Search, Send, Star, Trash2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { apiDelete, apiGet, apiPatch, apiPost } from "@/lib/api";
 
@@ -81,10 +81,19 @@ export function WebmailClient() {
   });
 
   const selectedMessage = messages.data?.find((message) => message.id === selectedMessageId) ?? messages.data?.[0];
+  const isRefreshing = folderCounts.isFetching || messages.isFetching;
 
   const invalidateMailbox = async () => {
     await queryClient.invalidateQueries({ queryKey: ["webmail-my-folders"] });
     await queryClient.invalidateQueries({ queryKey: ["webmail-my-messages"] });
+  };
+
+  const refreshMailbox = async () => {
+    setError("");
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["webmail-my-folders"] }),
+      queryClient.invalidateQueries({ queryKey: ["webmail-my-messages"] })
+    ]);
   };
 
   const updateMessage = useMutation({
@@ -139,10 +148,16 @@ export function WebmailClient() {
           <h1 className="text-xl font-semibold text-panel-text">Webmail</h1>
           <p className="text-sm text-panel-muted">{me.data?.email ?? "Loading mailbox..."}</p>
         </div>
-        <button className="flex h-10 items-center gap-2 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50" disabled={logout.isPending} onClick={() => logout.mutate()} type="button">
-          <LogOut size={16} />
-          Logout
-        </button>
+        <div className="flex items-center gap-2">
+          <button className="flex h-10 items-center gap-2 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50 disabled:opacity-60" disabled={isRefreshing} onClick={() => refreshMailbox()} type="button">
+            <RefreshCw className={isRefreshing ? "animate-spin" : ""} size={16} />
+            {isRefreshing ? "Refreshing" : "Refresh"}
+          </button>
+          <button className="flex h-10 items-center gap-2 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50" disabled={logout.isPending} onClick={() => logout.mutate()} type="button">
+            <LogOut size={16} />
+            Logout
+          </button>
+        </div>
       </header>
 
       <section className="space-y-4 p-6">
