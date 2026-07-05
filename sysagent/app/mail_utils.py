@@ -29,6 +29,7 @@ def smtp_settings(hostname: str, certificate_path: str | None, key_path: str | N
         ("virtual_mailbox_maps", "hash:/etc/postfix/vmailbox"),
         ("virtual_transport", "lmtp:unix:private/dovecot-lmtp"),
         ("message_size_limit", "52428800"),
+        ("mailbox_size_limit", "0"),
         ("anvil_rate_time_unit", "60s"),
         ("smtpd_client_message_rate_limit", str(message_rate_limit)),
         ("smtpd_client_recipient_rate_limit", str(message_rate_limit * 10)),

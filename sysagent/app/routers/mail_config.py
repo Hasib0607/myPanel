@@ -488,7 +488,7 @@ def policy_service_restriction() -> str:
 def sync_mailbox(payload: MailboxRequest) -> dict:
     email, user, domain = safe_email(payload.email)
     maildir = maildir_for(user, domain)
-    mkdir = run_command(["install", "-d", "-o", "vmail", "-g", "vmail", str(maildir / "cur"), str(maildir / "new"), str(maildir / "tmp")]) if payload.enabled else {"skipped": True, "reason": "mailbox disabled"}
+    mkdir = run_command(["install", "-d", "-o", "vmail", "-g", "vmail", str(maildir), str(maildir / "cur"), str(maildir / "new"), str(maildir / "tmp")]) if payload.enabled else {"skipped": True, "reason": "mailbox disabled"}
     vdomains = merge_key_value_line(VMAILDOMAINS, domain, f"{domain} OK")
     vmailbox = merge_key_value_line(VMAILBOX, email, f"{email} {domain}/{user}/" if payload.enabled else None)
     dovecot_user = merge_dovecot_user(email, payload.passwordHash, maildir, payload.quotaMb, payload.enabled)

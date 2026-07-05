@@ -57,11 +57,32 @@ class MailConfigTests(unittest.TestCase):
     def test_smtp_limits_use_numeric_anvil_window(self):
         config = dict(smtp_settings("mail.example.com", None, None, 60))
         self.assertEqual(config["anvil_rate_time_unit"], "60s")
+        self.assertEqual(config["message_size_limit"], "52428800")
+        self.assertEqual(config["mailbox_size_limit"], "0")
         self.assertEqual(config["smtpd_client_message_rate_limit"], "60")
         self.assertEqual(config["smtpd_client_recipient_rate_limit"], "600")
         self.assertEqual(config["smtpd_client_connection_rate_limit"], "30")
         self.assertEqual(config["inet_interfaces"], "all")
         self.assertEqual(config["inet_protocols"], "ipv4")
+
+    def test_sync_mailbox_repairs_maildir_root_ownership(self):
+        payload = MailboxRequest(email="assist@example.com", passwordHash="{BLF-CRYPT}$2y$hash")
+        disabled = SimpleNamespace(allow_live_system_commands=True)
+        with (
+            patch.object(mail_config, "settings", disabled),
+            patch.object(mail_config, "run_command", return_value={"returncode": 0}) as command,
+            patch.object(mail_config, "merge_key_value_line", return_value={"returncode": 0}),
+            patch.object(mail_config, "merge_dovecot_user", return_value={"returncode": 0}),
+            patch.object(mail_config, "merge_policy_mailbox", return_value={"returncode": 0}),
+        ):
+            result = mail_config.sync_mailbox(payload)
+
+        command.assert_called_once()
+        install_command = command.call_args.args[0]
+        self.assertEqual(install_command[:5], ["install", "-d", "-o", "vmail", "-g"])
+        self.assertIn("/var/mail/vhosts/example.com/assist", install_command)
+        self.assertIn("/var/mail/vhosts/example.com/assist/new", install_command)
+        self.assertEqual(result["maildir"], "/var/mail/vhosts/example.com/assist")
 
     def test_listener_public_bind_detection_distinguishes_loopback(self):
         self.assertFalse(listener_is_public("LISTEN 0 100 127.0.0.1:587 0.0.0.0:*", 587))
