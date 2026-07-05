@@ -178,12 +178,21 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
   });
 
   const configureSmtp = useMutation({
-    mutationFn: (domainId: string) => apiPost(`/mail/domains/${domainId}/smtp/configure`, { messageRateLimit: 60 }),
+    mutationFn: (domainId: string) => apiPost(`/account/mail/domains/${domainId}/smtp/configure`, { messageRateLimit: 60 }),
     onSuccess: async () => {
       setNotice("SMTP services, firewall ports, and listener checks were applied.");
       await refresh();
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not configure SMTP.")
+  });
+
+  const syncMailboxes = useMutation({
+    mutationFn: (domainId: string) => apiPost<{ synced: number; domain: string }>(`/account/mail/domains/${domainId}/sync`, {}),
+    onSuccess: async (result) => {
+      setNotice(`Mailboxes synced for ${result.domain}. Synced ${result.synced} mailbox${result.synced === 1 ? "" : "es"}.`);
+      await refresh();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not sync mailboxes.")
   });
 
   const createFile = useMutation({
@@ -536,6 +545,10 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
                   <RotateCw size={14} />
                   {configureSmtp.isPending ? "Configuring..." : "Configure SMTP"}
                 </button>
+                <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line bg-white px-3 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60" disabled={!mailOpsDomainId || syncMailboxes.isPending} onClick={() => syncMailboxes.mutate(mailOpsDomainId)} title={`Repair mailbox maps for ${mailOpsDomainName}`} type="button">
+                  <RefreshCw size={14} />
+                  {syncMailboxes.isPending ? "Syncing..." : "Sync mailboxes"}
+                </button>
               </div>
             </div>
             <div className="grid gap-2 lg:grid-cols-[1fr_1fr_1fr_140px_auto]">
@@ -572,6 +585,7 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
                         <button className="text-panel-accent hover:underline" onClick={() => copyText(`${webmailUrl}\nEmail: ${mailboxAddress(mailbox)}`, "Webmail login details copied.")} type="button">Copy login</button>
                         <button className="text-panel-accent hover:underline" onClick={() => copyText(mailboxSmtpSettings(mailbox), "SMTP settings copied.")} type="button">Copy SMTP</button>
                         <button className="text-panel-accent hover:underline disabled:cursor-not-allowed disabled:opacity-50" disabled={!mailbox.domain?.id || configureSmtp.isPending} onClick={() => mailbox.domain?.id && configureSmtp.mutate(mailbox.domain.id)} type="button">Configure SMTP</button>
+                        <button className="text-panel-accent hover:underline disabled:cursor-not-allowed disabled:opacity-50" disabled={!mailbox.domain?.id || syncMailboxes.isPending} onClick={() => mailbox.domain?.id && syncMailboxes.mutate(mailbox.domain.id)} type="button">Sync mailboxes</button>
                       </div>
                     </td>
                     <td className="px-4 py-3">

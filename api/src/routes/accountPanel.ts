@@ -126,6 +126,10 @@ const mailboxSchema = z.object({
   password: z.string().min(10),
   quotaMb: z.number().int().min(128).default(1024)
 });
+const accountSmtpConfigureSchema = z.object({
+  hostname: z.string().trim().min(1).optional(),
+  messageRateLimit: z.coerce.number().int().min(1).max(10000).default(60)
+});
 const mailboxUpdateSchema = z.object({
   quotaMb: z.number().int().min(128).optional(),
   enabled: z.boolean().optional(),
@@ -217,6 +221,25 @@ const bulkZoneActionSchema = z.object({
 });
 type AccountDnsRecordInput = z.infer<typeof dnsRecordSchema>;
 type DnsRecordIdentity = { domainId: string; id?: string; type: AccountDnsRecordInput["type"]; name: string };
+
+async function syncAccountDomainMailboxes(domainId: string, scopedAccountId: string) {
+  const domain = await prisma.domain.findFirstOrThrow({
+    where: { id: domainId, accountId: scopedAccountId },
+    include: { mailAccounts: { orderBy: { username: "asc" } } }
+  });
+  const mailboxes = domain.mailAccounts.map((mailbox) => ({
+    email: `${mailbox.username}@${domain.name}`,
+    quotaMb: mailbox.quotaMb,
+    passwordHash: mailbox.passwordHash,
+    enabled: mailbox.enabled,
+    smtpSuspended: mailbox.smtpSuspended,
+    dailySendLimit: mailbox.dailySendLimit,
+    minuteSendLimit: mailbox.minuteSendLimit
+  }));
+  const result = assertLiveMailProvisioning(await sysagent.syncMailboxes({ domain: domain.name, mailboxes }), `Mailbox sync for ${domain.name}`);
+  return { domain, mailboxes, result };
+}
+
 const subdomainSchema = z.object({
   name: z.string().trim().toLowerCase().regex(/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/),
   target: z.string().trim().min(1),
@@ -3451,6 +3474,8 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     let sysagentResult: unknown;
     try {
       sysagentResult = assertLiveMailProvisioning(await sysagent.createMailbox({ email: `${mailbox.username}@${domain.name}`, quotaMb: mailbox.quotaMb, passwordHash, plainPassword: body.password, enabled: mailbox.enabled }), `Mailbox ${mailbox.username}@${domain.name}`);
+      const syncResult = await syncAccountDomainMailboxes(domain.id, account.id);
+      sysagentResult = { mailbox: sysagentResult, sync: syncResult.result };
     } catch (error) {
       await prisma.mailAccount.delete({ where: { id: mailbox.id } });
       throw error;
@@ -3475,8 +3500,9 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       smtpSuspended: mailbox.smtpSuspended
     }), `Mailbox ${mailbox.username}@${mailbox.domain.name}`);
     await prisma.mailAccount.update({ where: { id: mailbox.id }, data });
+    const syncResult = await syncAccountDomainMailboxes(mailbox.domainId, accountId(request));
     await audit(request, { action: "UPDATE", resource: "mail_account", resourceId: mailboxId, description: "Account updated mailbox" });
-    return { ok: true };
+    return { ok: true, sync: syncResult.result };
   });
 
   app.delete("/mail/:mailboxId", async (request: any) => {
@@ -3485,8 +3511,27 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     if (!mailbox) throw app.httpErrors.notFound("Mailbox not found");
     assertLiveMailProvisioning(await sysagent.deleteMailbox({ email: `${mailbox.username}@${mailbox.domain.name}` }), `Delete mailbox ${mailbox.username}@${mailbox.domain.name}`);
     await prisma.mailAccount.delete({ where: { id: mailbox.id } });
+    const syncResult = await syncAccountDomainMailboxes(mailbox.domainId, accountId(request));
     await audit(request, { action: "DELETE", resource: "mail_account", resourceId: mailbox.id, description: "Account deleted mailbox" });
-    return { ok: true };
+    return { ok: true, sync: syncResult.result };
+  });
+
+  app.post("/mail/domains/:domainId/sync", async (request: any, reply) => {
+    const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
+    const { domain, mailboxes, result } = await syncAccountDomainMailboxes(domainId, accountId(request));
+    await audit(request, { action: "APPLY", resource: "mailbox_sync", resourceId: domainId, description: `Account synced ${mailboxes.length} mailboxes for ${domain.name}`, metadata: { count: mailboxes.length } });
+    return reply.code(202).send({ ok: true, domain: domain.name, synced: mailboxes.length, result });
+  });
+
+  app.post("/mail/domains/:domainId/smtp/configure", async (request: any, reply) => {
+    const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
+    const body = accountSmtpConfigureSchema.parse(request.body ?? {});
+    const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
+    const hostname = body.hostname || `mail.${domain.name}`;
+    const firewall = assertLiveMailProvisioning(await sysagent.applyMailFirewall(), "Mail firewall configuration");
+    const result = assertLiveMailProvisioning(await sysagent.configureSmtp({ domain: domain.name, hostname, messageRateLimit: body.messageRateLimit, pop3Enabled: domain.mailPop3Enabled }), `SMTP configuration for ${domain.name}`);
+    await audit(request, { action: "APPLY", resource: "smtp", resourceId: domainId, description: `Account configured SMTP submission and firewall for ${domain.name}`, metadata: { hostname, messageRateLimit: body.messageRateLimit } });
+    return reply.code(202).send({ queued: false, firewall, result });
   });
 
   app.get("/files/overview", async (request: any) => {

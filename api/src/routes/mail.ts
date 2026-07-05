@@ -84,6 +84,24 @@ const deliverabilitySchema = z.object({
   pop3Enabled: z.boolean()
 });
 
+async function syncDomainMailboxes(domainId: string) {
+  const domain = await prisma.domain.findUniqueOrThrow({
+    where: { id: domainId },
+    include: { mailAccounts: { orderBy: { username: "asc" } } }
+  });
+  const mailboxes = domain.mailAccounts.map((account) => ({
+    email: `${account.username}@${domain.name}`,
+    quotaMb: account.quotaMb,
+    passwordHash: account.passwordHash,
+    enabled: account.enabled,
+    smtpSuspended: account.smtpSuspended,
+    dailySendLimit: account.dailySendLimit,
+    minuteSendLimit: account.minuteSendLimit
+  }));
+  const result = assertLiveMailProvisioning(await sysagent.syncMailboxes({ domain: domain.name, mailboxes }), `Mailbox sync for ${domain.name}`);
+  return { domain, mailboxes, result };
+}
+
 export const mailRoutes: FastifyPluginAsync = async (app) => {
   app.addHook("preHandler", app.requireAuth);
 
@@ -182,6 +200,7 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
         }),
         `Mailbox ${account.username}@${domain.name}`
       );
+      await syncDomainMailboxes(domain.id);
     } catch (error) {
       await prisma.mailAccount.delete({ where: { id: account.id } });
       throw error;
@@ -210,7 +229,9 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
       dailySendLimit: next.dailySendLimit,
       minuteSendLimit: next.minuteSendLimit
     }), `Mailbox ${account.username}@${account.domain.name}`);
-    return prisma.mailAccount.update({ where: { id: accountId }, data: body, include: { domain: true } });
+    const updated = await prisma.mailAccount.update({ where: { id: accountId }, data: body, include: { domain: true } });
+    await syncDomainMailboxes(account.domainId);
+    return updated;
   });
 
   app.post("/accounts/:accountId/reset-password", async (request) => {
@@ -219,7 +240,9 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
     const passwordHash = await bcrypt.hash(body.password, 12);
     const account = await prisma.mailAccount.findUniqueOrThrow({ where: { id: accountId }, include: { domain: true } });
     assertLiveMailProvisioning(await sysagent.createMailbox({ email: `${account.username}@${account.domain.name}`, quotaMb: account.quotaMb, passwordHash, plainPassword: body.password, enabled: account.enabled, smtpSuspended: account.smtpSuspended, dailySendLimit: account.dailySendLimit, minuteSendLimit: account.minuteSendLimit }), `Mailbox ${account.username}@${account.domain.name}`);
-    return prisma.mailAccount.update({ where: { id: accountId }, data: { passwordHash }, include: { domain: true } });
+    const updated = await prisma.mailAccount.update({ where: { id: accountId }, data: { passwordHash }, include: { domain: true } });
+    await syncDomainMailboxes(account.domainId);
+    return updated;
   });
 
   app.delete("/accounts/:accountId", async (request) => {
@@ -227,6 +250,7 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
     const account = await prisma.mailAccount.findUniqueOrThrow({ where: { id: accountId }, include: { domain: true } });
     assertLiveMailProvisioning(await sysagent.deleteMailbox({ email: `${account.username}@${account.domain.name}` }), `Delete mailbox ${account.username}@${account.domain.name}`);
     await prisma.mailAccount.delete({ where: { id: accountId } });
+    await syncDomainMailboxes(account.domainId);
     return { ok: true };
   });
 
@@ -605,20 +629,7 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
 
   app.post("/domains/:domainId/mailboxes/sync", async (request, reply) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
-    const domain = await prisma.domain.findUniqueOrThrow({
-      where: { id: domainId },
-      include: { mailAccounts: { orderBy: { username: "asc" } } }
-    });
-    const mailboxes = domain.mailAccounts.map((account) => ({
-      email: `${account.username}@${domain.name}`,
-      quotaMb: account.quotaMb,
-      passwordHash: account.passwordHash,
-      enabled: account.enabled,
-      smtpSuspended: account.smtpSuspended,
-      dailySendLimit: account.dailySendLimit,
-      minuteSendLimit: account.minuteSendLimit
-    }));
-    const result = assertLiveMailProvisioning(await sysagent.syncMailboxes({ domain: domain.name, mailboxes }), `Mailbox sync for ${domain.name}`);
+    const { domain, mailboxes, result } = await syncDomainMailboxes(domainId);
     await audit(request, { action: "APPLY", resource: "mailbox_sync", resourceId: domainId, description: `Synced ${mailboxes.length} mailboxes for ${domain.name}`, metadata: { count: mailboxes.length } });
     return reply.code(202).send({ ok: true, synced: mailboxes.length, result });
   });
