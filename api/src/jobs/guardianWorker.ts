@@ -11,7 +11,7 @@ import { checkPanelRemoteUpdate } from "../lib/panelUpdateMonitor.js";
 import { runDeploymentAutoDeployPoll } from "../lib/deploymentAutoDeployPoller.js";
 import { deployQueue } from "./queues.js";
 import { requiredRuntimeExecutables, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
-import { laravelPublicCwdMissing, nginxProxyMissingDomainFailure, permissionRepairNeeded, pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded } from "../lib/deploymentFailureRuntimeRepairs.js";
+import { laravelPublicCwdMissing, nginxProxyMissingDomainFailure, permissionRepairNeeded, prismaDatabaseAuthFailure, pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded } from "../lib/deploymentFailureRuntimeRepairs.js";
 import path from "node:path";
 import { Redis as AppRedis } from "ioredis";
 import {
@@ -333,6 +333,7 @@ async function guardianApplyFailureRepairs(
   const runtimeTargets = runtimeTargetsForFailedDeploymentLog(failureText);
   const publicCwdMissing = laravelPublicCwdMissing(failureText);
   const proxyMissingDomain = nginxProxyMissingDomainFailure(failureText);
+  const prismaDbAuthFailure = prismaDatabaseAuthFailure(failureText);
 
   await prisma.deploymentLog.create({
     data: {
@@ -344,6 +345,7 @@ async function guardianApplyFailureRepairs(
         runtimeTargets: runtimeTargets.map((target) => target.actionKey),
         laravelPublicCwdMissing: publicCwdMissing,
         nginxProxyMissingDomain: proxyMissingDomain,
+        prismaDatabaseAuthFailure: prismaDbAuthFailure,
         supervisorRepair: supervisorRepairNeeded(failureText),
         permissionRepair: permissionRepairNeeded(failureText),
         pythonRuntimeRepair: pythonRuntimeRepairNeeded(failureText),
@@ -414,6 +416,25 @@ async function guardianApplyFailureRepairs(
         }
       });
     }
+  }
+
+  if (prismaDbAuthFailure) {
+    applied.push("prisma-database-credentials:retry-with-managed-env");
+    await prisma.deploymentLog.create({
+      data: {
+        deploymentId: deployment.id,
+        step: "PREFLIGHT",
+        level: "warn",
+        message: "Guardian detected Prisma database credential failure",
+        metadata: {
+          action: "Clear stale DB_PASSWORD/DATABASE_URL overrides or redeploy with managed database env",
+          dbType: deployment.dbType,
+          dbName: deployment.dbName,
+          dbUser: deployment.dbUser,
+          evidence: failureText.slice(0, 4000)
+        } as any
+      }
+    });
   }
 
   for (const target of runtimeTargets) {
@@ -518,7 +539,7 @@ async function guardianApplyFailureRepairs(
     }
   }
 
-  return { identified: runtimeTargets.length > 0 || publicCwdMissing || proxyMissingDomain || supervisorRepairNeeded(failureText) || permissionRepairNeeded(failureText) || pythonRuntimeRepairNeeded(failureText), applied, approvalsCreated };
+  return { identified: runtimeTargets.length > 0 || publicCwdMissing || proxyMissingDomain || prismaDbAuthFailure || supervisorRepairNeeded(failureText) || permissionRepairNeeded(failureText) || pythonRuntimeRepairNeeded(failureText), applied, approvalsCreated };
 }
 
 async function queueGuardianDeployRepair(deployment: Awaited<ReturnType<typeof prisma.deployment.findMany>>[number], action: "restart" | "deploy", reason: string) {

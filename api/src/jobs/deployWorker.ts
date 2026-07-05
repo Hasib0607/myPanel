@@ -17,7 +17,7 @@ import {
   findLaravelAppRoot,
   nodeStartUsesVitePreview
 } from "../lib/deploymentDetection.js";
-import { nginxUpstreamFailure, nodePackageBinaryMissing, supervisorStartStillStarting } from "../lib/deploymentFailureRuntimeRepairs.js";
+import { nginxUpstreamFailure, nodePackageBinaryMissing, prismaDatabaseAuthFailure, supervisorStartStillStarting } from "../lib/deploymentFailureRuntimeRepairs.js";
 import { normalizeLoopbackRuntimeUrls } from "../lib/deploymentEnv.js";
 import { appendFrontendModuleNotFoundHint, envDrivenRuntimeExecutables, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables, runtimeInstallTargetsForTools } from "../lib/deploymentRuntimeTools.js";
 import {
@@ -2494,6 +2494,10 @@ function isMysqlAccessDenied(text: string) {
     && lower.includes("using password");
 }
 
+function isDatabaseAccessAuthFailure(text: string) {
+  return isMysqlAccessDenied(text) || prismaDatabaseAuthFailure(text);
+}
+
 async function autoRepairDatabaseAccess(
   deployment: DeploymentDatabaseRuntime,
   releaseId: string | undefined,
@@ -2501,7 +2505,7 @@ async function autoRepairDatabaseAccess(
   errorText: string,
   envVars: Record<string, string>
 ) {
-  if (!isMysqlAccessDenied(errorText)) return null;
+  if (!isDatabaseAccessAuthFailure(errorText)) return null;
   if (!deployment.dbType || !deployment.dbName || !deployment.dbUser) return null;
 
   await writeLog(deployment.id, releaseId, "PREFLIGHT", "Database access denied detected; repairing deployment credentials", {
@@ -4299,6 +4303,15 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         }
         if (nodeBuildTerminatedBySigterm(detail) && repairPackageManager) {
           buildRecovered = await retryBuildAfterSigterm(detail, "initial build");
+        }
+        if (!buildRecovered && prismaDatabaseAuthFailure(detail)) {
+          const repairedDatabaseEnv = await autoRepairDatabaseAccess(deployment, releaseId, appPath, detail, envVars).catch(() => null);
+          if (repairedDatabaseEnv) {
+            envVars = repairedDatabaseEnv;
+            buildResult = await runBuild("Build retry after database credential repair");
+            assertCommandTree(buildResult, "Build retry after database credential repair");
+            buildRecovered = true;
+          }
         }
         if (!buildRecovered) {
           if (!nodePackageBinaryMissing(detail) || !repairPackageManager) {

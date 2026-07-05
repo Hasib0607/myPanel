@@ -68,6 +68,14 @@ export function nginxUpstreamFailure(result: unknown, text = "") {
     || detail.includes("upstream");
 }
 
+export function prismaDatabaseAuthFailure(text: string) {
+  const lower = text.toLowerCase();
+  return lower.includes("p1000")
+    && lower.includes("authentication failed")
+    && lower.includes("database")
+    && lower.includes("credentials");
+}
+
 export function runtimeTargetsForFailedDeploymentLog(text: string) {
   const lower = text.toLowerCase();
   const missingTools = new Set<string>();

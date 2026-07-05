@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { appendFrontendModuleNotFoundHint, detectComposerPlatformIssue, detectFrontendModuleNotFound, envDrivenRuntimeExecutables, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "./deploymentRuntimeTools.js";
-import { frontendModuleNotFound, laravelPublicCwdMissing, nodePackageBinaryMissing, pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded, supervisorStartStillStarting } from "./deploymentFailureRuntimeRepairs.js";
+import { frontendModuleNotFound, laravelPublicCwdMissing, nodePackageBinaryMissing, prismaDatabaseAuthFailure, pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded, supervisorStartStillStarting } from "./deploymentFailureRuntimeRepairs.js";
 
 test("composer PHP 8.1 requirement on PHP 8.0 queues PHP 8.2 runtime repair", () => {
   const targets = runtimeInstallTargetsForComposerPlatformIssue(`
@@ -330,6 +330,16 @@ test("failed deploy parser detects Laravel public cwd missing", () => {
   const log = 'The provided cwd "/var/www/deployments/ecommercex-admin/public" does not exist.';
 
   assert.equal(laravelPublicCwdMissing(log), true);
+});
+
+test("failed deploy parser detects Prisma P1000 database credential failures", () => {
+  const log = `
+    Error: P1000: Authentication failed against database server, the provided database credentials for \`psmm\` are not valid.
+    Please make sure to provide valid database credentials for the database server at the configured address.
+  `;
+
+  assert.equal(prismaDatabaseAuthFailure(log), true);
+  assert.deepEqual(runtimeTargetsForFailedDeploymentLog(log), []);
 });
 
 test("failed deploy parser treats missing Vite as project dependency repair", () => {
