@@ -44,6 +44,10 @@ type Dashboard = {
     ownerName: string | null;
     homeRoot: string;
     packageName: string | null;
+    domainLimit: number | null;
+    mailboxLimit: number | null;
+    databaseLimit: number | null;
+    deploymentLimit: number | null;
   };
   usage: {
     domains: number;
@@ -63,6 +67,7 @@ type Dashboard = {
   databases: AccountDatabase[];
   fileRoot: string;
 };
+type MailOverview = Pick<Dashboard, "account" | "domains" | "mailAccounts">;
 type FileList = { current: FileEntry; root: string; items: FileEntry[] };
 type FileRead = { file: FileEntry; content: string };
 type AccountApiToken = { token: string; tokenType: "Bearer"; expiresInSeconds: number | null; expiresAt: string | null; unlimited: boolean; apiBaseUrl: string };
@@ -90,6 +95,13 @@ const viewDescriptions: Record<AccountView, string> = {
 
 export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
   const queryClient = useQueryClient();
+  const isDashboard = view === "dashboard";
+  const showDomains = view === "domains";
+  const showMail = view === "mail";
+  const showFiles = view === "files";
+  const showDeployments = view === "deployments";
+  const showDatabases = view === "databases";
+  const showProfile = view === "profile";
   const [notice, setNotice] = useState("");
   const [domainName, setDomainName] = useState("");
   const [mailDraft, setMailDraft] = useState({ domainId: "", username: "", password: "", quotaMb: "1024" });
@@ -111,7 +123,13 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
 
   const dashboard = useQuery({
     queryKey: ["account-dashboard"],
-    queryFn: () => apiGet<Dashboard>("/account/dashboard")
+    queryFn: () => apiGet<Dashboard>("/account/dashboard"),
+    enabled: !showMail
+  });
+  const mailOverview = useQuery({
+    queryKey: ["account-mail-overview"],
+    queryFn: () => apiGet<MailOverview>("/account/mail/overview"),
+    enabled: showMail
   });
   const savedApiToken = useQuery({
     queryKey: ["account-api-token"],
@@ -119,11 +137,13 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
   });
   const files = useQuery({
     queryKey: ["account-files", filePath],
-    queryFn: () => apiGet<FileList>(`/account/files/list?path=${encodeURIComponent(filePath)}`)
+    queryFn: () => apiGet<FileList>(`/account/files/list?path=${encodeURIComponent(filePath)}`),
+    enabled: isDashboard || showFiles
   });
   const refresh = async () => {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["account-dashboard"] }),
+      queryClient.invalidateQueries({ queryKey: ["account-mail-overview"] }),
       queryClient.invalidateQueries({ queryKey: ["account-files"] })
     ]);
   };
@@ -386,17 +406,31 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
     "Password: mailbox password"
   ].join("\n");
 
-  const data = dashboard.data;
+  const data = showMail && mailOverview.data
+    ? {
+        account: mailOverview.data.account,
+        usage: dashboard.data?.usage ?? {
+          domains: mailOverview.data.domains.length,
+          deployments: 0,
+          mailAccounts: mailOverview.data.mailAccounts.length,
+          databases: 0,
+          diskUsedMb: 0,
+          diskLimitMb: null,
+          domainLimit: mailOverview.data.account.domainLimit,
+          mailboxLimit: mailOverview.data.account.mailboxLimit,
+          databaseLimit: mailOverview.data.account.databaseLimit,
+          deploymentLimit: mailOverview.data.account.deploymentLimit
+        },
+        domains: mailOverview.data.domains,
+        deployments: [],
+        mailAccounts: mailOverview.data.mailAccounts,
+        databases: [],
+        fileRoot: mailOverview.data.account.homeRoot
+      } satisfies Dashboard
+    : dashboard.data;
   const domains = data?.domains ?? [];
   const mailOpsDomainId = mailDraft.domainId;
   const mailOpsDomainName = domains.find((domain) => domain.id === mailOpsDomainId)?.name || "selected domain";
-  const isDashboard = view === "dashboard";
-  const showDomains = view === "domains";
-  const showMail = view === "mail";
-  const showFiles = view === "files";
-  const showDeployments = view === "deployments";
-  const showDatabases = view === "databases";
-  const showProfile = view === "profile";
 
   return (
     <>
@@ -505,10 +539,7 @@ export function AccountClient({ view = "dashboard" }: { view?: AccountView }) {
               </div>
             </div>
             <div className="grid gap-2 lg:grid-cols-[1fr_1fr_1fr_140px_auto]">
-              <select className="h-10 rounded-md border border-panel-line bg-white px-2 text-sm" onChange={(event) => setMailDraft({ ...mailDraft, domainId: event.target.value })} value={mailDraft.domainId}>
-                <option value="">Select domain</option>
-                {domains.map((domain) => <option key={domain.id} value={domain.id}>{domain.name}</option>)}
-              </select>
+              <SearchableDomainSelect domains={domains} value={mailDraft.domainId} onChange={(domainId) => setMailDraft({ ...mailDraft, domainId })} />
               <input className="h-10 rounded-md border border-panel-line bg-white px-3 text-sm" onChange={(event) => setMailDraft({ ...mailDraft, username: event.target.value.trim().toLowerCase() })} placeholder="name" value={mailDraft.username} />
               <input className="h-10 rounded-md border border-panel-line bg-white px-3 text-sm" onChange={(event) => setMailDraft({ ...mailDraft, password: event.target.value })} placeholder="Password" type="password" value={mailDraft.password} />
               <input className="h-10 rounded-md border border-panel-line bg-white px-3 text-sm" onChange={(event) => setMailDraft({ ...mailDraft, quotaMb: event.target.value.replace(/\D/g, "") })} placeholder="Quota MB" value={mailDraft.quotaMb} />
@@ -894,6 +925,60 @@ function IconButton({ title, onClick, children }: { title: string; onClick: () =
     <button className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-50" onClick={onClick} title={title} type="button">
       {children}
     </button>
+  );
+}
+
+function SearchableDomainSelect({ domains, value, onChange }: { domains: Domain[]; value: string; onChange: (value: string) => void }) {
+  const selected = domains.find((domain) => domain.id === value);
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState(selected?.name ?? "");
+  const normalizedSearch = search.trim().toLowerCase();
+  const matches = domains
+    .filter((domain) => !normalizedSearch || domain.name.toLowerCase().includes(normalizedSearch))
+    .slice(0, 50);
+
+  useEffect(() => {
+    if (!open) setSearch(selected?.name ?? "");
+  }, [open, selected?.name]);
+
+  return (
+    <div className="relative">
+      <input
+        className="h-10 w-full rounded-md border border-panel-line bg-white px-3 text-sm"
+        onBlur={() => window.setTimeout(() => setOpen(false), 120)}
+        onChange={(event) => {
+          const next = event.target.value;
+          setSearch(next);
+          setOpen(true);
+          const exact = domains.find((domain) => domain.name.toLowerCase() === next.trim().toLowerCase());
+          onChange(exact?.id ?? "");
+        }}
+        onFocus={() => setOpen(true)}
+        placeholder="Search domain"
+        value={open ? search : selected?.name ?? ""}
+      />
+      {open ? (
+        <div className="absolute left-0 right-0 top-11 z-30 max-h-72 overflow-auto rounded-md border border-panel-line bg-white py-1 text-sm shadow-xl">
+          {matches.map((domain) => (
+            <button
+              className={`block w-full px-3 py-2 text-left hover:bg-slate-50 ${domain.id === value ? "bg-teal-50 font-semibold text-panel-accent" : "text-panel-ink"}`}
+              key={domain.id}
+              onMouseDown={(event) => {
+                event.preventDefault();
+                onChange(domain.id);
+                setSearch(domain.name);
+                setOpen(false);
+              }}
+              type="button"
+            >
+              {domain.name}
+            </button>
+          ))}
+          {!matches.length ? <div className="px-3 py-3 text-panel-muted">No domains found.</div> : null}
+          {domains.length > matches.length ? <div className="border-t border-panel-line px-3 py-2 text-xs text-panel-muted">Showing {matches.length} of {domains.length}. Keep typing to narrow.</div> : null}
+        </div>
+      ) : null}
+    </div>
   );
 }
 

@@ -1640,6 +1640,24 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     };
   });
 
+  app.get("/mail/overview", async (request: any) => {
+    const id = accountId(request);
+    const [account, domains, mailAccounts] = await Promise.all([
+      prisma.account.findUniqueOrThrow({ where: { id }, include: { _count: { select: { domains: true, mailAccounts: true } } } }),
+      prisma.domain.findMany({
+        where: { accountId: id },
+        orderBy: { name: "asc" },
+        select: { id: true, name: true, status: true, documentRoot: true }
+      }),
+      prisma.mailAccount.findMany({ where: { accountId: id }, orderBy: { createdAt: "desc" }, include: { domain: true } })
+    ]);
+    return {
+      account: safeAccount(account),
+      domains,
+      mailAccounts
+    };
+  });
+
   app.get("/domains", async (request: any) => {
     const query = z.object({
       search: z.string().optional(),
