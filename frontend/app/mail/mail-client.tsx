@@ -4,6 +4,7 @@ import { FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Archive, FileText, Inbox, Mail, Search, Send, Star, Trash2 } from "lucide-react";
 import { apiDelete, apiGet, apiPatch, apiPost } from "@/lib/api";
+import { MailMessageBody } from "@/components/mail-message-body";
 
 type Folder = "INBOX" | "SENT" | "DRAFTS" | "SPAM" | "TRASH";
 
@@ -35,10 +36,6 @@ type MailMessage = {
   isStarred: boolean;
   receivedAt: string;
 };
-
-function displayBody(message: MailMessage) {
-  return message.bodyText || message.bodyHtml?.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim() || "No message body.";
-}
 
 const folders: Array<{ key: Folder; label: string; icon: typeof Inbox }> = [
   { key: "INBOX", label: "Inbox", icon: Inbox },
@@ -319,7 +316,7 @@ export function MailClient({ domainId, composeFirst = false }: { domainId?: stri
                 </div>
               </div>
               {selectedMessage.deliveryError ? <div className="mb-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">{selectedMessage.deliveryError}</div> : null}
-              <div className="whitespace-pre-wrap rounded-md border border-panel-line bg-slate-50 p-6 text-sm leading-6 text-slate-700">{displayBody(selectedMessage)}</div>
+              <MailMessageBody message={selectedMessage} />
             </article>
           ) : (
             <div className="rounded-md border border-dashed border-panel-line p-8 text-center text-sm text-panel-muted">
