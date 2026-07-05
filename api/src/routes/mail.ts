@@ -661,8 +661,10 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
     const hostname = body.hostname || `mail.${domain.name}`;
     const firewall = assertLiveMailProvisioning(await sysagent.applyMailFirewall(), "Mail firewall configuration");
     const result = assertLiveMailProvisioning(await sysagent.configureSmtp({ domain: domain.name, hostname, messageRateLimit: body.messageRateLimit, pop3Enabled: domain.mailPop3Enabled }), `SMTP configuration for ${domain.name}`);
-    await audit(request, { action: "APPLY", resource: "smtp", resourceId: domainId, description: `Configured SMTP submission and firewall for ${domain.name}`, metadata: { hostname, messageRateLimit: body.messageRateLimit } });
-    return reply.code(202).send({ queued: false, firewall, result });
+    const routingDns = await ensureMailRoutingDns(domain.id, domain.name);
+    const mailboxSync = await syncDomainMailboxes(domain.id);
+    await audit(request, { action: "APPLY", resource: "smtp", resourceId: domainId, description: `Configured SMTP submission, inbound DNS, and mailbox maps for ${domain.name}`, metadata: { hostname, messageRateLimit: body.messageRateLimit, mailboxCount: mailboxSync.mailboxes.length } });
+    return reply.code(202).send({ queued: false, firewall, result, routingDns, mailboxSync: { synced: mailboxSync.mailboxes.length, result: mailboxSync.result } });
   });
 
   app.get("/domains/:domainId/bounces", async (request) => {
@@ -739,6 +741,13 @@ function mailDnsRecords(domainId: string, domain: string, vpsIp: string, setting
   ];
 }
 
+function mailRoutingDnsRecords(domainId: string, domain: string, vpsIp: string) {
+  return [
+    { domainId, type: "A" as const, name: "mail", value: vpsIp, ttl: 3600, priority: null },
+    { domainId, type: "MX" as const, name: "@", value: `mail.${domain}`, ttl: 3600, priority: 10 }
+  ];
+}
+
 function sameMailDnsRecord(existing: { type: string; name: string; value: string; priority: number | null }, record: { type: string; name: string; value: string; priority: number | null }) {
   return existing.type === record.type && existing.name === record.name && existing.value === record.value && (existing.priority ?? null) === (record.priority ?? null);
 }
@@ -755,6 +764,23 @@ async function ensureMailDns(domainId: string, domainName: string) {
     }
   }
   return publishDomainDnsZone(domainId);
+}
+
+async function ensureMailRoutingDns(domainId: string, domainName: string) {
+  const vpsIp = await currentVpsIp();
+  const changed = [];
+  for (const record of mailRoutingDnsRecords(domainId, domainName, vpsIp)) {
+    const existing = await findManagedMailDnsRecord(domainId, record);
+    if (existing) {
+      await prisma.dnsRecord.update({ where: { id: existing.id }, data: { value: record.value, ttl: record.ttl, priority: record.priority } });
+      changed.push({ action: "updated", record });
+    } else {
+      await prisma.dnsRecord.create({ data: record });
+      changed.push({ action: "created", record });
+    }
+  }
+  const publish = await publishDomainDnsZone(domainId);
+  return { changed, publish };
 }
 
 function mailCommandSucceeded(result: { returncode?: number; dryRun?: boolean }) {

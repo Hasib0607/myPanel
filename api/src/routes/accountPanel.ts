@@ -240,6 +240,36 @@ async function syncAccountDomainMailboxes(domainId: string, scopedAccountId: str
   return { domain, mailboxes, result };
 }
 
+function accountMailRoutingDnsRecords(domainId: string, domain: string, vpsIp: string) {
+  return [
+    { domainId, type: "A" as const, name: "mail", value: vpsIp, ttl: 3600, priority: null },
+    { domainId, type: "MX" as const, name: "@", value: `mail.${domain}`, ttl: 3600, priority: 10 }
+  ];
+}
+
+async function ensureAccountMailRoutingDns(domainId: string, domainName: string) {
+  const vpsIp = await currentVpsIp();
+  const changed = [];
+  for (const record of accountMailRoutingDnsRecords(domainId, domainName, vpsIp)) {
+    const existing = await prisma.dnsRecord.findFirst({
+      where: {
+        domainId,
+        type: record.type,
+        name: record.name
+      }
+    });
+    if (existing) {
+      await prisma.dnsRecord.update({ where: { id: existing.id }, data: { value: record.value, ttl: record.ttl, priority: record.priority } });
+      changed.push({ action: "updated", record });
+    } else {
+      await prisma.dnsRecord.create({ data: record });
+      changed.push({ action: "created", record });
+    }
+  }
+  const publish = await publishDomainDnsZone(domainId);
+  return { changed, publish };
+}
+
 const subdomainSchema = z.object({
   name: z.string().trim().toLowerCase().regex(/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/),
   target: z.string().trim().min(1),
@@ -3530,8 +3560,10 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const hostname = body.hostname || `mail.${domain.name}`;
     const firewall = assertLiveMailProvisioning(await sysagent.applyMailFirewall(), "Mail firewall configuration");
     const result = assertLiveMailProvisioning(await sysagent.configureSmtp({ domain: domain.name, hostname, messageRateLimit: body.messageRateLimit, pop3Enabled: domain.mailPop3Enabled }), `SMTP configuration for ${domain.name}`);
-    await audit(request, { action: "APPLY", resource: "smtp", resourceId: domainId, description: `Account configured SMTP submission and firewall for ${domain.name}`, metadata: { hostname, messageRateLimit: body.messageRateLimit } });
-    return reply.code(202).send({ queued: false, firewall, result });
+    const routingDns = await ensureAccountMailRoutingDns(domain.id, domain.name);
+    const mailboxSync = await syncAccountDomainMailboxes(domain.id, accountId(request));
+    await audit(request, { action: "APPLY", resource: "smtp", resourceId: domainId, description: `Account configured SMTP submission, inbound DNS, and mailbox maps for ${domain.name}`, metadata: { hostname, messageRateLimit: body.messageRateLimit, mailboxCount: mailboxSync.mailboxes.length } });
+    return reply.code(202).send({ queued: false, firewall, result, routingDns, mailboxSync: { synced: mailboxSync.mailboxes.length, result: mailboxSync.result } });
   });
 
   app.get("/files/overview", async (request: any) => {
