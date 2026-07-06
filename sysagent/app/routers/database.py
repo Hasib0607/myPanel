@@ -140,6 +140,10 @@ def postgres_psql(sql: str) -> dict:
     return run_command(["sudo", "-u", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-At", "-c", sql])
 
 
+def successful_command(command: list[str], stdout: str = "") -> dict:
+    return {"command": command, "stdout": stdout, "stderr": "", "returncode": 0}
+
+
 def ensure_mysql_runtime() -> dict | None:
     if shutil.which("mysql"):
         return None
@@ -293,11 +297,18 @@ def provision_postgres(database: str, username: str, password: str) -> dict:
         "END IF; END $$;"
     )
     create_user = postgres_psql(user_sql)
-    create_database = postgres_psql(
-        f"SELECT 'CREATE DATABASE {postgres_identifier(database)} OWNER {postgres_identifier(username)}' "
-        f"WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = {sql_literal(database)})\\gexec"
+    check_database = postgres_psql(f"SELECT 1 FROM pg_database WHERE datname = {sql_literal(database)};")
+    if check_database.get("returncode") == 0 and parse_lines(check_database.get("stdout")):
+        create_database = successful_command(["postgres-database-exists", database], "database already exists")
+    elif check_database.get("returncode") == 0:
+        create_database = postgres_psql(f"CREATE DATABASE {postgres_identifier(database)} OWNER {postgres_identifier(username)};")
+    else:
+        create_database = check_database
+    grant = (
+        postgres_psql(f"GRANT ALL PRIVILEGES ON DATABASE {postgres_identifier(database)} TO {postgres_identifier(username)};")
+        if create_database.get("returncode") == 0
+        else successful_command(["postgres-grant-skipped", database, username], "skipped because database create failed")
     )
-    grant = postgres_psql(f"GRANT ALL PRIVILEGES ON DATABASE {postgres_identifier(database)} TO {postgres_identifier(username)};")
     return {"user": create_user, "database": create_database, "grant": grant}
 
 
