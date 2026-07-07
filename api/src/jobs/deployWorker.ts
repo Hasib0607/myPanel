@@ -29,6 +29,7 @@ import {
 } from "../lib/deploymentGuardianRepair.js";
 import { env } from "../config/env.js";
 import { prisma } from "../lib/prisma.js";
+import { sanitizePrismaJson, sanitizePrismaText } from "../lib/prismaSanitize.js";
 import { deleteSecret, getSecret, putSecret } from "../lib/secrets.js";
 import { sysagent } from "../lib/sysagent.js";
 import { currentVpsIp } from "../lib/serverIp.js";
@@ -174,9 +175,9 @@ async function writeLog(deploymentId: string, releaseId: string | undefined, ste
       deploymentId,
       releaseId,
       step,
-      level,
-      message,
-      metadata
+      level: sanitizePrismaText(level),
+      message: sanitizePrismaText(message),
+      metadata: sanitizePrismaJson(metadata)
     }
   });
 }
@@ -454,10 +455,10 @@ async function runStep<T>(deploymentId: string, releaseId: string | undefined, s
   await writeLog(deploymentId, releaseId, step, `${message} started`);
   try {
     const result = await fn();
-    await writeLog(deploymentId, releaseId, step, `${message} completed`, { result: JSON.parse(JSON.stringify(result ?? null)) });
+    await writeLog(deploymentId, releaseId, step, `${message} completed`, { result: sanitizePrismaJson(JSON.parse(JSON.stringify(result ?? null))) });
     return result;
   } catch (error) {
-    const detail = error instanceof Error ? error.message : "Unknown deployment step error";
+    const detail = sanitizePrismaText(error instanceof Error ? error.message : "Unknown deployment step error");
     await writeLog(deploymentId, releaseId, step, `${message} failed`, { error: detail }, "error");
     throw error;
   }
