@@ -1578,6 +1578,48 @@ async function republishDeploymentNginxVhost(
   );
 }
 
+async function inspectAndRepairDeploymentNginxRoute(
+  deploymentId: string,
+  releaseId: string | undefined,
+  deployment: {
+    id: string;
+    port: number;
+    rootPath: string;
+    framework: DeploymentFramework;
+    startCommand?: string | null;
+    publicDirectory?: string | null;
+    outputDirectory?: string | null;
+  },
+  domain: BoundDomain,
+  reason: string
+) {
+  const serverName = deploymentServerName(domain);
+  const inspect = await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Inspect public nginx route after upstream failure", () =>
+    sysagent.deploymentNginxInspect({
+      deploymentId: deployment.id,
+      serverName: serverName ?? domain.name,
+      upstreamPort: deployment.port,
+      rootPath: deployment.rootPath,
+      framework: deployment.framework
+    })
+  );
+  const inspectFailed = liveResultFailureMessage(inspect, "Inspect public nginx route after upstream failure");
+  if (inspectFailed) {
+    await writeLog(deploymentId, releaseId, "HEALTH_CHECK", "Public nginx route inspection found a stale or wrong vhost", {
+      reason,
+      inspect: inspect as Prisma.InputJsonValue
+    }, "warn");
+    await republishDeploymentNginxVhost(deploymentId, releaseId, deployment, domain);
+    return { repaired: true, inspect };
+  }
+
+  await writeLog(deploymentId, releaseId, "HEALTH_CHECK", "Public nginx route points at the expected upstream", {
+    reason,
+    inspect: inspect as Prisma.InputJsonValue
+  }, "warn");
+  return { repaired: false, inspect };
+}
+
 async function publishDeploymentNginxRoute(
   deploymentId: string,
   releaseId: string | undefined,
@@ -2040,7 +2082,7 @@ async function optionalPublicRouteWarning(
     }
 
     if (nginxUpstreamFailure(publicRoute, firstMessage)) {
-      await republishDeploymentNginxVhost(deploymentId, releaseId, { ...deployment, rootPath: appPath }, domain);
+      await inspectAndRepairDeploymentNginxRoute(deploymentId, releaseId, { ...deployment, rootPath: appPath }, domain, firstMessage);
     }
     await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Guardian public-route repair", () =>
       runGuardianDeploymentRepair({ rootPath: appPath, framework: deployment.framework, envVars })
@@ -2077,7 +2119,12 @@ async function optionalPublicRouteWarning(
     const message = error instanceof Error ? error.message : "Public route check failed";
     await writeLog(deploymentId, releaseId, "HEALTH_CHECK", `${label} warning`, { warning: message }, "warn");
     if (nginxUpstreamFailure(publicRoute, message)) {
-      throw new Error(`${message}\n\nGuardian rewrote the Nginx vhost and restarted the deployment process, but the upstream still returns 502/503/504.`);
+      await inspectAndRepairDeploymentNginxRoute(deploymentId, releaseId, { ...deployment, rootPath: appPath }, domain, message).catch((inspectError) =>
+        writeLog(deploymentId, releaseId, "HEALTH_CHECK", "Public nginx route inspection failed", {
+          warning: inspectError instanceof Error ? inspectError.message : String(inspectError)
+        }, "warn")
+      );
+      return `${message}\n\nThe app passed localhost health, so deploy will continue. The public Nginx route still returns 502/503/504 after repair; check the generated vhost, conflicting server_name configs, and nginx error log for ${domain.name}.`;
     }
     return message;
   }
