@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import secrets
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -176,7 +177,53 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
     if settings.allow_live_nginx:
         run_live_step("website root create", lambda: root_path.mkdir(parents=True, exist_ok=True))
         permissions = run_live_step("website root permissions", lambda: make_web_root_readable(root_path))
-    result = publish_nginx_config(body.name, config, sites_available, sites_enabled, server_name=body.serverName)
+
+    probe_file: Path | None = None
+    probe_expected = ""
+    if settings.allow_live_nginx:
+        probe_token = f"vps-panel-vhost-{secrets.token_hex(12)}"
+        probe_expected = f"ok-{probe_token}"
+        challenge_dir = root_path / ".well-known" / "acme-challenge"
+        probe_file = challenge_dir / probe_token
+        run_live_step("ACME vhost probe directory create", lambda: challenge_dir.mkdir(parents=True, exist_ok=True))
+        run_live_step("ACME vhost probe write", lambda: probe_file.write_text(probe_expected, encoding="utf-8"))
+        permissions = run_live_step("ACME vhost probe permissions", lambda: make_web_root_readable(root_path))
+
+    def post_reload_check() -> dict:
+        if not probe_file:
+            return {"returncode": 0, "stdout": "", "stderr": "", "command": ["skip-acme-vhost-probe"]}
+        primary_host = body.serverName.split()[0]
+        result = run_command([
+            "curl",
+            "-fsS",
+            "--max-time",
+            "10",
+            "--noproxy",
+            "*",
+            "-H",
+            f"Host: {primary_host}",
+            f"http://127.0.0.1/.well-known/acme-challenge/{probe_file.name}",
+        ], allow_live=True)
+        if result.get("returncode") == 0 and (result.get("stdout") or "").strip() != probe_expected:
+            result = {
+                **result,
+                "returncode": 1,
+                "stderr": f"ACME vhost probe returned unexpected body from local Nginx. Expected {probe_expected!r}, got {(result.get('stdout') or '').strip()!r}.",
+            }
+        return result
+
+    try:
+        result = publish_nginx_config(
+            body.name,
+            config,
+            sites_available,
+            sites_enabled,
+            server_name=body.serverName,
+            post_reload_check=post_reload_check if settings.allow_live_nginx else None,
+        )
+    finally:
+        if probe_file and settings.allow_live_nginx:
+            run_live_step("ACME vhost probe cleanup", lambda: probe_file.unlink(missing_ok=True))
     return {
         **result,
         "rootPath": str(root_path),

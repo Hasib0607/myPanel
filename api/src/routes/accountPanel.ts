@@ -1058,7 +1058,7 @@ async function accountSslPreflight(request: any, domain: { id: string; name: str
     rootPath: webRoot,
     forceHttps: false
   });
-  const nginxFailure = failedCommand(nginxResult.test) ?? failedCommand(nginxResult.reload);
+  const nginxFailure = failedCommand(nginxResult.test) ?? failedCommand(nginxResult.reload) ?? failedCommand(nginxResult.postReloadCheck);
   if (nginxFailure) {
     throw Object.assign(new Error(`Could not publish HTTP challenge vhost for ${domain.name}. ${nginxFailure}`), { statusCode: 400 });
   }
@@ -1130,7 +1130,7 @@ async function accountSubdomainSslPreflight(request: any, subdomainId: string) {
     rootPath: target.webRoot,
     forceHttps: false
   });
-  const nginxFailure = failedCommand(nginxResult.test) ?? failedCommand(nginxResult.reload);
+  const nginxFailure = failedCommand(nginxResult.test) ?? failedCommand(nginxResult.reload) ?? failedCommand(nginxResult.postReloadCheck);
   if (nginxFailure) {
     throw Object.assign(new Error(`Could not publish HTTP challenge vhost for ${target.fqdn}. ${nginxFailure}`), { statusCode: 400 });
   }

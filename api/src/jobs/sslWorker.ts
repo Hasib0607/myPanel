@@ -78,6 +78,7 @@ function certificatePaths(domain: string, certificate?: ReusableCertificate | nu
 type NginxPublishResult = {
   test: SysagentCommandResult;
   reload: SysagentCommandResult;
+  postReloadCheck?: SysagentCommandResult;
   [key: string]: unknown;
 };
 
@@ -213,6 +214,7 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
 
   assertLiveCommandSucceeded("Nginx certificate vhost test", result.test);
   assertLiveCommandSucceeded("Nginx certificate vhost reload", result.reload);
+  if (result.postReloadCheck) assertLiveCommandSucceeded("Nginx certificate vhost route check", result.postReloadCheck);
   return result;
 }
 
@@ -248,6 +250,7 @@ async function publishHttpChallengeVhost(domainName: string, domainId: string | 
   });
   assertLiveCommandSucceeded("Nginx HTTP challenge vhost test", result.test as SysagentCommandResult);
   assertLiveCommandSucceeded("Nginx HTTP challenge vhost reload", result.reload as SysagentCommandResult);
+  if (result.postReloadCheck) assertLiveCommandSucceeded("Nginx HTTP challenge vhost route check", result.postReloadCheck as SysagentCommandResult);
   if (domainId) {
     await redis.del("domain_list", `domain:${domainId}`);
   }

@@ -233,7 +233,7 @@ async function publishDomainHttpVhost(domainName: string, webRoot: string, inclu
     forceHttps: false,
     sslCertificate: `/etc/letsencrypt/live/${certName}/fullchain.pem`,
     sslCertificateKey: `/etc/letsencrypt/live/${certName}/privkey.pem`
-  }) as { test?: SysagentCommandResult; reload?: SysagentCommandResult };
+  }) as { test?: SysagentCommandResult; reload?: SysagentCommandResult; postReloadCheck?: SysagentCommandResult };
 
   if (result.test && !commandSucceeded(result.test)) {
     const detail = commandFailureDetail(result.test);
@@ -242,6 +242,10 @@ async function publishDomainHttpVhost(domainName: string, webRoot: string, inclu
   if (result.reload && !commandSucceeded(result.reload)) {
     const detail = commandFailureDetail(result.reload);
     throw Object.assign(new Error(`Could not reload Nginx for ${domainName}.${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
+  }
+  if (result.postReloadCheck && !commandSucceeded(result.postReloadCheck)) {
+    const detail = commandFailureDetail(result.postReloadCheck);
+    throw Object.assign(new Error(`Could not verify HTTP challenge vhost for ${domainName}.${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
   }
 
   return result;
@@ -268,7 +272,7 @@ async function publishSubdomainHttpVhost(target: Awaited<ReturnType<typeof subdo
     serverName: target.fqdn,
     rootPath: target.webRoot,
     forceHttps: false
-  }) as { test?: SysagentCommandResult; reload?: SysagentCommandResult };
+  }) as { test?: SysagentCommandResult; reload?: SysagentCommandResult; postReloadCheck?: SysagentCommandResult };
 
   if (result.test && !commandSucceeded(result.test)) {
     const detail = commandFailureDetail(result.test);
@@ -277,6 +281,10 @@ async function publishSubdomainHttpVhost(target: Awaited<ReturnType<typeof subdo
   if (result.reload && !commandSucceeded(result.reload)) {
     const detail = commandFailureDetail(result.reload);
     throw Object.assign(new Error(`Could not reload Nginx for ${target.fqdn}.${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
+  }
+  if (result.postReloadCheck && !commandSucceeded(result.postReloadCheck)) {
+    const detail = commandFailureDetail(result.postReloadCheck);
+    throw Object.assign(new Error(`Could not verify HTTP challenge vhost for ${target.fqdn}.${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
   }
 
   return result;
