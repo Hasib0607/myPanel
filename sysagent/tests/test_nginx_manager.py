@@ -60,6 +60,27 @@ server {
             self.assertFalse(stale.exists())
             self.assertTrue(own.exists())
 
+    def test_exact_domain_removes_conflicting_parent_wildcard_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stale = root / "stale-wildcard.conf"
+            own = root / "domain-store.ebitans.store.conf"
+            stale.write_text("server { listen 80; server_name *.ebitans.store; }\n", encoding="utf-8")
+            own.write_text("server { listen 80; server_name store.ebitans.store; }\n", encoding="utf-8")
+
+            removed = remove_conflicting_configs("domain-store.ebitans.store", "store.ebitans.store", tmp)
+
+            self.assertEqual(removed, ["stale-wildcard.conf"])
+            self.assertFalse(stale.exists())
+            self.assertTrue(own.exists())
+
+    def test_parent_wildcard_does_not_claim_apex_domain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "wildcard.conf"
+            config.write_text("server { listen 80; server_name *.ebitans.store; }\n", encoding="utf-8")
+
+            self.assertFalse(_config_has_server_name(config, "ebitans.store"))
+
 
 if __name__ == "__main__":
     unittest.main()

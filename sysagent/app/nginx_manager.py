@@ -118,12 +118,25 @@ def server_name_directive_tokens(text: str) -> list[str]:
     return tokens
 
 
+def _server_name_token_matches(claimed: str, requested: str) -> bool:
+    if claimed == requested:
+        return True
+    if claimed.startswith("*."):
+        suffix = claimed[1:]
+        return requested.endswith(suffix) and requested != claimed[2:]
+    return False
+
+
 def _config_has_server_name(path: Path, server_name: str) -> bool:
     """Return True if an nginx config file contains a server_name directive for server_name."""
     try:
         text = path.read_text(encoding="utf-8", errors="ignore")
         claimed = set(server_name_directive_tokens(text))
-        return any(token in claimed for token in server_name_tokens(server_name))
+        return any(
+            _server_name_token_matches(claimed_token, requested_token)
+            for requested_token in server_name_tokens(server_name)
+            for claimed_token in claimed
+        )
     except OSError:
         return False
 

@@ -1067,9 +1067,13 @@ async function accountSslPreflight(request: any, domain: { id: string; name: str
   if (certbotFailure) {
     throw Object.assign(new Error(`Certbot is not ready for ${domain.name}. ${certbotFailure}`), { statusCode: 400 });
   }
-  const failedCheck = preflightChallengeChecks(preflight).find((check) => failedCommand(check));
+  const failedCheck = preflightChallengeChecks(preflight).find(({ check }) => failedCommand(check));
   if (failedCheck) {
-    throw Object.assign(new Error(`HTTP ACME challenge failed for ${domain.name}. Publish the website and keep port 80 open. ${failedCommand(failedCheck) ?? ""}`.trim()), { statusCode: 400 });
+    const detail = failedCommand(failedCheck.check);
+    const hint = failedCheck.scope === "local"
+      ? "The local Nginx challenge vhost did not return the token. Check the generated vhost, document root, and account path permissions."
+      : "The public challenge URL did not return the token. Keep port 80 open and confirm public DNS points to this VPS.";
+    throw Object.assign(new Error(`HTTP ACME challenge failed for ${domain.name}. ${hint}${detail ? ` ${detail}` : ""}`.trim()), { statusCode: 400 });
   }
   return {
     webRoot,
@@ -1135,9 +1139,13 @@ async function accountSubdomainSslPreflight(request: any, subdomainId: string) {
   if (certbotFailure) {
     throw Object.assign(new Error(`Certbot is not ready for ${target.fqdn}. ${certbotFailure}`), { statusCode: 400 });
   }
-  const failedCheck = preflightChallengeChecks(preflight).find((check) => failedCommand(check));
+  const failedCheck = preflightChallengeChecks(preflight).find(({ check }) => failedCommand(check));
   if (failedCheck) {
-    throw Object.assign(new Error(`HTTP ACME challenge failed for ${target.fqdn}. Publish the subdomain and keep port 80 open. ${failedCommand(failedCheck) ?? ""}`.trim()), { statusCode: 400 });
+    const detail = failedCommand(failedCheck.check);
+    const hint = failedCheck.scope === "local"
+      ? "The local Nginx challenge vhost did not return the token. Check the generated vhost, document root, and account path permissions."
+      : "The public challenge URL did not return the token. Keep port 80 open and confirm public DNS points to this VPS.";
+    throw Object.assign(new Error(`HTTP ACME challenge failed for ${target.fqdn}. ${hint}${detail ? ` ${detail}` : ""}`.trim()), { statusCode: 400 });
   }
 
   return {
@@ -1341,7 +1349,10 @@ async function sslJobCounts() {
 
 function preflightChallengeChecks(preflight: { checks?: unknown[]; localChecks?: unknown[]; publicChecks?: unknown[] }) {
   const publicChecks = preflight.publicChecks?.length ? preflight.publicChecks : preflight.checks ?? [];
-  return [...(preflight.localChecks ?? []), ...publicChecks];
+  return [
+    ...(preflight.localChecks ?? []).map((check) => ({ scope: "local" as const, check })),
+    ...publicChecks.map((check) => ({ scope: "public" as const, check }))
+  ];
 }
 
 function assertLimit(current: number, limit: number | null | undefined, label: string) {
