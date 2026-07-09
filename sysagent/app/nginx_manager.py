@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os
 import re
+import stat
 from pathlib import Path
 from typing import Callable, TypeVar
 from uuid import uuid4
@@ -78,6 +79,38 @@ def acme_root_for_server_name(server_name: str) -> Path:
     if not primary:
         raise HTTPException(status_code=400, detail="Server name is required for ACME challenge root")
     return safe_web_root(str(Path(settings.file_manager_root) / primary / "public_html"))
+
+
+def make_web_root_readable(web_root: Path) -> dict:
+    """
+    Nginx must be able to traverse account/domain parent paths before it can
+    serve public files or ACME tokens from the web root.
+    """
+    file_root = Path(settings.file_manager_root).resolve()
+    resolved_web_root = web_root.resolve()
+    if resolved_web_root != file_root and file_root not in resolved_web_root.parents:
+        raise HTTPException(status_code=400, detail="Website root escapes file manager root")
+
+    changed: list[str] = []
+
+    def chmod_or(path: Path, bits: int) -> None:
+        mode = path.stat().st_mode
+        next_mode = mode | bits
+        if next_mode != mode:
+            path.chmod(stat.S_IMODE(next_mode))
+            changed.append(str(path))
+
+    parent_dirs: list[Path] = []
+    cursor = resolved_web_root
+    while cursor != file_root:
+        parent_dirs.append(cursor)
+        cursor = cursor.parent
+    parent_dirs.append(file_root)
+
+    for directory in reversed(parent_dirs):
+        chmod_or(directory, stat.S_IXOTH)
+    chmod_or(resolved_web_root, stat.S_IROTH | stat.S_IXOTH)
+    return {"changed": changed, "webRoot": str(resolved_web_root)}
 
 
 def acme_location(server_name: str, web_root: Path | str | None = None) -> str:

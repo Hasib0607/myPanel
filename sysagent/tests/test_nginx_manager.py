@@ -2,6 +2,7 @@ import tempfile
 import sys
 import types
 import unittest
+import stat
 from pathlib import Path
 
 fastapi = types.ModuleType("fastapi")
@@ -23,10 +24,10 @@ sys.modules.setdefault("app.command", command)
 
 config = types.ModuleType("app.config")
 config.DEPLOYMENT_COMMANDS_LIVE = True
-config.settings = types.SimpleNamespace(allow_live_nginx=False)
+config.settings = types.SimpleNamespace(allow_live_nginx=False, file_manager_root="/tmp")
 sys.modules.setdefault("app.config", config)
 
-from app.nginx_manager import _config_has_server_name, remove_conflicting_configs
+from app.nginx_manager import _config_has_server_name, make_web_root_readable, remove_conflicting_configs
 
 
 class NginxManagerTests(unittest.TestCase):
@@ -80,6 +81,22 @@ server {
             config.write_text("server { listen 80; server_name *.ebitans.store; }\n", encoding="utf-8")
 
             self.assertFalse(_config_has_server_name(config, "ebitans.store"))
+
+    def test_make_web_root_readable_allows_nginx_parent_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            file_root = Path(tmp)
+            config.settings.file_manager_root = str(file_root)
+            web_root = file_root / "accounts" / "shop" / "public_html"
+            web_root.mkdir(parents=True)
+            for path in [file_root, file_root / "accounts", file_root / "accounts" / "shop", web_root]:
+                path.chmod(0o700)
+
+            result = make_web_root_readable(web_root)
+
+            self.assertEqual(result["webRoot"], str(web_root.resolve()))
+            self.assertTrue(web_root.stat().st_mode & stat.S_IROTH)
+            for path in [file_root, file_root / "accounts", file_root / "accounts" / "shop", web_root]:
+                self.assertTrue(path.stat().st_mode & stat.S_IXOTH)
 
 
 if __name__ == "__main__":

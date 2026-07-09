@@ -11,6 +11,7 @@ from app.config import settings
 from app.nginx_paths import nginx_sites_available, nginx_sites_enabled
 from app.nginx_manager import (
     acme_location,
+    make_web_root_readable,
     publish_nginx_config,
     run_live_step,
     safe_letsencrypt_path,
@@ -171,12 +172,15 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
             "}\n"
         )
 
+    permissions = {"changed": [], "webRoot": str(root_path)}
     if settings.allow_live_nginx:
         run_live_step("website root create", lambda: root_path.mkdir(parents=True, exist_ok=True))
+        permissions = run_live_step("website root permissions", lambda: make_web_root_readable(root_path))
     result = publish_nginx_config(body.name, config, sites_available, sites_enabled, server_name=body.serverName)
     return {
         **result,
         "rootPath": str(root_path),
+        "permissions": permissions,
         "sslEnabled": has_ssl,
         "forceHttps": body.forceHttps,
     }

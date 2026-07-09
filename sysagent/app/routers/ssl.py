@@ -583,15 +583,19 @@ def preflight(payload: CertificatePreflightRequest) -> dict:
             "-fsS",
             "--max-time",
             "10",
-            "--resolve",
-            f"{host}:80:127.0.0.1",
-            f"http://{host}/.well-known/acme-challenge/{token}",
+            "--noproxy",
+            "*",
+            "-H",
+            f"Host: {host}",
+            f"http://127.0.0.1/.well-known/acme-challenge/{token}",
         ], allow_live=settings.allow_live_ssl))
         public_checks.append(run_command([
             "curl",
             "-fsS",
             "--max-time",
             "10",
+            "--noproxy",
+            "*",
             f"http://{host}/.well-known/acme-challenge/{token}",
         ], allow_live=settings.allow_live_ssl))
 
