@@ -27,7 +27,7 @@ config.DEPLOYMENT_COMMANDS_LIVE = True
 config.settings = types.SimpleNamespace(allow_live_nginx=False, file_manager_root="/tmp")
 sys.modules.setdefault("app.config", config)
 
-from app.nginx_manager import _config_has_server_name, make_web_root_readable, remove_conflicting_configs
+from app.nginx_manager import _config_has_server_name, _enable_site, make_web_root_readable, remove_conflicting_configs
 
 
 class NginxManagerTests(unittest.TestCase):
@@ -97,6 +97,18 @@ server {
             self.assertTrue(web_root.stat().st_mode & stat.S_IROTH)
             for path in [file_root, file_root / "accounts", file_root / "accounts" / "shop", web_root]:
                 self.assertTrue(path.stat().st_mode & stat.S_IXOTH)
+
+    def test_enable_site_noops_when_available_and_enabled_are_same_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "domain-example.conf"
+            content = "server { listen 80; server_name example.com; }\n"
+            config_path.write_text(content, encoding="utf-8")
+
+            _enable_site(config_path, config_path)
+
+            self.assertTrue(config_path.is_file())
+            self.assertFalse(config_path.is_symlink())
+            self.assertEqual(config_path.read_text(encoding="utf-8"), content)
 
 
 if __name__ == "__main__":

@@ -263,6 +263,8 @@ def _restore(path: Path, snapshot: dict) -> None:
 
 
 def _enable_site(available: Path, enabled: Path) -> None:
+    if available == enabled:
+        return
     if enabled.is_symlink() or enabled.exists():
         enabled.unlink()
     enabled.symlink_to(available)
