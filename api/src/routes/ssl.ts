@@ -111,6 +111,11 @@ function commandFailureDetail(result: SysagentCommandResult) {
   return [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
 }
 
+type PreflightChallengeCheck = {
+  scope: "local" | "public";
+  check: SysagentCommandResult;
+};
+
 async function panelVanityNameServers(domainId: string, domainName: string) {
   const [dnsRecords, configuredNameServers] = await Promise.all([
     prisma.dnsRecord.findMany({ where: { domainId, type: "NS", name: "@" }, select: { value: true } }),
@@ -206,10 +211,13 @@ async function runSslPreflight(domain: { id: string; name: string; documentRoot?
     throw Object.assign(new Error(`Certbot is not ready. Install certbot and enable ALLOW_LIVE_SSL. ${detail}`.trim()), { statusCode: 400 });
   }
 
-  const failedCheck = preflightChallengeChecks(preflight).find((check) => !commandSucceeded(check));
+  const failedCheck = preflightChallengeChecks(preflight).find(({ check }) => !commandSucceeded(check));
   if (failedCheck) {
-    const detail = commandFailureDetail(failedCheck);
-    throw Object.assign(new Error(`HTTP ACME challenge failed for ${domain.name}. The panel published the challenge vhost, but the public challenge URL still did not return the token. Keep port 80 open and confirm public DNS points to this VPS.${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
+    const detail = commandFailureDetail(failedCheck.check);
+    const hint = failedCheck.scope === "local"
+      ? "The local Nginx challenge vhost did not return the token. Check the generated vhost and document root."
+      : "The public challenge URL did not return the token. Keep port 80 open and confirm public DNS points to this VPS.";
+    throw Object.assign(new Error(`HTTP ACME challenge failed for ${domain.name}. ${hint}${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
   }
 
   return { dnsChecks, httpVhost, preflight, webRoot, includeWww: effectiveIncludeWww };
@@ -304,17 +312,24 @@ async function runSubdomainSslPreflight(subdomainId: string) {
     throw Object.assign(new Error(`Certbot is not ready. Install certbot and enable ALLOW_LIVE_SSL. ${detail}`.trim()), { statusCode: 400 });
   }
 
-  const failedCheck = preflightChallengeChecks(preflight).find((check) => !commandSucceeded(check));
+  const failedCheck = preflightChallengeChecks(preflight).find(({ check }) => !commandSucceeded(check));
   if (failedCheck) {
-    const detail = commandFailureDetail(failedCheck);
-    throw Object.assign(new Error(`HTTP ACME challenge failed for ${target.fqdn}. Publish the subdomain first and keep port 80 open.${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
+    const detail = commandFailureDetail(failedCheck.check);
+    const hint = failedCheck.scope === "local"
+      ? "The local Nginx challenge vhost did not return the token. Check the generated vhost and document root."
+      : "Publish the subdomain first, keep port 80 open, and confirm public DNS points to this VPS.";
+    throw Object.assign(new Error(`HTTP ACME challenge failed for ${target.fqdn}. ${hint}${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
   }
 
   return { ...target, dnsChecks, httpVhost, preflight, includeWww: false, dnsChallenge: false, certName: certbotCertificateName(target.fqdn) };
 }
 
-function preflightChallengeChecks(preflight: { checks: SysagentCommandResult[]; localChecks?: SysagentCommandResult[] }) {
-  return preflight.localChecks?.length ? preflight.localChecks : preflight.checks;
+function preflightChallengeChecks(preflight: { checks?: SysagentCommandResult[]; localChecks?: SysagentCommandResult[]; publicChecks?: SysagentCommandResult[] }): PreflightChallengeCheck[] {
+  const publicChecks = preflight.publicChecks?.length ? preflight.publicChecks : preflight.checks ?? [];
+  return [
+    ...(preflight.localChecks ?? []).map((check) => ({ scope: "local" as const, check })),
+    ...publicChecks.map((check) => ({ scope: "public" as const, check }))
+  ];
 }
 
 export const sslRoutes: FastifyPluginAsync = async (app) => {

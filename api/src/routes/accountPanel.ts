@@ -1339,8 +1339,9 @@ async function sslJobCounts() {
   return sslQueue.getJobCounts("waiting", "delayed", "active", "failed");
 }
 
-function preflightChallengeChecks(preflight: { checks: unknown[]; localChecks?: unknown[] }) {
-  return preflight.localChecks?.length ? preflight.localChecks : preflight.checks;
+function preflightChallengeChecks(preflight: { checks?: unknown[]; localChecks?: unknown[]; publicChecks?: unknown[] }) {
+  const publicChecks = preflight.publicChecks?.length ? preflight.publicChecks : preflight.checks ?? [];
+  return [...(preflight.localChecks ?? []), ...publicChecks];
 }
 
 function assertLimit(current: number, limit: number | null | undefined, label: string) {

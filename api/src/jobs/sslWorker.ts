@@ -253,8 +253,9 @@ async function publishHttpChallengeVhost(domainName: string, domainId: string | 
   }
 }
 
-function firstFailedPreflightChallenge(preflight: { checks?: SysagentCommandResult[]; localChecks?: SysagentCommandResult[] }) {
-  const checks = preflight.localChecks?.length ? preflight.localChecks : preflight.checks ?? [];
+function firstFailedPreflightChallenge(preflight: { checks?: SysagentCommandResult[]; localChecks?: SysagentCommandResult[]; publicChecks?: SysagentCommandResult[] }) {
+  const publicChecks = preflight.publicChecks?.length ? preflight.publicChecks : preflight.checks ?? [];
+  const checks = [...(preflight.localChecks ?? []), ...publicChecks];
   return checks.find((check) => check.returncode !== 0 || check.dryRun);
 }
 

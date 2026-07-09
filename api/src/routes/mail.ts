@@ -506,7 +506,7 @@ export const mailRoutes: FastifyPluginAsync = async (app) => {
     if (!mailCommandSucceeded(preflight.certbot)) {
       throw Object.assign(new Error(`Certbot is not ready for ${hostname}: ${preflight.certbot.stderr || "preflight failed"}`), { statusCode: 400 });
     }
-    const checks = preflight.localChecks?.length ? preflight.localChecks : preflight.checks;
+    const checks = [...(preflight.localChecks ?? []), ...(preflight.publicChecks?.length ? preflight.publicChecks : preflight.checks ?? [])];
     const failed = checks.find((check) => !mailCommandSucceeded(check));
     if (failed) {
       throw Object.assign(new Error(`ACME challenge failed for ${hostname}: ${failed.stderr || failed.stdout || "HTTP validation failed"}`), { statusCode: 400 });
