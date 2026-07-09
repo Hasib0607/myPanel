@@ -3,6 +3,7 @@ import re
 import secrets
 import subprocess
 import tempfile
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -114,6 +115,44 @@ def certificate_names(domain: str) -> list[str]:
     return sorted({name.lower() for name in re.findall(r"DNS:([^,\s]+)", result.stdout, re.IGNORECASE)})
 
 
+def make_acme_webroot_readable(web_root: Path, challenge_dir: Path, challenge_file: Path) -> dict:
+    """
+    Nginx must be able to traverse the account path and read the challenge file.
+    Keep parent directories execute-only for "other"; make only the public webroot
+    and .well-known challenge directories listable/readable.
+    """
+    file_root = Path(settings.file_manager_root).resolve()
+    resolved_web_root = web_root.resolve()
+    if resolved_web_root != file_root and file_root not in resolved_web_root.parents:
+        raise HTTPException(status_code=400, detail="Certbot webroot escapes file manager root")
+
+    changed: list[str] = []
+
+    def chmod_or(path: Path, bits: int) -> None:
+        mode = path.stat().st_mode
+        next_mode = mode | bits
+        if next_mode != mode:
+            path.chmod(stat.S_IMODE(next_mode))
+            changed.append(str(path))
+
+    parent_dirs: list[Path] = []
+    cursor = resolved_web_root
+    while cursor != file_root:
+        parent_dirs.append(cursor)
+        cursor = cursor.parent
+    parent_dirs.append(file_root)
+
+    for directory in reversed(parent_dirs):
+        chmod_or(directory, stat.S_IXOTH)
+    for directory in [resolved_web_root, resolved_web_root / ".well-known", challenge_dir]:
+        if directory.exists():
+            chmod_or(directory, stat.S_IROTH | stat.S_IXOTH)
+    if challenge_file.exists():
+        chmod_or(challenge_file, stat.S_IROTH)
+
+    return {"changed": changed, "webRoot": str(resolved_web_root), "challengeDir": str(challenge_dir)}
+
+
 @router.get("/certificate-status/{domain}")
 def certificate_status(domain: str) -> dict:
     primary = safe_cert_lookup_name(domain)
@@ -184,14 +223,17 @@ def ensure_acme_webroot(body: EnsureAcmeWebrootRequest) -> dict:
     primary = body.domain.split()[0].strip()
     web_root = safe_web_root(body.webRoot) if body.webRoot else acme_root_for_server_name(primary)
     challenge_dir = web_root / ".well-known" / "acme-challenge"
+    permissions = {"changed": [], "webRoot": str(web_root), "challengeDir": str(challenge_dir)}
     if settings.allow_live_ssl:
         run_live_step("ACME webroot create", lambda: challenge_dir.mkdir(parents=True, exist_ok=True))
+        permissions = run_live_step("ACME webroot permissions", lambda: make_acme_webroot_readable(web_root, challenge_dir, challenge_dir))
     return {
         "dryRun": not settings.allow_live_ssl,
         "returncode": 0,
         "webRoot": str(web_root),
         "challengeDir": str(challenge_dir),
         "domain": primary,
+        "permissions": permissions,
     }
 
 
@@ -526,6 +568,9 @@ def preflight(payload: CertificatePreflightRequest) -> dict:
     if settings.allow_live_ssl:
         run_live_step("ACME challenge directory create", lambda: challenge_dir.mkdir(parents=True, exist_ok=True))
         run_live_step("ACME challenge write", lambda: challenge_file.write_text(expected, encoding="utf-8"))
+        permissions = run_live_step("ACME challenge permissions", lambda: make_acme_webroot_readable(web_root, challenge_dir, challenge_file))
+    else:
+        permissions = {"changed": [], "webRoot": str(web_root), "challengeDir": str(challenge_dir)}
 
     hosts = [payload.domain]
     if payload.includeWww:
@@ -560,4 +605,5 @@ def preflight(payload: CertificatePreflightRequest) -> dict:
         "localChecks": local_checks,
         "publicChecks": public_checks,
         "webRoot": str(web_root),
+        "permissions": permissions,
     }
