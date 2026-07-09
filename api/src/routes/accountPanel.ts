@@ -1026,7 +1026,7 @@ async function accountSslPreflight(request: any, domain: { id: string; name: str
       throw Object.assign(new Error(`Certbot is not ready for ${domain.name}. ${certbotFailure}`), { statusCode: 400 });
     }
     const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
-    const webRoot = path.join(account.homeRoot, normalizeDocumentRoot(domain.documentRoot));
+    const webRoot = accountDomainWebRoot(account, domain);
     await fs.mkdir(path.join(webRoot, ".well-known", "acme-challenge"), { recursive: true });
     return {
       webRoot,
@@ -1050,7 +1050,7 @@ async function accountSslPreflight(request: any, domain: { id: string; name: str
   const wwwCheck = includeWww ? await optionalPublicA(`www.${domain.name}`) : null;
   const effectiveIncludeWww = Boolean(wwwCheck?.ok);
   const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
-  const webRoot = path.join(account.homeRoot, normalizeDocumentRoot(domain.documentRoot));
+  const webRoot = accountDomainWebRoot(account, domain);
   await fs.mkdir(path.join(webRoot, ".well-known", "acme-challenge"), { recursive: true });
   const nginxResult = await sysagent.writeStaticNginxVhost({
     name: `domain-${nginxResourceName(domain.name)}`,
@@ -1186,7 +1186,7 @@ async function publishAccountDomainRoute(request: any, account: { id: string; ho
           startCommand: deployment.startCommand,
           publicDirectory: deployment.publicDirectory,
           outputDirectory: deployment.outputDirectory,
-          fallbackRootPath: path.join(account.homeRoot, normalizeDocumentRoot(domain.documentRoot)),
+          fallbackRootPath: accountDomainWebRoot(account, domain),
           forceSsl: domain.forceSsl && domain.sslEnabled
         })
       )
@@ -1199,7 +1199,7 @@ async function publishAccountDomainRoute(request: any, account: { id: string; ho
       : await sysagent.writeStaticNginxVhost({
           name: `domain-${nginxResourceName(domain.name)}`,
           serverName: `${domain.name} www.${domain.name}`,
-          rootPath: path.join(account.homeRoot, normalizeDocumentRoot(domain.documentRoot)),
+          rootPath: accountDomainWebRoot(account, domain),
           forceHttps: domain.forceSsl && domain.sslEnabled,
           ...(domain.sslEnabled
             ? {
@@ -1299,7 +1299,7 @@ async function queueAccountBulkDomainSslJobs(account: { homeRoot: string }, doma
       domainId: domain.id,
       domain: domain.name,
       email: `admin@${domain.name}`,
-      webRoot: path.join(account.homeRoot, normalizeDocumentRoot(domain.documentRoot)),
+      webRoot: accountDomainWebRoot(account, domain),
       includeWww: true,
       forceSsl: domain.forceSsl,
       source: "account-bulk-domain-ssl"
@@ -1330,7 +1330,7 @@ async function queueAccountAutoDomainSslJob(account: { homeRoot: string }, domai
     domainId: domain.id,
     domain: domain.name,
     email: `admin@${domain.name}`,
-    webRoot: path.join(account.homeRoot, normalizeDocumentRoot(domain.documentRoot)),
+    webRoot: accountDomainWebRoot(account, domain),
     includeWww,
     forceSsl: domain.forceSsl,
     source: "account-auto-domain-ssl"
@@ -1378,6 +1378,15 @@ function normalizeDocumentRoot(value?: string | null) {
     throw error;
   }
   return root;
+}
+
+function accountDomainWebRoot(account: { homeRoot: string }, domain: { name: string; documentRoot?: string | null }) {
+  const documentRoot = normalizeDocumentRoot(domain.documentRoot);
+  const normalizedName = normalizeDomainName(domain.name);
+  if (documentRoot === normalizedName || documentRoot.startsWith(`${normalizedName}/`)) {
+    return path.join(account.homeRoot, documentRoot);
+  }
+  return path.join(account.homeRoot, normalizedName, documentRoot);
 }
 
 function normalizeRedirectUrl(value?: string | null) {
@@ -2351,7 +2360,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const body = sslSchema.parse(request.body ?? {});
     const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
     const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
-    const webRoot = path.join(account.homeRoot, "public_html");
+    const webRoot = accountDomainWebRoot(account, domain);
     const job = await sslQueue.add(action, {
       domainId: domain.id,
       domain: domain.name,
@@ -2855,7 +2864,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
           startCommand: "php-fpm",
           publicDirectory: deployment.publicDirectory,
           outputDirectory: deployment.outputDirectory,
-          fallbackRootPath: path.join(account.homeRoot, "public_html"),
+          fallbackRootPath: serverName ? accountDomainWebRoot(account, { name: serverName.split(/\s+/)[0] ?? serverName, documentRoot: "public_html" }) : path.join(account.homeRoot, "public_html"),
           forceHttps: true
         })
       : { skipped: true, reason: "No domain is linked to this deployment" };

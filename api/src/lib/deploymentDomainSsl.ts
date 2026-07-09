@@ -29,7 +29,13 @@ function publicHtmlRootPath(domainName: string, documentRoot?: string | null) {
 }
 
 function accountPublicRootPath(domain: { name: string; documentRoot?: string | null; account?: { homeRoot?: string | null } | null }) {
-  if (domain.account?.homeRoot) return path.join(domain.account.homeRoot, normalizeDocumentRoot(domain.documentRoot));
+  if (domain.account?.homeRoot) {
+    const documentRoot = normalizeDocumentRoot(domain.documentRoot);
+    if (documentRoot === domain.name || documentRoot.startsWith(`${domain.name}/`)) {
+      return path.join(domain.account.homeRoot, documentRoot);
+    }
+    return path.join(domain.account.homeRoot, domain.name, documentRoot);
+  }
   return publicHtmlRootPath(domain.name, domain.documentRoot);
 }
 
