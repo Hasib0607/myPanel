@@ -132,6 +132,23 @@ server { listen 80; server_name rettrovibes.shop www.rettrovibes.shop; }
 
         self.assertEqual(files, ["/etc/nginx/conf.d/default.conf"])
 
+    def test_config_dump_conflict_files_handles_multiline_server_name(self) -> None:
+        dump = """
+# configuration file /etc/nginx/conf.d/legacy.conf:
+server {
+    listen 80;
+    server_name
+        rettrovibes.shop
+        www.rettrovibes.shop;
+}
+# configuration file /etc/nginx/conf.d/domain-rettrovibes.shop.conf:
+server { listen 80; server_name rettrovibes.shop www.rettrovibes.shop; }
+"""
+
+        files = _config_dump_conflict_files(dump, "rettrovibes.shop www.rettrovibes.shop", "domain-rettrovibes.shop.conf")
+
+        self.assertEqual(files, ["/etc/nginx/conf.d/legacy.conf"])
+
 
 if __name__ == "__main__":
     unittest.main()

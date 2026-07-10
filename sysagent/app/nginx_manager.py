@@ -174,18 +174,34 @@ def _config_has_server_name(path: Path, server_name: str) -> bool:
         return False
 
 
-def _config_dump_conflict_files(text: str, server_name: str, own_filename: str = "") -> list[str]:
-    requested_tokens = server_name_tokens(server_name)
+def _config_dump_sections(text: str) -> list[tuple[str, str]]:
+    sections: list[tuple[str, list[str]]] = []
     current_file = ""
-    matches: list[str] = []
+    current_lines: list[str] = []
     for line in text.splitlines():
         marker = re.match(r"#\s+configuration file\s+(.+?):\s*$", line.strip())
         if marker:
+            if current_file:
+                sections.append((current_file, current_lines))
             current_file = marker.group(1)
+            current_lines = []
             continue
-        if "server_name" not in line:
+        if current_file:
+            current_lines.append(line)
+    if current_file:
+        sections.append((current_file, current_lines))
+    return [(file_path, "\n".join(lines)) for file_path, lines in sections]
+
+
+def _config_dump_conflict_files(text: str, server_name: str, own_filename: str = "") -> list[str]:
+    requested_tokens = server_name_tokens(server_name)
+    matches: list[str] = []
+    for current_file, file_text in _config_dump_sections(text):
+        if own_filename and Path(current_file).name == own_filename:
             continue
-        claimed = server_name_directive_tokens(line)
+        if "server_name" not in file_text:
+            continue
+        claimed = server_name_directive_tokens(file_text)
         if not claimed:
             continue
         if not any(
@@ -194,11 +210,26 @@ def _config_dump_conflict_files(text: str, server_name: str, own_filename: str =
             for claimed_token in claimed
         ):
             continue
-        if not current_file or (own_filename and Path(current_file).name == own_filename):
-            continue
         if current_file not in matches:
             matches.append(current_file)
     return matches
+
+
+def nginx_config_dump() -> tuple[str, dict]:
+    dump = run_command(["nginx", "-T"], allow_live=True)
+    text = "\n".join([dump.get("stdout") or "", dump.get("stderr") or ""])
+    return text, dump
+
+
+def nginx_dump_diagnostic(dump: dict) -> str:
+    rc = dump.get("returncode")
+    stderr = (dump.get("stderr") or "").strip().replace("\n", " ")[:500]
+    stdout = (dump.get("stdout") or "").strip().replace("\n", " ")[:500]
+    if stderr:
+        return f"nginx -T returncode={rc}, stderr='{stderr}'"
+    if stdout:
+        return f"nginx -T returncode={rc}, stdout='{stdout}'"
+    return f"nginx -T returncode={rc}, no output"
 
 
 def _is_removable_nginx_conf(path: str) -> bool:
@@ -216,8 +247,7 @@ def _is_removable_nginx_conf(path: str) -> bool:
 
 
 def remove_loaded_conflicting_configs(our_name: str, server_name: str) -> list[str]:
-    dump = run_command(["nginx", "-T"], allow_live=True)
-    text = "\n".join([dump.get("stdout") or "", dump.get("stderr") or ""])
+    text, _dump = nginx_config_dump()
     removed: list[str] = []
     for file_path in _config_dump_conflict_files(text, server_name, f"{our_name}.conf"):
         if not _is_removable_nginx_conf(file_path):
@@ -231,9 +261,13 @@ def remove_loaded_conflicting_configs(our_name: str, server_name: str) -> list[s
 
 
 def loaded_conflicting_config_files(our_name: str, server_name: str) -> list[str]:
-    dump = run_command(["nginx", "-T"], allow_live=True)
-    text = "\n".join([dump.get("stdout") or "", dump.get("stderr") or ""])
+    text, _dump = nginx_config_dump()
     return _config_dump_conflict_files(text, server_name, f"{our_name}.conf")
+
+
+def loaded_conflict_diagnostic(our_name: str, server_name: str) -> tuple[list[str], str]:
+    text, dump = nginx_config_dump()
+    return _config_dump_conflict_files(text, server_name, f"{our_name}.conf"), nginx_dump_diagnostic(dump)
 
 
 def _config_has_insecure_port443(path: Path) -> bool:
@@ -444,10 +478,19 @@ def publish_nginx_config(
                                 conflict_files.append(str(cp))
                         except OSError:
                             pass
-                for file_path in loaded_conflicting_config_files(name, server_name):
+                loaded_files, loaded_diagnostic = loaded_conflict_diagnostic(name, server_name)
+                for file_path in loaded_files:
                     if file_path not in conflict_files:
                         conflict_files.append(file_path)
-                files_hint = (", ".join(conflict_files) or "unknown") + ". Remove it and redeploy."
+                if conflict_files:
+                    files_hint = ", ".join(conflict_files) + ". Remove it and redeploy."
+                else:
+                    nginx_test_hint = test_stderr.strip().replace("\n", " ")[:500]
+                    files_hint = (
+                        "not found in scanned files or nginx -T sections. "
+                        f"{loaded_diagnostic}. nginx -t stderr='{nginx_test_hint}'. "
+                        "Run nginx -T on the VPS and remove the duplicate server_name."
+                    )
                 skip_msg = (
                     f'Another nginx config still claims server_name "{server_name}" '
                     f"after cleanup. Conflicting file(s): {files_hint}"
