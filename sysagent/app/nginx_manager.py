@@ -115,11 +115,11 @@ def make_web_root_readable(web_root: Path) -> dict:
 
 def acme_location(server_name: str, web_root: Path | str | None = None) -> str:
     acme_root = safe_web_root(str(web_root)) if web_root else acme_root_for_server_name(server_name)
+    challenge_root = acme_root / ".well-known" / "acme-challenge"
     return (
         "    location ^~ /.well-known/acme-challenge/ {\n"
-        f"        root {acme_root};\n"
+        f"        alias {challenge_root}/;\n"
         "        default_type text/plain;\n"
-        "        try_files $uri =404;\n"
         "    }\n"
         "\n"
     )
