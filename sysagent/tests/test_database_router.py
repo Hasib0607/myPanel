@@ -36,7 +36,7 @@ _config_module.settings = _settings
 _config_module.DEPLOYMENT_COMMANDS_LIVE = True
 sys.modules.setdefault("app.config", _config_module)
 
-from app.routers.database import DatabaseRowsRequest, preview_rows, provision_postgres, selected_row_search_columns  # noqa: E402
+from app.routers.database import DatabaseRowsRequest, preview_rows, provision_postgres, row_search_where, selected_row_search_columns  # noqa: E402
 
 
 class PostgresProvisionTests(unittest.TestCase):
@@ -85,7 +85,11 @@ class RowSearchColumnTests(unittest.TestCase):
 
     def test_postgres_row_preview_searches_selected_columns_only(self) -> None:
         with (
-            mock.patch("app.routers.database.table_column_names", return_value=["id", "name", "description"]),
+            mock.patch("app.routers.database.table_column_metadata", return_value=[
+                {"name": "id", "type": "integer"},
+                {"name": "name", "type": "text"},
+                {"name": "description", "type": "text"},
+            ]),
             mock.patch("app.routers.database.run_command") as run_command,
         ):
             run_command.return_value = {"command": [], "stdout": "id,name,description\n1,Pangabi,Lorem\n", "stderr": "", "returncode": 0}
@@ -105,9 +109,20 @@ class RowSearchColumnTests(unittest.TestCase):
         self.assertIn('"description"::text', sql)
         self.assertNotIn('"id"::text', sql)
 
+    def test_selected_numeric_column_search_uses_like_on_that_column_only(self) -> None:
+        where = row_search_where("MYSQL", [{"name": "store_id", "type": "bigint(20)"}], "14393")
+
+        self.assertEqual(where, " WHERE CAST(`store_id` AS CHAR) LIKE '%14393%'")
+        self.assertNotIn("customer_id", where)
+        self.assertNotIn("uid", where)
+
     def test_postgres_row_preview_returns_no_matches_when_no_columns_are_selected(self) -> None:
         with (
-            mock.patch("app.routers.database.table_column_names", return_value=["id", "name", "description"]),
+            mock.patch("app.routers.database.table_column_metadata", return_value=[
+                {"name": "id", "type": "integer"},
+                {"name": "name", "type": "text"},
+                {"name": "description", "type": "text"},
+            ]),
             mock.patch("app.routers.database.run_command") as run_command,
         ):
             run_command.return_value = {"command": [], "stdout": "id,name,description\n", "stderr": "", "returncode": 0}

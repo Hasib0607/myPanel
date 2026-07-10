@@ -35,6 +35,13 @@ function searchColumnLabel(selected: string[], columns: Column[]) {
   return `${selected.length} columns`;
 }
 
+function searchScopeLabel(columns: string[] | undefined) {
+  if (columns === undefined) return "all columns";
+  if (columns.length === 0) return "no columns";
+  if (columns.length === 1) return columns[0] ?? "1 column";
+  return `${columns.length} columns`;
+}
+
 function parseCsvLine(line: string) {
   const values: string[] = [];
   let current = "";
@@ -350,8 +357,8 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
               <div>
                 <div className="font-semibold">{selectedTable || "Select a table"}</div>
                 <div className="text-xs text-panel-muted">
-                  {editableColumns.length} columns · showing {rowSearchTerm ? `${filteredRows.length} of ` : ""}{parsed.rows.length} rows
-                  {rowSearchTerm ? " matching search" : ""}
+                  {editableColumns.length} table columns · showing {rowSearchTerm ? `${filteredRows.length} of ` : ""}{parsed.rows.length} rows
+                  {rowSearchTerm ? ` matching search in ${searchScopeLabel(appliedRowSearchColumns)}` : ""}
                 </div>
               </div>
             </div>

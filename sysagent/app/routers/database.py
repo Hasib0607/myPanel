@@ -501,22 +501,30 @@ def list_columns(body: DatabaseTableRequest) -> dict:
     return {"engine": body.engine, "database": body.database, "table": body.table, "columns": columns, "result": result}
 
 
-def table_column_names(engine: str, database: str, table: str) -> list[str]:
+def table_column_metadata(engine: str, database: str, table: str) -> list[dict[str, str]]:
     if engine == "POSTGRESQL":
         sql = (
-            "SELECT column_name FROM information_schema.columns "
+            "SELECT column_name || '|' || data_type FROM information_schema.columns "
             f"WHERE table_schema = 'public' AND table_name = {sql_literal(table)} "
             "ORDER BY ordinal_position;"
         )
         result = run_command(["sudo", "-u", "postgres", "psql", "-d", database, "-At", "-c", sql])
     else:
         sql = (
-            "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+            "SELECT CONCAT(COLUMN_NAME, '|', COLUMN_TYPE) FROM information_schema.COLUMNS "
             f"WHERE TABLE_SCHEMA = {sql_literal(database)} AND TABLE_NAME = {sql_literal(table)} "
             "ORDER BY ORDINAL_POSITION;"
         )
         result = mysql_exec(sql)
-    return parse_lines(result.get("stdout"))
+    columns = []
+    for line in parse_lines(result.get("stdout")):
+        name, _, data_type = line.partition("|")
+        columns.append({"name": name, "type": data_type})
+    return columns
+
+
+def table_column_names(engine: str, database: str, table: str) -> list[str]:
+    return [column["name"] for column in table_column_metadata(engine, database, table)]
 
 
 def selected_row_search_columns(all_columns: list[str], requested_columns: list[str] | None) -> list[str]:
@@ -527,29 +535,38 @@ def selected_row_search_columns(all_columns: list[str], requested_columns: list[
     return [column for column in requested if column in allowed]
 
 
+def row_search_where(engine: str, columns: list[dict[str, str]], search: str) -> str:
+    if not search:
+        return ""
+    if not columns:
+        return " WHERE 1 = 0"
+
+    conditions = []
+    for column in columns:
+        name = column["name"]
+        if engine == "POSTGRESQL":
+            conditions.append(f"{postgres_identifier(name)}::text ILIKE {sql_literal('%' + search + '%')}")
+        else:
+            conditions.append(f"CAST({mysql_identifier(name)} AS CHAR) LIKE {sql_literal('%' + search + '%')}")
+    return " WHERE " + " OR ".join(conditions)
+
+
 @router.post("/rows")
 def preview_rows(body: DatabaseRowsRequest) -> dict:
     search = (body.search or "").strip()
-    all_columns = table_column_names(body.engine, body.database, body.table) if search else []
-    columns = selected_row_search_columns(all_columns, body.searchColumns) if search else []
+    all_column_metadata = table_column_metadata(body.engine, body.database, body.table) if search else []
+    all_column_names = [column["name"] for column in all_column_metadata]
+    selected_columns = selected_row_search_columns(all_column_names, body.searchColumns) if search else []
+    selected_column_set = set(selected_columns)
+    columns = [column for column in all_column_metadata if column["name"] in selected_column_set]
     if body.engine == "POSTGRESQL":
-        where = ""
-        if search and not columns:
-            where = " WHERE 1 = 0"
-        elif columns:
-            haystack = "concat_ws(E'\\t', " + ", ".join(f"{postgres_identifier(column)}::text" for column in columns) + ")"
-            where = f" WHERE {haystack} ILIKE {sql_literal('%' + search + '%')}"
+        where = row_search_where(body.engine, columns, search)
         result = run_command([
             "sudo", "-u", "postgres", "psql", "-d", body.database, "--csv",
             "-c", f"SELECT * FROM {postgres_identifier(body.table)}{where} LIMIT {body.limit} OFFSET {body.offset};"
         ])
     else:
-        where = ""
-        if search and not columns:
-            where = " WHERE 1 = 0"
-        elif columns:
-            haystack = "CONCAT_WS('\\t', " + ", ".join(mysql_identifier(column) for column in columns) + ")"
-            where = f" WHERE {haystack} LIKE {sql_literal('%' + search + '%')}"
+        where = row_search_where(body.engine, columns, search)
         result = run_command([
             "mysql", "--batch", "--raw", "-e",
             f"SELECT * FROM {mysql_identifier(body.table)}{where} LIMIT {body.limit} OFFSET {body.offset};",
@@ -562,7 +579,7 @@ def preview_rows(body: DatabaseRowsRequest) -> dict:
         "format": "CSV" if body.engine == "POSTGRESQL" else "TSV",
         "rows": result.get("stdout") or "",
         "search": search,
-        "searchColumns": columns,
+        "searchColumns": selected_columns,
         "result": result,
     }
 
