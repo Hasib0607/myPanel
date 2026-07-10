@@ -242,7 +242,7 @@ def _is_removable_nginx_conf(path: str) -> bool:
         target.resolve().relative_to(Path("/etc/nginx").resolve())
     except ValueError:
         return False
-    if stem in STRICTLY_PROTECTED_CONFIG_NAMES or "vps-panel" in stem:
+    if stem in STRICTLY_PROTECTED_CONFIG_NAMES:
         return False
     return True
 
@@ -298,7 +298,7 @@ def remove_insecure_port443_configs(our_name: str, server_name: str, *scan_dirs:
             if conf_path.name == our_filename:
                 continue
             stem = conf_path.stem.lower()
-            if stem in STRICTLY_PROTECTED_CONFIG_NAMES or "vps-panel" in stem:
+            if stem in STRICTLY_PROTECTED_CONFIG_NAMES:
                 continue
             try:
                 target = conf_path.resolve() if conf_path.is_symlink() else conf_path
@@ -329,7 +329,7 @@ def remove_conflicting_configs(our_name: str, server_name: str, *scan_dirs: str)
             if conf_path.name == our_filename:
                 continue
             stem = conf_path.stem.lower()
-            if stem in STRICTLY_PROTECTED_CONFIG_NAMES or "vps-panel" in stem:
+            if stem in STRICTLY_PROTECTED_CONFIG_NAMES:
                 continue
             try:
                 target = conf_path.resolve() if conf_path.is_symlink() else conf_path

@@ -95,6 +95,23 @@ server {
             self.assertFalse(stale.exists())
             self.assertTrue(own.exists())
 
+    def test_removes_stale_vps_panel_named_domain_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stale = root / "vps-panel-acme-rettrovibes.shop.conf"
+            protected = root / "vps-panel.conf"
+            own = root / "domain-rettrovibes.shop.conf"
+            stale.write_text("server { listen 80; server_name rettrovibes.shop www.rettrovibes.shop; }\n", encoding="utf-8")
+            protected.write_text("server { listen 80; server_name rettrovibes.shop; }\n", encoding="utf-8")
+            own.write_text("server { listen 80; server_name rettrovibes.shop www.rettrovibes.shop; }\n", encoding="utf-8")
+
+            removed = remove_conflicting_configs("domain-rettrovibes.shop", "rettrovibes.shop www.rettrovibes.shop", tmp)
+
+            self.assertEqual(removed, ["vps-panel-acme-rettrovibes.shop.conf"])
+            self.assertFalse(stale.exists())
+            self.assertTrue(protected.exists())
+            self.assertTrue(own.exists())
+
     def test_parent_wildcard_does_not_claim_apex_domain(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "wildcard.conf"
