@@ -448,6 +448,12 @@ def publish_nginx_config(
     old_enabled = _snapshot(enabled)
 
     try:
+        if server_name and available != enabled and available.exists():
+            try:
+                if _config_has_server_name(available.resolve() if available.is_symlink() else available, server_name):
+                    run_live_step("hide stale available config", lambda: available.unlink())
+            except OSError:
+                pass
         run_live_step("write temp config", lambda: temp_available.write_text(config, encoding="utf-8"))
         run_live_step("enable temp config", lambda: _enable_site(temp_available, enabled))
         test = run_command(["nginx", "-t"], allow_live=True)
@@ -459,6 +465,7 @@ def publish_nginx_config(
             and any(token in test_stderr for token in requested_tokens)
         )
         if test.get("returncode") != 0 or has_conflict_warn:
+            run_live_step("rollback failed available config", lambda: _restore(available, old_available))
             run_live_step("rollback failed config", lambda: _restore(enabled, old_enabled))
             run_live_step("remove temp config", lambda: temp_available.unlink(missing_ok=True))
             if has_conflict_warn:
