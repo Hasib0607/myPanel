@@ -325,9 +325,10 @@ def publish_nginx_config(
 
     if server_name:
         scan_dirs = [sites_enabled]
-        conf_d = Path("/etc/nginx/conf.d")
-        if conf_d.is_dir():
-            scan_dirs.append(str(conf_d))
+        for candidate in ["/etc/nginx/conf.d", "/etc/nginx/sites-enabled", "/etc/nginx/sites-available"]:
+            candidate_path = Path(candidate)
+            if candidate_path.is_dir() and str(candidate_path) not in scan_dirs:
+                scan_dirs.append(str(candidate_path))
         available_dir = Path(sites_available)
         if available_dir.is_dir() and str(available_dir) not in scan_dirs:
             scan_dirs.append(str(available_dir))
@@ -351,20 +352,29 @@ def publish_nginx_config(
         run_live_step("enable temp config", lambda: _enable_site(temp_available, enabled))
         test = run_command(["nginx", "-t"], allow_live=True)
         test_stderr = test.get("stderr") or ""
-        has_conflict_warn = server_name and "conflicting server name" in test_stderr and server_name in test_stderr
+        requested_tokens = server_name_tokens(server_name) if server_name else []
+        has_conflict_warn = bool(
+            requested_tokens
+            and "conflicting server name" in test_stderr
+            and any(token in test_stderr for token in requested_tokens)
+        )
         if test.get("returncode") != 0 or has_conflict_warn:
             run_live_step("rollback failed config", lambda: _restore(enabled, old_enabled))
             run_live_step("remove temp config", lambda: temp_available.unlink(missing_ok=True))
             if has_conflict_warn:
                 # Find which files still claim the server_name so the user knows what to remove
                 conflict_files: list[str] = []
-                for scan_d in ([sites_enabled, "/etc/nginx/conf.d"] if Path("/etc/nginx/conf.d").is_dir() else [sites_enabled]):
+                conflict_scan_dirs = [sites_enabled]
+                for candidate in ["/etc/nginx/conf.d", "/etc/nginx/sites-enabled", "/etc/nginx/sites-available", sites_available]:
+                    if Path(candidate).is_dir() and candidate not in conflict_scan_dirs:
+                        conflict_scan_dirs.append(candidate)
+                for scan_d in conflict_scan_dirs:
                     for cp in Path(scan_d).iterdir() if Path(scan_d).is_dir() else []:
                         if cp.name == f"{name}.conf":
                             continue
                         try:
                             tgt = cp.resolve() if cp.is_symlink() else cp
-                            if _config_has_server_name(tgt, server_name):
+                            if any(_config_has_server_name(tgt, token) for token in requested_tokens):
                                 conflict_files.append(str(cp))
                         except OSError:
                             pass
