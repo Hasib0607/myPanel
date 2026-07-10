@@ -42,13 +42,14 @@ function searchScopeLabel(columns: string[] | undefined) {
   return `${columns.length} columns`;
 }
 
-function parseCsvLine(line: string) {
-  const values: string[] = [];
+function parseCsvRecords(raw: string) {
+  const records: string[][] = [];
+  let record: string[] = [];
   let current = "";
   let quoted = false;
-  for (let index = 0; index < line.length; index += 1) {
-    const char = line[index];
-    const next = line[index + 1];
+  for (let index = 0; index < raw.length; index += 1) {
+    const char = raw[index];
+    const next = raw[index + 1];
     if (char === "\"" && quoted && next === "\"") {
       current += "\"";
       index += 1;
@@ -59,23 +60,34 @@ function parseCsvLine(line: string) {
       continue;
     }
     if (char === "," && !quoted) {
-      values.push(current);
+      record.push(current);
+      current = "";
+      continue;
+    }
+    if ((char === "\n" || char === "\r") && !quoted) {
+      if (char === "\r" && next === "\n") index += 1;
+      record.push(current);
+      if (record.some((value) => value.length > 0)) records.push(record);
+      record = [];
       current = "";
       continue;
     }
     current += char;
   }
-  values.push(current);
-  return values;
+  if (current.length > 0 || record.length > 0) {
+    record.push(current);
+    if (record.some((value) => value.length > 0)) records.push(record);
+  }
+  return records;
 }
 
 function parseRows(raw: string, format: string) {
-  const lines = raw.split(/\r?\n/).filter((line) => line.length > 0);
-  if (lines.length === 0) return { headers: [] as string[], rows: [] as Record<string, string>[] };
-  const parse = format === "CSV" ? parseCsvLine : (line: string) => line.split("\t");
-  const headers = parse(lines[0] ?? "");
-  const rows = lines.slice(1).map((line) => {
-    const cells = parse(line);
+  const records = format === "CSV"
+    ? parseCsvRecords(raw)
+    : raw.split(/\r?\n/).filter((line) => line.length > 0).map((line) => line.split("\t"));
+  if (records.length === 0) return { headers: [] as string[], rows: [] as Record<string, string>[] };
+  const headers = records[0] ?? [];
+  const rows = records.slice(1).map((cells) => {
     return Object.fromEntries(headers.map((header, index) => [header, cells[index] ?? ""]));
   });
   return { headers, rows };

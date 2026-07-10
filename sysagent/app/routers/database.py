@@ -568,7 +568,7 @@ def preview_rows(body: DatabaseRowsRequest) -> dict:
     else:
         where = row_search_where(body.engine, columns, search)
         result = run_command([
-            "mysql", "--batch", "--raw", "-e",
+            "mysql", "--batch", "-e",
             f"SELECT * FROM {mysql_identifier(body.table)}{where} LIMIT {body.limit} OFFSET {body.offset};",
             body.database,
         ])
@@ -603,7 +603,7 @@ def export_table_csv(body: DatabaseTableRequest) -> dict:
         content = result.get("stdout") or ""
     else:
         result = run_command([
-            "mysql", "--batch", "--raw", "-e", f"SELECT * FROM {mysql_identifier(body.table)};", body.database
+            "mysql", "--batch", "-e", f"SELECT * FROM {mysql_identifier(body.table)};", body.database
         ], timeout=300)
         content = result.get("stdout") or ""
     return {"engine": body.engine, "database": body.database, "table": body.table, "format": "CSV" if body.engine == "POSTGRESQL" else "TSV", "content": content, "result": result}
