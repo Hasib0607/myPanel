@@ -175,6 +175,32 @@ def _config_has_server_name(path: Path, server_name: str) -> bool:
         return False
 
 
+def _nginx_include_text_loads_directory(text: str, directory: Path) -> bool:
+    normalized = str(directory)
+    for match in re.finditer(r"\binclude\s+([^;]+);", text):
+        include_path = match.group(1).strip().strip("\"'")
+        if include_path.startswith(normalized + "/") or include_path == normalized:
+            return True
+    return False
+
+
+def _nginx_loads_directory(directory: Path) -> bool:
+    nginx_conf = Path("/etc/nginx/nginx.conf")
+    try:
+        text = nginx_conf.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    return _nginx_include_text_loads_directory(text, directory)
+
+
+def _nginx_loads_both_site_directories(sites_available: str, sites_enabled: str) -> bool:
+    available = Path(sites_available)
+    enabled = Path(sites_enabled)
+    if available == enabled:
+        return False
+    return _nginx_loads_directory(available) and _nginx_loads_directory(enabled)
+
+
 def _config_dump_sections(text: str) -> list[tuple[str, str]]:
     sections: list[tuple[str, list[str]]] = []
     current_file = ""
@@ -386,8 +412,15 @@ def publish_nginx_config(
     server_name: str | None = None,
     post_reload_check: Callable[[], dict] | None = None,
 ) -> dict:
-    available = safe_nginx_path(sites_available, name)
-    enabled = safe_nginx_path(sites_enabled, name)
+    requested_available = safe_nginx_path(sites_available, name)
+    requested_enabled = safe_nginx_path(sites_enabled, name)
+    single_loaded_site_file = settings.allow_live_nginx and _nginx_loads_both_site_directories(sites_available, sites_enabled)
+    if single_loaded_site_file:
+        available = requested_enabled
+        enabled = requested_enabled
+    else:
+        available = requested_available
+        enabled = requested_enabled
     temp_available = available.with_name(f".{available.name}.{os.getpid()}-{uuid4().hex}.tmp")
 
     write = {
@@ -444,6 +477,15 @@ def publish_nginx_config(
         removed = [*removed, *insecure_removed, *loaded_removed]
     else:
         removed = []
+
+    if single_loaded_site_file and requested_available != available and requested_available.exists():
+        try:
+            target = requested_available.resolve() if requested_available.is_symlink() else requested_available
+            if not server_name or _config_has_server_name(target, server_name):
+                run_live_step("remove stale duplicate available config", lambda: requested_available.unlink())
+                removed.append(str(requested_available))
+        except OSError:
+            pass
 
     old_available = _snapshot(available)
     old_enabled = _snapshot(enabled)

@@ -31,6 +31,7 @@ from app.nginx_manager import (
     _config_dump_conflict_files,
     _config_has_server_name,
     _enable_site,
+    _nginx_include_text_loads_directory,
     make_web_root_readable,
     remove_conflicting_configs,
 )
@@ -179,6 +180,18 @@ server { listen 80; server_name rettrovibes.shop www.rettrovibes.shop; }
         files = _config_dump_conflict_files(dump, "rettrovibes.shop www.rettrovibes.shop", "domain-rettrovibes.shop.conf")
 
         self.assertEqual(files, ["/etc/nginx/conf.d/legacy.conf"])
+
+    def test_nginx_include_text_detects_loaded_site_directories(self) -> None:
+        text = """
+http {
+    include /etc/nginx/sites-available/*.conf;
+    include /etc/nginx/sites-enabled/*.conf;
+}
+"""
+
+        self.assertTrue(_nginx_include_text_loads_directory(text, Path("/etc/nginx/sites-available")))
+        self.assertTrue(_nginx_include_text_loads_directory(text, Path("/etc/nginx/sites-enabled")))
+        self.assertFalse(_nginx_include_text_loads_directory(text, Path("/etc/nginx/conf.d")))
 
 
 if __name__ == "__main__":
