@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import re
 import secrets
+import stat
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -43,6 +44,26 @@ PHP_INI_TUNING = {
     "opcache.max_accelerated_files": "20000",
     "opcache.validate_timestamps": "0",
 }
+
+
+def make_acme_probe_readable(root_path: Path, challenge_dir: Path, probe_file: Path) -> dict:
+    permissions = make_web_root_readable(root_path)
+    changed = list(permissions.get("changed") or [])
+
+    def chmod_or(path: Path, bits: int) -> None:
+        mode = path.stat().st_mode
+        next_mode = mode | bits
+        if next_mode != mode:
+            path.chmod(stat.S_IMODE(next_mode))
+            changed.append(str(path))
+
+    well_known = challenge_dir.parent
+    for directory in [well_known, challenge_dir]:
+        if directory.exists():
+            chmod_or(directory, stat.S_IROTH | stat.S_IXOTH)
+    if probe_file.exists():
+        chmod_or(probe_file, stat.S_IROTH)
+    return {**permissions, "changed": changed, "challengeDir": str(challenge_dir), "probeFile": str(probe_file)}
 
 
 class VhostRequest(BaseModel):
@@ -187,7 +208,10 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
         probe_file = challenge_dir / probe_token
         run_live_step("ACME vhost probe directory create", lambda: challenge_dir.mkdir(parents=True, exist_ok=True))
         run_live_step("ACME vhost probe write", lambda: probe_file.write_text(probe_expected, encoding="utf-8"))
-        permissions = run_live_step("ACME vhost probe permissions", lambda: make_web_root_readable(root_path))
+        permissions = run_live_step(
+            "ACME vhost probe permissions",
+            lambda: make_acme_probe_readable(root_path, challenge_dir, probe_file),
+        )
 
     def post_reload_check() -> dict:
         if not probe_file:
@@ -204,11 +228,39 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
             f"Host: {primary_host}",
             f"http://127.0.0.1/.well-known/acme-challenge/{probe_file.name}",
         ], allow_live=True)
-        if result.get("returncode") == 0 and (result.get("stdout") or "").strip() != probe_expected:
+        if result.get("returncode") != 0:
+            debug = run_command([
+                "curl",
+                "-sS",
+                "-i",
+                "--max-time",
+                "10",
+                "--noproxy",
+                "*",
+                "-H",
+                f"Host: {primary_host}",
+                f"http://127.0.0.1/.well-known/acme-challenge/{probe_file.name}",
+            ], allow_live=True)
+            result = {
+                **result,
+                "stderr": (
+                    f"{result.get('stderr') or ''}\n"
+                    f"ACME vhost probe failed for serverName={body.serverName!r}, "
+                    f"rootPath={str(root_path)!r}, probeFile={str(probe_file)!r}. "
+                    f"Debug response: stdout={(debug.get('stdout') or '').strip()!r}; "
+                    f"stderr={(debug.get('stderr') or '').strip()!r}; "
+                    f"returncode={debug.get('returncode')}."
+                ).strip(),
+            }
+        elif (result.get("stdout") or "").strip() != probe_expected:
             result = {
                 **result,
                 "returncode": 1,
-                "stderr": f"ACME vhost probe returned unexpected body from local Nginx. Expected {probe_expected!r}, got {(result.get('stdout') or '').strip()!r}.",
+                "stderr": (
+                    f"ACME vhost probe returned unexpected body from local Nginx. "
+                    f"Expected {probe_expected!r}, got {(result.get('stdout') or '').strip()!r}. "
+                    f"serverName={body.serverName!r}, rootPath={str(root_path)!r}, probeFile={str(probe_file)!r}."
+                ),
             }
         return result
 
