@@ -561,11 +561,24 @@ def row_sort_order(engine: str, available_columns: list[str], sort_column: str |
     return f" ORDER BY {identifier} {direction}"
 
 
+def mysql_row_select_list(columns: list[dict[str, str]]) -> str:
+    if not columns:
+        return "*"
+    expressions = []
+    for column in columns:
+        identifier = mysql_identifier(column["name"])
+        escaped = (
+            f"REPLACE(REPLACE(REPLACE(CAST({identifier} AS CHAR), "
+            "CHAR(13), '\\\\r'), CHAR(10), '\\\\n'), CHAR(9), '\\\\t')"
+        )
+        expressions.append(f"{escaped} AS {identifier}")
+    return ", ".join(expressions)
+
+
 @router.post("/rows")
 def preview_rows(body: DatabaseRowsRequest) -> dict:
     search = (body.search or "").strip()
-    needs_metadata = bool(search or body.sortColumn)
-    all_column_metadata = table_column_metadata(body.engine, body.database, body.table) if needs_metadata else []
+    all_column_metadata = table_column_metadata(body.engine, body.database, body.table)
     all_column_names = [column["name"] for column in all_column_metadata]
     selected_columns = selected_row_search_columns(all_column_names, body.searchColumns) if search else []
     selected_column_set = set(selected_columns)
@@ -579,9 +592,10 @@ def preview_rows(body: DatabaseRowsRequest) -> dict:
         ])
     else:
         where = row_search_where(body.engine, columns, search)
+        select_list = mysql_row_select_list(all_column_metadata)
         result = run_command([
             "mysql", "--batch", "-e",
-            f"SELECT * FROM {mysql_identifier(body.table)}{where}{order_by} LIMIT {body.limit} OFFSET {body.offset};",
+            f"SELECT {select_list} FROM {mysql_identifier(body.table)}{where}{order_by} LIMIT {body.limit} OFFSET {body.offset};",
             body.database,
         ])
     return {
