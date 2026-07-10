@@ -459,16 +459,20 @@ def publish_nginx_config(
         test = run_command(["nginx", "-t"], allow_live=True)
         test_stderr = test.get("stderr") or ""
         requested_tokens = server_name_tokens(server_name) if server_name else []
-        has_conflict_warn = bool(
+        conflict_warning = bool(
             requested_tokens
             and "conflicting server name" in test_stderr
             and any(token in test_stderr for token in requested_tokens)
         )
-        if test.get("returncode") != 0 or has_conflict_warn:
+        # Nginx reports duplicate server_name entries as warnings while still
+        # returning success. Do not block publishing on a warning alone; the
+        # post-reload ACME probe below verifies whether the active route serves
+        # the challenge token.
+        if test.get("returncode") != 0:
             run_live_step("rollback failed available config", lambda: _restore(available, old_available))
             run_live_step("rollback failed config", lambda: _restore(enabled, old_enabled))
             run_live_step("remove temp config", lambda: temp_available.unlink(missing_ok=True))
-            if has_conflict_warn:
+            if conflict_warning:
                 # Find which files still claim the server_name so the user knows what to remove
                 conflict_files: list[str] = []
                 conflict_scan_dirs = [sites_enabled]
