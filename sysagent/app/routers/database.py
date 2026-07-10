@@ -74,6 +74,8 @@ class DatabaseRowsRequest(DatabaseTableRequest):
     offset: int = Field(default=0, ge=0)
     search: str | None = Field(default=None, max_length=200)
     searchColumns: list[str] | None = None
+    sortColumn: str | None = Field(default=None, pattern=IDENTIFIER_PATTERN)
+    sortDirection: str | None = Field(default=None, pattern="^(asc|desc)$")
 
 
 class DatabaseTableImportRequest(DatabaseTableRequest):
@@ -551,25 +553,35 @@ def row_search_where(engine: str, columns: list[dict[str, str]], search: str) ->
     return " WHERE " + " OR ".join(conditions)
 
 
+def row_sort_order(engine: str, available_columns: list[str], sort_column: str | None, sort_direction: str | None) -> str:
+    if not sort_column or sort_column not in set(available_columns):
+        return ""
+    direction = "DESC" if sort_direction == "desc" else "ASC"
+    identifier = postgres_identifier(sort_column) if engine == "POSTGRESQL" else mysql_identifier(sort_column)
+    return f" ORDER BY {identifier} {direction}"
+
+
 @router.post("/rows")
 def preview_rows(body: DatabaseRowsRequest) -> dict:
     search = (body.search or "").strip()
-    all_column_metadata = table_column_metadata(body.engine, body.database, body.table) if search else []
+    needs_metadata = bool(search or body.sortColumn)
+    all_column_metadata = table_column_metadata(body.engine, body.database, body.table) if needs_metadata else []
     all_column_names = [column["name"] for column in all_column_metadata]
     selected_columns = selected_row_search_columns(all_column_names, body.searchColumns) if search else []
     selected_column_set = set(selected_columns)
     columns = [column for column in all_column_metadata if column["name"] in selected_column_set]
+    order_by = row_sort_order(body.engine, all_column_names, body.sortColumn, body.sortDirection)
     if body.engine == "POSTGRESQL":
         where = row_search_where(body.engine, columns, search)
         result = run_command([
             "sudo", "-u", "postgres", "psql", "-d", body.database, "--csv",
-            "-c", f"SELECT * FROM {postgres_identifier(body.table)}{where} LIMIT {body.limit} OFFSET {body.offset};"
+            "-c", f"SELECT * FROM {postgres_identifier(body.table)}{where}{order_by} LIMIT {body.limit} OFFSET {body.offset};"
         ])
     else:
         where = row_search_where(body.engine, columns, search)
         result = run_command([
             "mysql", "--batch", "-e",
-            f"SELECT * FROM {mysql_identifier(body.table)}{where} LIMIT {body.limit} OFFSET {body.offset};",
+            f"SELECT * FROM {mysql_identifier(body.table)}{where}{order_by} LIMIT {body.limit} OFFSET {body.offset};",
             body.database,
         ])
     return {
@@ -580,6 +592,8 @@ def preview_rows(body: DatabaseRowsRequest) -> dict:
         "rows": result.get("stdout") or "",
         "search": search,
         "searchColumns": selected_columns,
+        "sortColumn": body.sortColumn if body.sortColumn in set(all_column_names) else None,
+        "sortDirection": body.sortDirection,
         "result": result,
     }
 

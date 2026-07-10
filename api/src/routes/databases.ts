@@ -60,7 +60,9 @@ const rowsSchema = tableSchema.extend({
   limit: z.number().int().min(1).max(500).default(50),
   offset: z.number().int().min(0).default(0),
   search: z.string().trim().max(200).optional(),
-  searchColumns: z.array(identifierSchema).optional()
+  searchColumns: z.array(identifierSchema).optional(),
+  sortColumn: identifierSchema.optional(),
+  sortDirection: z.enum(["asc", "desc"]).optional()
 });
 
 const tableImportSchema = tableSchema.extend({

@@ -27,6 +27,7 @@ type DatabaseBrowserClientProps = {
 
 type TableTab = "data" | "columns" | "editor";
 type RowValue = string | number | boolean | null;
+type SortDirection = "asc" | "desc";
 
 function searchColumnLabel(selected: string[], columns: Column[]) {
   if (selected.length === 0) return "Select columns";
@@ -139,6 +140,8 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
   const [rowSearchColumns, setRowSearchColumns] = useState<string[]>([]);
   const [appliedRowSearch, setAppliedRowSearch] = useState("");
   const [appliedRowSearchColumns, setAppliedRowSearchColumns] = useState<string[] | undefined>(undefined);
+  const [sortColumn, setSortColumn] = useState("");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
   const [columnPickerOpen, setColumnPickerOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<TableTab>("data");
   const [notice, setNotice] = useState<{ text: string; tone: "success" | "error" } | null>(null);
@@ -164,8 +167,8 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
   const rowSearchColumnKey = appliedRowSearchColumns?.join("|") ?? "all";
   const rows = useQuery({
     enabled: Boolean(selectedTable),
-    queryKey: ["database-browser-rows", apiBase, engine, database, selectedTable, limit, offset, rowSearchTerm, rowSearchColumnKey],
-    queryFn: () => apiPost<RowPreviewResult>(`${apiBase}/rows`, { ...target, table: selectedTable, limit, offset, search: rowSearchTerm || undefined, searchColumns: appliedRowSearchColumns })
+    queryKey: ["database-browser-rows", apiBase, engine, database, selectedTable, limit, offset, rowSearchTerm, rowSearchColumnKey, sortColumn, sortDirection],
+    queryFn: () => apiPost<RowPreviewResult>(`${apiBase}/rows`, { ...target, table: selectedTable, limit, offset, search: rowSearchTerm || undefined, searchColumns: appliedRowSearchColumns, sortColumn: sortColumn || undefined, sortDirection })
   });
 
   useEffect(() => {
@@ -178,6 +181,8 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
     setRowSearchColumns([]);
     setAppliedRowSearch("");
     setAppliedRowSearchColumns(undefined);
+    setSortColumn("");
+    setSortDirection("asc");
     setColumnPickerOpen(false);
     setActiveTab("data");
   }, [selectedTable]);
@@ -186,6 +191,7 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
     const available = new Set((columns.data?.columns ?? []).map((column) => column.name));
     setRowSearchColumns((current) => current.filter((column) => available.has(column)));
     setAppliedRowSearchColumns((current) => current?.filter((column) => available.has(column)));
+    setSortColumn((current) => available.has(current) ? current : "");
   }, [columns.data?.columns]);
 
   const databaseInfo = overview.data?.engines.find((item) => item.engine === engine)?.databases.find((item) => item.name === database);
@@ -276,6 +282,16 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
     setRowSearch("");
     setAppliedRowSearch("");
     setAppliedRowSearchColumns(undefined);
+    setOffset(0);
+  }
+
+  function toggleSort(header: string) {
+    if (sortColumn === header) {
+      setSortDirection((current) => current === "asc" ? "desc" : "asc");
+    } else {
+      setSortColumn(header);
+      setSortDirection("asc");
+    }
     setOffset(0);
   }
 
@@ -500,7 +516,19 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
                     <thead className="bg-slate-50 text-xs uppercase text-panel-muted">
                       <tr>
                         <th className="sticky left-0 z-10 w-24 bg-slate-50 px-3 py-3">Actions</th>
-                        {parsed.headers.map((header) => <th className="whitespace-nowrap px-3 py-3" key={header}>{header}</th>)}
+                        {parsed.headers.map((header) => (
+                          <th className="whitespace-nowrap px-3 py-3" key={header}>
+                            <button
+                              className="inline-flex h-7 items-center gap-1 rounded px-1 font-semibold uppercase hover:bg-slate-100 hover:text-panel-ink"
+                              onClick={() => toggleSort(header)}
+                              title={`Sort by ${header}`}
+                              type="button"
+                            >
+                              {header}
+                              <span className="inline-block w-3 text-[10px]">{sortColumn === header ? (sortDirection === "asc" ? "▲" : "▼") : ""}</span>
+                            </button>
+                          </th>
+                        ))}
                       </tr>
                     </thead>
                     <tbody>

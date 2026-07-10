@@ -36,7 +36,7 @@ _config_module.settings = _settings
 _config_module.DEPLOYMENT_COMMANDS_LIVE = True
 sys.modules.setdefault("app.config", _config_module)
 
-from app.routers.database import DatabaseRowsRequest, preview_rows, provision_postgres, row_search_where, selected_row_search_columns  # noqa: E402
+from app.routers.database import DatabaseRowsRequest, preview_rows, provision_postgres, row_search_where, row_sort_order, selected_row_search_columns  # noqa: E402
 
 
 class PostgresProvisionTests(unittest.TestCase):
@@ -115,6 +115,11 @@ class RowSearchColumnTests(unittest.TestCase):
         self.assertEqual(where, " WHERE CAST(`store_id` AS CHAR) LIKE '%14393%'")
         self.assertNotIn("customer_id", where)
         self.assertNotIn("uid", where)
+
+    def test_row_sort_order_uses_only_existing_columns(self) -> None:
+        self.assertEqual(row_sort_order("MYSQL", ["id", "name"], "name", "desc"), " ORDER BY `name` DESC")
+        self.assertEqual(row_sort_order("POSTGRESQL", ["id", "name"], "id", "asc"), ' ORDER BY "id" ASC')
+        self.assertEqual(row_sort_order("MYSQL", ["id", "name"], "missing", "desc"), "")
 
     def test_postgres_row_preview_returns_no_matches_when_no_columns_are_selected(self) -> None:
         with (
