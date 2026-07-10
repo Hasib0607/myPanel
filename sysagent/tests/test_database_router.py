@@ -36,7 +36,7 @@ _config_module.settings = _settings
 _config_module.DEPLOYMENT_COMMANDS_LIVE = True
 sys.modules.setdefault("app.config", _config_module)
 
-from app.routers.database import provision_postgres  # noqa: E402
+from app.routers.database import DatabaseRowsRequest, preview_rows, provision_postgres, selected_row_search_columns  # noqa: E402
 
 
 class PostgresProvisionTests(unittest.TestCase):
@@ -69,6 +69,38 @@ class PostgresProvisionTests(unittest.TestCase):
         self.assertEqual(result["database"]["stdout"], "database already exists")
         commands = [" ".join(call.args[0]) for call in run_command.call_args_list]
         self.assertFalse(any("CREATE DATABASE" in command for command in commands))
+
+
+class RowSearchColumnTests(unittest.TestCase):
+    def test_uses_all_columns_when_no_column_filter_is_selected(self) -> None:
+        self.assertEqual(selected_row_search_columns(["id", "name", "description"], []), ["id", "name", "description"])
+
+    def test_keeps_only_existing_safe_column_filters(self) -> None:
+        selected = selected_row_search_columns(["id", "name", "description"], ["name", "missing", "bad-name", "description"])
+
+        self.assertEqual(selected, ["name", "description"])
+
+    def test_postgres_row_preview_searches_selected_columns_only(self) -> None:
+        with (
+            mock.patch("app.routers.database.table_column_names", return_value=["id", "name", "description"]),
+            mock.patch("app.routers.database.run_command") as run_command,
+        ):
+            run_command.return_value = {"command": [], "stdout": "id,name,description\n1,Pangabi,Lorem\n", "stderr": "", "returncode": 0}
+
+            result = preview_rows(DatabaseRowsRequest(
+                engine="POSTGRESQL",
+                database="shop",
+                table="products",
+                search="pang",
+                searchColumns=["name", "description"],
+            ))
+
+        command = run_command.call_args.args[0]
+        sql = command[-1]
+        self.assertEqual(result["searchColumns"], ["name", "description"])
+        self.assertIn('"name"::text', sql)
+        self.assertIn('"description"::text', sql)
+        self.assertNotIn('"id"::text', sql)
 
 
 if __name__ == "__main__":

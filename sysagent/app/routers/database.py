@@ -73,6 +73,7 @@ class DatabaseRowsRequest(DatabaseTableRequest):
     limit: int = Field(default=50, ge=1, le=500)
     offset: int = Field(default=0, ge=0)
     search: str | None = Field(default=None, max_length=200)
+    searchColumns: list[str] = Field(default_factory=list)
 
 
 class DatabaseTableImportRequest(DatabaseTableRequest):
@@ -518,10 +519,19 @@ def table_column_names(engine: str, database: str, table: str) -> list[str]:
     return parse_lines(result.get("stdout"))
 
 
+def selected_row_search_columns(all_columns: list[str], requested_columns: list[str]) -> list[str]:
+    if not requested_columns:
+        return all_columns
+    requested = [column for column in requested_columns if re.match(IDENTIFIER_PATTERN, column)]
+    allowed = set(all_columns)
+    return [column for column in requested if column in allowed]
+
+
 @router.post("/rows")
 def preview_rows(body: DatabaseRowsRequest) -> dict:
     search = (body.search or "").strip()
-    columns = table_column_names(body.engine, body.database, body.table) if search else []
+    all_columns = table_column_names(body.engine, body.database, body.table) if search else []
+    columns = selected_row_search_columns(all_columns, body.searchColumns) if search else []
     if body.engine == "POSTGRESQL":
         where = ""
         if columns:
@@ -541,7 +551,16 @@ def preview_rows(body: DatabaseRowsRequest) -> dict:
             f"SELECT * FROM {mysql_identifier(body.table)}{where} LIMIT {body.limit} OFFSET {body.offset};",
             body.database,
         ])
-    return {"engine": body.engine, "database": body.database, "table": body.table, "format": "CSV" if body.engine == "POSTGRESQL" else "TSV", "rows": result.get("stdout") or "", "search": search, "result": result}
+    return {
+        "engine": body.engine,
+        "database": body.database,
+        "table": body.table,
+        "format": "CSV" if body.engine == "POSTGRESQL" else "TSV",
+        "rows": result.get("stdout") or "",
+        "search": search,
+        "searchColumns": columns,
+        "result": result,
+    }
 
 
 @router.post("/table/export")

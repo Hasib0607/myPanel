@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { ChevronLeft, Database, Edit3, Plus, RefreshCw, Save, Search, Table2, Trash2, X } from "lucide-react";
+import { ChevronDown, ChevronLeft, Database, Edit3, Plus, RefreshCw, Save, Search, Table2, Trash2, X } from "lucide-react";
 import Link from "next/link";
 import { apiDeleteBody, apiGet, apiPatch, apiPost } from "@/lib/api";
 
@@ -27,6 +27,13 @@ type DatabaseBrowserClientProps = {
 
 type TableTab = "data" | "columns" | "editor";
 type RowValue = string | number | boolean | null;
+
+function searchColumnLabel(selected: string[], columns: Column[]) {
+  if (selected.length === 0) return "All columns";
+  if (selected.length === 1) return selected[0] ?? "1 column";
+  if (selected.length === columns.length) return "All columns";
+  return `${selected.length} columns`;
+}
 
 function parseCsvLine(line: string) {
   const values: string[] = [];
@@ -110,6 +117,8 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
   const [tableSearch, setTableSearch] = useState("");
   const [columnSearch, setColumnSearch] = useState("");
   const [rowSearch, setRowSearch] = useState("");
+  const [rowSearchColumns, setRowSearchColumns] = useState<string[]>([]);
+  const [columnPickerOpen, setColumnPickerOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<TableTab>("data");
   const [notice, setNotice] = useState<{ text: string; tone: "success" | "error" } | null>(null);
   const [editing, setEditing] = useState<Record<string, string> | null>(null);
@@ -131,10 +140,11 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
     queryFn: () => apiPost<ColumnListResult>(`${apiBase}/columns`, { ...target, table: selectedTable })
   });
   const rowSearchTerm = rowSearch.trim();
+  const rowSearchColumnKey = rowSearchColumns.join("|");
   const rows = useQuery({
     enabled: Boolean(selectedTable),
-    queryKey: ["database-browser-rows", apiBase, engine, database, selectedTable, limit, offset, rowSearchTerm],
-    queryFn: () => apiPost<RowPreviewResult>(`${apiBase}/rows`, { ...target, table: selectedTable, limit, offset, search: rowSearchTerm || undefined })
+    queryKey: ["database-browser-rows", apiBase, engine, database, selectedTable, limit, offset, rowSearchTerm, rowSearchColumnKey],
+    queryFn: () => apiPost<RowPreviewResult>(`${apiBase}/rows`, { ...target, table: selectedTable, limit, offset, search: rowSearchTerm || undefined, searchColumns: rowSearchColumns })
   });
 
   useEffect(() => {
@@ -144,8 +154,15 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
   useEffect(() => {
     setColumnSearch("");
     setRowSearch("");
+    setRowSearchColumns([]);
+    setColumnPickerOpen(false);
     setActiveTab("data");
   }, [selectedTable]);
+
+  useEffect(() => {
+    const available = new Set((columns.data?.columns ?? []).map((column) => column.name));
+    setRowSearchColumns((current) => current.filter((column) => available.has(column)));
+  }, [columns.data?.columns]);
 
   const databaseInfo = overview.data?.engines.find((item) => item.engine === engine)?.databases.find((item) => item.name === database);
   const parsed = useMemo(() => parseRows(rows.data?.rows ?? "", rows.data?.format ?? "TSV"), [rows.data]);
@@ -165,6 +182,7 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
   const filteredRows = parsed.rows;
   const primaryColumn = columns.data?.columns.find((column) => column.primary)?.name ?? null;
   const editableColumns = columns.data?.columns ?? [];
+  const selectedSearchColumns = rowSearchColumns.length === 0 ? editableColumns.map((column) => column.name) : rowSearchColumns;
 
   const refreshTable = async () => {
     await Promise.all([tables.refetch(), columns.refetch(), rows.refetch(), overview.refetch()]);
@@ -370,7 +388,56 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
                       </button>
                     ) : null}
                   </label>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="relative">
+                      <button
+                        className="inline-flex h-9 min-w-[150px] items-center justify-between gap-2 rounded-md border border-panel-line bg-white px-3 text-sm font-semibold hover:bg-slate-50 disabled:opacity-50"
+                        disabled={!selectedTable || editableColumns.length === 0}
+                        onClick={() => setColumnPickerOpen((open) => !open)}
+                        type="button"
+                      >
+                        <span className="truncate">{searchColumnLabel(rowSearchColumns, editableColumns)}</span>
+                        <ChevronDown size={14} />
+                      </button>
+                      {columnPickerOpen ? (
+                        <div className="absolute right-0 top-10 z-20 w-72 rounded-md border border-panel-line bg-white shadow-lg">
+                          <div className="border-b border-panel-line p-2">
+                            <button
+                              className="flex h-8 w-full items-center rounded-md px-2 text-left text-sm font-medium hover:bg-slate-50"
+                              onClick={() => {
+                                setRowSearchColumns([]);
+                                setOffset(0);
+                              }}
+                              type="button"
+                            >
+                              Search all columns
+                            </button>
+                          </div>
+                          <div className="max-h-72 overflow-auto p-2">
+                            {editableColumns.map((column) => {
+                              const checked = selectedSearchColumns.includes(column.name);
+                              return (
+                                <label className="flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-sm hover:bg-slate-50" key={column.name}>
+                                  <input
+                                    checked={checked}
+                                    className="h-4 w-4 rounded border-panel-line text-panel-accent"
+                                    onChange={(event) => {
+                                      setRowSearchColumns((current) => {
+                                        const base = current.length === 0 ? editableColumns.map((item) => item.name) : current;
+                                        return event.target.checked ? Array.from(new Set([...base, column.name])) : base.filter((item) => item !== column.name);
+                                      });
+                                      setOffset(0);
+                                    }}
+                                    type="checkbox"
+                                  />
+                                  <span className="truncate font-mono text-xs">{column.name}</span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
                     <select className="h-9 rounded-md border border-panel-line px-2 text-sm" onChange={(event) => setLimit(Number(event.target.value))} value={limit}>
                       {[50, 100, 250, 500].map((value) => <option key={value} value={value}>{value} rows</option>)}
                     </select>
