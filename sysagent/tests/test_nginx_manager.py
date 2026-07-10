@@ -27,7 +27,13 @@ config.DEPLOYMENT_COMMANDS_LIVE = True
 config.settings = types.SimpleNamespace(allow_live_nginx=False, file_manager_root="/tmp")
 sys.modules.setdefault("app.config", config)
 
-from app.nginx_manager import _config_has_server_name, _enable_site, make_web_root_readable, remove_conflicting_configs
+from app.nginx_manager import (
+    _config_dump_conflict_files,
+    _config_has_server_name,
+    _enable_site,
+    make_web_root_readable,
+    remove_conflicting_configs,
+)
 
 
 class NginxManagerTests(unittest.TestCase):
@@ -109,6 +115,22 @@ server {
             self.assertTrue(config_path.is_file())
             self.assertFalse(config_path.is_symlink())
             self.assertEqual(config_path.read_text(encoding="utf-8"), content)
+
+    def test_config_dump_conflict_files_tracks_nginx_t_sources(self) -> None:
+        dump = """
+# configuration file /etc/nginx/nginx.conf:
+http {
+    include /etc/nginx/conf.d/*.conf;
+}
+# configuration file /etc/nginx/conf.d/default.conf:
+server { listen 80; server_name rettrovibes.shop; }
+# configuration file /etc/nginx/conf.d/domain-rettrovibes.shop.conf:
+server { listen 80; server_name rettrovibes.shop www.rettrovibes.shop; }
+"""
+
+        files = _config_dump_conflict_files(dump, "rettrovibes.shop www.rettrovibes.shop", "domain-rettrovibes.shop.conf")
+
+        self.assertEqual(files, ["/etc/nginx/conf.d/default.conf"])
 
 
 if __name__ == "__main__":

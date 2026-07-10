@@ -174,6 +174,68 @@ def _config_has_server_name(path: Path, server_name: str) -> bool:
         return False
 
 
+def _config_dump_conflict_files(text: str, server_name: str, own_filename: str = "") -> list[str]:
+    requested_tokens = server_name_tokens(server_name)
+    current_file = ""
+    matches: list[str] = []
+    for line in text.splitlines():
+        marker = re.match(r"#\s+configuration file\s+(.+?):\s*$", line.strip())
+        if marker:
+            current_file = marker.group(1)
+            continue
+        if "server_name" not in line:
+            continue
+        claimed = server_name_directive_tokens(line)
+        if not claimed:
+            continue
+        if not any(
+            _server_name_token_matches(claimed_token, requested_token)
+            for requested_token in requested_tokens
+            for claimed_token in claimed
+        ):
+            continue
+        if not current_file or (own_filename and Path(current_file).name == own_filename):
+            continue
+        if current_file not in matches:
+            matches.append(current_file)
+    return matches
+
+
+def _is_removable_nginx_conf(path: str) -> bool:
+    target = Path(path)
+    stem = target.stem.lower()
+    if target.suffix != ".conf":
+        return False
+    try:
+        target.resolve().relative_to(Path("/etc/nginx").resolve())
+    except ValueError:
+        return False
+    if stem in PROTECTED_CONFIG_NAMES or "vps-panel" in stem:
+        return False
+    return True
+
+
+def remove_loaded_conflicting_configs(our_name: str, server_name: str) -> list[str]:
+    dump = run_command(["nginx", "-T"], allow_live=True)
+    text = "\n".join([dump.get("stdout") or "", dump.get("stderr") or ""])
+    removed: list[str] = []
+    for file_path in _config_dump_conflict_files(text, server_name, f"{our_name}.conf"):
+        if not _is_removable_nginx_conf(file_path):
+            continue
+        try:
+            Path(file_path).unlink()
+            removed.append(file_path)
+        except OSError:
+            pass
+    return removed
+
+
+def loaded_conflicting_config_files(our_name: str, server_name: str) -> list[str]:
+    dump = run_command(["nginx", "-T"], allow_live=True)
+    text = "\n".join([dump.get("stdout") or "", dump.get("stderr") or ""])
+    return _config_dump_conflict_files(text, server_name, f"{our_name}.conf")
+
+
 def _config_has_insecure_port443(path: Path) -> bool:
     """True when a file listens on 443 without the ssl flag (plain HTTP on 443 → browser SSL protocol errors)."""
     try:
@@ -340,7 +402,11 @@ def publish_nginx_config(
             "remove insecure port 443 configs",
             lambda: remove_insecure_port443_configs(name, server_name, *scan_dirs),
         )
-        removed = [*removed, *insecure_removed]
+        loaded_removed = run_live_step(
+            "remove loaded conflicting configs",
+            lambda: remove_loaded_conflicting_configs(name, server_name),
+        )
+        removed = [*removed, *insecure_removed, *loaded_removed]
     else:
         removed = []
 
@@ -378,6 +444,9 @@ def publish_nginx_config(
                                 conflict_files.append(str(cp))
                         except OSError:
                             pass
+                for file_path in loaded_conflicting_config_files(name, server_name):
+                    if file_path not in conflict_files:
+                        conflict_files.append(file_path)
                 files_hint = (", ".join(conflict_files) or "unknown") + ". Remove it and redeploy."
                 skip_msg = (
                     f'Another nginx config still claims server_name "{server_name}" '
