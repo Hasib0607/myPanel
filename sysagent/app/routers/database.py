@@ -73,7 +73,7 @@ class DatabaseRowsRequest(DatabaseTableRequest):
     limit: int = Field(default=50, ge=1, le=500)
     offset: int = Field(default=0, ge=0)
     search: str | None = Field(default=None, max_length=200)
-    searchColumns: list[str] = Field(default_factory=list)
+    searchColumns: list[str] | None = None
 
 
 class DatabaseTableImportRequest(DatabaseTableRequest):
@@ -519,8 +519,8 @@ def table_column_names(engine: str, database: str, table: str) -> list[str]:
     return parse_lines(result.get("stdout"))
 
 
-def selected_row_search_columns(all_columns: list[str], requested_columns: list[str]) -> list[str]:
-    if not requested_columns:
+def selected_row_search_columns(all_columns: list[str], requested_columns: list[str] | None) -> list[str]:
+    if requested_columns is None:
         return all_columns
     requested = [column for column in requested_columns if re.match(IDENTIFIER_PATTERN, column)]
     allowed = set(all_columns)
@@ -534,7 +534,9 @@ def preview_rows(body: DatabaseRowsRequest) -> dict:
     columns = selected_row_search_columns(all_columns, body.searchColumns) if search else []
     if body.engine == "POSTGRESQL":
         where = ""
-        if columns:
+        if search and not columns:
+            where = " WHERE 1 = 0"
+        elif columns:
             haystack = "concat_ws(E'\\t', " + ", ".join(f"{postgres_identifier(column)}::text" for column in columns) + ")"
             where = f" WHERE {haystack} ILIKE {sql_literal('%' + search + '%')}"
         result = run_command([
@@ -543,7 +545,9 @@ def preview_rows(body: DatabaseRowsRequest) -> dict:
         ])
     else:
         where = ""
-        if columns:
+        if search and not columns:
+            where = " WHERE 1 = 0"
+        elif columns:
             haystack = "CONCAT_WS('\\t', " + ", ".join(mysql_identifier(column) for column in columns) + ")"
             where = f" WHERE {haystack} LIKE {sql_literal('%' + search + '%')}"
         result = run_command([

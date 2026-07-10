@@ -29,7 +29,7 @@ type TableTab = "data" | "columns" | "editor";
 type RowValue = string | number | boolean | null;
 
 function searchColumnLabel(selected: string[], columns: Column[]) {
-  if (selected.length === 0) return "All columns";
+  if (selected.length === 0) return "Select columns";
   if (selected.length === 1) return selected[0] ?? "1 column";
   if (selected.length === columns.length) return "All columns";
   return `${selected.length} columns`;
@@ -182,7 +182,7 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
   const filteredRows = parsed.rows;
   const primaryColumn = columns.data?.columns.find((column) => column.primary)?.name ?? null;
   const editableColumns = columns.data?.columns ?? [];
-  const selectedSearchColumns = rowSearchColumns.length === 0 ? editableColumns.map((column) => column.name) : rowSearchColumns;
+  const selectedSearchColumns = rowSearchColumns;
 
   const refreshTable = async () => {
     await Promise.all([tables.refetch(), columns.refetch(), rows.refetch(), overview.refetch()]);
@@ -410,7 +410,7 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
                               }}
                               type="button"
                             >
-                              Search all columns
+                              Clear selection
                             </button>
                           </div>
                           <div className="max-h-72 overflow-auto p-2">
@@ -423,8 +423,7 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
                                     className="h-4 w-4 rounded border-panel-line text-panel-accent"
                                     onChange={(event) => {
                                       setRowSearchColumns((current) => {
-                                        const base = current.length === 0 ? editableColumns.map((item) => item.name) : current;
-                                        return event.target.checked ? Array.from(new Set([...base, column.name])) : base.filter((item) => item !== column.name);
+                                        return event.target.checked ? Array.from(new Set([...current, column.name])) : current.filter((item) => item !== column.name);
                                       });
                                       setOffset(0);
                                     }}

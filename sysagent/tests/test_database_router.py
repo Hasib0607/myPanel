@@ -72,8 +72,11 @@ class PostgresProvisionTests(unittest.TestCase):
 
 
 class RowSearchColumnTests(unittest.TestCase):
-    def test_uses_all_columns_when_no_column_filter_is_selected(self) -> None:
-        self.assertEqual(selected_row_search_columns(["id", "name", "description"], []), ["id", "name", "description"])
+    def test_uses_all_columns_when_column_filter_is_omitted(self) -> None:
+        self.assertEqual(selected_row_search_columns(["id", "name", "description"], None), ["id", "name", "description"])
+
+    def test_empty_column_filter_selects_no_columns(self) -> None:
+        self.assertEqual(selected_row_search_columns(["id", "name", "description"], []), [])
 
     def test_keeps_only_existing_safe_column_filters(self) -> None:
         selected = selected_row_search_columns(["id", "name", "description"], ["name", "missing", "bad-name", "description"])
@@ -101,6 +104,25 @@ class RowSearchColumnTests(unittest.TestCase):
         self.assertIn('"name"::text', sql)
         self.assertIn('"description"::text', sql)
         self.assertNotIn('"id"::text', sql)
+
+    def test_postgres_row_preview_returns_no_matches_when_no_columns_are_selected(self) -> None:
+        with (
+            mock.patch("app.routers.database.table_column_names", return_value=["id", "name", "description"]),
+            mock.patch("app.routers.database.run_command") as run_command,
+        ):
+            run_command.return_value = {"command": [], "stdout": "id,name,description\n", "stderr": "", "returncode": 0}
+
+            result = preview_rows(DatabaseRowsRequest(
+                engine="POSTGRESQL",
+                database="shop",
+                table="products",
+                search="pang",
+                searchColumns=[],
+            ))
+
+        sql = run_command.call_args.args[0][-1]
+        self.assertEqual(result["searchColumns"], [])
+        self.assertIn("WHERE 1 = 0", sql)
 
 
 if __name__ == "__main__":
