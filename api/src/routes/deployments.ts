@@ -232,6 +232,25 @@ function serializeDeployment<T extends { domainBindings?: any[]; domainId?: stri
   };
 }
 
+async function ensureLegacyDeploymentDomainBindings(deployment: { id: string; domainBindings?: Array<{ domainId?: string | null }> }) {
+  const existingDomainIds = new Set((deployment.domainBindings ?? []).map((binding) => binding.domainId).filter((id): id is string => Boolean(id)));
+  const legacyDomains = await prisma.domain.findMany({
+    where: {
+      hostingMode: "DEPLOYMENT_PROXY",
+      hostingDeploymentId: deployment.id,
+      id: { notIn: [...existingDomainIds] }
+    },
+    select: { id: true }
+  });
+  if (legacyDomains.length === 0) return false;
+
+  await prisma.deploymentDomain.createMany({
+    data: legacyDomains.map((domain) => ({ deploymentId: deployment.id, domainId: domain.id, role: "alias" })),
+    skipDuplicates: true
+  });
+  return true;
+}
+
 function cronJobForSysagent(job: {
   id: string;
   name: string;
@@ -261,6 +280,10 @@ async function findDeployment(idOrSlug: string) {
     where: { OR: [{ id: idOrSlug }, { slug: idOrSlug }] },
     include: includeFullDeployment()
   });
+  if (await ensureLegacyDeploymentDomainBindings(deployment)) {
+    const refreshed = await prisma.deployment.findUniqueOrThrow({ where: { id: deployment.id }, include: includeFullDeployment() });
+    return serializeDeployment(refreshed);
+  }
   return serializeDeployment(deployment);
 }
 

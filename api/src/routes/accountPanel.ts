@@ -624,6 +624,26 @@ function serializeAccountDeployment<T extends { domainBindings?: any[]; domainId
   };
 }
 
+async function ensureLegacyAccountDeploymentDomainBindings(deployment: { id: string; accountId?: string | null; domainBindings?: Array<{ domainId?: string | null }> }) {
+  const existingDomainIds = new Set((deployment.domainBindings ?? []).map((binding) => binding.domainId).filter((id): id is string => Boolean(id)));
+  const legacyDomains = await prisma.domain.findMany({
+    where: {
+      accountId: deployment.accountId ?? undefined,
+      hostingMode: "DEPLOYMENT_PROXY",
+      hostingDeploymentId: deployment.id,
+      id: { notIn: [...existingDomainIds] }
+    },
+    select: { id: true }
+  });
+  if (legacyDomains.length === 0) return false;
+
+  await prisma.deploymentDomain.createMany({
+    data: legacyDomains.map((domain) => ({ deploymentId: deployment.id, domainId: domain.id, role: "alias" })),
+    skipDuplicates: true
+  });
+  return true;
+}
+
 async function resolveAccountBindingTarget(accountId: string, selectionId: string) {
   if (isSubdomainSelectionId(selectionId)) {
     const subdomainId = selectionId.slice(subdomainSelectionPrefix.length);
@@ -684,6 +704,10 @@ async function findAccountDeployment(request: any, idOrSlug: string) {
     where: { accountId: accountId(request), OR: [{ id: idOrSlug }, { slug: idOrSlug }] },
     include: includeAccountDeployment()
   });
+  if (await ensureLegacyAccountDeploymentDomainBindings(deployment)) {
+    const refreshed = await prisma.deployment.findUniqueOrThrow({ where: { id: deployment.id }, include: includeAccountDeployment() });
+    return serializeAccountDeployment(refreshed);
+  }
   return serializeAccountDeployment(deployment);
 }
 
