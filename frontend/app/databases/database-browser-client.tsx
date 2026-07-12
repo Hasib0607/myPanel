@@ -138,6 +138,7 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
   const [columnSearch, setColumnSearch] = useState("");
   const [rowSearch, setRowSearch] = useState("");
   const [rowSearchColumns, setRowSearchColumns] = useState<string[]>([]);
+  const [columnPickerSearch, setColumnPickerSearch] = useState("");
   const [appliedRowSearch, setAppliedRowSearch] = useState("");
   const [appliedRowSearchColumns, setAppliedRowSearchColumns] = useState<string[] | undefined>(undefined);
   const [sortColumn, setSortColumn] = useState("");
@@ -184,6 +185,7 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
     setSortColumn("");
     setSortDirection("asc");
     setColumnPickerOpen(false);
+    setColumnPickerSearch("");
     setActiveTab("data");
   }, [selectedTable]);
 
@@ -213,6 +215,15 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
   const primaryColumn = columns.data?.columns.find((column) => column.primary)?.name ?? null;
   const editableColumns = columns.data?.columns ?? [];
   const selectedSearchColumns = rowSearchColumns;
+  const filteredColumnPickerColumns = useMemo(
+    () => editableColumns.filter((column) =>
+      matchesSearch(column.name, columnPickerSearch)
+      || matchesSearch(column.type, columnPickerSearch)
+      || matchesSearch(column.nullable, columnPickerSearch)
+      || (column.primary && matchesSearch("primary", columnPickerSearch))
+    ),
+    [editableColumns, columnPickerSearch]
+  );
 
   const refreshTable = async () => {
     await Promise.all([tables.refetch(), columns.refetch(), rows.refetch(), overview.refetch()]);
@@ -456,7 +467,12 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
                       <button
                         className="inline-flex h-9 min-w-[150px] items-center justify-between gap-2 rounded-md border border-panel-line bg-white px-3 text-sm font-semibold hover:bg-slate-50 disabled:opacity-50"
                         disabled={!selectedTable || editableColumns.length === 0}
-                        onClick={() => setColumnPickerOpen((open) => !open)}
+                        onClick={() => {
+                          setColumnPickerOpen((open) => {
+                            if (open) setColumnPickerSearch("");
+                            return !open;
+                          });
+                        }}
                         type="button"
                       >
                         <span className="truncate">{searchColumnLabel(rowSearchColumns, editableColumns)}</span>
@@ -465,6 +481,33 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
                       {columnPickerOpen ? (
                         <div className="absolute right-0 top-10 z-20 w-72 rounded-md border border-panel-line bg-white shadow-lg">
                           <div className="border-b border-panel-line p-2">
+                            <label className="relative mb-2 block">
+                              <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-panel-muted" size={14} />
+                              <input
+                                autoFocus
+                                className="h-9 w-full rounded-md border border-panel-line bg-white pl-8 pr-8 text-sm outline-none ring-panel-accent focus:ring-2"
+                                onChange={(event) => setColumnPickerSearch(event.target.value)}
+                                onKeyDown={(event) => {
+                                  if (event.key === "Escape") {
+                                    setColumnPickerOpen(false);
+                                    setColumnPickerSearch("");
+                                  }
+                                }}
+                                placeholder="Search columns..."
+                                type="search"
+                                value={columnPickerSearch}
+                              />
+                              {columnPickerSearch ? (
+                                <button
+                                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-panel-muted hover:bg-slate-100 hover:text-panel-ink"
+                                  onClick={() => setColumnPickerSearch("")}
+                                  title="Clear column search"
+                                  type="button"
+                                >
+                                  <X size={14} />
+                                </button>
+                              ) : null}
+                            </label>
                             <button
                               className="flex h-8 w-full items-center rounded-md px-2 text-left text-sm font-medium hover:bg-slate-50"
                               onClick={() => {
@@ -477,7 +520,7 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
                             </button>
                           </div>
                           <div className="max-h-72 overflow-auto p-2">
-                            {editableColumns.map((column) => {
+                            {filteredColumnPickerColumns.map((column) => {
                               const checked = selectedSearchColumns.includes(column.name);
                               return (
                                 <label className="flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-sm hover:bg-slate-50" key={column.name}>
@@ -496,6 +539,9 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
                                 </label>
                               );
                             })}
+                            {filteredColumnPickerColumns.length === 0 ? (
+                              <div className="px-2 py-6 text-sm text-panel-muted">No columns match &quot;{columnPickerSearch}&quot;.</div>
+                            ) : null}
                           </div>
                         </div>
                       ) : null}
