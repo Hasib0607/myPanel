@@ -465,6 +465,57 @@ async function runStep<T>(deploymentId: string, releaseId: string | undefined, s
   }
 }
 
+function isSysagentConnectionRefused(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /sysagent .* request failed: .*ECONNREFUSED/i.test(message);
+}
+
+async function waitForSysagentHealthy(maxAttempts = 20) {
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const health = await sysagent.health();
+      return { attempt, health };
+    } catch (error) {
+      lastError = error;
+      await sleep(1000);
+    }
+  }
+  const detail = lastError instanceof Error ? lastError.message : String(lastError ?? "unknown error");
+  throw new Error(`Sysagent health check failed after ${maxAttempts} seconds: ${detail}`);
+}
+
+async function repairSysagentConnectionForDeployment(deploymentId: string, releaseId: string | undefined, step: DeployStep, reason: string) {
+  await writeLog(deploymentId, releaseId, step, "Sysagent connection repair started", { reason }, "warn");
+  const restart = await systemctlRestart("vps-panel-sysagent");
+  const ready = await waitForSysagentHealthy();
+  await writeLog(deploymentId, releaseId, step, "Sysagent connection repair completed", {
+    restart: {
+      stdout: restart.stdout,
+      stderr: restart.stderr
+    },
+    ready
+  });
+  return ready;
+}
+
+async function runStepWithSysagentConnectionRepair<T>(
+  deploymentId: string,
+  releaseId: string | undefined,
+  step: DeployStep,
+  message: string,
+  fn: () => Promise<T>
+) {
+  try {
+    return await runStep(deploymentId, releaseId, step, message, fn);
+  } catch (error) {
+    if (!isSysagentConnectionRefused(error)) throw error;
+    const reason = error instanceof Error ? error.message : String(error);
+    await repairSysagentConnectionForDeployment(deploymentId, releaseId, step, reason);
+    return runStep(deploymentId, releaseId, step, `${message} retry after sysagent restart`, fn);
+  }
+}
+
 function assertLiveResult(result: unknown, label: string) {
   const message = liveResultFailureMessage(result, label);
   if (message) throw new Error(message);
@@ -1638,7 +1689,7 @@ async function publishDeploymentNginxRoute(
   label = `Nginx proxy config for ${domain.name}`
 ) {
   const serverName = deploymentServerName(domain);
-  const nginxResult = await runStep(deploymentId, releaseId, "CONFIGURING_PROXY", label, async () =>
+  const nginxResult = await runStepWithSysagentConnectionRepair(deploymentId, releaseId, "CONFIGURING_PROXY", label, async () =>
     sysagent.deploymentNginx(
       buildDeploymentNginxRequest({
         deploymentId: deployment.id,

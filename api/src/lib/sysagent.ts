@@ -69,6 +69,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const sysagent = {
+  health: () => request<{ ok?: boolean; status?: string }>("/health"),
   stats: () => request("/system/stats"),
   backupPlan: () => request<{ backupRoot: string; appDir?: string; liveEnabled: boolean; freeBytes: number; includes: string[] }>("/backup/plan"),
   backupCoverage: (body: unknown) =>
