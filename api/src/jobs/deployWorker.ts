@@ -3924,8 +3924,8 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
     return { result, health, status: "RUNNING", healthStatus, publicRouteWarning };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown lifecycle error";
-    const nextStatus = processAction === "stop" ? "RUNNING" : "FAILED";
-    const nextHealth = processAction === "stop" ? "UNKNOWN" : "DOWN";
+    const nextStatus = processAction === "stop" ? "STOPPED" : "FAILED";
+    const nextHealth = "DOWN";
     await prisma.deployment.update({
       where: { id: deployment.id },
       data: { status: nextStatus, healthStatus: nextHealth, lastHealthCheckAt: new Date() }

@@ -251,6 +251,26 @@ async function ensureLegacyDeploymentDomainBindings(deployment: { id: string; do
   return true;
 }
 
+async function syncDeploymentStatusFromMetrics(deployment: { id: string; framework: DeploymentFramework; processManager?: string | null; status?: string | null }, metrics: unknown) {
+  const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
+  const expectsProcess = deployment.framework !== "STATIC" && processManager !== "STATIC" && processManager !== "NONE";
+  if (!expectsProcess || deployment.status !== "RUNNING") return;
+
+  const data = metrics && typeof metrics === "object" ? metrics as { ok?: unknown; process?: { processCount?: unknown } } : null;
+  const processCount = Number(data?.process?.processCount ?? 0);
+  if (data?.ok === true && processCount > 0) return;
+
+  await prisma.deployment.update({
+    where: { id: deployment.id },
+    data: { status: "FAILED", healthStatus: "DOWN", lastHealthCheckAt: new Date() }
+  });
+  await addLog(deployment.id, "HEALTH_CHECK", "Marked deployment down because no live runtime process was found", undefined, {
+    processManager,
+    processCount,
+    metricsOk: data?.ok ?? null
+  } as Prisma.InputJsonObject);
+}
+
 function cronJobForSysagent(job: {
   id: string;
   name: string;
@@ -2718,6 +2738,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
         take: 300
       })
     ]);
+    await syncDeploymentStatusFromMetrics(deployment, metrics);
     return { ...(metrics as Record<string, unknown>), buildLogs };
   });
 
