@@ -4719,12 +4719,13 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       const previousRelease = await prisma.deploymentRelease.findFirst({
         where: {
           deploymentId: deployment.id,
-          status: { in: ["SUCCEEDED", "ROLLED_BACK"] },
+          status: { in: ["SUCCEEDED", "ROLLED_BACK", "RUNNING"] },
           ...(releaseId ? { id: { not: releaseId } } : {})
         },
         orderBy: { createdAt: "desc" }
       });
-      if (previousRelease?.commitSha) {
+      const rollbackHasUsableSource = previousRelease && (!deployment.gitUrl || previousRelease.commitSha);
+      if (rollbackHasUsableSource) {
         await writeLog(deployment.id, releaseId, "ROLLBACK", "Auto rollback to last successful release started", {
           failedReleaseId: releaseId ?? null,
           rollbackReleaseId: previousRelease.id,
@@ -4746,8 +4747,12 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           }, "error");
         }
       } else {
-        await writeLog(deployment.id, releaseId, "ROLLBACK", "Auto rollback skipped; no previous successful release with a commit snapshot", {
-          failedReleaseId: releaseId ?? null
+        await writeLog(deployment.id, releaseId, "ROLLBACK", "Auto rollback skipped; no previous usable release snapshot", {
+          failedReleaseId: releaseId ?? null,
+          previousReleaseId: previousRelease?.id ?? null,
+          previousReleaseStatus: previousRelease?.status ?? null,
+          hasCommitSha: Boolean(previousRelease?.commitSha),
+          gitUrl: Boolean(deployment.gitUrl)
         }, "warn");
       }
     }

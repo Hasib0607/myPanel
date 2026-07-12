@@ -768,7 +768,12 @@ async function runDeploymentWatch() {
           };
         }
       }
+      const openRelease = await prisma.deploymentRelease.findFirst({
+        where: { deploymentId: deployment.id, status: { in: ["QUEUED", "RUNNING"] } },
+        orderBy: { createdAt: "desc" }
+      });
       const stalePending = ["DEPLOYING", "BUILDING", "QUEUED"].includes(deployment.status) && Date.now() - deployment.updatedAt.getTime() >= staleDeploymentMs;
+      const failedWithOpenRelease = deployment.status === "FAILED" && openRelease?.status === "RUNNING";
       const recoveredFailedDeployment = deployment.status === "FAILED" && healthy;
       await prisma.deployment.update({
         where: { id: deployment.id },
@@ -778,7 +783,27 @@ async function runDeploymentWatch() {
           lastHealthCheckAt: new Date()
         }
       });
-      if (recoveredFailedDeployment) {
+      if (healthy && openRelease) {
+        const finishedAt = new Date();
+        await prisma.deploymentRelease.updateMany({
+          where: { id: openRelease.id, status: { not: "CANCELLED" } },
+          data: {
+            status: "SUCCEEDED",
+            finishedAt,
+            durationMs: Math.max(0, finishedAt.getTime() - (openRelease.startedAt ?? openRelease.createdAt).getTime())
+          }
+        });
+      } else if ((stalePending || failedWithOpenRelease) && openRelease) {
+        const finishedAt = new Date();
+        await prisma.deploymentRelease.updateMany({
+          where: { id: openRelease.id, status: { not: "CANCELLED" } },
+          data: {
+            status: "FAILED",
+            finishedAt,
+            durationMs: Math.max(0, finishedAt.getTime() - (openRelease.startedAt ?? openRelease.createdAt).getTime())
+          }
+        });
+      } else if (recoveredFailedDeployment) {
         const release = await prisma.deploymentRelease.findFirst({
           where: { deploymentId: deployment.id, status: "FAILED" },
           orderBy: { createdAt: "desc" }
@@ -805,13 +830,13 @@ async function runDeploymentWatch() {
             : stalePending
               ? "Scheduled deployment watch marked stale deployment as failed"
               : "Scheduled deployment watch failed",
-          metadata: { result, stalePending, recoveredFailedDeployment } as any
+          metadata: { result, stalePending, failedWithOpenRelease, openReleaseId: openRelease?.id ?? null, recoveredFailedDeployment } as any
         }
       });
       let autoRepair = null;
       if (!healthy) {
-        const shouldRedeploy = stalePending || deployment.status === "FAILED";
-        const shouldRestart = !shouldRedeploy && deployment.status === "RUNNING";
+        const shouldRedeploy = stalePending || (deployment.status === "FAILED" && !failedWithOpenRelease);
+        const shouldRestart = failedWithOpenRelease || (!shouldRedeploy && deployment.status === "RUNNING");
         if (shouldRedeploy || shouldRestart) {
           if (shouldRedeploy && !deployment.startCommand?.trim() && deployment.framework !== "STATIC") {
             await guardianSyncRuntimeIfMissingStart(deployment);
@@ -841,17 +866,33 @@ async function runDeploymentWatch() {
           autoRepair = await queueGuardianDeployRepair(
             deployment,
             shouldRedeploy ? "deploy" : "restart",
-            stalePending ? "stale deployment did not finish" : deployment.status === "FAILED" ? "deployment is failed" : "running deployment health check failed"
+            stalePending ? "stale deployment did not finish" : failedWithOpenRelease ? "failed deployment has a stale running release" : deployment.status === "FAILED" ? "deployment is failed" : "running deployment health check failed"
           );
         }
       }
-      results.push({ deploymentId: deployment.id, healthy, stalePending, autoRepair });
+      results.push({ deploymentId: deployment.id, healthy, stalePending, failedWithOpenRelease, autoRepair });
     } catch (error) {
       const stalePending = ["DEPLOYING", "BUILDING", "QUEUED"].includes(deployment.status) && Date.now() - deployment.updatedAt.getTime() >= staleDeploymentMs;
+      const openRelease = await prisma.deploymentRelease.findFirst({
+        where: { deploymentId: deployment.id, status: { in: ["QUEUED", "RUNNING"] } },
+        orderBy: { createdAt: "desc" }
+      });
+      const failedWithOpenRelease = deployment.status === "FAILED" && openRelease?.status === "RUNNING";
       if (stalePending) {
         await prisma.deployment.update({
           where: { id: deployment.id },
           data: { status: "FAILED", healthStatus: "DOWN", lastHealthCheckAt: new Date() }
+        });
+      }
+      if ((stalePending || failedWithOpenRelease) && openRelease) {
+        const finishedAt = new Date();
+        await prisma.deploymentRelease.updateMany({
+          where: { id: openRelease.id, status: { not: "CANCELLED" } },
+          data: {
+            status: "FAILED",
+            finishedAt,
+            durationMs: Math.max(0, finishedAt.getTime() - (openRelease.startedAt ?? openRelease.createdAt).getTime())
+          }
         });
       }
       await prisma.deploymentLog.create({
@@ -859,8 +900,8 @@ async function runDeploymentWatch() {
           deploymentId: deployment.id,
           step: "HEALTH_CHECK",
           level: "error",
-          message: stalePending ? "Scheduled deployment watch marked stale deployment as failed after error" : "Scheduled deployment watch errored",
-          metadata: { error: error instanceof Error ? error.message : String(error), stalePending } as any
+          message: stalePending ? "Scheduled deployment watch marked stale deployment as failed after error" : failedWithOpenRelease ? "Scheduled deployment watch closed stale running release after error" : "Scheduled deployment watch errored",
+          metadata: { error: error instanceof Error ? error.message : String(error), stalePending, failedWithOpenRelease, openReleaseId: openRelease?.id ?? null } as any
         }
       });
       let autoRepair = null;
@@ -888,11 +929,11 @@ async function runDeploymentWatch() {
         }
         autoRepair = await queueGuardianDeployRepair(
           deployment,
-          "deploy",
-          stalePending ? "stale deployment watch errored" : "failed deployment watch errored"
+          failedWithOpenRelease ? "restart" : "deploy",
+          stalePending ? "stale deployment watch errored" : failedWithOpenRelease ? "failed deployment had stale running release" : "failed deployment watch errored"
         );
       }
-      results.push({ deploymentId: deployment.id, healthy: false, stalePending, autoRepair });
+      results.push({ deploymentId: deployment.id, healthy: false, stalePending, failedWithOpenRelease, autoRepair });
     }
   }
   return { checked: results.length, results };
