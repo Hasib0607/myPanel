@@ -2256,15 +2256,16 @@ def nginx(body: NginxRequest) -> dict:
             fallback_location=fallback_location,
             loopback_proxy_host=body.loopbackProxyHost,
         )
+        acme_root = fallback_root or public_root
         if body.forceSsl and has_ssl:
             http_location = (
-                f"{acme_location(server_name, public_root)}"
+                f"{acme_location(server_name, acme_root)}"
                 "    location / {\n"
                 "        return 301 https://$host$request_uri;\n"
                 "    }\n"
             )
         else:
-            http_location = f"{acme_location(server_name, public_root)}{app_locations}"
+            http_location = f"{acme_location(server_name, acme_root)}{app_locations}"
 
         access_log = Path("/var/log/nginx") / f"vps-panel-{config_name}.access.log"
         error_log = Path("/var/log/nginx") / f"vps-panel-{config_name}.error.log"
@@ -2292,7 +2293,7 @@ server {{
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header Content-Security-Policy "upgrade-insecure-requests" always;
 
-{acme_location(server_name, public_root)}{app_locations}
+{acme_location(server_name, acme_root)}{app_locations}
 }}
 """
         info = path_info(body.rootPath)

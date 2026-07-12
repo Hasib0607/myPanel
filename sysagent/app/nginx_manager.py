@@ -116,10 +116,10 @@ def make_web_root_readable(web_root: Path) -> dict:
 
 def acme_location(server_name: str, web_root: Path | str | None = None) -> str:
     acme_root = safe_web_root(str(web_root)) if web_root else acme_root_for_server_name(server_name)
+    challenge_root = acme_root / ".well-known" / "acme-challenge"
     return (
         "    location ^~ /.well-known/acme-challenge/ {\n"
-        f"        root {acme_root};\n"
-        "        try_files $uri =404;\n"
+        f"        alias {challenge_root}/;\n"
         "        default_type text/plain;\n"
         "    }\n"
         "\n"
@@ -555,6 +555,14 @@ def publish_nginx_config(
         run_live_step("write temp config", lambda: temp_available.write_text(config, encoding="utf-8"))
         run_live_step("enable temp config", lambda: _enable_site(temp_available, enabled))
         test = run_command(["nginx", "-t"], allow_live=True)
+        if server_name and own_paths:
+            late_removed = run_live_step(
+                "remove loaded conflicting configs after temp enable",
+                lambda: remove_loaded_conflicting_configs(name, server_name, own_paths),
+            )
+            if late_removed:
+                removed = [*removed, *late_removed]
+                test = run_command(["nginx", "-t"], allow_live=True)
         test_stderr = test.get("stderr") or ""
         requested_tokens = server_name_tokens(server_name) if server_name else []
         conflict_warning = bool(

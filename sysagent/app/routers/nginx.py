@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 import secrets
 import stat
+import time
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -13,6 +14,7 @@ from app.config import settings
 from app.nginx_paths import nginx_sites_available, nginx_sites_enabled
 from app.nginx_manager import (
     acme_location,
+    loaded_conflicting_config_files,
     make_web_root_readable,
     publish_nginx_config,
     run_live_step,
@@ -217,7 +219,8 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
         if not probe_file:
             return {"returncode": 0, "stdout": "", "stderr": "", "command": ["skip-acme-vhost-probe"]}
         primary_host = body.serverName.split()[0]
-        result = run_command([
+        probe_url = f"http://127.0.0.1/.well-known/acme-challenge/{probe_file.name}"
+        curl_base = [
             "curl",
             "-fsS",
             "--max-time",
@@ -226,8 +229,15 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
             "*",
             "-H",
             f"Host: {primary_host}",
-            f"http://127.0.0.1/.well-known/acme-challenge/{probe_file.name}",
-        ], allow_live=True)
+            probe_url,
+        ]
+        result: dict = {"returncode": 1, "stdout": "", "stderr": "", "command": curl_base}
+        for attempt in range(3):
+            if attempt:
+                time.sleep(0.25)
+            result = run_command(curl_base, allow_live=True)
+            if result.get("returncode") == 0 and (result.get("stdout") or "").strip() == probe_expected:
+                return result
         if result.get("returncode") != 0:
             debug = run_command([
                 "curl",
@@ -239,8 +249,14 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
                 "*",
                 "-H",
                 f"Host: {primary_host}",
-                f"http://127.0.0.1/.well-known/acme-challenge/{probe_file.name}",
+                probe_url,
             ], allow_live=True)
+            loaded_conflicts = loaded_conflicting_config_files(body.name, body.serverName)
+            conflict_hint = (
+                f" Loaded conflicting nginx configs: {', '.join(loaded_conflicts)}."
+                if loaded_conflicts
+                else ""
+            )
             result = {
                 **result,
                 "stderr": (
@@ -249,7 +265,7 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
                     f"rootPath={str(root_path)!r}, probeFile={str(probe_file)!r}. "
                     f"Debug response: stdout={(debug.get('stdout') or '').strip()!r}; "
                     f"stderr={(debug.get('stderr') or '').strip()!r}; "
-                    f"returncode={debug.get('returncode')}."
+                    f"returncode={debug.get('returncode')}.{conflict_hint}"
                 ).strip(),
             }
         elif (result.get("stdout") or "").strip() != probe_expected:
