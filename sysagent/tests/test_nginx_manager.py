@@ -31,6 +31,7 @@ from app.nginx_manager import (
     _config_dump_conflict_files,
     _config_has_server_name,
     _enable_site,
+    _normalize_conflict_path,
     _nginx_include_text_loads_directory,
     make_web_root_readable,
     remove_conflicting_configs,
@@ -93,6 +94,30 @@ server {
             removed = remove_conflicting_configs("domain-rettrovibes.shop", "rettrovibes.shop www.rettrovibes.shop", tmp)
 
             self.assertEqual(removed, ["default.conf"])
+            self.assertFalse(stale.exists())
+            self.assertTrue(own.exists())
+
+    def test_removes_same_filename_conflict_outside_own_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conf_d = root / "conf.d"
+            sites_enabled = root / "sites-enabled"
+            conf_d.mkdir()
+            sites_enabled.mkdir()
+            stale = conf_d / "domain-empirepointbd.shop.conf"
+            own = sites_enabled / "domain-empirepointbd.shop.conf"
+            stale.write_text("server { listen 80; server_name empirepointbd.shop www.empirepointbd.shop; root /old; }\n", encoding="utf-8")
+            own.write_text("server { listen 80; server_name empirepointbd.shop www.empirepointbd.shop; root /new; }\n", encoding="utf-8")
+
+            removed = remove_conflicting_configs(
+                "domain-empirepointbd.shop",
+                "empirepointbd.shop www.empirepointbd.shop",
+                str(conf_d),
+                str(sites_enabled),
+                own_paths={_normalize_conflict_path(own)},
+            )
+
+            self.assertEqual(removed, ["domain-empirepointbd.shop.conf"])
             self.assertFalse(stale.exists())
             self.assertTrue(own.exists())
 

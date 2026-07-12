@@ -231,11 +231,34 @@ def _config_dump_sections(text: str) -> list[tuple[str, str]]:
     return [(file_path, "\n".join(lines)) for file_path, lines in sections]
 
 
-def _config_dump_conflict_files(text: str, server_name: str, own_filename: str = "") -> list[str]:
+def _normalize_conflict_path(path: Path | str) -> str:
+    try:
+        return str(Path(path).resolve())
+    except OSError:
+        return str(Path(path).absolute())
+
+
+def _is_own_conflict_path(path: Path | str, own_paths: set[str]) -> bool:
+    if not own_paths:
+        return False
+    current = Path(path)
+    candidates = {str(current), _normalize_conflict_path(current)}
+    return bool(candidates & own_paths)
+
+
+def _config_dump_conflict_files(
+    text: str,
+    server_name: str,
+    own_filename: str = "",
+    own_paths: set[str] | None = None,
+) -> list[str]:
     requested_tokens = server_name_tokens(server_name)
+    own_paths = own_paths or set()
     matches: list[str] = []
     for current_file, file_text in _config_dump_sections(text):
-        if own_filename and Path(current_file).name == own_filename:
+        if _is_own_conflict_path(current_file, own_paths):
+            continue
+        if own_filename and not own_paths and Path(current_file).name == own_filename:
             continue
         if "server_name" not in file_text:
             continue
@@ -284,10 +307,10 @@ def _is_removable_nginx_conf(path: str) -> bool:
     return True
 
 
-def remove_loaded_conflicting_configs(our_name: str, server_name: str) -> list[str]:
+def remove_loaded_conflicting_configs(our_name: str, server_name: str, own_paths: set[str] | None = None) -> list[str]:
     text, _dump = nginx_config_dump()
     removed: list[str] = []
-    for file_path in _config_dump_conflict_files(text, server_name, f"{our_name}.conf"):
+    for file_path in _config_dump_conflict_files(text, server_name, f"{our_name}.conf", own_paths):
         if not _is_removable_nginx_conf(file_path):
             continue
         try:
@@ -298,14 +321,14 @@ def remove_loaded_conflicting_configs(our_name: str, server_name: str) -> list[s
     return removed
 
 
-def loaded_conflicting_config_files(our_name: str, server_name: str) -> list[str]:
+def loaded_conflicting_config_files(our_name: str, server_name: str, own_paths: set[str] | None = None) -> list[str]:
     text, _dump = nginx_config_dump()
-    return _config_dump_conflict_files(text, server_name, f"{our_name}.conf")
+    return _config_dump_conflict_files(text, server_name, f"{our_name}.conf", own_paths)
 
 
-def loaded_conflict_diagnostic(our_name: str, server_name: str) -> tuple[list[str], str]:
+def loaded_conflict_diagnostic(our_name: str, server_name: str, own_paths: set[str] | None = None) -> tuple[list[str], str]:
     text, dump = nginx_config_dump()
-    return _config_dump_conflict_files(text, server_name, f"{our_name}.conf"), nginx_dump_diagnostic(dump)
+    return _config_dump_conflict_files(text, server_name, f"{our_name}.conf", own_paths), nginx_dump_diagnostic(dump)
 
 
 def _config_has_insecure_port443(path: Path) -> bool:
@@ -321,9 +344,15 @@ def _config_has_insecure_port443(path: Path) -> bool:
     return True
 
 
-def remove_insecure_port443_configs(our_name: str, server_name: str, *scan_dirs: str) -> list[str]:
+def remove_insecure_port443_configs(
+    our_name: str,
+    server_name: str,
+    *scan_dirs: str,
+    own_paths: set[str] | None = None,
+) -> list[str]:
     removed: list[str] = []
     our_filename = f"{our_name}.conf"
+    own_paths = own_paths or set()
     tokens = server_name_tokens(server_name)
     if not tokens:
         return removed
@@ -332,7 +361,9 @@ def remove_insecure_port443_configs(our_name: str, server_name: str, *scan_dirs:
         if not enabled_dir.is_dir():
             continue
         for conf_path in enabled_dir.iterdir():
-            if conf_path.name == our_filename:
+            if _is_own_conflict_path(conf_path, own_paths):
+                continue
+            if conf_path.name == our_filename and not own_paths:
                 continue
             stem = conf_path.stem.lower()
             if stem in STRICTLY_PROTECTED_CONFIG_NAMES:
@@ -350,7 +381,12 @@ def remove_insecure_port443_configs(our_name: str, server_name: str, *scan_dirs:
     return removed
 
 
-def remove_conflicting_configs(our_name: str, server_name: str, *scan_dirs: str) -> list[str]:
+def remove_conflicting_configs(
+    our_name: str,
+    server_name: str,
+    *scan_dirs: str,
+    own_paths: set[str] | None = None,
+) -> list[str]:
     """
     Scan all provided directories and remove any config that claims server_name, except
     our own config. Protects panel system configs by name. No prefix filter — the
@@ -358,12 +394,15 @@ def remove_conflicting_configs(our_name: str, server_name: str, *scan_dirs: str)
     """
     removed: list[str] = []
     our_filename = f"{our_name}.conf"
+    own_paths = own_paths or set()
     for scan_dir in scan_dirs:
         enabled_dir = Path(scan_dir)
         if not enabled_dir.is_dir():
             continue
         for conf_path in enabled_dir.iterdir():
-            if conf_path.name == our_filename:
+            if _is_own_conflict_path(conf_path, own_paths):
+                continue
+            if conf_path.name == our_filename and not own_paths:
                 continue
             stem = conf_path.stem.lower()
             if stem in STRICTLY_PROTECTED_CONFIG_NAMES:
@@ -465,6 +504,10 @@ def publish_nginx_config(
     run_live_step("prepare enabled directory", lambda: enabled.parent.mkdir(parents=True, exist_ok=True))
 
     if server_name:
+        own_paths = {
+            _normalize_conflict_path(path)
+            for path in {requested_available, requested_enabled, available, enabled, temp_available}
+        }
         scan_dirs = [sites_enabled]
         for candidate in ["/etc/nginx/conf.d", "/etc/nginx/sites-enabled", "/etc/nginx/sites-available"]:
             candidate_path = Path(candidate)
@@ -475,19 +518,20 @@ def publish_nginx_config(
             scan_dirs.append(str(available_dir))
         removed = run_live_step(
             "remove conflicting configs",
-            lambda: remove_conflicting_configs(name, server_name, *scan_dirs),
+            lambda: remove_conflicting_configs(name, server_name, *scan_dirs, own_paths=own_paths),
         )
         insecure_removed = run_live_step(
             "remove insecure port 443 configs",
-            lambda: remove_insecure_port443_configs(name, server_name, *scan_dirs),
+            lambda: remove_insecure_port443_configs(name, server_name, *scan_dirs, own_paths=own_paths),
         )
         loaded_removed = run_live_step(
             "remove loaded conflicting configs",
-            lambda: remove_loaded_conflicting_configs(name, server_name),
+            lambda: remove_loaded_conflicting_configs(name, server_name, own_paths),
         )
         removed = [*removed, *insecure_removed, *loaded_removed]
     else:
         removed = []
+        own_paths = set()
 
     if single_loaded_site_file and requested_available != available and requested_available.exists():
         try:
@@ -543,7 +587,7 @@ def publish_nginx_config(
                                 conflict_files.append(str(cp))
                         except OSError:
                             pass
-                loaded_files, loaded_diagnostic = loaded_conflict_diagnostic(name, server_name)
+                loaded_files, loaded_diagnostic = loaded_conflict_diagnostic(name, server_name, own_paths)
                 for file_path in loaded_files:
                     if file_path not in conflict_files:
                         conflict_files.append(file_path)
