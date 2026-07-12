@@ -33,6 +33,7 @@ import {
   renderLaravelProcessCommand
 } from "../lib/laravelProcesses.js";
 import { deploymentPriorityDefaults, normalizeDeploymentResourcePolicy } from "../lib/deploymentResourcePolicy.js";
+import { localRuntimeHealthUrl } from "../lib/deploymentHealthUrl.js";
 
 const frameworkSchema = z.enum(["LARAVEL", "NEXTJS", "NODEJS", "PYTHON", "GO", "STATIC"]);
 const statusSchema = z.enum(["QUEUED", "RUNNING", "STOPPED", "DEPLOYING", "BUILDING", "FAILED"]);
@@ -1587,7 +1588,7 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
 
   let health: unknown = null;
   try {
-    health = await sysagent.deploymentHealth({ deploymentId: deployment.id, port: deployment.port, healthUrl: deployment.healthUrl, processName: deployment.slug, processManager, rootPath: appPath, logDir: deploymentLogDir(deployment.slug), strictHealth: normalizeDeploymentResourcePolicy(deployment.processConfig).healthStrict });
+    health = await sysagent.deploymentHealth({ deploymentId: deployment.id, port: deployment.port, healthUrl: localRuntimeHealthUrl(deployment.healthUrl, deployment.port), processName: deployment.slug, processManager, rootPath: appPath, logDir: deploymentLogDir(deployment.slug), strictHealth: normalizeDeploymentResourcePolicy(deployment.processConfig).healthStrict });
   } catch (error) {
     health = { returncode: 1, stderr: error instanceof Error ? error.message : "Health check failed" };
   }
@@ -2997,7 +2998,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       const result = await sysagent.deploymentHealth({
         deploymentId: deployment.id,
         port: deployment.port,
-        healthUrl: deployment.healthUrl,
+        healthUrl: localRuntimeHealthUrl(deployment.healthUrl, deployment.port),
         processName: deployment.slug,
         processManager: deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework],
         rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
@@ -3213,7 +3214,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     const result = await sysagent.deploymentHealth({
       deploymentId: deployment.id,
       port: deployment.port,
-      healthUrl: deployment.healthUrl,
+      healthUrl: localRuntimeHealthUrl(deployment.healthUrl, deployment.port),
       processName: deployment.slug,
       processManager: deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework],
       rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),

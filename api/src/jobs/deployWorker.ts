@@ -27,6 +27,7 @@ import {
   runGuardianDeploymentRepair,
   sleep as guardianRepairSleep
 } from "../lib/deploymentGuardianRepair.js";
+import { localRuntimeHealthUrl } from "../lib/deploymentHealthUrl.js";
 import { env } from "../config/env.js";
 import { prisma } from "../lib/prisma.js";
 import { sanitizePrismaJson, sanitizePrismaText } from "../lib/prismaSanitize.js";
@@ -1358,7 +1359,7 @@ async function runHealthCheckWithGuardianRecovery(
         sysagent.deploymentHealth({
           deploymentId: deployment.id,
           port: deployment.port,
-          healthUrl: deployment.healthUrl,
+          healthUrl: localRuntimeHealthUrl(deployment.healthUrl, deployment.port),
           processName: deployment.slug,
           processManager,
           rootPath: appPath,
