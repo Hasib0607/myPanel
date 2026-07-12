@@ -508,18 +508,23 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
                                 </button>
                               ) : null}
                             </label>
-                            <button
-                              className="flex h-8 w-full items-center rounded-md px-2 text-left text-sm font-medium hover:bg-slate-50"
-                              onClick={() => {
-                                setRowSearchColumns([]);
-                                setOffset(0);
-                              }}
-                              type="button"
-                            >
-                              Clear selection
-                            </button>
+                            <div className="flex items-center justify-between gap-2">
+                              <button
+                                className="flex h-8 min-w-0 flex-1 items-center rounded-md px-2 text-left text-sm font-medium hover:bg-slate-50"
+                                onClick={() => {
+                                  setRowSearchColumns([]);
+                                  setOffset(0);
+                                }}
+                                type="button"
+                              >
+                                Clear selection
+                              </button>
+                              <span className="shrink-0 text-xs text-panel-muted">
+                                {filteredColumnPickerColumns.length}/{editableColumns.length}
+                              </span>
+                            </div>
                           </div>
-                          <div className="max-h-72 overflow-auto p-2">
+                          <div className="max-h-96 overflow-y-scroll p-2">
                             {filteredColumnPickerColumns.map((column) => {
                               const checked = selectedSearchColumns.includes(column.name);
                               return (
