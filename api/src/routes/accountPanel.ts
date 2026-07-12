@@ -2834,6 +2834,112 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     return prisma.deploymentRelease.findMany({ where: { deploymentId: deployment.id }, orderBy: { createdAt: "desc" }, take: 50 });
   });
 
+  app.post("/deployments/:deploymentId/releases/:releaseId/cancel", async (request: any) => {
+    const { deploymentId, releaseId } = z.object({ deploymentId: z.string(), releaseId: z.string() }).parse(request.params);
+    const deployment = await findAccountDeployment(request, deploymentId);
+    const release = await prisma.deploymentRelease.findFirstOrThrow({ where: { id: releaseId, deploymentId: deployment.id } });
+    const jobs = await deployQueue.getJobs(["wait", "delayed", "prioritized", "paused", "waiting-children"] as any, 0, 500);
+    const matchingJobs = jobs.filter((job) => (job.data as { releaseId?: string } | undefined)?.releaseId === release.id);
+    const removedJobIds: string[] = [];
+    for (const job of matchingJobs) {
+      await job.remove();
+      removedJobIds.push(String(job.id));
+    }
+    const activeJobs = (await deployQueue.getJobs(["active"] as any, 0, 500))
+      .filter((job) => (job.data as { releaseId?: string } | undefined)?.releaseId === release.id)
+      .map((job) => String(job.id));
+    const finishedAt = new Date();
+    const startedAt = release.startedAt ?? release.createdAt;
+    const closed = await prisma.deploymentRelease.update({
+      where: { id: release.id },
+      data: {
+        status: "CANCELLED",
+        finishedAt,
+        durationMs: Math.max(0, finishedAt.getTime() - startedAt.getTime())
+      }
+    });
+    await prisma.deploymentLog.create({
+      data: {
+        deploymentId: deployment.id,
+        releaseId: release.id,
+        step: "QUEUED",
+        level: "warn",
+        message: "Release cancelled",
+        metadata: { removedJobIds, activeJobIds: activeJobs }
+      }
+    });
+    const openRelease = await prisma.deploymentRelease.findFirst({ where: { deploymentId: deployment.id, status: { in: ["QUEUED", "RUNNING"] }, id: { not: release.id } } });
+    if (!openRelease) {
+      const previous = await prisma.deploymentRelease.findFirst({ where: { deploymentId: deployment.id, status: { in: ["SUCCEEDED", "ROLLED_BACK"] } }, orderBy: { createdAt: "desc" } });
+      await prisma.deployment.update({
+        where: { id: deployment.id },
+        data: previous
+          ? { status: "RUNNING", healthStatus: "UNKNOWN", lastHealthCheckAt: new Date() }
+          : { status: "FAILED", healthStatus: "DOWN", lastHealthCheckAt: new Date() }
+      });
+    }
+    await audit(request, { action: "UPDATE", resource: "deployment_release", resourceId: release.id, description: `Account cancelled release for ${deployment.slug}`, metadata: { removedJobIds, activeJobIds: activeJobs } });
+    return { ok: true, release: closed, removedJobIds, activeJobIds: activeJobs };
+  });
+
+  app.delete("/deployments/:deploymentId/releases/:releaseId", async (request: any) => {
+    const { deploymentId, releaseId } = z.object({ deploymentId: z.string(), releaseId: z.string() }).parse(request.params);
+    const deployment = await findAccountDeployment(request, deploymentId);
+    const release = await prisma.deploymentRelease.findFirstOrThrow({ where: { id: releaseId, deploymentId: deployment.id } });
+    if (release.status === "RUNNING") {
+      const finishedAt = new Date();
+      const startedAt = release.startedAt ?? release.createdAt;
+      await prisma.deploymentRelease.update({
+        where: { id: release.id },
+        data: {
+          status: "CANCELLED",
+          finishedAt,
+          durationMs: Math.max(0, finishedAt.getTime() - startedAt.getTime())
+        }
+      });
+      await prisma.deploymentLog.create({
+        data: {
+          deploymentId: deployment.id,
+          releaseId: release.id,
+          step: "QUEUED",
+          level: "warn",
+          message: "Running release closed without deleting active worker history"
+        }
+      });
+      await audit(request, { action: "UPDATE", resource: "deployment_release", resourceId: release.id, description: `Account closed running release for ${deployment.slug}` });
+      return { ok: true, deleted: false };
+    }
+    if (release.status === "QUEUED") {
+      const jobs = await deployQueue.getJobs(["wait", "delayed", "prioritized", "paused", "waiting-children"] as any, 0, 500);
+      for (const job of jobs.filter((item) => (item.data as { releaseId?: string } | undefined)?.releaseId === release.id)) {
+        await job.remove();
+      }
+      const finishedAt = new Date();
+      const startedAt = release.startedAt ?? release.createdAt;
+      await prisma.deploymentRelease.update({
+        where: { id: release.id },
+        data: {
+          status: "CANCELLED",
+          finishedAt,
+          durationMs: Math.max(0, finishedAt.getTime() - startedAt.getTime())
+        }
+      });
+    }
+    await prisma.deploymentRelease.delete({ where: { id: release.id } });
+    const openRelease = await prisma.deploymentRelease.findFirst({ where: { deploymentId: deployment.id, status: { in: ["QUEUED", "RUNNING"] } } });
+    if (!openRelease) {
+      const previous = await prisma.deploymentRelease.findFirst({ where: { deploymentId: deployment.id, status: { in: ["SUCCEEDED", "ROLLED_BACK"] } }, orderBy: { createdAt: "desc" } });
+      await prisma.deployment.update({
+        where: { id: deployment.id },
+        data: previous
+          ? { status: "RUNNING", healthStatus: "UNKNOWN", lastHealthCheckAt: new Date() }
+          : { status: "FAILED", healthStatus: "DOWN", lastHealthCheckAt: new Date() }
+      });
+    }
+    await audit(request, { action: "DELETE", resource: "deployment_release", resourceId: release.id, description: `Account deleted release for ${deployment.slug}` });
+    return { ok: true };
+  });
+
   app.get("/deployments/:deploymentId/metrics", async (request: any) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const deployment = await findAccountDeployment(request, deploymentId);

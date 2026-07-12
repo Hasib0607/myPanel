@@ -1,13 +1,15 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { History, RefreshCw } from "lucide-react";
-import { apiGet, apiPost } from "@/lib/api";
+import { History, RefreshCw, Trash2, XCircle } from "lucide-react";
+import { useState } from "react";
+import { apiDelete, apiGet, apiPost } from "@/lib/api";
 import type { Deployment, DeploymentRelease, QueueResponse } from "../../deployment-types";
 import { formatDate, ProjectTabs, statusBadge } from "../../deployment-ui";
 
 export function DeploymentHistoryClient({ project }: { project: string }) {
   const queryClient = useQueryClient();
+  const [notice, setNotice] = useState("");
   const detail = useQuery({ queryKey: ["deployment", project], queryFn: () => apiGet<Deployment>(`/deployments/${project}`) });
   const releases = useQuery({
     queryKey: ["deployment-releases", project],
@@ -17,9 +19,28 @@ export function DeploymentHistoryClient({ project }: { project: string }) {
   const rollback = useMutation({
     mutationFn: (releaseId: string) => apiPost<QueueResponse>(`/deployments/${project}/rollback`, { releaseId }),
     onSuccess: async () => {
+      setNotice("Rollback queued.");
       await queryClient.invalidateQueries({ queryKey: ["deployment", project] });
       await queryClient.invalidateQueries({ queryKey: ["deployment-releases", project] });
     }
+  });
+  const cancelRelease = useMutation({
+    mutationFn: (releaseId: string) => apiPost<{ ok: true }>(`/deployments/${project}/releases/${releaseId}/cancel`, {}),
+    onSuccess: async () => {
+      setNotice("Release closed.");
+      await queryClient.invalidateQueries({ queryKey: ["deployment", project] });
+      await queryClient.invalidateQueries({ queryKey: ["deployment-releases", project] });
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not close release.")
+  });
+  const deleteRelease = useMutation({
+    mutationFn: (releaseId: string) => apiDelete<{ ok: true }>(`/deployments/${project}/releases/${releaseId}`),
+    onSuccess: async () => {
+      setNotice("Release deleted.");
+      await queryClient.invalidateQueries({ queryKey: ["deployment", project] });
+      await queryClient.invalidateQueries({ queryKey: ["deployment-releases", project] });
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not delete release.")
   });
 
   return (
@@ -36,6 +57,7 @@ export function DeploymentHistoryClient({ project }: { project: string }) {
             Refresh
           </button>
         </div>
+        {notice ? <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">{notice}</div> : null}
 
         <div className="overflow-hidden rounded-md border border-panel-line bg-white">
           <table className="w-full text-sm">
@@ -64,9 +86,30 @@ export function DeploymentHistoryClient({ project }: { project: string }) {
                   <td className="px-4 py-3 text-xs text-panel-muted">{formatDate(release.finishedAt)}</td>
                   <td className="px-4 py-3 text-xs text-panel-muted">{release.durationMs ? `${Math.round(release.durationMs / 1000)}s` : "-"}</td>
                   <td className="px-4 py-3">
-                    <div className="flex justify-end">
+                    <div className="flex justify-end gap-2">
+                      {release.status === "QUEUED" || release.status === "RUNNING" ? (
+                        <button
+                          className="flex h-8 items-center gap-1 rounded-md border border-amber-200 px-2 text-xs font-semibold text-amber-700 hover:bg-amber-50 disabled:opacity-50"
+                          disabled={cancelRelease.isPending}
+                          onClick={() => cancelRelease.mutate(release.id)}
+                          title={release.status === "RUNNING" ? "Close stuck running release" : "Cancel queued release"}
+                          type="button"
+                        >
+                          <XCircle size={14} />
+                          {release.status === "RUNNING" ? "Close" : "Cancel"}
+                        </button>
+                      ) : null}
                       <button className="h-8 rounded-md border border-panel-line px-3 text-xs font-semibold hover:bg-slate-50 disabled:opacity-50" disabled={rollback.isPending || release.status !== "SUCCEEDED"} onClick={() => rollback.mutate(release.id)} type="button">
                         Jump
+                      </button>
+                      <button
+                        className="flex h-8 items-center justify-center rounded-md border border-red-200 px-2 text-panel-danger hover:bg-red-50 disabled:opacity-50"
+                        disabled={deleteRelease.isPending || release.status === "RUNNING"}
+                        onClick={() => deleteRelease.mutate(release.id)}
+                        title={release.status === "RUNNING" ? "Close the running release before deleting it" : "Delete release row"}
+                        type="button"
+                      >
+                        <Trash2 size={14} />
                       </button>
                     </div>
                   </td>

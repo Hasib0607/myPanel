@@ -643,6 +643,55 @@ async function enqueueDeployAction(deploymentId: string, action: string, release
   }
 }
 
+async function deployJobsForRelease(releaseId: string, states: string[]) {
+  const jobs = await deployQueue.getJobs(states as any, 0, 500);
+  return jobs.filter((job) => (job.data as { releaseId?: string } | undefined)?.releaseId === releaseId);
+}
+
+async function closeDeploymentRelease(deploymentId: string, releaseId: string, status: "CANCELLED" | "FAILED") {
+  const release = await prisma.deploymentRelease.findFirstOrThrow({ where: { id: releaseId, deploymentId } });
+  const removableJobs = await deployJobsForRelease(releaseId, ["wait", "delayed", "prioritized", "paused", "waiting-children"]);
+  const removedJobIds: string[] = [];
+  for (const job of removableJobs) {
+    await job.remove();
+    removedJobIds.push(String(job.id));
+  }
+  const activeJobs = await deployJobsForRelease(releaseId, ["active"]);
+  const finishedAt = new Date();
+  const startedAt = release.startedAt ?? release.createdAt;
+  const closed = await prisma.deploymentRelease.update({
+    where: { id: release.id },
+    data: {
+      status,
+      finishedAt,
+      durationMs: Math.max(0, finishedAt.getTime() - startedAt.getTime())
+    }
+  });
+  await addLog(deploymentId, status === "CANCELLED" ? "QUEUED" : "ROLLBACK", `Release ${status.toLowerCase()}`, release.id, {
+    removedJobIds,
+    activeJobIds: activeJobs.map((job) => String(job.id))
+  });
+
+  const openRelease = await prisma.deploymentRelease.findFirst({
+    where: { deploymentId, status: { in: ["QUEUED", "RUNNING"] }, id: { not: release.id } },
+    orderBy: { createdAt: "desc" }
+  });
+  if (!openRelease) {
+    const previous = await prisma.deploymentRelease.findFirst({
+      where: { deploymentId, status: { in: ["SUCCEEDED", "ROLLED_BACK"] } },
+      orderBy: { createdAt: "desc" }
+    });
+    await prisma.deployment.update({
+      where: { id: deploymentId },
+      data: previous
+        ? { status: "RUNNING", healthStatus: "UNKNOWN", lastHealthCheckAt: new Date() }
+        : { status: "FAILED", healthStatus: "DOWN", lastHealthCheckAt: new Date() }
+    });
+  }
+
+  return { release: closed, removedJobIds, activeJobIds: activeJobs.map((job) => String(job.id)) };
+}
+
 function githubTokenSecretRef() {
   return "github:superadmin:token";
 }
@@ -2703,6 +2752,31 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const deployment = await findDeployment(deploymentId);
     return prisma.deploymentRelease.findMany({ where: { deploymentId: deployment.id }, orderBy: { createdAt: "desc" }, include: { logs: { orderBy: { createdAt: "asc" } } } });
+  });
+
+  app.post("/:deploymentId/releases/:releaseId/cancel", async (request) => {
+    const { deploymentId, releaseId } = z.object({ deploymentId: z.string(), releaseId: z.string() }).parse(request.params);
+    const deployment = await findDeployment(deploymentId);
+    const result = await closeDeploymentRelease(deployment.id, releaseId, "CANCELLED");
+    await audit(request, { action: "UPDATE", resource: "deployment_release", resourceId: releaseId, description: `Cancelled release for ${deployment.slug}`, metadata: { removedJobIds: result.removedJobIds, activeJobIds: result.activeJobIds } });
+    return { ok: true, ...result };
+  });
+
+  app.delete("/:deploymentId/releases/:releaseId", async (request) => {
+    const { deploymentId, releaseId } = z.object({ deploymentId: z.string(), releaseId: z.string() }).parse(request.params);
+    const deployment = await findDeployment(deploymentId);
+    const release = await prisma.deploymentRelease.findFirstOrThrow({ where: { id: releaseId, deploymentId: deployment.id } });
+    if (release.status === "RUNNING") {
+      const closeResult = await closeDeploymentRelease(deployment.id, release.id, "CANCELLED");
+      await audit(request, { action: "UPDATE", resource: "deployment_release", resourceId: release.id, description: `Closed running release for ${deployment.slug}`, metadata: { removedJobIds: closeResult.removedJobIds, activeJobIds: closeResult.activeJobIds } });
+      return { ok: true, deleted: false, closeResult };
+    }
+    const closeResult = release.status === "QUEUED"
+      ? await closeDeploymentRelease(deployment.id, release.id, "CANCELLED")
+      : null;
+    await prisma.deploymentRelease.delete({ where: { id: release.id } });
+    await audit(request, { action: "DELETE", resource: "deployment_release", resourceId: release.id, description: `Deleted release for ${deployment.slug}`, metadata: closeResult ? { removedJobIds: closeResult.removedJobIds, activeJobIds: closeResult.activeJobIds } : {} });
+    return { ok: true, closeResult };
   });
 
   app.get("/:deploymentId/metrics", async (request) => {

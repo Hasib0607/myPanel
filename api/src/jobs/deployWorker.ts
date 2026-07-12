@@ -1022,8 +1022,8 @@ async function applyPriorityReserveToDeployBudget(deploymentId: string, budget: 
 async function markRelease(releaseId: string | undefined, status: "RUNNING" | "SUCCEEDED" | "FAILED" | "ROLLED_BACK", startedAt?: Date) {
   if (!releaseId) return;
   const finished = status === "SUCCEEDED" || status === "FAILED" || status === "ROLLED_BACK" ? new Date() : undefined;
-  await prisma.deploymentRelease.update({
-    where: { id: releaseId },
+  await prisma.deploymentRelease.updateMany({
+    where: { id: releaseId, status: { not: "CANCELLED" } },
     data: {
       status,
       startedAt: startedAt ?? (status === "RUNNING" ? new Date() : undefined),
@@ -1059,8 +1059,8 @@ async function syncReleaseCommitInfo(deploymentId: string, releaseId: string | u
   };
   await prisma.deployment.update({ where: { id: deploymentId }, data: { commitSha: commit.sha } });
   if (releaseId) {
-    await prisma.deploymentRelease.update({
-      where: { id: releaseId },
+    await prisma.deploymentRelease.updateMany({
+      where: { id: releaseId, status: { not: "CANCELLED" } },
       data
     });
   }
@@ -3987,7 +3987,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
   }
 }
 
-async function processDeploy(action: string, deploymentId: string, releaseId: string | undefined) {
+async function processDeploy(action: string, deploymentId: string, releaseId: string | undefined): Promise<Record<string, unknown>> {
   const startedAt = new Date();
   let deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: deploymentWorkerInclude });
   const release = releaseId ? await prisma.deploymentRelease.findUnique({ where: { id: releaseId } }) : null;
@@ -4712,9 +4712,46 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     await writeLog(deployment.id, releaseId, action === "rollback" ? "ROLLBACK" : "SUCCEEDED", `${action} completed`, { dryRun: false, publicRouteWarning });
     return { dryRun: false, completed: true, status: "RUNNING", healthStatus, publicRouteWarning };
   } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
     await markRelease(releaseId, "FAILED", startedAt);
+    await writeLog(deployment.id, releaseId, "FAILED", `${action} failed`, { error: message }, "error");
+    if (action !== "rollback") {
+      const previousRelease = await prisma.deploymentRelease.findFirst({
+        where: {
+          deploymentId: deployment.id,
+          status: { in: ["SUCCEEDED", "ROLLED_BACK"] },
+          ...(releaseId ? { id: { not: releaseId } } : {})
+        },
+        orderBy: { createdAt: "desc" }
+      });
+      if (previousRelease?.commitSha) {
+        await writeLog(deployment.id, releaseId, "ROLLBACK", "Auto rollback to last successful release started", {
+          failedReleaseId: releaseId ?? null,
+          rollbackReleaseId: previousRelease.id,
+          commitSha: previousRelease.commitSha
+        }, "warn");
+        try {
+          const rollback: Record<string, unknown> = await processDeploy("rollback", deployment.id, previousRelease.id);
+          await writeLog(deployment.id, releaseId, "ROLLBACK", "Auto rollback to last successful release completed", {
+            failedReleaseId: releaseId ?? null,
+            rollbackReleaseId: previousRelease.id,
+            rollback: rollback as Prisma.InputJsonValue
+          });
+          return { dryRun: false, completed: false, recovered: true, failedReleaseId: releaseId, rollbackReleaseId: previousRelease.id, rollback };
+        } catch (rollbackError) {
+          await writeLog(deployment.id, releaseId, "ROLLBACK", "Auto rollback to last successful release failed", {
+            failedReleaseId: releaseId ?? null,
+            rollbackReleaseId: previousRelease.id,
+            error: rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
+          }, "error");
+        }
+      } else {
+        await writeLog(deployment.id, releaseId, "ROLLBACK", "Auto rollback skipped; no previous successful release with a commit snapshot", {
+          failedReleaseId: releaseId ?? null
+        }, "warn");
+      }
+    }
     await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "FAILED", healthStatus: "DOWN" } });
-    await writeLog(deployment.id, releaseId, "FAILED", `${action} failed`, { error: error instanceof Error ? error.message : "Unknown error" }, "error");
     throw error;
   }
 }
