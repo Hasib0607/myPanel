@@ -102,7 +102,7 @@ export function deploymentSslCertificatePaths(domain: BoundDomain | null) {
 export async function deploymentHttpsReady(domain: BoundDomain | null) {
   if (!domain?.name) return false;
   try {
-    const status = await sysagent.certificateExists(certbotCertificateName(domain.name));
+    const status = await sysagent.certificateFindReusable(domain.name);
     return Boolean(status.exists);
   } catch {
     return false;
@@ -110,8 +110,17 @@ export async function deploymentHttpsReady(domain: BoundDomain | null) {
 }
 
 export async function deploymentSslCertificatePathsWhenReady(domain: BoundDomain | null) {
-  if (!domain || !(await deploymentHttpsReady(domain))) return {};
-  return deploymentSslCertificatePaths(domain);
+  if (!domain) return {};
+  try {
+    const status = await sysagent.certificateFindReusable(domain.name);
+    if (!status.exists) return {};
+    return {
+      sslCertificate: status.certificate,
+      sslCertificateKey: status.privateKey
+    };
+  } catch {
+    return {};
+  }
 }
 
 export function deploymentFallbackRootPath(domain: BoundDomain | null) {
@@ -127,13 +136,14 @@ export async function publishPublicHtmlNginxVhost(domain: BoundDomain | null) {
   const serverName = deploymentServerName(domain);
   const rootPath = deploymentFallbackRootPath(domain);
   if (!domain?.name || !serverName || !rootPath) return null;
-  const httpsReady = await deploymentHttpsReady(domain);
+  const sslPaths = await deploymentSslCertificatePathsWhenReady(domain);
+  const httpsReady = Boolean(sslPaths.sslCertificate && sslPaths.sslCertificateKey);
   return sysagent.writeStaticNginxVhost({
     name: nginxResourceName("domain", domain.name),
     serverName,
     rootPath,
     forceHttps: Boolean(domain.forceSsl && httpsReady),
-    ...(httpsReady ? deploymentSslCertificatePaths(domain) : {})
+    ...(httpsReady ? sslPaths : {})
   });
 }
 
@@ -344,7 +354,8 @@ export async function publishDeploymentProxyNginx(input: {
     sslEnabled: input.forceHttps
   };
   const hasExplicitCertificate = Boolean(input.sslCertificate && input.sslCertificateKey);
-  const httpsReady = hasExplicitCertificate || (input.forceHttps ? await deploymentHttpsReady(bound) : false);
+  const reusableSslPaths = hasExplicitCertificate || !input.forceHttps ? {} : await deploymentSslCertificatePathsWhenReady(bound);
+  const httpsReady = hasExplicitCertificate || Boolean(reusableSslPaths.sslCertificate && reusableSslPaths.sslCertificateKey);
   return sysagent.deploymentNginx(
     buildDeploymentNginxRequest({
       deploymentId: input.deploymentId,
@@ -360,7 +371,7 @@ export async function publishDeploymentProxyNginx(input: {
       requireSsl: input.requireSsl ?? false,
       ...(hasExplicitCertificate
         ? { sslCertificate: input.sslCertificate, sslCertificateKey: input.sslCertificateKey }
-        : httpsReady ? deploymentSslCertificatePaths(bound) : {})
+        : httpsReady ? reusableSslPaths : {})
     })
   );
 }

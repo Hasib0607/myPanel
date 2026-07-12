@@ -178,21 +178,38 @@ def reusable_certificate_candidates(requested: str) -> list[dict]:
         if not item.is_dir():
             continue
         cert_name = item.name
-        if cert_name != base and not duplicate_pattern.fullmatch(cert_name):
-            continue
         expiry = certificate_expiry(cert_name)
         exists = letsencrypt_certificate_exists(cert_name)
         if not exists:
+            continue
+        names = certificate_names(cert_name)
+        if cert_name != base and not duplicate_pattern.fullmatch(cert_name) and not certificate_names_cover(base, names):
             continue
         candidates.append({
             "domain": cert_name,
             "exists": exists,
             "expiry": expiry,
-            "names": certificate_names(cert_name),
+            "names": names,
             "certificate": str(item / "fullchain.pem"),
             "privateKey": str(item / "privkey.pem"),
         })
     return sorted(candidates, key=lambda item: item.get("expiry") or "", reverse=True)
+
+
+def certificate_names_cover(requested: str, names: list[str]) -> bool:
+    requested = requested.lower().rstrip(".")
+    requested_labels = requested.split(".")
+    for name in names:
+        candidate = name.lower().rstrip(".")
+        if candidate == requested:
+            return True
+        if not candidate.startswith("*."):
+            continue
+        parent = candidate[2:]
+        parent_labels = parent.split(".")
+        if requested.endswith(f".{parent}") and len(requested_labels) == len(parent_labels) + 1:
+            return True
+    return False
 
 
 @router.get("/certificate-reusable/{domain}")

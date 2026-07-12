@@ -39,6 +39,34 @@ test("wildcard deployment certificates use the safe certbot lineage name", async
   assert.equal(paths.sslCertificateKey, "/etc/letsencrypt/live/wildcard.ebitans.store/privkey.pem");
 });
 
+test("subdomain deployments reuse matching wildcard certificate paths", async () => {
+  const { deploymentSslCertificatePathsWhenReady } = await import("./deploymentDomainSsl.js");
+  const { sysagent } = await import("./sysagent.js");
+  const original = sysagent.certificateFindReusable;
+  sysagent.certificateFindReusable = async () => ({
+    requested: "fahpet.ebitan.store",
+    domain: "wildcard.ebitan.store",
+    exists: true,
+    expiry: null,
+    names: ["*.ebitan.store"],
+    certificate: "/etc/letsencrypt/live/wildcard.ebitan.store/fullchain.pem",
+    privateKey: "/etc/letsencrypt/live/wildcard.ebitan.store/privkey.pem"
+  });
+
+  try {
+    const paths = await deploymentSslCertificatePathsWhenReady({
+      id: "subdomain:sub_1",
+      name: "fahpet.ebitan.store",
+      forceSsl: true
+    });
+
+    assert.equal(paths.sslCertificate, "/etc/letsencrypt/live/wildcard.ebitan.store/fullchain.pem");
+    assert.equal(paths.sslCertificateKey, "/etc/letsencrypt/live/wildcard.ebitan.store/privkey.pem");
+  } finally {
+    sysagent.certificateFindReusable = original;
+  }
+});
+
 test("wildcard deployment skips HTTP ACME webroot preparation", async () => {
   const { ensureAcmeWebroot } = await import("./deploymentDomainSsl.js");
   const { sysagent } = await import("./sysagent.js");
