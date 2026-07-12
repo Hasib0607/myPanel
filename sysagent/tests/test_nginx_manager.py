@@ -33,6 +33,7 @@ from app.nginx_manager import (
     _enable_site,
     _normalize_conflict_path,
     _nginx_include_text_loads_directory,
+    acme_location,
     make_web_root_readable,
     remove_conflicting_configs,
 )
@@ -144,6 +145,19 @@ server {
             config.write_text("server { listen 80; server_name *.ebitans.store; }\n", encoding="utf-8")
 
             self.assertFalse(_config_has_server_name(config, "ebitans.store"))
+
+    def test_acme_location_uses_webroot_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            file_root = Path(tmp)
+            config.settings.file_manager_root = str(file_root)
+            web_root = file_root / "accounts" / "shop" / "public_html"
+            web_root.mkdir(parents=True)
+
+            location = acme_location("shop.test", web_root)
+
+            self.assertIn(f"root {web_root.resolve()};", location)
+            self.assertIn("try_files $uri =404;", location)
+            self.assertNotIn("alias", location)
 
     def test_similar_wildcard_domains_do_not_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
