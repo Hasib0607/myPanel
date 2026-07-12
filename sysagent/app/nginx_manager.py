@@ -153,11 +153,22 @@ def server_name_directive_tokens(text: str) -> list[str]:
 
 
 def _server_name_token_matches(claimed: str, requested: str) -> bool:
+    claimed = claimed.strip().lower().rstrip(".")
+    requested = requested.strip().lower().rstrip(".")
+    if not claimed or not requested:
+        return False
     if claimed == requested:
         return True
     if claimed.startswith("*."):
-        suffix = claimed[1:]
-        return requested.endswith(suffix) and requested != claimed[2:]
+        parent = claimed[2:]
+        requested_labels = requested.split(".")
+        parent_labels = parent.split(".")
+        return (
+            not requested.startswith("*.")
+            and requested != parent
+            and requested.endswith(f".{parent}")
+            and len(requested_labels) == len(parent_labels) + 1
+        )
     return False
 
 

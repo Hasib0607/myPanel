@@ -120,6 +120,30 @@ server {
 
             self.assertFalse(_config_has_server_name(config, "ebitans.store"))
 
+    def test_similar_wildcard_domains_do_not_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sibling = root / "domain-wildcard.ebitans.store.conf"
+            own = root / "domain-wildcard.ebitan.store.conf"
+            sibling.write_text("server { listen 443 ssl; server_name *.ebitans.store; }\n", encoding="utf-8")
+            own.write_text("server { listen 443 ssl; server_name *.ebitan.store; }\n", encoding="utf-8")
+
+            removed = remove_conflicting_configs("domain-wildcard.ebitan.store", "*.ebitan.store", tmp)
+
+            self.assertEqual(removed, [])
+            self.assertTrue(sibling.exists())
+            self.assertTrue(own.exists())
+            self.assertFalse(_config_has_server_name(sibling, "*.ebitan.store"))
+            self.assertFalse(_config_has_server_name(own, "*.ebitans.store"))
+
+    def test_wildcard_matches_only_one_child_label(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "wildcard.conf"
+            config.write_text("server { listen 80; server_name *.ebitans.store; }\n", encoding="utf-8")
+
+            self.assertTrue(_config_has_server_name(config, "shop.ebitans.store"))
+            self.assertFalse(_config_has_server_name(config, "deep.shop.ebitans.store"))
+
     def test_make_web_root_readable_allows_nginx_parent_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             file_root = Path(tmp)
