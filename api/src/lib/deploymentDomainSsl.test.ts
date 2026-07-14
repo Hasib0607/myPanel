@@ -86,6 +86,24 @@ test("wildcard deployment skips HTTP ACME webroot preparation", async () => {
   assert.equal(calls, 0);
 });
 
+test("wildcard subdomain deployment binding matches one-level child hosts", async () => {
+  const { subdomainBindingMatchesFqdn } = await import("./deploymentDomainSsl.js");
+  const wildcard = { name: "*", domain: { name: "ecommercex.store" } };
+
+  assert.equal(subdomainBindingMatchesFqdn(wildcard, "a9.ecommercex.store"), true);
+  assert.equal(subdomainBindingMatchesFqdn(wildcard, "A10.ecommercex.store"), true);
+  assert.equal(subdomainBindingMatchesFqdn(wildcard, "deep.a9.ecommercex.store"), false);
+  assert.equal(subdomainBindingMatchesFqdn(wildcard, "ecommercex.store"), false);
+});
+
+test("exact subdomain deployment binding still matches only itself", async () => {
+  const { subdomainBindingMatchesFqdn } = await import("./deploymentDomainSsl.js");
+  const exact = { name: "admin", domain: { name: "ecommercex.store" } };
+
+  assert.equal(subdomainBindingMatchesFqdn(exact, "admin.ecommercex.store"), true);
+  assert.equal(subdomainBindingMatchesFqdn(exact, "a9.ecommercex.store"), false);
+});
+
 test("Next.js proxy requests always preserve the public Host", async () => {
   const { buildDeploymentNginxRequest } = await import("./deploymentDomainSsl.js");
   const request = buildDeploymentNginxRequest({

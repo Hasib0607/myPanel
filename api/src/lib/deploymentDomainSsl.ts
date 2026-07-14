@@ -239,6 +239,7 @@ export async function syncDeploymentTlsWithCertificate(domain: BoundDomain | nul
 }
 
 export async function findDeploymentProxyTarget(fqdn: string) {
+  const normalizedFqdn = fqdn.toLowerCase();
   const subdomainBindings = await prisma.deploymentDomain.findMany({
     where: { subdomainId: { not: null } },
     include: {
@@ -247,7 +248,7 @@ export async function findDeploymentProxyTarget(fqdn: string) {
     }
   });
   const subdomainHit = subdomainBindings.find(
-    (binding) => binding.subdomain && `${binding.subdomain.name}.${binding.subdomain.domain.name}` === fqdn
+    (binding) => binding.subdomain && subdomainBindingMatchesFqdn(binding.subdomain, normalizedFqdn)
   );
   if (subdomainHit?.deployment) {
     if (!deploymentIsRoutable(subdomainHit.deployment)) return null;
@@ -287,6 +288,22 @@ export async function findDeploymentProxyTarget(fqdn: string) {
   if (!deployment) return null;
   if (!deploymentIsRoutable(deployment)) return null;
   return { deployment, domain, subdomainId: null as string | null, includeWww: true };
+}
+
+export function subdomainBindingMatchesFqdn(
+  subdomain: { name: string; domain: { name: string } },
+  fqdn: string
+) {
+  const normalizedFqdn = fqdn.toLowerCase();
+  const parent = subdomain.domain.name.toLowerCase();
+  const name = subdomain.name.toLowerCase();
+  if (name === "*") {
+    const suffix = `.${parent}`;
+    if (!normalizedFqdn.endsWith(suffix)) return false;
+    const left = normalizedFqdn.slice(0, -suffix.length);
+    return Boolean(left) && !left.includes(".");
+  }
+  return `${name}.${parent}` === normalizedFqdn;
 }
 
 export function deploymentNginxPublicDirectory(input: {
