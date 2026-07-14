@@ -132,6 +132,17 @@ done
 cat > "$NGINX_SITES_AVAILABLE/$PANEL_SITE_NAME" <<EOF
 # Managed by repair-admin-panel-ssl.sh. Do not use this hostname for customer domains.
 server {
+    listen 443 ssl default_server;
+    http2 on;
+    server_name _;
+
+    ssl_certificate /etc/letsencrypt/live/$PANEL_DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$PANEL_DOMAIN/privkey.pem;
+
+    return 421;
+}
+
+server {
     listen 80;
     server_name $PANEL_DOMAIN;
 

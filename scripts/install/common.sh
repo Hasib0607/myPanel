@@ -635,7 +635,7 @@ server {
 
 server {
     listen $PANEL_LOGIN_PORT$(if [[ "$PANEL_PUBLIC_SCHEME" == "https" && -n "$PANEL_DOMAIN" ]]; then printf " ssl"; fi);
-    server_name $PANEL_PUBLIC_HOST $VPS_IP _;
+    server_name $PANEL_PUBLIC_HOST $VPS_IP;
 
     client_max_body_size 0;
 $(if [[ "$PANEL_PUBLIC_SCHEME" == "https" && -n "$PANEL_DOMAIN" ]]; then cat <<SSL
@@ -686,7 +686,7 @@ fi)
 
 server {
     listen $CPANEL_LOGIN_PORT$(if [[ "$PANEL_PUBLIC_SCHEME" == "https" && -n "$PANEL_DOMAIN" ]]; then printf " ssl"; fi);
-    server_name $PANEL_PUBLIC_HOST $VPS_IP _;
+    server_name $PANEL_PUBLIC_HOST $VPS_IP;
 
     client_max_body_size 0;
 $(if [[ "$PANEL_PUBLIC_SCHEME" == "https" && -n "$PANEL_DOMAIN" ]]; then cat <<SSL
