@@ -40,11 +40,14 @@ from app.deployment_health import backend_only_laravel_health, curl_health_probe
 from app.platform import runtime_tool_install_plan
 from app.nginx_paths import nginx_sites_available, nginx_sites_enabled
 from app.nginx_manager import (
+    ROUTE_OWNERSHIP_HEADER,
     acme_location,
     letsencrypt_certificate_exists,
+    loaded_conflicting_config_files,
     publish_nginx_config,
     remove_conflicting_configs,
     remove_insecure_port443_configs,
+    route_ownership_header,
     safe_letsencrypt_path,
     safe_nginx_path,
     safe_web_root,
@@ -2131,6 +2134,50 @@ def _laravel_nginx_post_reload_check(server_name: str, public_root: str, framewo
     }
 
 
+def _nginx_route_ownership_probe(server_name: str, config_name: str, *, require_https: bool) -> dict:
+    primary = server_name.split()[0].strip()
+    scheme = "https" if require_https else "http"
+    port = "443" if require_https else "80"
+    command = [
+        "curl",
+        "-sS",
+        "-i",
+        *(["-k"] if require_https else []),
+        "--resolve",
+        f"{primary}:{port}:127.0.0.1",
+        "--max-time",
+        "10",
+        "--noproxy",
+        "*",
+        "-H",
+        f"Host: {primary}",
+        f"{scheme}://{primary}/",
+    ]
+    result = run_command(command, allow_live=True)
+    output = f"{result.get('stdout') or ''}\n{result.get('stderr') or ''}"
+    if result.get("returncode") == 0 and f"{ROUTE_OWNERSHIP_HEADER}: {config_name}" in output:
+        return result
+    conflicts = loaded_conflicting_config_files(config_name, server_name)
+    conflict_hint = f" Loaded conflicting nginx configs: {', '.join(conflicts)}." if conflicts else ""
+    return {
+        **result,
+        "returncode": 1,
+        "stderr": (
+            f"Generated vhost {config_name!r} is not the active {scheme.upper()} route for {primary}; "
+            f"missing {ROUTE_OWNERSHIP_HEADER} response header.{conflict_hint}"
+        ),
+    }
+
+
+def _deployment_nginx_post_reload_check(server_name: str, config_name: str, public_root: str, framework: str | None, *, require_https: bool) -> dict:
+    ownership = _nginx_route_ownership_probe(server_name, config_name, require_https=require_https)
+    if ownership.get("returncode") != 0:
+        return ownership
+    if (framework or "").upper() == "LARAVEL":
+        return _laravel_nginx_post_reload_check(server_name, public_root, framework, require_https=require_https)
+    return ownership
+
+
 @router.post("/nginx-retire")
 def nginx_retire(body: RetireNginxRouteRequest) -> dict:
     try:
@@ -2275,6 +2322,7 @@ server {{
     server_name {server_name};
     access_log {access_log} combined;
     error_log {error_log} warn;
+{route_ownership_header(config_name)}
 
 {http_location}}}
 """.lstrip()
@@ -2288,6 +2336,7 @@ server {{
     error_log {error_log} warn;
     ssl_certificate {ssl_certificate};
     ssl_certificate_key {ssl_certificate_key};
+{route_ownership_header(config_name)}
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_prefer_server_ciphers off;
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
@@ -2305,10 +2354,12 @@ server {{
             nginx_sites_available(),
             nginx_sites_enabled(),
             server_name=server_name,
-            post_reload_check=(
-                lambda: _laravel_nginx_post_reload_check(server_name, str(public_root), body.framework, require_https=has_ssl and body.forceSsl)
-                if (body.framework or "").upper() == "LARAVEL"
-                else None
+            post_reload_check=lambda: _deployment_nginx_post_reload_check(
+                server_name,
+                config_name,
+                str(public_root),
+                body.framework,
+                require_https=has_ssl and body.forceSsl,
             ),
         )
         return {

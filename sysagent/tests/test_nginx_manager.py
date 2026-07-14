@@ -36,10 +36,21 @@ from app.nginx_manager import (
     acme_location,
     make_web_root_readable,
     remove_conflicting_configs,
+    route_ownership_header,
 )
 
 
 class NginxManagerTests(unittest.TestCase):
+    def test_route_ownership_header_uses_managed_config_name(self) -> None:
+        self.assertEqual(
+            route_ownership_header("domain-a8.ecommercex.store"),
+            '    add_header X-VPS-Panel-Route "domain-a8.ecommercex.store" always;\n',
+        )
+
+    def test_route_ownership_header_rejects_protected_panel_config(self) -> None:
+        with self.assertRaises(HTTPException):
+            route_ownership_header("panel")
+
     def test_detects_wildcard_server_name_directive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "wildcard.conf"

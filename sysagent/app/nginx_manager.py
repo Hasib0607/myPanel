@@ -16,6 +16,7 @@ T = TypeVar("T")
 MANAGED_CONFIG_PREFIXES = ("domain-", "deployment-")
 PROTECTED_CONFIG_NAMES = {"default", "vps-panel", "panel", "vps_panel"}
 STRICTLY_PROTECTED_CONFIG_NAMES = {"vps-panel", "panel", "vps_panel"}
+ROUTE_OWNERSHIP_HEADER = "X-VPS-Panel-Route"
 
 
 def assert_managed_config_name(name: str) -> None:
@@ -24,6 +25,11 @@ def assert_managed_config_name(name: str) -> None:
         raise HTTPException(status_code=400, detail="Refusing to write protected panel Nginx config")
     if not normalized.startswith(MANAGED_CONFIG_PREFIXES):
         raise HTTPException(status_code=400, detail="Nginx config name must be domain-* or deployment-*")
+
+
+def route_ownership_header(name: str) -> str:
+    assert_managed_config_name(name)
+    return f'    add_header {ROUTE_OWNERSHIP_HEADER} "{name}" always;\n'
 
 
 def safe_nginx_path(root: str, name: str) -> Path:

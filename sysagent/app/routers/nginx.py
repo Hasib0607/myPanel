@@ -13,10 +13,12 @@ from app.command import run_command
 from app.config import settings
 from app.nginx_paths import nginx_sites_available, nginx_sites_enabled
 from app.nginx_manager import (
+    ROUTE_OWNERSHIP_HEADER,
     acme_location,
     loaded_conflicting_config_files,
     make_web_root_readable,
     publish_nginx_config,
+    route_ownership_header,
     run_live_step,
     safe_letsencrypt_path,
     safe_nginx_path,
@@ -168,6 +170,7 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
         f"    root {root_path};\n"
         "    index index.html index.htm index.php;\n"
         "    client_max_body_size 0;\n"
+        f"{route_ownership_header(body.name)}"
         "\n"
         f"{http_location}"
         "}\n"
@@ -182,6 +185,7 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
             f"    root {root_path};\n"
             "    index index.html index.htm index.php;\n"
             "    client_max_body_size 0;\n"
+            f"{route_ownership_header(body.name)}"
             f"    ssl_certificate {ssl_certificate};\n"
             f"    ssl_certificate_key {ssl_certificate_key};\n"
             "    ssl_protocols TLSv1.2 TLSv1.3;\n"
@@ -215,9 +219,48 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
             lambda: make_acme_probe_readable(root_path, challenge_dir, probe_file),
         )
 
+    def route_ownership_probe(*, https: bool = False) -> dict:
+        primary_host = body.serverName.split()[0]
+        scheme = "https" if https else "http"
+        port = "443" if https else "80"
+        command = [
+            "curl",
+            "-sS",
+            "-i",
+            *(["-k"] if https else []),
+            "--resolve",
+            f"{primary_host}:{port}:127.0.0.1",
+            "--max-time",
+            "10",
+            "--noproxy",
+            "*",
+            "-H",
+            f"Host: {primary_host}",
+            f"{scheme}://{primary_host}/",
+        ]
+        result = run_command(command, allow_live=True)
+        output = f"{result.get('stdout') or ''}\n{result.get('stderr') or ''}"
+        if result.get("returncode") == 0 and f"{ROUTE_OWNERSHIP_HEADER}: {body.name}" in output:
+            return result
+        loaded_conflicts = loaded_conflicting_config_files(body.name, body.serverName)
+        conflict_hint = (
+            f" Loaded conflicting nginx configs: {', '.join(loaded_conflicts)}."
+            if loaded_conflicts
+            else ""
+        )
+        return {
+            **result,
+            "returncode": 1,
+            "stderr": (
+                f"Generated vhost {body.name!r} is not the active {scheme.upper()} route "
+                f"for {primary_host}:{port}; missing {ROUTE_OWNERSHIP_HEADER} response header."
+                f"{conflict_hint}"
+            ),
+        }
+
     def post_reload_check() -> dict:
         if not probe_file:
-            return {"returncode": 0, "stdout": "", "stderr": "", "command": ["skip-acme-vhost-probe"]}
+            return route_ownership_probe(https=has_ssl)
         primary_host = body.serverName.split()[0]
         probe_url = f"http://127.0.0.1/.well-known/acme-challenge/{probe_file.name}"
         curl_base = [
@@ -237,7 +280,8 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
                 time.sleep(0.25)
             result = run_command(curl_base, allow_live=True)
             if result.get("returncode") == 0 and (result.get("stdout") or "").strip() == probe_expected:
-                return result
+                ownership = route_ownership_probe(https=has_ssl)
+                return ownership if ownership.get("returncode") != 0 else result
         if result.get("returncode") != 0:
             debug = run_command([
                 "curl",
