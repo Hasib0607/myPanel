@@ -2140,6 +2140,47 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     return reply.code(201).send(result);
   });
 
+  app.delete("/domains/:domainId/subdomains/:subdomainId", async (request: any) => {
+    const { domainId, subdomainId } = z.object({ domainId: z.string(), subdomainId: z.string() }).parse(request.params);
+    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
+    const subdomain = await prisma.subdomain.findFirstOrThrow({
+      where: {
+        id: subdomainId,
+        domainId,
+        domain: { accountId: account.id }
+      },
+      include: { domain: { select: { id: true, name: true } } }
+    });
+
+    await prisma.$transaction(async (tx) => {
+      await tx.subdomain.delete({ where: { id: subdomain.id } });
+      await tx.dnsRecord.deleteMany({
+        where: {
+          domainId: subdomain.domainId,
+          name: subdomain.name,
+          value: subdomain.target,
+          type: dnsRecordTypeForTarget(subdomain.target)
+        }
+      });
+    });
+
+    let publishWarning: string | undefined;
+    try {
+      await publishDomainDnsZone(subdomain.domainId);
+    } catch (error) {
+      publishWarning = error instanceof Error ? error.message : "Subdomain DNS publish failed";
+    }
+
+    await audit(request, {
+      action: "DELETE",
+      resource: "subdomain",
+      resourceId: subdomain.id,
+      description: `Account deleted subdomain ${subdomain.name}.${subdomain.domain.name}`,
+      metadata: publishWarning ? ({ publishWarning } as Prisma.InputJsonValue) : undefined
+    });
+    return { ok: true, publishWarning };
+  });
+
   app.post("/domains/dns/bulk-zone-action", async (request: any, reply) => {
     const body = bulkZoneActionSchema.parse(request.body);
     const ownerAccountId = accountId(request);
