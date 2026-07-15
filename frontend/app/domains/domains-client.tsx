@@ -781,10 +781,12 @@ export function DomainsClient({
                               className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line bg-white text-panel-danger hover:bg-red-50 disabled:opacity-60"
                               disabled={deleteSubdomain.isPending}
                               onClick={() => {
+                                const subdomainDomainId = subdomain.domainId ?? domain.id;
+                                const subdomainFqdn = subdomain.fqdn ?? `${subdomain.name}.${domain.name}`;
                                 setDeleteSubdomainTarget({
-                                  domainId: domain.id,
+                                  domainId: subdomainDomainId,
                                   subdomainId: subdomain.id,
-                                  fqdn: `${subdomain.name}.${domain.name}`
+                                  fqdn: subdomainFqdn
                                 });
                               }}
                               title="Delete subdomain"
