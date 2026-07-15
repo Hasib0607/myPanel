@@ -6,7 +6,7 @@ import { Prisma } from "@prisma/client";
 import { env } from "../config/env.js";
 import { audit } from "../lib/audit.js";
 import { ensureDomainFileStructure, ensureSubdomainFileStructure, subdomainFolderName } from "../lib/domainFiles.js";
-import { buildDeploymentNginxRequest, deploymentIsRoutable, publishPublicHtmlNginxVhost } from "../lib/deploymentDomainSsl.js";
+import { buildDeploymentNginxRequest, deploymentIsRoutable, deploymentSslCertificatePathsWhenReady, publishPublicHtmlNginxVhost } from "../lib/deploymentDomainSsl.js";
 import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
 import { sysagent } from "../lib/sysagent.js";
@@ -424,11 +424,13 @@ async function publishDomainHosting(domainId: string) {
     if (!targetIsLocal) continue;
     const scaffold = await ensureSubdomainFileStructure(domain.name, subdomain.name);
     try {
+      const sslOptions = await localSubdomainSslOptions(fqdn, subdomain.sslEnabled);
       const result = await sysagent.writeStaticNginxVhost({
         name: `domain-${nginxResourceName(fqdn)}`,
         serverName: fqdn,
         rootPath: path.join(env.FILE_MANAGER_ROOT, scaffold.relativeRoot),
-        forceHttps: false
+        forceHttps: false,
+        ...sslOptions
       });
       subdomainVhosts.push({ fqdn, result });
     } catch (error) {
@@ -524,6 +526,21 @@ function dnsRecordTypeForTarget(target: string) {
   return "CNAME" as const;
 }
 
+async function localSubdomainSslOptions(fqdn: string, sslEnabled: boolean) {
+  if (!sslEnabled) return {};
+  const sslPaths = await deploymentSslCertificatePathsWhenReady({
+    id: fqdn,
+    name: fqdn,
+    forceSsl: true,
+    sslEnabled: true,
+    includeWww: false
+  });
+  return {
+    forceHttps: Boolean(sslPaths.sslCertificate && sslPaths.sslCertificateKey),
+    ...sslPaths
+  };
+}
+
 async function createSubdomainForDomain(input: {
   domainId: string;
   name: string;
@@ -565,13 +582,15 @@ async function createSubdomainForDomain(input: {
   let nginxResult = null;
   let nginxWarning: string | undefined;
   try {
-    if (input.target === vpsIp || input.target === parentDomain.name || input.target === `${input.name}.${parentDomain.name}`) {
+    if (input.target === vpsIp || input.target === env.VPS_IP || input.target === parentDomain.name || input.target === `${input.name}.${parentDomain.name}`) {
       const fqdn = `${input.name}.${parentDomain.name}`;
+      const sslOptions = await localSubdomainSslOptions(fqdn, input.sslEnabled ?? false);
       nginxResult = await sysagent.writeStaticNginxVhost({
         name: `domain-${nginxResourceName(fqdn)}`,
         serverName: fqdn,
         rootPath: path.join(env.FILE_MANAGER_ROOT, fileScaffold.relativeRoot),
-        forceHttps: false
+        forceHttps: false,
+        ...sslOptions
       });
     }
   } catch (error) {
