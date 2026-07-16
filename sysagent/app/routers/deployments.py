@@ -2210,10 +2210,32 @@ def _nginx_route_ownership_probe(server_name: str, config_name: str, *, require_
 
 def _deployment_nginx_post_reload_check(server_name: str, config_name: str, public_root: str, framework: str | None, *, require_https: bool) -> dict:
     ownership = _nginx_route_ownership_probe(server_name, config_name, require_https=require_https)
+    if (framework or "").upper() == "LARAVEL":
+        route = _laravel_nginx_post_reload_check(server_name, public_root, framework, require_https=require_https)
+    else:
+        route = _curl_public_route(server_name, "/", public_root, framework, require_https=require_https)
+        if _public_route_upstream_failed(route):
+            route = {
+                **route,
+                "returncode": 1,
+                "stderr": route.get("stderr") or f"HTTP {route.get('httpCode')} after Nginx reload",
+            }
+
+    if route.get("returncode") == 0 and not _public_route_upstream_failed(route):
+        if ownership.get("returncode") != 0:
+            route["ownershipWarning"] = {
+                "stderr": ownership.get("stderr"),
+                "returncode": ownership.get("returncode"),
+                "command": ownership.get("command"),
+            }
+            route["stderr"] = (
+                f"{route.get('stderr') or ''}\n"
+                f"Route ownership header was not visible after reload, but public route returned HTTP {route.get('httpCode')}; keeping the new vhost active."
+            ).strip()
+        return {**route, "returncode": 0}
+
     if ownership.get("returncode") != 0:
         return ownership
-    if (framework or "").upper() == "LARAVEL":
-        return _laravel_nginx_post_reload_check(server_name, public_root, framework, require_https=require_https)
     return ownership
 
 

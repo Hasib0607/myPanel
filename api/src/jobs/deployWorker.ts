@@ -4649,6 +4649,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           return { queued: true, jobId: sslJob.id, completed: true };
         });
         proxyHttpsReady = true;
+        const httpsSslPaths = await deploymentSslCertificatePathsWhenReady(domain);
         const httpsNginx = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx HTTPS proxy config", () =>
           publishDeploymentProxyNginx({
             deploymentId: deployment.id,
@@ -4660,7 +4661,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
             publicDirectory: deployment.publicDirectory,
             outputDirectory: deployment.outputDirectory,
             fallbackRootPath: deploymentFallbackRootPath(domain),
-            forceHttps: true
+            forceHttps: true,
+            ...httpsSslPaths
           })
         );
         assertLiveResult((httpsNginx as { write?: unknown }).write, "Nginx HTTPS proxy config write");
@@ -4707,6 +4709,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       const tlsSync = await syncDeploymentTlsWithCertificate(domain);
       const activeDomain = tlsSync.domain ?? domain;
       domain = activeDomain;
+      const activeSslPaths = tlsSync.httpsReady ? await deploymentSslCertificatePathsWhenReady(activeDomain) : {};
       await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Finalize deployment proxy vhost", () =>
         publishDeploymentProxyNginx({
           deploymentId: deployment.id,
@@ -4718,7 +4721,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           publicDirectory: deployment.publicDirectory,
           outputDirectory: deployment.outputDirectory,
           fallbackRootPath: deploymentFallbackRootPath(activeDomain),
-          forceHttps: tlsSync.httpsReady
+          forceHttps: tlsSync.httpsReady,
+          ...activeSslPaths
         })
       );
       const diagnose = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Public access diagnose", () =>
