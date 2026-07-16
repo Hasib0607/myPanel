@@ -171,6 +171,10 @@ const defaultProcessManagerByFramework: Record<DeploymentFramework, DeploymentPr
 
 async function writeLog(deploymentId: string, releaseId: string | undefined, step: DeployStep, message: string, metadata: Prisma.InputJsonObject = {}, level = "info") {
   await pruneBuildLogs(deploymentId);
+  await prisma.deployment.update({
+    where: { id: deploymentId },
+    data: { updatedAt: new Date() }
+  }).catch(() => undefined);
   return prisma.deploymentLog.create({
     data: {
       deploymentId,

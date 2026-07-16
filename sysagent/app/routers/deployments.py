@@ -86,6 +86,7 @@ class CommandRequest(BaseModel):
     packageManager: str | None = None
     env: dict[str, str] | None = None
     resourceLimits: dict[str, int] | None = None
+    timeoutSeconds: int | None = Field(default=360, ge=10, le=1800)
 
 
 class ResourceSnapshotRequest(BaseModel):
@@ -426,20 +427,20 @@ def clamp_worker_count(value: int) -> int:
     return max(0, min(value, max(1, settings.deployment_worker_max)))
 
 
-def guarded_command(root_path: str, command: list[str], cwd: str | None = None, resource_limits: dict[str, int] | None = None) -> dict:
+def guarded_command(root_path: str, command: list[str], cwd: str | None = None, resource_limits: dict[str, int] | None = None, timeout: int | None = None) -> dict:
     info = path_info(root_path)
     if not info["allowed"]:
         return blocked_command("Path escapes configured file manager root", command, info)
-    result = run_command(command, cwd=cwd, allow_live=DEPLOYMENT_COMMANDS_LIVE, resource_limits=resource_limits)
+    result = run_command(command, cwd=cwd, allow_live=DEPLOYMENT_COMMANDS_LIVE, timeout=timeout, resource_limits=resource_limits)
     result["path"] = info
     return result
 
 
-def guarded_command_with_env(root_path: str, command: list[str], cwd: str | None = None, env: dict[str, str] | None = None, resource_limits: dict[str, int] | None = None) -> dict:
+def guarded_command_with_env(root_path: str, command: list[str], cwd: str | None = None, env: dict[str, str] | None = None, resource_limits: dict[str, int] | None = None, timeout: int | None = None) -> dict:
     info = path_info(root_path)
     if not info["allowed"]:
         return blocked_command("Path escapes configured file manager root", command, info)
-    result = run_command(command, cwd=cwd, env=env, allow_live=DEPLOYMENT_COMMANDS_LIVE, resource_limits=resource_limits)
+    result = run_command(command, cwd=cwd, env=env, allow_live=DEPLOYMENT_COMMANDS_LIVE, timeout=timeout, resource_limits=resource_limits)
     result["path"] = info
     return result
 
@@ -599,7 +600,7 @@ def nginx_config_name(deployment_id: str, server_name: str) -> str:
     return f"domain-{safe_name}"
 
 
-def guarded_deployment_command(root_path: str, command: str, env: dict[str, str] | None = None, resource_limits: dict[str, int] | None = None) -> dict:
+def guarded_deployment_command(root_path: str, command: str, env: dict[str, str] | None = None, resource_limits: dict[str, int] | None = None, timeout: int | None = None) -> dict:
     info = path_info(root_path)
     try:
         parsed = parse_deployment_command(command)
@@ -608,7 +609,7 @@ def guarded_deployment_command(root_path: str, command: str, env: dict[str, str]
     effective_env = dict(env or {})
     if parsed and parsed[0] == "composer":
         effective_env = composer_git_env(root_path, effective_env)
-    return guarded_command_with_env(root_path, parsed, cwd=deployment_cwd(root_path), env=effective_env or None, resource_limits=effective_resource_limits(resource_limits))
+    return guarded_command_with_env(root_path, parsed, cwd=deployment_cwd(root_path), env=effective_env or None, resource_limits=effective_resource_limits(resource_limits), timeout=timeout)
 
 
 def pm2_env(port: int | None) -> dict[str, str]:
@@ -2030,19 +2031,19 @@ def install(body: CommandRequest) -> dict:
     env = dict(body.env or {})
     if (body.packageManager or "").upper() == "COMPOSER":
         env.setdefault("COMPOSER_ALLOW_SUPERUSER", "1")
-    return guarded_deployment_command(body.rootPath, command, env=env or None, resource_limits=body.resourceLimits)
+    return guarded_deployment_command(body.rootPath, command, env=env or None, resource_limits=body.resourceLimits, timeout=body.timeoutSeconds)
 
 
 @router.post("/build")
 def build(body: CommandRequest) -> dict:
     command = body.command or "true"
-    return guarded_deployment_command(body.rootPath, command, env=body.env, resource_limits=body.resourceLimits)
+    return guarded_deployment_command(body.rootPath, command, env=body.env, resource_limits=body.resourceLimits, timeout=body.timeoutSeconds)
 
 
 @router.post("/migrate")
 def migrate(body: CommandRequest) -> dict:
     command = body.command or "true"
-    return guarded_deployment_command(body.rootPath, command, env=body.env, resource_limits=body.resourceLimits)
+    return guarded_deployment_command(body.rootPath, command, env=body.env, resource_limits=body.resourceLimits, timeout=body.timeoutSeconds)
 
 
 @router.post("/process")

@@ -21,7 +21,7 @@ import {
 } from "../lib/laravelProcesses.js";
 import { normalizeDeploymentResourcePolicy } from "../lib/deploymentResourcePolicy.js";
 
-const staleDeploymentMs = Number(process.env.GUARDIAN_STALE_DEPLOYMENT_MS ?? 15 * 60_000);
+const staleDeploymentMs = Number(process.env.GUARDIAN_STALE_DEPLOYMENT_MS ?? 6 * 60_000);
 const autoDeployRepairEnabled = process.env.GUARDIAN_AUTO_DEPLOY_REPAIR !== "false";
 const autoDeployCooldownMs = Number(process.env.GUARDIAN_AUTO_DEPLOY_COOLDOWN_MS ?? 30 * 60_000);
 const autoDeployMaxAttempts = Number(process.env.GUARDIAN_AUTO_DEPLOY_MAX_ATTEMPTS_PER_HOUR ?? 2);
