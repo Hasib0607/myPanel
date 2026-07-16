@@ -177,13 +177,39 @@ def _server_name_token_matches(claimed: str, requested: str) -> bool:
     return claimed == requested
 
 
+def _wildcard_parent(token: str) -> str | None:
+    token = token.strip().lower().rstrip(".")
+    if token.startswith("*.") and len(token) > 2:
+        return token[2:]
+    return None
+
+
+def _one_label_child_of(host: str, parent: str) -> bool:
+    host = host.strip().lower().rstrip(".")
+    parent = parent.strip().lower().rstrip(".")
+    suffix = f".{parent}"
+    if not host.endswith(suffix):
+        return False
+    left = host[: -len(suffix)]
+    return bool(left) and left != "*" and "." not in left
+
+
+def _server_name_token_conflicts(claimed: str, requested: str) -> bool:
+    if _server_name_token_matches(claimed, requested):
+        return True
+    requested_parent = _wildcard_parent(requested)
+    if requested_parent:
+        return _one_label_child_of(claimed, requested_parent)
+    return False
+
+
 def _config_has_server_name(path: Path, server_name: str) -> bool:
     """Return True if an nginx config file contains a server_name directive for server_name."""
     try:
         text = path.read_text(encoding="utf-8", errors="ignore")
         claimed = set(server_name_directive_tokens(text))
         return any(
-            _server_name_token_matches(claimed_token, requested_token)
+            _server_name_token_conflicts(claimed_token, requested_token)
             for requested_token in server_name_tokens(server_name)
             for claimed_token in claimed
         )
@@ -271,7 +297,7 @@ def _config_dump_conflict_files(
         if not claimed:
             continue
         if not any(
-            _server_name_token_matches(claimed_token, requested_token)
+            _server_name_token_conflicts(claimed_token, requested_token)
             for requested_token in requested_tokens
             for claimed_token in claimed
         ):

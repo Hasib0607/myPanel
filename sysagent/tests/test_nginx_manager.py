@@ -109,6 +109,40 @@ server {
             self.assertTrue(stale.exists())
             self.assertTrue(own.exists())
 
+    def test_wildcard_domain_removes_exact_child_shadow_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stale = root / "domain-fahpet.ebitan.store.conf"
+            own = root / "deployment-wildcard.ebitan.store.conf"
+            stale.write_text("server { listen 443 ssl; server_name fahpet.ebitan.store; }\n", encoding="utf-8")
+            own.write_text("server { listen 443 ssl; server_name *.ebitan.store; }\n", encoding="utf-8")
+
+            removed = remove_conflicting_configs("deployment-wildcard.ebitan.store", "*.ebitan.store", tmp)
+
+            self.assertEqual(removed, ["domain-fahpet.ebitan.store.conf"])
+            self.assertFalse(stale.exists())
+            self.assertTrue(own.exists())
+
+    def test_wildcard_domain_keeps_apex_and_deep_child_configs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            apex = root / "domain-ebitan.store.conf"
+            deep_child = root / "domain-deep.fahpet.ebitan.store.conf"
+            own = root / "deployment-wildcard.ebitan.store.conf"
+            apex.write_text("server { listen 443 ssl; server_name ebitan.store; }\n", encoding="utf-8")
+            deep_child.write_text(
+                "server { listen 443 ssl; server_name deep.fahpet.ebitan.store; }\n",
+                encoding="utf-8",
+            )
+            own.write_text("server { listen 443 ssl; server_name *.ebitan.store; }\n", encoding="utf-8")
+
+            removed = remove_conflicting_configs("deployment-wildcard.ebitan.store", "*.ebitan.store", tmp)
+
+            self.assertEqual(removed, [])
+            self.assertTrue(apex.exists())
+            self.assertTrue(deep_child.exists())
+            self.assertTrue(own.exists())
+
     def test_removes_default_config_when_it_claims_requested_domain(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
