@@ -22,6 +22,8 @@ import {
 import { normalizeDeploymentResourcePolicy } from "../lib/deploymentResourcePolicy.js";
 
 const staleDeploymentMs = Number(process.env.GUARDIAN_STALE_DEPLOYMENT_MS ?? 6 * 60_000);
+const queuedReleaseRecoveryMs = Number(process.env.GUARDIAN_QUEUED_RELEASE_RECOVERY_MS ?? 90_000);
+const deployQueueScanLimit = Number(process.env.GUARDIAN_DEPLOY_QUEUE_SCAN_LIMIT ?? 1000);
 const autoDeployRepairEnabled = process.env.GUARDIAN_AUTO_DEPLOY_REPAIR !== "false";
 const autoDeployCooldownMs = Number(process.env.GUARDIAN_AUTO_DEPLOY_COOLDOWN_MS ?? 30 * 60_000);
 const autoDeployMaxAttempts = Number(process.env.GUARDIAN_AUTO_DEPLOY_MAX_ATTEMPTS_PER_HOUR ?? 2);
@@ -584,6 +586,84 @@ async function queueGuardianDeployRepair(deployment: Awaited<ReturnType<typeof p
   });
   const job = await deployQueue.add(action, { deploymentId: deployment.id, releaseId });
   return { queued: true, action, releaseId, jobId: job.id };
+}
+
+async function deployQueueReleaseIds() {
+  const states = ["wait", "delayed", "prioritized", "paused", "waiting-children", "active"] as const;
+  const jobs = await deployQueue.getJobs(states as any, 0, deployQueueScanLimit);
+  const releaseIds = new Set<string>();
+  const activeReleaseIds = new Set<string>();
+  for (const job of jobs) {
+    const releaseId = typeof (job.data as { releaseId?: unknown } | undefined)?.releaseId === "string"
+      ? (job.data as { releaseId: string }).releaseId
+      : null;
+    if (!releaseId) continue;
+    releaseIds.add(releaseId);
+    if (await job.getState() === "active") activeReleaseIds.add(releaseId);
+  }
+  return { releaseIds, activeReleaseIds, scanned: jobs.length };
+}
+
+async function runDeploymentQueueWatch() {
+  const wasPaused = await deployQueue.isPaused();
+  if (wasPaused) {
+    await deployQueue.resume();
+  }
+
+  const cutoff = new Date(Date.now() - queuedReleaseRecoveryMs);
+  const releases = await prisma.deploymentRelease.findMany({
+    where: {
+      status: "QUEUED",
+      createdAt: { lte: cutoff },
+      deployment: { status: "QUEUED" }
+    },
+    include: { deployment: true },
+    orderBy: { createdAt: "asc" },
+    take: 50
+  });
+  const queueState = await deployQueueReleaseIds();
+  const requeued = [];
+
+  for (const release of releases) {
+    if (queueState.releaseIds.has(release.id)) continue;
+
+    const job = await deployQueue.add("deploy", {
+      deploymentId: release.deploymentId,
+      releaseId: release.id,
+      trigger: "guardian_queue_recovery"
+    });
+    queueState.releaseIds.add(release.id);
+
+    await prisma.deployment.update({
+      where: { id: release.deploymentId },
+      data: { status: "QUEUED", healthStatus: "UNKNOWN" }
+    });
+    await prisma.deploymentLog.create({
+      data: {
+        deploymentId: release.deploymentId,
+        releaseId: release.id,
+        step: "QUEUED",
+        message: "Guardian requeued stuck deployment release",
+        metadata: {
+          jobId: job.id,
+          queuedForMs: Date.now() - release.createdAt.getTime(),
+          reason: "No live BullMQ job was found for this queued release.",
+          queueWasPaused: wasPaused
+        } as any
+      }
+    });
+    requeued.push({ deploymentId: release.deploymentId, releaseId: release.id, jobId: job.id });
+  }
+
+  return {
+    checked: releases.length,
+    requeued,
+    queueWasPaused: wasPaused,
+    queueResumed: wasPaused,
+    liveQueuedReleaseJobs: queueState.releaseIds.size,
+    activeReleaseJobs: queueState.activeReleaseIds.size,
+    scannedJobs: queueState.scanned
+  };
 }
 
 function renderStartCommand(deployment: { framework: string; startCommand: string | null; port: number }) {
@@ -1223,13 +1303,17 @@ export const guardianWorker = new Worker(
   "guardian",
   async (job) => {
     logger.info("guardian job received", { id: job.id, name: job.name });
+    if (job.name === "deployment-queue-watch") {
+      return runDeploymentQueueWatch();
+    }
     if (job.name === "deployment-watch") {
-      const [deploymentWatch, laravelWorkers, laravelQueueGroups] = await Promise.all([
+      const [queueWatch, deploymentWatch, laravelWorkers, laravelQueueGroups] = await Promise.all([
+        runDeploymentQueueWatch(),
         runDeploymentWatch(),
         runLaravelWorkerAutoscale(),
         runLaravelQueueGroupAutoscale()
       ]);
-      return { deploymentWatch, laravelWorkers, laravelQueueGroups };
+      return { queueWatch, deploymentWatch, laravelWorkers, laravelQueueGroups };
     }
     if (job.name === "deployment-guard-watch") {
       return runDeploymentGuardWatch();

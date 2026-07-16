@@ -2,6 +2,7 @@ import { logger } from "./lib/logger.js";
 import { guardianQueue } from "./jobs/queues.js";
 
 const intervalMs = Number(process.env.GUARDIAN_INTERVAL_MS ?? 60_000);
+const deploymentQueueIntervalMs = Number(process.env.GUARDIAN_DEPLOYMENT_QUEUE_INTERVAL_MS ?? 60_000);
 const deploymentDoctorIntervalMs = Number(process.env.GUARDIAN_DEPLOYMENT_DOCTOR_INTERVAL_MS ?? 5 * 60_000);
 const deploymentGuardIntervalMs = Number(process.env.GUARDIAN_DEPLOYMENT_GUARD_INTERVAL_MS ?? 10 * 60_000);
 const webRuntimeIntervalMs = Number(process.env.GUARDIAN_WEB_RUNTIME_INTERVAL_MS ?? 5 * 60_000);
@@ -26,6 +27,12 @@ async function scheduleGuardian() {
     await guardianQueue.add("deployment-watch", {}, {
       jobId: "guardian-deployment-watch",
       repeat: { every: deploymentDoctorIntervalMs },
+      removeOnComplete: 100,
+      removeOnFail: 100
+    });
+    await guardianQueue.add("deployment-queue-watch", {}, {
+      jobId: "guardian-deployment-queue-watch",
+      repeat: { every: deploymentQueueIntervalMs },
       removeOnComplete: 100,
       removeOnFail: 100
     });
@@ -75,6 +82,7 @@ async function scheduleGuardian() {
       name,
       autoHealEnabled,
       intervalMs,
+      deploymentQueueIntervalMs,
       deploymentDoctorIntervalMs,
       webRuntimeIntervalMs,
       laravelProductionIntervalMs,

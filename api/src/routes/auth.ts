@@ -1,5 +1,5 @@
 import bcrypt from "bcrypt";
-import type { FastifyPluginAsync } from "fastify";
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { env } from "../config/env.js";
 import { audit } from "../lib/audit.js";
@@ -19,25 +19,44 @@ const twoFactorLoginSchema = z.object({
 });
 
 export const authRoutes: FastifyPluginAsync = async (app) => {
-  function clearAuthCookies(reply: any) {
+  function requestUsesHttps(request: FastifyRequest) {
+    const forwardedProto = String(request.headers["x-forwarded-proto"] ?? "")
+      .split(",")[0]
+      .trim()
+      .toLowerCase();
+    if (forwardedProto) return forwardedProto === "https";
+    return request.protocol === "https" || Boolean((request.raw.socket as any).encrypted);
+  }
+
+  function authCookieOptions(request: FastifyRequest, maxAge?: number) {
+    return {
+      httpOnly: true,
+      secure: requestUsesHttps(request),
+      sameSite: "strict" as const,
+      path: "/",
+      ...(maxAge ? { maxAge } : {})
+    };
+  }
+
+  function clearAuthCookies(reply: FastifyReply) {
     reply.clearCookie("panel_session", { path: "/" });
     reply.clearCookie("account_session", { path: "/" });
     reply.clearCookie("mail_session", { path: "/" });
     reply.clearCookie(csrfCookieName, { path: "/" });
   }
 
-  function setCsrfCookie(reply: any) {
+  function setCsrfCookie(request: FastifyRequest, reply: FastifyReply) {
     const csrfToken = createCsrfToken();
     reply.setCookie(csrfCookieName, csrfToken, {
       httpOnly: false,
-      secure: process.env.NODE_ENV === "production",
+      secure: requestUsesHttps(request),
       sameSite: "strict",
       path: "/"
     });
     return csrfToken;
   }
 
-  app.get("/csrf", async (_request, reply) => ({ token: setCsrfCookie(reply) }));
+  app.get("/csrf", async (request, reply) => ({ token: setCsrfCookie(request, reply) }));
 
   app.post("/login", { config: { rateLimit: { max: 5, timeWindow: "15 minutes" } } }, async (request, reply) => {
     const body = loginSchema.parse(request.body);
@@ -65,14 +84,8 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
     const token = app.jwt.sign({ sub: env.SUPERADMIN_USERNAME, role: "superadmin" }, { expiresIn: env.JWT_EXPIRY });
     reply.clearCookie("account_session", { path: "/" });
-    reply.setCookie("panel_session", token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
-      path: "/",
-      maxAge: env.JWT_EXPIRY
-    });
-    setCsrfCookie(reply);
+    reply.setCookie("panel_session", token, authCookieOptions(request, env.JWT_EXPIRY));
+    setCsrfCookie(request, reply);
     await audit(request, { action: "LOGIN", resource: "auth", description: "Superadmin logged in without 2FA" });
 
     return { ok: true };
@@ -97,14 +110,8 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
     const token = app.jwt.sign({ sub: account.username, role: "account", accountId: account.id }, { expiresIn: env.JWT_EXPIRY });
     reply.clearCookie("panel_session", { path: "/" });
-    reply.setCookie("account_session", token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
-      path: "/",
-      maxAge: env.JWT_EXPIRY
-    });
-    setCsrfCookie(reply);
+    reply.setCookie("account_session", token, authCookieOptions(request, env.JWT_EXPIRY));
+    setCsrfCookie(request, reply);
     await audit(request, { action: "LOGIN", resource: "account_auth", resourceId: account.id, description: `Account ${account.username} logged in` });
     return { ok: true, role: "account" };
   });
@@ -142,14 +149,8 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     const token = app.jwt.sign({ sub: email, role: "mail", mailAccountId: mailbox.id }, { expiresIn: env.JWT_EXPIRY });
     reply.clearCookie("panel_session", { path: "/" });
     reply.clearCookie("account_session", { path: "/" });
-    reply.setCookie("mail_session", token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
-      path: "/",
-      maxAge: env.JWT_EXPIRY
-    });
-    setCsrfCookie(reply);
+    reply.setCookie("mail_session", token, authCookieOptions(request, env.JWT_EXPIRY));
+    setCsrfCookie(request, reply);
     await audit(request, { action: "LOGIN", resource: "mail_auth", resourceId: mailbox.id, description: `Mailbox ${email} logged in` });
     return { ok: true, role: "mail", email, redirectTo: "/webmail" };
   });
@@ -168,14 +169,8 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     }
 
     const token = app.jwt.sign({ sub: account.username, role: "account", accountId: account.id }, { expiresIn: env.JWT_EXPIRY });
-    reply.setCookie("account_session", token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
-      path: "/",
-      maxAge: env.JWT_EXPIRY
-    });
-    setCsrfCookie(reply);
+    reply.setCookie("account_session", token, authCookieOptions(request, env.JWT_EXPIRY));
+    setCsrfCookie(request, reply);
     await audit(request, {
       action: "LOGIN",
       resource: "account_auth",
@@ -232,14 +227,8 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
     const token = app.jwt.sign({ sub: env.SUPERADMIN_USERNAME, role: "superadmin", mfa: "verified" }, { expiresIn: env.JWT_EXPIRY });
     reply.clearCookie("account_session", { path: "/" });
-    reply.setCookie("panel_session", token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
-      path: "/",
-      maxAge: env.JWT_EXPIRY
-    });
-    setCsrfCookie(reply);
+    reply.setCookie("panel_session", token, authCookieOptions(request, env.JWT_EXPIRY));
+    setCsrfCookie(request, reply);
     await audit(request, { action: "LOGIN", resource: "auth", description: "Superadmin completed 2FA login" });
 
     return { ok: true };
