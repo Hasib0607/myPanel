@@ -191,6 +191,49 @@ function deploymentProcessConfig(value: unknown): Record<string, any> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {};
 }
 
+function deploymentArtifactRootPath(deployment: { rootPath: string; processConfig: unknown }) {
+  const config = deploymentProcessConfig(deployment.processConfig);
+  return typeof config.activeArtifactPath === "string" && config.activeArtifactPath.trim()
+    ? config.activeArtifactPath
+    : deployment.rootPath;
+}
+
+function deploymentReleaseRootPath(deployment: { rootPath: string }, releaseId: string | undefined) {
+  const safeReleaseId = (releaseId || new Date().toISOString()).replace(/[^a-zA-Z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "");
+  return path.join(deployment.rootPath, ".panel-releases", `${Date.now()}-${safeReleaseId || "release"}`);
+}
+
+function deploymentUsesAtomicArtifact(deployment: { framework: DeploymentFramework; gitUrl: string | null; processManager: DeploymentProcessManager | null }) {
+  return Boolean(deployment.gitUrl) && deployment.processManager === "PM2" && (deployment.framework === "NEXTJS" || deployment.framework === "NODEJS");
+}
+
+async function activateDeploymentArtifact(deployment: DeploymentWithWorkerRelations, releaseId: string | undefined, artifactRootPath: string | null) {
+  const currentConfig = deploymentProcessConfig(deployment.processConfig);
+  if (!artifactRootPath && !currentConfig.activeArtifactPath) return deployment;
+  const nextProcessConfig = {
+    ...currentConfig
+  };
+  if (artifactRootPath) {
+    nextProcessConfig.activeArtifactPath = artifactRootPath;
+  } else {
+    delete nextProcessConfig.activeArtifactPath;
+  }
+  if (releaseId) {
+    await prisma.deploymentRelease.updateMany({
+      where: { id: releaseId, status: { not: "CANCELLED" } },
+      data: {
+        sourcePath: deployment.rootPath,
+        artifactPath: artifactRootPath
+      }
+    });
+  }
+  return prisma.deployment.update({
+    where: { id: deployment.id },
+    data: { processConfig: nextProcessConfig as Prisma.InputJsonValue },
+    include: deploymentWorkerInclude
+  });
+}
+
 function laravelWorkerConfig(value: unknown) {
   const raw = value && typeof value === "object" ? value as Record<string, any> : {};
   const enabled = Boolean(raw.enabled);
@@ -2953,14 +2996,15 @@ async function reconcileMisdetectedLaravelFramework(
 async function reconcileDeploymentRootDirectory(
   deployment: DeploymentWithWorkerRelations,
   releaseId: string | undefined,
-  appPath: string
+  appPath: string,
+  searchRootPath = deployment.rootPath
 ) {
-  const detected = await findDeploymentAppRoot(deployment.rootPath, deployment.rootDirectory, deployment.framework);
+  const detected = await findDeploymentAppRoot(searchRootPath, deployment.rootDirectory, deployment.framework);
   if (!detected) {
     return { deployment, appPath };
   }
 
-  const rootPath = path.resolve(deployment.rootPath);
+  const rootPath = path.resolve(searchRootPath);
   const detectedAppPath = path.resolve(detected.appPath);
   const currentAppPath = path.resolve(appPath);
   if (detectedAppPath === currentAppPath) {
@@ -3824,8 +3868,9 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
     });
 
     const envVars = await resolveEnvVars(deployment.env);
-    let appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
-    ({ deployment, appPath } = await reconcileDeploymentRootDirectory(deployment, releaseId, appPath));
+    const lifecycleRootPath = deploymentArtifactRootPath(deployment);
+    let appPath = deploymentAppPath(lifecycleRootPath, deployment.rootDirectory);
+    ({ deployment, appPath } = await reconcileDeploymentRootDirectory(deployment, releaseId, appPath, lifecycleRootPath));
     ({ deployment, appPath } = await reconcileLaravelRootDirectory(deployment, releaseId, appPath));
     deployment = await reconcilePythonStartCommand(deployment, releaseId, appPath);
     const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
@@ -3991,6 +4036,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
   const startedAt = new Date();
   let deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: deploymentWorkerInclude });
   const release = releaseId ? await prisma.deploymentRelease.findUnique({ where: { id: releaseId } }) : null;
+  let artifactRootPath: string | null = null;
   await resetBuildLogs(deployment.id);
   await markRelease(releaseId, "RUNNING", startedAt);
   await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "DEPLOYING" } });
@@ -4011,15 +4057,27 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         sysagent.ensureWebRuntimeOptimizations()
       );
     }
-    let deployBudget = await prepareDeployResourceBudget(deployment.id, releaseId, deployment.rootPath);
+    const rollbackArtifactPath = action === "rollback" && release?.artifactPath ? release.artifactPath : null;
+    const shouldUseAtomicArtifact = !rollbackArtifactPath && deploymentUsesAtomicArtifact(deployment);
+    let workingRootPath = rollbackArtifactPath || (shouldUseAtomicArtifact ? deploymentReleaseRootPath(deployment, releaseId) : deployment.rootPath);
+    artifactRootPath = workingRootPath !== deployment.rootPath ? workingRootPath : null;
+    if (artifactRootPath) {
+      await writeLog(deployment.id, releaseId, "PREFLIGHT", "Using isolated release artifact directory", {
+        sourceRootPath: deployment.rootPath,
+        artifactRootPath,
+        reason: rollbackArtifactPath ? "Rollback release has a built artifact path" : "Next/Node PM2 deployments build outside the active runtime directory"
+      });
+    }
 
-    if (deployment.gitUrl || action === "pull") {
+    let deployBudget = await prepareDeployResourceBudget(deployment.id, releaseId, workingRootPath);
+
+    if ((deployment.gitUrl || action === "pull") && !rollbackArtifactPath) {
       const gitToken = await githubCloneToken(deployment.sourceProvider, deployment.gitUrl, deployment.accountId);
       const commitSha = sourceSyncCommitSha(action, release, deployment);
       const syncResult = await runStep(deployment.id, releaseId, "CLONING", "Source sync", () =>
         sysagent.deploymentGitSync({
-          rootPath: deployment.rootPath,
-          gitUrl: action === "pull" ? null : deployment.gitUrl,
+          rootPath: workingRootPath,
+          gitUrl: artifactRootPath ? deployment.gitUrl : action === "pull" ? null : deployment.gitUrl,
           branch: deployment.branch,
           commitSha,
           gitToken,
@@ -4029,14 +4087,17 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       assertCommandTree(syncResult, "Source sync");
       await syncReleaseCommitInfo(deployment.id, releaseId, gitSyncCommitInfo(syncResult));
     } else {
-      await writeLog(deployment.id, releaseId, "CLONING", "Source sync skipped for non-Git source", { sourceProvider: deployment.sourceProvider });
+      await writeLog(deployment.id, releaseId, "CLONING", "Source sync skipped", {
+        sourceProvider: deployment.sourceProvider,
+        reason: rollbackArtifactPath ? "Rollback is using an existing release artifact" : "Non-Git source"
+      });
     }
 
-    let appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
-    ({ deployment, appPath } = await reconcileDeploymentRootDirectory(deployment, releaseId, appPath));
+    let appPath = deploymentAppPath(workingRootPath, deployment.rootDirectory);
+    ({ deployment, appPath } = await reconcileDeploymentRootDirectory(deployment, releaseId, appPath, workingRootPath));
 
     const detection = await runStep(deployment.id, releaseId, "PREFLIGHT", "Runtime detection", () =>
-      detectDeploymentSource(deployment.rootPath, deployment.rootDirectory)
+      detectDeploymentSource(workingRootPath, deployment.rootDirectory)
     );
     deployment = await prisma.deployment.update({
       where: { id: deployment.id },
@@ -4064,6 +4125,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     if (deployment.processManager === "NONE" && deployment.framework !== "STATIC") {
       throw new Error(`No runnable start command found for ${deployment.slug}. Add a package.json start script or set a manual start command.`);
     }
+    workingRootPath = path.resolve(appPath, deployment.rootDirectory && deployment.rootDirectory !== "." ? ".." : ".");
     deployBudget = await prepareDeployResourceBudget(deployment.id, releaseId, appPath);
     let domain = deploymentDomain(deployment);
     let routeDomains = deploymentRouteDomains(deployment);
@@ -4698,6 +4760,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
 
     const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, "Public website check", { ...deployment, domain }, appPath, envVars, processManager);
 
+    deployment = await activateDeploymentArtifact(deployment, releaseId, artifactRootPath);
     await markRelease(releaseId, action === "rollback" ? "ROLLED_BACK" : "SUCCEEDED", startedAt);
     const healthStatus = publicRouteWarning || healthOutcome.degraded ? "DEGRADED" : "HEALTHY";
     await prisma.deployment.update({

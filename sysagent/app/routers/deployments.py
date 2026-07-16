@@ -1933,6 +1933,21 @@ def guarded_write_file(root_path: str, target_path: str, content: str) -> dict:
 @router.post("/git-sync")
 def git_sync(body: GitSyncRequest) -> dict:
     target = Path(body.rootPath)
+    info = path_info(body.rootPath)
+    if not info["allowed"]:
+        return blocked_command("Path escapes configured file manager root", ["git", "sync", str(target)], info)
+    if settings.allow_live_system_commands:
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            return {
+                "dryRun": False,
+                "command": ["mkdir", "-p", str(target.parent)],
+                "path": info,
+                "stdout": "",
+                "stderr": str(error),
+                "returncode": 1,
+            }
     env = git_auth_env(body.gitToken)
     safe = git_safe_directory(body.rootPath, target)
     if target.joinpath(".git").exists():

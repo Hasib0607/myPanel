@@ -316,7 +316,7 @@ async function applyDeploymentCron(deployment: Awaited<ReturnType<typeof findDep
   const result = await sysagent.deploymentCron({
     deploymentId: deployment.id,
     name: deployment.slug,
-    rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
+    rootPath: deploymentActiveAppPath(deployment),
     logDir: deploymentLogDir(deployment.slug),
     jobs: jobs.map(cronJobForSysagent)
   });
@@ -871,6 +871,17 @@ function deploymentProcessConfig(value: unknown): Record<string, any> {
   return value && typeof value === "object" && !Array.isArray(value) ? { ...(value as Record<string, any>) } : {};
 }
 
+function deploymentActiveRootPath(deployment: { rootPath: string; processConfig: unknown }) {
+  const config = deploymentProcessConfig(deployment.processConfig);
+  return typeof config.activeArtifactPath === "string" && config.activeArtifactPath.trim()
+    ? config.activeArtifactPath
+    : deployment.rootPath;
+}
+
+function deploymentActiveAppPath(deployment: { rootPath: string; rootDirectory: string | null; processConfig: unknown }) {
+  return deploymentAppPath(deploymentActiveRootPath(deployment), deployment.rootDirectory);
+}
+
 function normalizeLaravelWorkerConfig(input: unknown, fallback?: Partial<LaravelWorkerConfig>): LaravelWorkerConfig {
   const base = {
     enabled: false,
@@ -896,7 +907,7 @@ async function applyLaravelWorkers(deployment: Awaited<ReturnType<typeof findDep
   const desiredWorkers = config.enabled ? config.desiredWorkers : 0;
   const result = await sysagent.deploymentLaravelWorkers({
     name: laravelWorkerProgramName(deployment.slug),
-    rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
+    rootPath: deploymentActiveAppPath(deployment),
     action: desiredWorkers > 0 ? "apply" : "stop",
     desiredWorkers,
     queueCommand: config.queueCommand,
@@ -942,7 +953,7 @@ async function applyLaravelManagedProcesses(deployment: Awaited<ReturnType<typeo
   for (const definition of definitions) {
     results[definition.key] = await sysagent.deploymentLaravelWorkers({
       name: laravelManagedProgramName(deployment.slug, definition.key),
-      rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
+      rootPath: deploymentActiveAppPath(deployment),
       action: definition.enabled && definition.instances > 0 ? "apply" : "stop",
       desiredWorkers: definition.enabled ? definition.instances : 0,
       queueCommand: renderLaravelProcessCommand(definition.command, deployment.port),
@@ -1480,7 +1491,7 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
   const checks: Array<{ key: string; label: string; status: "pass" | "warn" | "fail"; detail: string; fix?: string; repairAction?: string }> = [];
   const envSuggestions: Array<{ key: string; value: string; reason: string; repairAction: string }> = [];
   const riskyActions: Array<{ key: string; label: string; command: string; reason: string; approvalRequired: true }> = [];
-  const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
+  const appPath = deploymentActiveAppPath(deployment);
   const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
   const domain = deployment.domainBindings?.find((binding) => binding.role === "primary")?.domain ?? deployment.domainBindings?.[0]?.domain ?? deployment.domain;
   const serverName = deploymentServerName(domain);
@@ -2336,7 +2347,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     if (deployment.framework === "LARAVEL") {
       status = await sysagent.deploymentLaravelWorkers({
         name: laravelWorkerProgramName(deployment.slug),
-        rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
+        rootPath: deploymentActiveAppPath(deployment),
         action: "status",
         desiredWorkers: config.enabled ? config.desiredWorkers : 0,
         queueCommand: config.queueCommand,
@@ -2783,7 +2794,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const deployment = await findDeployment(deploymentId);
     await pruneDeploymentLogs(deployment.id);
-    const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
+    const appPath = deploymentActiveAppPath(deployment);
     const [metrics, buildLogs] = await Promise.all([
       sysagent.deploymentMetrics({
         deploymentId: deployment.id,
@@ -2826,7 +2837,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     return sysagent.deploymentLaravelRuntimeStatus({
       deploymentId: deployment.id,
       name: deployment.slug,
-      rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
+      rootPath: deploymentActiveAppPath(deployment),
       serverName,
       upstreamPort: deployment.port,
       processManager: deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework],
@@ -2839,7 +2850,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const deployment = await findDeployment(deploymentId);
     if (deployment.framework !== "LARAVEL") throw app.httpErrors.badRequest("Laravel runtime repair is only available for Laravel deployments.");
-    const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
+    const appPath = deploymentActiveAppPath(deployment);
     const domain = deployment.domainBindings?.find((binding) => binding.role === "primary")?.domain ?? deployment.domainBindings?.[0]?.domain ?? deployment.domain;
     const serverName = deploymentServerName(domain);
     const repair = await sysagent.deploymentLaravelRuntimeRepair({
@@ -2908,7 +2919,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       const runtime = await sysagent.deploymentRuntimeLogs({
         name: deployment.slug,
         logDir: deploymentLogDir(deployment.slug),
-        rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
+        rootPath: deploymentActiveAppPath(deployment),
         lines: query.limit
       });
       const lines = [
@@ -3043,7 +3054,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
         try {
           publicRoute = await sysagent.deploymentPublicRoute({
             serverName,
-            rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
+            rootPath: deploymentActiveAppPath(deployment),
             framework: deployment.framework
           });
         } catch (error) {
@@ -3075,7 +3086,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
         healthUrl: localRuntimeHealthUrl(deployment.healthUrl, deployment.port),
         processName: deployment.slug,
         processManager: deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework],
-        rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
+        rootPath: deploymentActiveAppPath(deployment),
         logDir: deploymentLogDir(deployment.slug),
         strictHealth: normalizeDeploymentResourcePolicy(deployment.processConfig).healthStrict
       });
@@ -3291,7 +3302,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       healthUrl: localRuntimeHealthUrl(deployment.healthUrl, deployment.port),
       processName: deployment.slug,
       processManager: deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework],
-      rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
+      rootPath: deploymentActiveAppPath(deployment),
       logDir: deploymentLogDir(deployment.slug),
       strictHealth: normalizeDeploymentResourcePolicy(deployment.processConfig).healthStrict
     });
