@@ -3,7 +3,6 @@ import re
 import secrets
 import subprocess
 import tempfile
-import stat
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -115,44 +114,6 @@ def certificate_names(domain: str) -> list[str]:
     return sorted({name.lower() for name in re.findall(r"DNS:([^,\s]+)", result.stdout, re.IGNORECASE)})
 
 
-def make_acme_webroot_readable(web_root: Path, challenge_dir: Path, challenge_file: Path) -> dict:
-    """
-    Nginx must be able to traverse the account path and read the challenge file.
-    Keep parent directories execute-only for "other"; make only the public webroot
-    and .well-known challenge directories listable/readable.
-    """
-    file_root = Path(settings.file_manager_root).resolve()
-    resolved_web_root = web_root.resolve()
-    if resolved_web_root != file_root and file_root not in resolved_web_root.parents:
-        raise HTTPException(status_code=400, detail="Certbot webroot escapes file manager root")
-
-    changed: list[str] = []
-
-    def chmod_or(path: Path, bits: int) -> None:
-        mode = path.stat().st_mode
-        next_mode = mode | bits
-        if next_mode != mode:
-            path.chmod(stat.S_IMODE(next_mode))
-            changed.append(str(path))
-
-    parent_dirs: list[Path] = []
-    cursor = resolved_web_root
-    while cursor != file_root:
-        parent_dirs.append(cursor)
-        cursor = cursor.parent
-    parent_dirs.append(file_root)
-
-    for directory in reversed(parent_dirs):
-        chmod_or(directory, stat.S_IXOTH)
-    for directory in [resolved_web_root, resolved_web_root / ".well-known", challenge_dir]:
-        if directory.exists():
-            chmod_or(directory, stat.S_IROTH | stat.S_IXOTH)
-    if challenge_file.exists():
-        chmod_or(challenge_file, stat.S_IROTH)
-
-    return {"changed": changed, "webRoot": str(resolved_web_root), "challengeDir": str(challenge_dir)}
-
-
 @router.get("/certificate-status/{domain}")
 def certificate_status(domain: str) -> dict:
     primary = safe_cert_lookup_name(domain)
@@ -178,38 +139,21 @@ def reusable_certificate_candidates(requested: str) -> list[dict]:
         if not item.is_dir():
             continue
         cert_name = item.name
+        if cert_name != base and not duplicate_pattern.fullmatch(cert_name):
+            continue
         expiry = certificate_expiry(cert_name)
         exists = letsencrypt_certificate_exists(cert_name)
         if not exists:
-            continue
-        names = certificate_names(cert_name)
-        if cert_name != base and not duplicate_pattern.fullmatch(cert_name) and not certificate_names_cover(base, names):
             continue
         candidates.append({
             "domain": cert_name,
             "exists": exists,
             "expiry": expiry,
-            "names": names,
+            "names": certificate_names(cert_name),
             "certificate": str(item / "fullchain.pem"),
             "privateKey": str(item / "privkey.pem"),
         })
     return sorted(candidates, key=lambda item: item.get("expiry") or "", reverse=True)
-
-
-def certificate_names_cover(requested: str, names: list[str]) -> bool:
-    requested = requested.lower().rstrip(".")
-    requested_labels = requested.split(".")
-    for name in names:
-        candidate = name.lower().rstrip(".")
-        if candidate == requested:
-            return True
-        if not candidate.startswith("*."):
-            continue
-        parent = candidate[2:]
-        parent_labels = parent.split(".")
-        if requested.endswith(f".{parent}") and len(requested_labels) == len(parent_labels) + 1:
-            return True
-    return False
 
 
 @router.get("/certificate-reusable/{domain}")
@@ -240,17 +184,14 @@ def ensure_acme_webroot(body: EnsureAcmeWebrootRequest) -> dict:
     primary = body.domain.split()[0].strip()
     web_root = safe_web_root(body.webRoot) if body.webRoot else acme_root_for_server_name(primary)
     challenge_dir = web_root / ".well-known" / "acme-challenge"
-    permissions = {"changed": [], "webRoot": str(web_root), "challengeDir": str(challenge_dir)}
     if settings.allow_live_ssl:
         run_live_step("ACME webroot create", lambda: challenge_dir.mkdir(parents=True, exist_ok=True))
-        permissions = run_live_step("ACME webroot permissions", lambda: make_acme_webroot_readable(web_root, challenge_dir, challenge_dir))
     return {
         "dryRun": not settings.allow_live_ssl,
         "returncode": 0,
         "webRoot": str(web_root),
         "challengeDir": str(challenge_dir),
         "domain": primary,
-        "permissions": permissions,
     }
 
 
@@ -585,9 +526,6 @@ def preflight(payload: CertificatePreflightRequest) -> dict:
     if settings.allow_live_ssl:
         run_live_step("ACME challenge directory create", lambda: challenge_dir.mkdir(parents=True, exist_ok=True))
         run_live_step("ACME challenge write", lambda: challenge_file.write_text(expected, encoding="utf-8"))
-        permissions = run_live_step("ACME challenge permissions", lambda: make_acme_webroot_readable(web_root, challenge_dir, challenge_file))
-    else:
-        permissions = {"changed": [], "webRoot": str(web_root), "challengeDir": str(challenge_dir)}
 
     hosts = [payload.domain]
     if payload.includeWww:
@@ -600,8 +538,6 @@ def preflight(payload: CertificatePreflightRequest) -> dict:
             "-fsS",
             "--max-time",
             "10",
-            "--noproxy",
-            "*",
             "-H",
             f"Host: {host}",
             f"http://127.0.0.1/.well-known/acme-challenge/{token}",
@@ -611,8 +547,6 @@ def preflight(payload: CertificatePreflightRequest) -> dict:
             "-fsS",
             "--max-time",
             "10",
-            "--noproxy",
-            "*",
             f"http://{host}/.well-known/acme-challenge/{token}",
         ], allow_live=settings.allow_live_ssl))
 
@@ -626,5 +560,4 @@ def preflight(payload: CertificatePreflightRequest) -> dict:
         "localChecks": local_checks,
         "publicChecks": public_checks,
         "webRoot": str(web_root),
-        "permissions": permissions,
     }

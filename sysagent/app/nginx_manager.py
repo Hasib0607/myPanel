@@ -1,7 +1,6 @@
 from __future__ import annotations
 import os
 import re
-import stat
 from pathlib import Path
 from typing import Callable, TypeVar
 from uuid import uuid4
@@ -15,8 +14,6 @@ T = TypeVar("T")
 
 MANAGED_CONFIG_PREFIXES = ("domain-", "deployment-")
 PROTECTED_CONFIG_NAMES = {"default", "vps-panel", "panel", "vps_panel"}
-STRICTLY_PROTECTED_CONFIG_NAMES = {"vps-panel", "panel", "vps_panel"}
-ROUTE_OWNERSHIP_HEADER = "X-VPS-Panel-Route"
 
 
 def assert_managed_config_name(name: str) -> None:
@@ -25,19 +22,6 @@ def assert_managed_config_name(name: str) -> None:
         raise HTTPException(status_code=400, detail="Refusing to write protected panel Nginx config")
     if not normalized.startswith(MANAGED_CONFIG_PREFIXES):
         raise HTTPException(status_code=400, detail="Nginx config name must be domain-* or deployment-*")
-
-
-def route_ownership_header(name: str) -> str:
-    assert_managed_config_name(name)
-    return f'    add_header {ROUTE_OWNERSHIP_HEADER} "{name}" always;\n'
-
-
-def route_ownership_header_seen(output: str, name: str) -> bool:
-    return f"{ROUTE_OWNERSHIP_HEADER.lower()}: {name.lower()}" in output.lower()
-
-
-def route_ownership_config_seen(output: str, name: str) -> bool:
-    return f'{ROUTE_OWNERSHIP_HEADER.lower()} "{name.lower()}"' in output.lower()
 
 
 def safe_nginx_path(root: str, name: str) -> Path:
@@ -60,15 +44,8 @@ def safe_web_root(root_path: str, detail: str = "Website root escapes file manag
     return target
 
 
-def certificate_name_for_server_name(server_name: str) -> str:
-    primary = primary_server_name(server_name)
-    if primary.startswith("*.") and len(primary) > 2:
-        return f"wildcard.{primary[2:]}"
-    return primary
-
-
 def letsencrypt_certificate_exists(domain: str) -> bool:
-    primary = certificate_name_for_server_name(domain)
+    primary = domain.split()[0].strip()
     cert = Path(f"/etc/letsencrypt/live/{primary}/fullchain.pem")
     key = Path(f"/etc/letsencrypt/live/{primary}/privkey.pem")
     if not cert.is_file() or not key.is_file():
@@ -96,13 +73,6 @@ def primary_server_name(server_name: str) -> str:
     return server_name.split()[0].strip() if server_name else ""
 
 
-def probe_host_for_server_name(server_name: str) -> str:
-    primary = primary_server_name(server_name)
-    if primary.startswith("*.") and len(primary) > 2:
-        return f"vps-panel-wildcard-probe.{primary[2:]}"
-    return primary
-
-
 def acme_root_for_server_name(server_name: str) -> Path:
     primary = primary_server_name(server_name)
     if not primary:
@@ -110,45 +80,13 @@ def acme_root_for_server_name(server_name: str) -> Path:
     return safe_web_root(str(Path(settings.file_manager_root) / primary / "public_html"))
 
 
-def make_web_root_readable(web_root: Path) -> dict:
-    """
-    Nginx must be able to traverse account/domain parent paths before it can
-    serve public files or ACME tokens from the web root.
-    """
-    file_root = Path(settings.file_manager_root).resolve()
-    resolved_web_root = web_root.resolve()
-    if resolved_web_root != file_root and file_root not in resolved_web_root.parents:
-        raise HTTPException(status_code=400, detail="Website root escapes file manager root")
-
-    changed: list[str] = []
-
-    def chmod_or(path: Path, bits: int) -> None:
-        mode = path.stat().st_mode
-        next_mode = mode | bits
-        if next_mode != mode:
-            path.chmod(stat.S_IMODE(next_mode))
-            changed.append(str(path))
-
-    parent_dirs: list[Path] = []
-    cursor = resolved_web_root
-    while cursor != file_root:
-        parent_dirs.append(cursor)
-        cursor = cursor.parent
-    parent_dirs.append(file_root)
-
-    for directory in reversed(parent_dirs):
-        chmod_or(directory, stat.S_IXOTH)
-    chmod_or(resolved_web_root, stat.S_IROTH | stat.S_IXOTH)
-    return {"changed": changed, "webRoot": str(resolved_web_root)}
-
-
 def acme_location(server_name: str, web_root: Path | str | None = None) -> str:
     acme_root = safe_web_root(str(web_root)) if web_root else acme_root_for_server_name(server_name)
-    challenge_root = acme_root / ".well-known" / "acme-challenge"
     return (
         "    location ^~ /.well-known/acme-challenge/ {\n"
-        f"        alias {challenge_root}/;\n"
+        f"        root {acme_root};\n"
         "        default_type text/plain;\n"
+        "        try_files $uri =404;\n"
         "    }\n"
         "\n"
     )
@@ -173,10 +111,6 @@ def server_name_tokens(server_name: str) -> list[str]:
     return [part.strip() for part in server_name.split() if part.strip()]
 
 
-def server_name_has_wildcard(server_name: str) -> bool:
-    return any(token.startswith("*.") for token in server_name_tokens(server_name))
-
-
 def server_name_directive_tokens(text: str) -> list[str]:
     tokens: list[str] = []
     for match in re.finditer(r"\bserver_name\b\s+([^;]+);", text):
@@ -184,197 +118,14 @@ def server_name_directive_tokens(text: str) -> list[str]:
     return tokens
 
 
-def _server_name_token_matches(claimed: str, requested: str) -> bool:
-    claimed = claimed.strip().lower().rstrip(".")
-    requested = requested.strip().lower().rstrip(".")
-    if not claimed or not requested:
-        return False
-    return claimed == requested
-
-
-def _wildcard_parent(token: str) -> str | None:
-    token = token.strip().lower().rstrip(".")
-    if token.startswith("*.") and len(token) > 2:
-        return token[2:]
-    return None
-
-
-def _one_label_child_of(host: str, parent: str) -> bool:
-    host = host.strip().lower().rstrip(".")
-    parent = parent.strip().lower().rstrip(".")
-    suffix = f".{parent}"
-    if not host.endswith(suffix):
-        return False
-    left = host[: -len(suffix)]
-    return bool(left) and left != "*" and "." not in left
-
-
-def _server_name_token_conflicts(claimed: str, requested: str) -> bool:
-    if _server_name_token_matches(claimed, requested):
-        return True
-    requested_parent = _wildcard_parent(requested)
-    if requested_parent:
-        return _one_label_child_of(claimed, requested_parent)
-    return False
-
-
 def _config_has_server_name(path: Path, server_name: str) -> bool:
     """Return True if an nginx config file contains a server_name directive for server_name."""
     try:
         text = path.read_text(encoding="utf-8", errors="ignore")
         claimed = set(server_name_directive_tokens(text))
-        return any(
-            _server_name_token_conflicts(claimed_token, requested_token)
-            for requested_token in server_name_tokens(server_name)
-            for claimed_token in claimed
-        )
+        return any(token in claimed for token in server_name_tokens(server_name))
     except OSError:
         return False
-
-
-def _nginx_include_text_loads_directory(text: str, directory: Path) -> bool:
-    normalized = str(directory)
-    for match in re.finditer(r"\binclude\s+([^;]+);", text):
-        include_path = match.group(1).strip().strip("\"'")
-        if include_path.startswith(normalized + "/") or include_path == normalized:
-            return True
-    return False
-
-
-def _nginx_loads_directory(directory: Path) -> bool:
-    nginx_conf = Path("/etc/nginx/nginx.conf")
-    try:
-        text = nginx_conf.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return False
-    return _nginx_include_text_loads_directory(text, directory)
-
-
-def _nginx_loads_both_site_directories(sites_available: str, sites_enabled: str) -> bool:
-    available = Path(sites_available)
-    enabled = Path(sites_enabled)
-    if available == enabled:
-        return False
-    return _nginx_loads_directory(available) and _nginx_loads_directory(enabled)
-
-
-def _config_dump_sections(text: str) -> list[tuple[str, str]]:
-    sections: list[tuple[str, list[str]]] = []
-    current_file = ""
-    current_lines: list[str] = []
-    for line in text.splitlines():
-        marker = re.match(r"#\s+configuration file\s+(.+?):\s*$", line.strip())
-        if marker:
-            if current_file:
-                sections.append((current_file, current_lines))
-            current_file = marker.group(1)
-            current_lines = []
-            continue
-        if current_file:
-            current_lines.append(line)
-    if current_file:
-        sections.append((current_file, current_lines))
-    return [(file_path, "\n".join(lines)) for file_path, lines in sections]
-
-
-def _normalize_conflict_path(path: Path | str) -> str:
-    try:
-        return str(Path(path).resolve())
-    except OSError:
-        return str(Path(path).absolute())
-
-
-def _is_own_conflict_path(path: Path | str, own_paths: set[str]) -> bool:
-    if not own_paths:
-        return False
-    current = Path(path)
-    candidates = {str(current), _normalize_conflict_path(current)}
-    return bool(candidates & own_paths)
-
-
-def _config_dump_conflict_files(
-    text: str,
-    server_name: str,
-    own_filename: str = "",
-    own_paths: set[str] | None = None,
-) -> list[str]:
-    requested_tokens = server_name_tokens(server_name)
-    own_paths = own_paths or set()
-    matches: list[str] = []
-    for current_file, file_text in _config_dump_sections(text):
-        if _is_own_conflict_path(current_file, own_paths):
-            continue
-        if own_filename and not own_paths and Path(current_file).name == own_filename:
-            continue
-        if "server_name" not in file_text:
-            continue
-        claimed = server_name_directive_tokens(file_text)
-        if not claimed:
-            continue
-        if not any(
-            _server_name_token_conflicts(claimed_token, requested_token)
-            for requested_token in requested_tokens
-            for claimed_token in claimed
-        ):
-            continue
-        if current_file not in matches:
-            matches.append(current_file)
-    return matches
-
-
-def nginx_config_dump() -> tuple[str, dict]:
-    dump = run_command(["nginx", "-T"], allow_live=True)
-    text = "\n".join([dump.get("stdout") or "", dump.get("stderr") or ""])
-    return text, dump
-
-
-def nginx_dump_diagnostic(dump: dict) -> str:
-    rc = dump.get("returncode")
-    stderr = (dump.get("stderr") or "").strip().replace("\n", " ")[:500]
-    stdout = (dump.get("stdout") or "").strip().replace("\n", " ")[:500]
-    if stderr:
-        return f"nginx -T returncode={rc}, stderr='{stderr}'"
-    if stdout:
-        return f"nginx -T returncode={rc}, stdout='{stdout}'"
-    return f"nginx -T returncode={rc}, no output"
-
-
-def _is_removable_nginx_conf(path: str) -> bool:
-    target = Path(path)
-    stem = target.stem.lower()
-    if target.suffix != ".conf":
-        return False
-    try:
-        target.resolve().relative_to(Path("/etc/nginx").resolve())
-    except ValueError:
-        return False
-    if stem in STRICTLY_PROTECTED_CONFIG_NAMES:
-        return False
-    return True
-
-
-def remove_loaded_conflicting_configs(our_name: str, server_name: str, own_paths: set[str] | None = None) -> list[str]:
-    text, _dump = nginx_config_dump()
-    removed: list[str] = []
-    for file_path in _config_dump_conflict_files(text, server_name, f"{our_name}.conf", own_paths):
-        if not _is_removable_nginx_conf(file_path):
-            continue
-        try:
-            Path(file_path).unlink()
-            removed.append(file_path)
-        except OSError:
-            pass
-    return removed
-
-
-def loaded_conflicting_config_files(our_name: str, server_name: str, own_paths: set[str] | None = None) -> list[str]:
-    text, _dump = nginx_config_dump()
-    return _config_dump_conflict_files(text, server_name, f"{our_name}.conf", own_paths)
-
-
-def loaded_conflict_diagnostic(our_name: str, server_name: str, own_paths: set[str] | None = None) -> tuple[list[str], str]:
-    text, dump = nginx_config_dump()
-    return _config_dump_conflict_files(text, server_name, f"{our_name}.conf", own_paths), nginx_dump_diagnostic(dump)
 
 
 def _config_has_insecure_port443(path: Path) -> bool:
@@ -390,15 +141,9 @@ def _config_has_insecure_port443(path: Path) -> bool:
     return True
 
 
-def remove_insecure_port443_configs(
-    our_name: str,
-    server_name: str,
-    *scan_dirs: str,
-    own_paths: set[str] | None = None,
-) -> list[str]:
+def remove_insecure_port443_configs(our_name: str, server_name: str, *scan_dirs: str) -> list[str]:
     removed: list[str] = []
     our_filename = f"{our_name}.conf"
-    own_paths = own_paths or set()
     tokens = server_name_tokens(server_name)
     if not tokens:
         return removed
@@ -407,12 +152,10 @@ def remove_insecure_port443_configs(
         if not enabled_dir.is_dir():
             continue
         for conf_path in enabled_dir.iterdir():
-            if _is_own_conflict_path(conf_path, own_paths):
-                continue
-            if conf_path.name == our_filename and not own_paths:
+            if conf_path.name == our_filename:
                 continue
             stem = conf_path.stem.lower()
-            if stem in STRICTLY_PROTECTED_CONFIG_NAMES:
+            if stem in PROTECTED_CONFIG_NAMES or "vps-panel" in stem:
                 continue
             try:
                 target = conf_path.resolve() if conf_path.is_symlink() else conf_path
@@ -427,12 +170,7 @@ def remove_insecure_port443_configs(
     return removed
 
 
-def remove_conflicting_configs(
-    our_name: str,
-    server_name: str,
-    *scan_dirs: str,
-    own_paths: set[str] | None = None,
-) -> list[str]:
+def remove_conflicting_configs(our_name: str, server_name: str, *scan_dirs: str) -> list[str]:
     """
     Scan all provided directories and remove any config that claims server_name, except
     our own config. Protects panel system configs by name. No prefix filter — the
@@ -440,18 +178,15 @@ def remove_conflicting_configs(
     """
     removed: list[str] = []
     our_filename = f"{our_name}.conf"
-    own_paths = own_paths or set()
     for scan_dir in scan_dirs:
         enabled_dir = Path(scan_dir)
         if not enabled_dir.is_dir():
             continue
         for conf_path in enabled_dir.iterdir():
-            if _is_own_conflict_path(conf_path, own_paths):
-                continue
-            if conf_path.name == our_filename and not own_paths:
+            if conf_path.name == our_filename:
                 continue
             stem = conf_path.stem.lower()
-            if stem in STRICTLY_PROTECTED_CONFIG_NAMES:
+            if stem in PROTECTED_CONFIG_NAMES or "vps-panel" in stem:
                 continue
             try:
                 target = conf_path.resolve() if conf_path.is_symlink() else conf_path
@@ -482,8 +217,6 @@ def _restore(path: Path, snapshot: dict) -> None:
 
 
 def _enable_site(available: Path, enabled: Path) -> None:
-    if available == enabled:
-        return
     if enabled.is_symlink() or enabled.exists():
         enabled.unlink()
     enabled.symlink_to(available)
@@ -508,15 +241,8 @@ def publish_nginx_config(
     server_name: str | None = None,
     post_reload_check: Callable[[], dict] | None = None,
 ) -> dict:
-    requested_available = safe_nginx_path(sites_available, name)
-    requested_enabled = safe_nginx_path(sites_enabled, name)
-    single_loaded_site_file = settings.allow_live_nginx and _nginx_loads_both_site_directories(sites_available, sites_enabled)
-    if single_loaded_site_file:
-        available = requested_enabled
-        enabled = requested_enabled
-    else:
-        available = requested_available
-        enabled = requested_enabled
+    available = safe_nginx_path(sites_available, name)
+    enabled = safe_nginx_path(sites_enabled, name)
     temp_available = available.with_name(f".{available.name}.{os.getpid()}-{uuid4().hex}.tmp")
 
     write = {
@@ -550,110 +276,51 @@ def publish_nginx_config(
     run_live_step("prepare enabled directory", lambda: enabled.parent.mkdir(parents=True, exist_ok=True))
 
     if server_name:
-        own_paths = {
-            _normalize_conflict_path(path)
-            for path in {requested_available, requested_enabled, available, enabled, temp_available}
-        }
         scan_dirs = [sites_enabled]
-        for candidate in ["/etc/nginx/conf.d", "/etc/nginx/sites-enabled", "/etc/nginx/sites-available"]:
-            candidate_path = Path(candidate)
-            if candidate_path.is_dir() and str(candidate_path) not in scan_dirs:
-                scan_dirs.append(str(candidate_path))
+        conf_d = Path("/etc/nginx/conf.d")
+        if conf_d.is_dir():
+            scan_dirs.append(str(conf_d))
         available_dir = Path(sites_available)
         if available_dir.is_dir() and str(available_dir) not in scan_dirs:
             scan_dirs.append(str(available_dir))
         removed = run_live_step(
             "remove conflicting configs",
-            lambda: remove_conflicting_configs(name, server_name, *scan_dirs, own_paths=own_paths),
+            lambda: remove_conflicting_configs(name, server_name, *scan_dirs),
         )
         insecure_removed = run_live_step(
             "remove insecure port 443 configs",
-            lambda: remove_insecure_port443_configs(name, server_name, *scan_dirs, own_paths=own_paths),
+            lambda: remove_insecure_port443_configs(name, server_name, *scan_dirs),
         )
-        loaded_removed = run_live_step(
-            "remove loaded conflicting configs",
-            lambda: remove_loaded_conflicting_configs(name, server_name, own_paths),
-        )
-        removed = [*removed, *insecure_removed, *loaded_removed]
+        removed = [*removed, *insecure_removed]
     else:
         removed = []
-        own_paths = set()
-
-    if single_loaded_site_file and requested_available != available and requested_available.exists():
-        try:
-            target = requested_available.resolve() if requested_available.is_symlink() else requested_available
-            if not server_name or _config_has_server_name(target, server_name):
-                run_live_step("remove stale duplicate available config", lambda: requested_available.unlink())
-                removed.append(str(requested_available))
-        except OSError:
-            pass
 
     old_available = _snapshot(available)
     old_enabled = _snapshot(enabled)
 
     try:
-        if server_name and available != enabled and available.exists():
-            try:
-                if _config_has_server_name(available.resolve() if available.is_symlink() else available, server_name):
-                    run_live_step("hide stale available config", lambda: available.unlink())
-            except OSError:
-                pass
         run_live_step("write temp config", lambda: temp_available.write_text(config, encoding="utf-8"))
         run_live_step("enable temp config", lambda: _enable_site(temp_available, enabled))
         test = run_command(["nginx", "-t"], allow_live=True)
-        if server_name and own_paths:
-            late_removed = run_live_step(
-                "remove loaded conflicting configs after temp enable",
-                lambda: remove_loaded_conflicting_configs(name, server_name, own_paths),
-            )
-            if late_removed:
-                removed = [*removed, *late_removed]
-                test = run_command(["nginx", "-t"], allow_live=True)
         test_stderr = test.get("stderr") or ""
-        requested_tokens = server_name_tokens(server_name) if server_name else []
-        conflict_warning = bool(
-            requested_tokens
-            and "conflicting server name" in test_stderr
-            and any(token in test_stderr for token in requested_tokens)
-        )
-        # Nginx reports duplicate server_name entries as warnings while still
-        # returning success. Do not block publishing on a warning alone; the
-        # post-reload ACME probe below verifies whether the active route serves
-        # the challenge token.
-        if test.get("returncode") != 0:
-            run_live_step("rollback failed available config", lambda: _restore(available, old_available))
+        has_conflict_warn = server_name and "conflicting server name" in test_stderr and server_name in test_stderr
+        if test.get("returncode") != 0 or has_conflict_warn:
             run_live_step("rollback failed config", lambda: _restore(enabled, old_enabled))
             run_live_step("remove temp config", lambda: temp_available.unlink(missing_ok=True))
-            if conflict_warning:
+            if has_conflict_warn:
                 # Find which files still claim the server_name so the user knows what to remove
                 conflict_files: list[str] = []
-                conflict_scan_dirs = [sites_enabled]
-                for candidate in ["/etc/nginx/conf.d", "/etc/nginx/sites-enabled", "/etc/nginx/sites-available", sites_available]:
-                    if Path(candidate).is_dir() and candidate not in conflict_scan_dirs:
-                        conflict_scan_dirs.append(candidate)
-                for scan_d in conflict_scan_dirs:
+                for scan_d in ([sites_enabled, "/etc/nginx/conf.d"] if Path("/etc/nginx/conf.d").is_dir() else [sites_enabled]):
                     for cp in Path(scan_d).iterdir() if Path(scan_d).is_dir() else []:
                         if cp.name == f"{name}.conf":
                             continue
                         try:
                             tgt = cp.resolve() if cp.is_symlink() else cp
-                            if any(_config_has_server_name(tgt, token) for token in requested_tokens):
+                            if _config_has_server_name(tgt, server_name):
                                 conflict_files.append(str(cp))
                         except OSError:
                             pass
-                loaded_files, loaded_diagnostic = loaded_conflict_diagnostic(name, server_name, own_paths)
-                for file_path in loaded_files:
-                    if file_path not in conflict_files:
-                        conflict_files.append(file_path)
-                if conflict_files:
-                    files_hint = ", ".join(conflict_files) + ". Remove it and redeploy."
-                else:
-                    nginx_test_hint = test_stderr.strip().replace("\n", " ")[:500]
-                    files_hint = (
-                        "not found in scanned files or nginx -T sections. "
-                        f"{loaded_diagnostic}. nginx -t stderr='{nginx_test_hint}'. "
-                        "Run nginx -T on the VPS and remove the duplicate server_name."
-                    )
+                files_hint = (", ".join(conflict_files) or "unknown") + ". Remove it and redeploy."
                 skip_msg = (
                     f'Another nginx config still claims server_name "{server_name}" '
                     f"after cleanup. Conflicting file(s): {files_hint}"

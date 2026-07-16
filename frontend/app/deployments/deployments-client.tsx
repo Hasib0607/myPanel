@@ -615,8 +615,8 @@ export function DeploymentsClient({
       const selectedIds = [...new Set(domainsToAdd)].filter(Boolean);
       if (selectedIds.length === 0) throw new Error("Select at least one domain");
       const results: DeploymentDomainBinding[] = [];
-      for (const [index, selectionId] of selectedIds.entries()) {
-        results.push(await apiPost<DeploymentDomainBinding>(`${apiBase}/${selected.slug}/domains`, { domainId: selectionId, primary: !selected.domainId && index === 0 }));
+      for (const [index, domainId] of selectedIds.entries()) {
+        results.push(await apiPost<DeploymentDomainBinding>(`${apiBase}/${selected.slug}/domains`, { domainId, primary: !selected.domainId && index === 0 }));
       }
       return results;
     },

@@ -1,8 +1,6 @@
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
 import path from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { DeploymentFramework, DeploymentProcessManager, Prisma } from "@prisma/client";
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
@@ -35,9 +33,6 @@ import {
   renderLaravelProcessCommand
 } from "../lib/laravelProcesses.js";
 import { deploymentPriorityDefaults, normalizeDeploymentResourcePolicy } from "../lib/deploymentResourcePolicy.js";
-import { localRuntimeHealthUrl } from "../lib/deploymentHealthUrl.js";
-
-const execFileAsync = promisify(execFile);
 
 const frameworkSchema = z.enum(["LARAVEL", "NEXTJS", "NODEJS", "PYTHON", "GO", "STATIC"]);
 const statusSchema = z.enum(["QUEUED", "RUNNING", "STOPPED", "DEPLOYING", "BUILDING", "FAILED"]);
@@ -237,45 +232,6 @@ function serializeDeployment<T extends { domainBindings?: any[]; domainId?: stri
   };
 }
 
-async function ensureLegacyDeploymentDomainBindings(deployment: { id: string; domainBindings?: Array<{ domainId?: string | null }> }) {
-  const existingDomainIds = new Set((deployment.domainBindings ?? []).map((binding) => binding.domainId).filter((id): id is string => Boolean(id)));
-  const legacyDomains = await prisma.domain.findMany({
-    where: {
-      hostingMode: "DEPLOYMENT_PROXY",
-      hostingDeploymentId: deployment.id,
-      id: { notIn: [...existingDomainIds] }
-    },
-    select: { id: true }
-  });
-  if (legacyDomains.length === 0) return false;
-
-  await prisma.deploymentDomain.createMany({
-    data: legacyDomains.map((domain) => ({ deploymentId: deployment.id, domainId: domain.id, role: "alias" })),
-    skipDuplicates: true
-  });
-  return true;
-}
-
-async function syncDeploymentStatusFromMetrics(deployment: { id: string; framework: DeploymentFramework; processManager?: string | null; status?: string | null }, metrics: unknown) {
-  const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
-  const expectsProcess = deployment.framework !== "STATIC" && processManager !== "STATIC" && processManager !== "NONE";
-  if (!expectsProcess || deployment.status !== "RUNNING") return;
-
-  const data = metrics && typeof metrics === "object" ? metrics as { ok?: unknown; process?: { processCount?: unknown } } : null;
-  const processCount = Number(data?.process?.processCount ?? 0);
-  if (data?.ok === true && processCount > 0) return;
-
-  await prisma.deployment.update({
-    where: { id: deployment.id },
-    data: { status: "FAILED", healthStatus: "DOWN", lastHealthCheckAt: new Date() }
-  });
-  await addLog(deployment.id, "HEALTH_CHECK", "Marked deployment down because no live runtime process was found", undefined, {
-    processManager,
-    processCount,
-    metricsOk: data?.ok ?? null
-  } as Prisma.InputJsonObject);
-}
-
 function cronJobForSysagent(job: {
   id: string;
   name: string;
@@ -305,10 +261,6 @@ async function findDeployment(idOrSlug: string) {
     where: { OR: [{ id: idOrSlug }, { slug: idOrSlug }] },
     include: includeFullDeployment()
   });
-  if (await ensureLegacyDeploymentDomainBindings(deployment)) {
-    const refreshed = await prisma.deployment.findUniqueOrThrow({ where: { id: deployment.id }, include: includeFullDeployment() });
-    return serializeDeployment(refreshed);
-  }
   return serializeDeployment(deployment);
 }
 
@@ -320,7 +272,7 @@ async function applyDeploymentCron(deployment: Awaited<ReturnType<typeof findDep
   const result = await sysagent.deploymentCron({
     deploymentId: deployment.id,
     name: deployment.slug,
-    rootPath: deploymentActiveAppPath(deployment),
+    rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
     logDir: deploymentLogDir(deployment.slug),
     jobs: jobs.map(cronJobForSysagent)
   });
@@ -647,55 +599,6 @@ async function enqueueDeployAction(deploymentId: string, action: string, release
   }
 }
 
-async function deployJobsForRelease(releaseId: string, states: string[]) {
-  const jobs = await deployQueue.getJobs(states as any, 0, 500);
-  return jobs.filter((job) => (job.data as { releaseId?: string } | undefined)?.releaseId === releaseId);
-}
-
-async function closeDeploymentRelease(deploymentId: string, releaseId: string, status: "CANCELLED" | "FAILED") {
-  const release = await prisma.deploymentRelease.findFirstOrThrow({ where: { id: releaseId, deploymentId } });
-  const removableJobs = await deployJobsForRelease(releaseId, ["wait", "delayed", "prioritized", "paused", "waiting-children"]);
-  const removedJobIds: string[] = [];
-  for (const job of removableJobs) {
-    await job.remove();
-    removedJobIds.push(String(job.id));
-  }
-  const activeJobs = await deployJobsForRelease(releaseId, ["active"]);
-  const finishedAt = new Date();
-  const startedAt = release.startedAt ?? release.createdAt;
-  const closed = await prisma.deploymentRelease.update({
-    where: { id: release.id },
-    data: {
-      status,
-      finishedAt,
-      durationMs: Math.max(0, finishedAt.getTime() - startedAt.getTime())
-    }
-  });
-  await addLog(deploymentId, status === "CANCELLED" ? "QUEUED" : "ROLLBACK", `Release ${status.toLowerCase()}`, release.id, {
-    removedJobIds,
-    activeJobIds: activeJobs.map((job) => String(job.id))
-  });
-
-  const openRelease = await prisma.deploymentRelease.findFirst({
-    where: { deploymentId, status: { in: ["QUEUED", "RUNNING"] }, id: { not: release.id } },
-    orderBy: { createdAt: "desc" }
-  });
-  if (!openRelease) {
-    const previous = await prisma.deploymentRelease.findFirst({
-      where: { deploymentId, status: { in: ["SUCCEEDED", "ROLLED_BACK"] } },
-      orderBy: { createdAt: "desc" }
-    });
-    await prisma.deployment.update({
-      where: { id: deploymentId },
-      data: previous
-        ? { status: "RUNNING", healthStatus: "UNKNOWN", lastHealthCheckAt: new Date() }
-        : { status: "FAILED", healthStatus: "DOWN", lastHealthCheckAt: new Date() }
-    });
-  }
-
-  return { release: closed, removedJobIds, activeJobIds: activeJobs.map((job) => String(job.id)) };
-}
-
 function githubTokenSecretRef() {
   return "github:superadmin:token";
 }
@@ -875,17 +778,6 @@ function deploymentProcessConfig(value: unknown): Record<string, any> {
   return value && typeof value === "object" && !Array.isArray(value) ? { ...(value as Record<string, any>) } : {};
 }
 
-function deploymentActiveRootPath(deployment: { rootPath: string; processConfig: unknown }) {
-  const config = deploymentProcessConfig(deployment.processConfig);
-  return typeof config.activeArtifactPath === "string" && config.activeArtifactPath.trim()
-    ? config.activeArtifactPath
-    : deployment.rootPath;
-}
-
-function deploymentActiveAppPath(deployment: { rootPath: string; rootDirectory: string | null; processConfig: unknown }) {
-  return deploymentAppPath(deploymentActiveRootPath(deployment), deployment.rootDirectory);
-}
-
 function normalizeLaravelWorkerConfig(input: unknown, fallback?: Partial<LaravelWorkerConfig>): LaravelWorkerConfig {
   const base = {
     enabled: false,
@@ -911,7 +803,7 @@ async function applyLaravelWorkers(deployment: Awaited<ReturnType<typeof findDep
   const desiredWorkers = config.enabled ? config.desiredWorkers : 0;
   const result = await sysagent.deploymentLaravelWorkers({
     name: laravelWorkerProgramName(deployment.slug),
-    rootPath: deploymentActiveAppPath(deployment),
+    rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
     action: desiredWorkers > 0 ? "apply" : "stop",
     desiredWorkers,
     queueCommand: config.queueCommand,
@@ -957,7 +849,7 @@ async function applyLaravelManagedProcesses(deployment: Awaited<ReturnType<typeo
   for (const definition of definitions) {
     results[definition.key] = await sysagent.deploymentLaravelWorkers({
       name: laravelManagedProgramName(deployment.slug, definition.key),
-      rootPath: deploymentActiveAppPath(deployment),
+      rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
       action: definition.enabled && definition.instances > 0 ? "apply" : "stop",
       desiredWorkers: definition.enabled ? definition.instances : 0,
       queueCommand: renderLaravelProcessCommand(definition.command, deployment.port),
@@ -1331,14 +1223,6 @@ function uniqueRiskyActions(actions: Array<{ key: string; label: string; command
 }
 
 async function executeDoctorApproval(deployment: Awaited<ReturnType<typeof findDeployment>>, approval: { actionKey: string }) {
-  if (approval.actionKey === "repair-sysagent-service") {
-    const restart = await execFileAsync("sudo", ["-n", "/usr/bin/systemctl", "restart", "vps-panel-sysagent"], { timeout: 60_000 });
-    const enable = await execFileAsync("sudo", ["-n", "/usr/bin/systemctl", "enable", "vps-panel-sysagent"], { timeout: 60_000 });
-    return {
-      restart: { stdout: restart.stdout, stderr: restart.stderr },
-      enable: { stdout: enable.stdout, stderr: enable.stderr }
-    };
-  }
   if (approval.actionKey.startsWith("install-")) {
     const toolMap: Record<string, string> = {
       "install-composer": "composer",
@@ -1503,7 +1387,7 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
   const checks: Array<{ key: string; label: string; status: "pass" | "warn" | "fail"; detail: string; fix?: string; repairAction?: string }> = [];
   const envSuggestions: Array<{ key: string; value: string; reason: string; repairAction: string }> = [];
   const riskyActions: Array<{ key: string; label: string; command: string; reason: string; approvalRequired: true }> = [];
-  const appPath = deploymentActiveAppPath(deployment);
+  const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
   const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
   const domain = deployment.domainBindings?.find((binding) => binding.role === "primary")?.domain ?? deployment.domainBindings?.[0]?.domain ?? deployment.domain;
   const serverName = deploymentServerName(domain);
@@ -1660,7 +1544,7 @@ async function deploymentDoctor(deployment: Awaited<ReturnType<typeof findDeploy
 
   let health: unknown = null;
   try {
-    health = await sysagent.deploymentHealth({ deploymentId: deployment.id, port: deployment.port, healthUrl: localRuntimeHealthUrl(deployment.healthUrl, deployment.port), processName: deployment.slug, processManager, rootPath: appPath, logDir: deploymentLogDir(deployment.slug), strictHealth: normalizeDeploymentResourcePolicy(deployment.processConfig).healthStrict });
+    health = await sysagent.deploymentHealth({ deploymentId: deployment.id, port: deployment.port, healthUrl: deployment.healthUrl, processName: deployment.slug, processManager, rootPath: appPath, logDir: deploymentLogDir(deployment.slug), strictHealth: normalizeDeploymentResourcePolicy(deployment.processConfig).healthStrict });
   } catch (error) {
     health = { returncode: 1, stderr: error instanceof Error ? error.message : "Health check failed" };
   }
@@ -2359,7 +2243,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     if (deployment.framework === "LARAVEL") {
       status = await sysagent.deploymentLaravelWorkers({
         name: laravelWorkerProgramName(deployment.slug),
-        rootPath: deploymentActiveAppPath(deployment),
+        rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
         action: "status",
         desiredWorkers: config.enabled ? config.desiredWorkers : 0,
         queueCommand: config.queueCommand,
@@ -2777,36 +2661,11 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     return prisma.deploymentRelease.findMany({ where: { deploymentId: deployment.id }, orderBy: { createdAt: "desc" }, include: { logs: { orderBy: { createdAt: "asc" } } } });
   });
 
-  app.post("/:deploymentId/releases/:releaseId/cancel", async (request) => {
-    const { deploymentId, releaseId } = z.object({ deploymentId: z.string(), releaseId: z.string() }).parse(request.params);
-    const deployment = await findDeployment(deploymentId);
-    const result = await closeDeploymentRelease(deployment.id, releaseId, "CANCELLED");
-    await audit(request, { action: "UPDATE", resource: "deployment_release", resourceId: releaseId, description: `Cancelled release for ${deployment.slug}`, metadata: { removedJobIds: result.removedJobIds, activeJobIds: result.activeJobIds } });
-    return { ok: true, ...result };
-  });
-
-  app.delete("/:deploymentId/releases/:releaseId", async (request) => {
-    const { deploymentId, releaseId } = z.object({ deploymentId: z.string(), releaseId: z.string() }).parse(request.params);
-    const deployment = await findDeployment(deploymentId);
-    const release = await prisma.deploymentRelease.findFirstOrThrow({ where: { id: releaseId, deploymentId: deployment.id } });
-    if (release.status === "RUNNING") {
-      const closeResult = await closeDeploymentRelease(deployment.id, release.id, "CANCELLED");
-      await audit(request, { action: "UPDATE", resource: "deployment_release", resourceId: release.id, description: `Closed running release for ${deployment.slug}`, metadata: { removedJobIds: closeResult.removedJobIds, activeJobIds: closeResult.activeJobIds } });
-      return { ok: true, deleted: false, closeResult };
-    }
-    const closeResult = release.status === "QUEUED"
-      ? await closeDeploymentRelease(deployment.id, release.id, "CANCELLED")
-      : null;
-    await prisma.deploymentRelease.delete({ where: { id: release.id } });
-    await audit(request, { action: "DELETE", resource: "deployment_release", resourceId: release.id, description: `Deleted release for ${deployment.slug}`, metadata: closeResult ? { removedJobIds: closeResult.removedJobIds, activeJobIds: closeResult.activeJobIds } : {} });
-    return { ok: true, closeResult };
-  });
-
   app.get("/:deploymentId/metrics", async (request) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const deployment = await findDeployment(deploymentId);
     await pruneDeploymentLogs(deployment.id);
-    const appPath = deploymentActiveAppPath(deployment);
+    const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
     const [metrics, buildLogs] = await Promise.all([
       sysagent.deploymentMetrics({
         deploymentId: deployment.id,
@@ -2836,7 +2695,6 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
         take: 300
       })
     ]);
-    await syncDeploymentStatusFromMetrics(deployment, metrics);
     return { ...(metrics as Record<string, unknown>), buildLogs };
   });
 
@@ -2849,7 +2707,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     return sysagent.deploymentLaravelRuntimeStatus({
       deploymentId: deployment.id,
       name: deployment.slug,
-      rootPath: deploymentActiveAppPath(deployment),
+      rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
       serverName,
       upstreamPort: deployment.port,
       processManager: deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework],
@@ -2862,7 +2720,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const deployment = await findDeployment(deploymentId);
     if (deployment.framework !== "LARAVEL") throw app.httpErrors.badRequest("Laravel runtime repair is only available for Laravel deployments.");
-    const appPath = deploymentActiveAppPath(deployment);
+    const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
     const domain = deployment.domainBindings?.find((binding) => binding.role === "primary")?.domain ?? deployment.domainBindings?.[0]?.domain ?? deployment.domain;
     const serverName = deploymentServerName(domain);
     const repair = await sysagent.deploymentLaravelRuntimeRepair({
@@ -2931,7 +2789,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       const runtime = await sysagent.deploymentRuntimeLogs({
         name: deployment.slug,
         logDir: deploymentLogDir(deployment.slug),
-        rootPath: deploymentActiveAppPath(deployment),
+        rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
         lines: query.limit
       });
       const lines = [
@@ -3066,7 +2924,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
         try {
           publicRoute = await sysagent.deploymentPublicRoute({
             serverName,
-            rootPath: deploymentActiveAppPath(deployment),
+            rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
             framework: deployment.framework
           });
         } catch (error) {
@@ -3095,10 +2953,10 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       const result = await sysagent.deploymentHealth({
         deploymentId: deployment.id,
         port: deployment.port,
-        healthUrl: localRuntimeHealthUrl(deployment.healthUrl, deployment.port),
+        healthUrl: deployment.healthUrl,
         processName: deployment.slug,
         processManager: deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework],
-        rootPath: deploymentActiveAppPath(deployment),
+        rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
         logDir: deploymentLogDir(deployment.slug),
         strictHealth: normalizeDeploymentResourcePolicy(deployment.processConfig).healthStrict
       });
@@ -3311,10 +3169,10 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     const result = await sysagent.deploymentHealth({
       deploymentId: deployment.id,
       port: deployment.port,
-      healthUrl: localRuntimeHealthUrl(deployment.healthUrl, deployment.port),
+      healthUrl: deployment.healthUrl,
       processName: deployment.slug,
       processManager: deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework],
-      rootPath: deploymentActiveAppPath(deployment),
+      rootPath: deploymentAppPath(deployment.rootPath, deployment.rootDirectory),
       logDir: deploymentLogDir(deployment.slug),
       strictHealth: normalizeDeploymentResourcePolicy(deployment.processConfig).healthStrict
     });

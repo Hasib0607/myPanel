@@ -40,22 +40,15 @@ from app.deployment_health import backend_only_laravel_health, curl_health_probe
 from app.platform import runtime_tool_install_plan
 from app.nginx_paths import nginx_sites_available, nginx_sites_enabled
 from app.nginx_manager import (
-    ROUTE_OWNERSHIP_HEADER,
     acme_location,
     letsencrypt_certificate_exists,
-    loaded_conflicting_config_files,
     publish_nginx_config,
-    probe_host_for_server_name,
     remove_conflicting_configs,
     remove_insecure_port443_configs,
-    route_ownership_config_seen,
-    route_ownership_header,
-    route_ownership_header_seen,
     safe_letsencrypt_path,
     safe_nginx_path,
     safe_web_root,
     server_name_directive_tokens,
-    server_name_has_wildcard,
     server_name_tokens,
     _config_has_insecure_port443,
     _config_has_server_name,
@@ -88,7 +81,6 @@ class CommandRequest(BaseModel):
     packageManager: str | None = None
     env: dict[str, str] | None = None
     resourceLimits: dict[str, int] | None = None
-    timeoutSeconds: int | None = Field(default=360, ge=10, le=1800)
 
 
 class ResourceSnapshotRequest(BaseModel):
@@ -429,20 +421,20 @@ def clamp_worker_count(value: int) -> int:
     return max(0, min(value, max(1, settings.deployment_worker_max)))
 
 
-def guarded_command(root_path: str, command: list[str], cwd: str | None = None, resource_limits: dict[str, int] | None = None, timeout: int | None = None) -> dict:
+def guarded_command(root_path: str, command: list[str], cwd: str | None = None, resource_limits: dict[str, int] | None = None) -> dict:
     info = path_info(root_path)
     if not info["allowed"]:
         return blocked_command("Path escapes configured file manager root", command, info)
-    result = run_command(command, cwd=cwd, allow_live=DEPLOYMENT_COMMANDS_LIVE, timeout=timeout, resource_limits=resource_limits)
+    result = run_command(command, cwd=cwd, allow_live=DEPLOYMENT_COMMANDS_LIVE, resource_limits=resource_limits)
     result["path"] = info
     return result
 
 
-def guarded_command_with_env(root_path: str, command: list[str], cwd: str | None = None, env: dict[str, str] | None = None, resource_limits: dict[str, int] | None = None, timeout: int | None = None) -> dict:
+def guarded_command_with_env(root_path: str, command: list[str], cwd: str | None = None, env: dict[str, str] | None = None, resource_limits: dict[str, int] | None = None) -> dict:
     info = path_info(root_path)
     if not info["allowed"]:
         return blocked_command("Path escapes configured file manager root", command, info)
-    result = run_command(command, cwd=cwd, env=env, allow_live=DEPLOYMENT_COMMANDS_LIVE, timeout=timeout, resource_limits=resource_limits)
+    result = run_command(command, cwd=cwd, env=env, allow_live=DEPLOYMENT_COMMANDS_LIVE, resource_limits=resource_limits)
     result["path"] = info
     return result
 
@@ -602,7 +594,7 @@ def nginx_config_name(deployment_id: str, server_name: str) -> str:
     return f"domain-{safe_name}"
 
 
-def guarded_deployment_command(root_path: str, command: str, env: dict[str, str] | None = None, resource_limits: dict[str, int] | None = None, timeout: int | None = None) -> dict:
+def guarded_deployment_command(root_path: str, command: str, env: dict[str, str] | None = None, resource_limits: dict[str, int] | None = None) -> dict:
     info = path_info(root_path)
     try:
         parsed = parse_deployment_command(command)
@@ -611,7 +603,7 @@ def guarded_deployment_command(root_path: str, command: str, env: dict[str, str]
     effective_env = dict(env or {})
     if parsed and parsed[0] == "composer":
         effective_env = composer_git_env(root_path, effective_env)
-    return guarded_command_with_env(root_path, parsed, cwd=deployment_cwd(root_path), env=effective_env or None, resource_limits=effective_resource_limits(resource_limits), timeout=timeout)
+    return guarded_command_with_env(root_path, parsed, cwd=deployment_cwd(root_path), env=effective_env or None, resource_limits=effective_resource_limits(resource_limits))
 
 
 def pm2_env(port: int | None) -> dict[str, str]:
@@ -1936,21 +1928,6 @@ def guarded_write_file(root_path: str, target_path: str, content: str) -> dict:
 @router.post("/git-sync")
 def git_sync(body: GitSyncRequest) -> dict:
     target = Path(body.rootPath)
-    info = path_info(body.rootPath)
-    if not info["allowed"]:
-        return blocked_command("Path escapes configured file manager root", ["git", "sync", str(target)], info)
-    if settings.allow_live_system_commands:
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-        except OSError as error:
-            return {
-                "dryRun": False,
-                "command": ["mkdir", "-p", str(target.parent)],
-                "path": info,
-                "stdout": "",
-                "stderr": str(error),
-                "returncode": 1,
-            }
     env = git_auth_env(body.gitToken)
     safe = git_safe_directory(body.rootPath, target)
     if target.joinpath(".git").exists():
@@ -2033,19 +2010,19 @@ def install(body: CommandRequest) -> dict:
     env = dict(body.env or {})
     if (body.packageManager or "").upper() == "COMPOSER":
         env.setdefault("COMPOSER_ALLOW_SUPERUSER", "1")
-    return guarded_deployment_command(body.rootPath, command, env=env or None, resource_limits=body.resourceLimits, timeout=body.timeoutSeconds)
+    return guarded_deployment_command(body.rootPath, command, env=env or None, resource_limits=body.resourceLimits)
 
 
 @router.post("/build")
 def build(body: CommandRequest) -> dict:
     command = body.command or "true"
-    return guarded_deployment_command(body.rootPath, command, env=body.env, resource_limits=body.resourceLimits, timeout=body.timeoutSeconds)
+    return guarded_deployment_command(body.rootPath, command, env=body.env, resource_limits=body.resourceLimits)
 
 
 @router.post("/migrate")
 def migrate(body: CommandRequest) -> dict:
     command = body.command or "true"
-    return guarded_deployment_command(body.rootPath, command, env=body.env, resource_limits=body.resourceLimits, timeout=body.timeoutSeconds)
+    return guarded_deployment_command(body.rootPath, command, env=body.env, resource_limits=body.resourceLimits)
 
 
 @router.post("/process")
@@ -2152,91 +2129,6 @@ def _laravel_nginx_post_reload_check(server_name: str, public_root: str, framewo
         "returncode": 1,
         "stderr": route.get("stderr") or f"HTTP {route.get('httpCode')} after Nginx reload",
     }
-
-
-def _nginx_route_ownership_probe(server_name: str, config_name: str, *, require_https: bool) -> dict:
-    if server_name_has_wildcard(server_name):
-        result = run_command(["nginx", "-T"], allow_live=True)
-        output = f"{result.get('stdout') or ''}\n{result.get('stderr') or ''}"
-        output_lower = output.lower()
-        if (
-            result.get("returncode") == 0
-            and f"server_name {server_name.lower()};" in output_lower
-            and route_ownership_config_seen(output, config_name)
-        ):
-            return result
-        return {
-            **result,
-            "returncode": 1,
-            "stderr": (
-                f"Generated wildcard vhost {config_name!r} is not present in the active nginx config; "
-                f"missing server_name {server_name!r} or {ROUTE_OWNERSHIP_HEADER} header."
-            ),
-        }
-
-    primary = probe_host_for_server_name(server_name)
-    scheme = "https" if require_https else "http"
-    port = "443" if require_https else "80"
-    command = [
-        "curl",
-        "-sS",
-        "-i",
-        *(["-k"] if require_https else []),
-        "--resolve",
-        f"{primary}:{port}:127.0.0.1",
-        "--max-time",
-        "10",
-        "--noproxy",
-        "*",
-        "-H",
-        f"Host: {primary}",
-        f"{scheme}://{primary}/",
-    ]
-    result = run_command(command, allow_live=True)
-    output = f"{result.get('stdout') or ''}\n{result.get('stderr') or ''}"
-    if result.get("returncode") == 0 and route_ownership_header_seen(output, config_name):
-        return result
-    conflicts = loaded_conflicting_config_files(config_name, server_name)
-    conflict_hint = f" Loaded conflicting nginx configs: {', '.join(conflicts)}." if conflicts else ""
-    return {
-        **result,
-        "returncode": 1,
-        "stderr": (
-            f"Generated vhost {config_name!r} is not the active {scheme.upper()} route for {primary}; "
-            f"missing {ROUTE_OWNERSHIP_HEADER} response header.{conflict_hint}"
-        ),
-    }
-
-
-def _deployment_nginx_post_reload_check(server_name: str, config_name: str, public_root: str, framework: str | None, *, require_https: bool) -> dict:
-    ownership = _nginx_route_ownership_probe(server_name, config_name, require_https=require_https)
-    if (framework or "").upper() == "LARAVEL":
-        route = _laravel_nginx_post_reload_check(server_name, public_root, framework, require_https=require_https)
-    else:
-        route = _curl_public_route(server_name, "/", public_root, framework, require_https=require_https)
-        if _public_route_upstream_failed(route):
-            route = {
-                **route,
-                "returncode": 1,
-                "stderr": route.get("stderr") or f"HTTP {route.get('httpCode')} after Nginx reload",
-            }
-
-    if route.get("returncode") == 0 and not _public_route_upstream_failed(route):
-        if ownership.get("returncode") != 0:
-            route["ownershipWarning"] = {
-                "stderr": ownership.get("stderr"),
-                "returncode": ownership.get("returncode"),
-                "command": ownership.get("command"),
-            }
-            route["stderr"] = (
-                f"{route.get('stderr') or ''}\n"
-                f"Route ownership header was not visible after reload, but public route returned HTTP {route.get('httpCode')}; keeping the new vhost active."
-            ).strip()
-        return {**route, "returncode": 0}
-
-    if ownership.get("returncode") != 0:
-        return ownership
-    return ownership
 
 
 @router.post("/nginx-retire")
@@ -2364,16 +2256,15 @@ def nginx(body: NginxRequest) -> dict:
             fallback_location=fallback_location,
             loopback_proxy_host=body.loopbackProxyHost,
         )
-        acme_root = fallback_root or public_root
         if body.forceSsl and has_ssl:
             http_location = (
-                f"{acme_location(server_name, acme_root)}"
+                f"{acme_location(server_name, public_root)}"
                 "    location / {\n"
                 "        return 301 https://$host$request_uri;\n"
                 "    }\n"
             )
         else:
-            http_location = f"{acme_location(server_name, acme_root)}{app_locations}"
+            http_location = f"{acme_location(server_name, public_root)}{app_locations}"
 
         access_log = Path("/var/log/nginx") / f"vps-panel-{config_name}.access.log"
         error_log = Path("/var/log/nginx") / f"vps-panel-{config_name}.error.log"
@@ -2383,7 +2274,6 @@ server {{
     server_name {server_name};
     access_log {access_log} combined;
     error_log {error_log} warn;
-{route_ownership_header(config_name)}
 
 {http_location}}}
 """.lstrip()
@@ -2397,13 +2287,12 @@ server {{
     error_log {error_log} warn;
     ssl_certificate {ssl_certificate};
     ssl_certificate_key {ssl_certificate_key};
-{route_ownership_header(config_name)}
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_prefer_server_ciphers off;
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header Content-Security-Policy "upgrade-insecure-requests" always;
 
-{acme_location(server_name, acme_root)}{app_locations}
+{acme_location(server_name, public_root)}{app_locations}
 }}
 """
         info = path_info(body.rootPath)
@@ -2415,12 +2304,10 @@ server {{
             nginx_sites_available(),
             nginx_sites_enabled(),
             server_name=server_name,
-            post_reload_check=lambda: _deployment_nginx_post_reload_check(
-                server_name,
-                config_name,
-                str(public_root),
-                body.framework,
-                require_https=has_ssl and body.forceSsl,
+            post_reload_check=(
+                lambda: _laravel_nginx_post_reload_check(server_name, str(public_root), body.framework, require_https=has_ssl and body.forceSsl)
+                if (body.framework or "").upper() == "LARAVEL"
+                else None
             ),
         )
         return {
@@ -2554,10 +2441,10 @@ def _server_primary_ip() -> str | None:
 
 
 def _curl_public_route(server_name: str, path: str = "/", root_path: str | None = None, framework: str | None = None, require_https: bool = False) -> dict:
-    primary = probe_host_for_server_name(server_name)
+    primary = server_name.split()[0].strip()
     clean_path = path if path.startswith("/") else f"/{path}"
     is_laravel = (framework or "").upper() == "LARAVEL"
-    use_https = require_https and letsencrypt_certificate_exists(server_name)
+    use_https = require_https and letsencrypt_certificate_exists(primary)
 
     def probe(url: str, *, accept_http_errors: bool, loopback: bool, insecure_tls: bool = False) -> dict:
         command = [
@@ -2673,13 +2560,13 @@ def _curl_public_route(server_name: str, path: str = "/", root_path: str | None 
                 "returncode": ip_probe.get("returncode") if ip_probe else None,
                 "stderr": ip_probe.get("stderr") if ip_probe else None,
             }
-        dns_failed_ssl = dns_probe.get("returncode") in {35, 51, 60}
-        ip_failed_ssl = bool(ip_probe and ip_probe.get("returncode") in {35, 51, 60})
+        dns_failed_ssl = dns_probe.get("returncode") == 35
+        ip_failed_ssl = bool(ip_probe and ip_probe.get("returncode") == 35)
         if dns_failed_ssl or ip_failed_ssl:
             result["degraded"] = True
             result["returncode"] = 0
             hints = [
-                "Local nginx HTTPS on 127.0.0.1:443 works, but the public internet path does not serve a valid certificate for this hostname.",
+                "Local nginx HTTPS on 127.0.0.1:443 works, but the public internet path does not.",
                 "Point DNS A record for this hostname to this VPS IP"
                 + (f" ({server_ip})" if server_ip else "")
                 + ", set Cloudflare to DNS only (grey cloud) or SSL Full, and disable browser VPN while testing.",
@@ -3604,7 +3491,6 @@ def port_status(body: PortStatusRequest) -> dict:
     if pm2_owner:
         same_process = pm2_owner.get("name") == body.processName
         same_cwd = str(Path(str(pm2_owner.get("cwd") or "")).resolve()) == str(Path(body.rootPath).resolve()) if pm2_owner.get("cwd") else False
-        reusable = same_process
         return {
             "dryRun": False,
             "command": ["pm2", "jlist"],
@@ -3613,9 +3499,8 @@ def port_status(body: PortStatusRequest) -> dict:
             "stderr": "",
             "returncode": 0,
             "path": info,
-            "occupied": not reusable,
-            "reusable": reusable,
-            "cwdMatches": same_cwd,
+            "occupied": not (same_process and same_cwd),
+            "reusable": same_process and same_cwd,
             "owner": pm2_owner,
         }
 

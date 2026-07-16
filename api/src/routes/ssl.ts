@@ -17,35 +17,6 @@ const sslActionSchema = z.object({
   includeWww: z.boolean().default(true)
 });
 
-type SslDomain = {
-  id: string;
-  name: string;
-  forceSsl?: boolean;
-  documentRoot?: string | null;
-  account?: { homeRoot?: string | null } | null;
-};
-
-function normalizeDocumentRoot(value?: string | null) {
-  const root = (value || "public_html").trim().replace(/^\/+/, "").replace(/\/+$/, "");
-  if (!root || root.includes("..") || path.isAbsolute(root)) {
-    const error = new Error("Document root must be a folder inside the domain.");
-    (error as Error & { statusCode?: number }).statusCode = 400;
-    throw error;
-  }
-  return root;
-}
-
-function domainWebRoot(domain: SslDomain) {
-  const documentRoot = normalizeDocumentRoot(domain.documentRoot);
-  if (domain.account?.homeRoot) {
-    if (documentRoot === domain.name || documentRoot.startsWith(`${domain.name}/`)) {
-      return path.join(domain.account.homeRoot, documentRoot);
-    }
-    return path.join(domain.account.homeRoot, domain.name, documentRoot);
-  }
-  return path.join(env.FILE_MANAGER_ROOT, domain.name, documentRoot);
-}
-
 function expiryStatus(expiry: Date | null) {
   if (!expiry) return { state: "missing", daysRemaining: null, alert: false };
   const diffMs = expiry.getTime() - Date.now();
@@ -140,11 +111,6 @@ function commandFailureDetail(result: SysagentCommandResult) {
   return [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
 }
 
-type PreflightChallengeCheck = {
-  scope: "local" | "public";
-  check: SysagentCommandResult;
-};
-
 async function panelVanityNameServers(domainId: string, domainName: string) {
   const [dnsRecords, configuredNameServers] = await Promise.all([
     prisma.dnsRecord.findMany({ where: { domainId, type: "NS", name: "@" }, select: { value: true } }),
@@ -197,7 +163,7 @@ async function optionalARecordPointsToVps(hostname: string, domainId: string, do
   }
 }
 
-async function runSslPreflight(domain: SslDomain, includeWww: boolean) {
+async function runSslPreflight(domain: { id: string; name: string; documentRoot?: string | null }, includeWww: boolean) {
   await publishDomainDnsZone(domain.id);
   let apexRecords: string[];
   try {
@@ -209,7 +175,7 @@ async function runSslPreflight(domain: SslDomain, includeWww: boolean) {
       const detail = commandFailureDetail(certbot);
       throw Object.assign(new Error(`Certbot is not ready. Install certbot and enable ALLOW_LIVE_SSL. ${detail}`.trim()), { statusCode: 400 });
     }
-    const webRoot = domainWebRoot(domain);
+    const webRoot = path.join(env.FILE_MANAGER_ROOT, domain.name, domain.documentRoot || "public_html");
     return {
       dnsChecks: [{
         host: `_acme-challenge.${domain.name}`,
@@ -231,7 +197,7 @@ async function runSslPreflight(domain: SslDomain, includeWww: boolean) {
   const wwwCheck = includeWww ? await optionalARecordPointsToVps(`www.${domain.name}`, domain.id, domain.name) : null;
   const effectiveIncludeWww = Boolean(wwwCheck?.ok);
   const dnsChecks = [apexCheck, ...(wwwCheck ? [wwwCheck] : [])];
-  const webRoot = domainWebRoot(domain);
+  const webRoot = path.join(env.FILE_MANAGER_ROOT, domain.name, domain.documentRoot || "public_html");
   const httpVhost = await publishDomainHttpVhost(domain.name, webRoot, effectiveIncludeWww);
   const preflight = await sysagent.sslPreflight({ domain: domain.name, webRoot, includeWww: effectiveIncludeWww });
 
@@ -240,13 +206,10 @@ async function runSslPreflight(domain: SslDomain, includeWww: boolean) {
     throw Object.assign(new Error(`Certbot is not ready. Install certbot and enable ALLOW_LIVE_SSL. ${detail}`.trim()), { statusCode: 400 });
   }
 
-  const failedCheck = preflightChallengeChecks(preflight).find(({ check }) => !commandSucceeded(check));
+  const failedCheck = preflightChallengeChecks(preflight).find((check) => !commandSucceeded(check));
   if (failedCheck) {
-    const detail = commandFailureDetail(failedCheck.check);
-    const hint = failedCheck.scope === "local"
-      ? "The local Nginx challenge vhost did not return the token. Check the generated vhost and document root."
-      : "The public challenge URL did not return the token. Keep port 80 open and confirm public DNS points to this VPS.";
-    throw Object.assign(new Error(`HTTP ACME challenge failed for ${domain.name}. ${hint}${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
+    const detail = commandFailureDetail(failedCheck);
+    throw Object.assign(new Error(`HTTP ACME challenge failed for ${domain.name}. The panel published the challenge vhost, but the public challenge URL still did not return the token. Keep port 80 open and confirm public DNS points to this VPS.${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
   }
 
   return { dnsChecks, httpVhost, preflight, webRoot, includeWww: effectiveIncludeWww };
@@ -262,7 +225,7 @@ async function publishDomainHttpVhost(domainName: string, webRoot: string, inclu
     forceHttps: false,
     sslCertificate: `/etc/letsencrypt/live/${certName}/fullchain.pem`,
     sslCertificateKey: `/etc/letsencrypt/live/${certName}/privkey.pem`
-  }) as { test?: SysagentCommandResult; reload?: SysagentCommandResult; postReloadCheck?: SysagentCommandResult };
+  }) as { test?: SysagentCommandResult; reload?: SysagentCommandResult };
 
   if (result.test && !commandSucceeded(result.test)) {
     const detail = commandFailureDetail(result.test);
@@ -271,10 +234,6 @@ async function publishDomainHttpVhost(domainName: string, webRoot: string, inclu
   if (result.reload && !commandSucceeded(result.reload)) {
     const detail = commandFailureDetail(result.reload);
     throw Object.assign(new Error(`Could not reload Nginx for ${domainName}.${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
-  }
-  if (result.postReloadCheck && !commandSucceeded(result.postReloadCheck)) {
-    const detail = commandFailureDetail(result.postReloadCheck);
-    throw Object.assign(new Error(`Could not verify HTTP challenge vhost for ${domainName}.${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
   }
 
   return result;
@@ -301,7 +260,7 @@ async function publishSubdomainHttpVhost(target: Awaited<ReturnType<typeof subdo
     serverName: target.fqdn,
     rootPath: target.webRoot,
     forceHttps: false
-  }) as { test?: SysagentCommandResult; reload?: SysagentCommandResult; postReloadCheck?: SysagentCommandResult };
+  }) as { test?: SysagentCommandResult; reload?: SysagentCommandResult };
 
   if (result.test && !commandSucceeded(result.test)) {
     const detail = commandFailureDetail(result.test);
@@ -311,20 +270,8 @@ async function publishSubdomainHttpVhost(target: Awaited<ReturnType<typeof subdo
     const detail = commandFailureDetail(result.reload);
     throw Object.assign(new Error(`Could not reload Nginx for ${target.fqdn}.${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
   }
-  if (result.postReloadCheck && !commandSucceeded(result.postReloadCheck)) {
-    const detail = commandFailureDetail(result.postReloadCheck);
-    throw Object.assign(new Error(`Could not verify HTTP challenge vhost for ${target.fqdn}.${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
-  }
 
   return result;
-}
-
-async function subdomainHasDeploymentBinding(subdomainId: string) {
-  const binding = await prisma.deploymentDomain.findFirst({
-    where: { subdomainId },
-    select: { id: true }
-  });
-  return Boolean(binding);
 }
 
 async function runSubdomainSslPreflight(subdomainId: string) {
@@ -349,10 +296,7 @@ async function runSubdomainSslPreflight(subdomainId: string) {
   await publishDomainDnsZone(target.parentDomain.id);
   const records = await assertARecordPointsToVps(target.fqdn, target.parentDomain.id, target.parentDomain.name);
   const dnsChecks = [{ host: target.fqdn, records, ok: true, skipped: false }];
-  const deploymentBound = await subdomainHasDeploymentBinding(subdomainId);
-  const httpVhost = deploymentBound
-    ? { skipped: true, reason: "Subdomain is bound to a deployment; static HTTP challenge vhost was not published." }
-    : await publishSubdomainHttpVhost(target);
+  const httpVhost = await publishSubdomainHttpVhost(target);
   const preflight = await sysagent.sslPreflight({ domain: target.fqdn, webRoot: target.webRoot, includeWww: false });
 
   if (!commandSucceeded(preflight.certbot)) {
@@ -360,26 +304,17 @@ async function runSubdomainSslPreflight(subdomainId: string) {
     throw Object.assign(new Error(`Certbot is not ready. Install certbot and enable ALLOW_LIVE_SSL. ${detail}`.trim()), { statusCode: 400 });
   }
 
-  const failedCheck = preflightChallengeChecks(preflight).find(({ check }) => !commandSucceeded(check));
+  const failedCheck = preflightChallengeChecks(preflight).find((check) => !commandSucceeded(check));
   if (failedCheck) {
-    const detail = commandFailureDetail(failedCheck.check);
-    const hint = failedCheck.scope === "local"
-      ? deploymentBound
-        ? "The deployment proxy vhost did not return the ACME token. Redeploy or run Deployment Doctor so the proxy route includes the ACME webroot location."
-        : "The local Nginx challenge vhost did not return the token. Check the generated vhost and document root."
-      : "Publish the subdomain first, keep port 80 open, and confirm public DNS points to this VPS.";
-    throw Object.assign(new Error(`HTTP ACME challenge failed for ${target.fqdn}. ${hint}${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
+    const detail = commandFailureDetail(failedCheck);
+    throw Object.assign(new Error(`HTTP ACME challenge failed for ${target.fqdn}. Publish the subdomain first and keep port 80 open.${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
   }
 
   return { ...target, dnsChecks, httpVhost, preflight, includeWww: false, dnsChallenge: false, certName: certbotCertificateName(target.fqdn) };
 }
 
-function preflightChallengeChecks(preflight: { checks?: SysagentCommandResult[]; localChecks?: SysagentCommandResult[]; publicChecks?: SysagentCommandResult[] }): PreflightChallengeCheck[] {
-  const publicChecks = preflight.publicChecks?.length ? preflight.publicChecks : preflight.checks ?? [];
-  return [
-    ...(preflight.localChecks ?? []).map((check) => ({ scope: "local" as const, check })),
-    ...publicChecks.map((check) => ({ scope: "public" as const, check }))
-  ];
+function preflightChallengeChecks(preflight: { checks: SysagentCommandResult[]; localChecks?: SysagentCommandResult[] }) {
+  return preflight.localChecks?.length ? preflight.localChecks : preflight.checks;
 }
 
 export const sslRoutes: FastifyPluginAsync = async (app) => {
@@ -429,10 +364,7 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
   app.post("/domains/:domainId/preflight", async (request) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const body = sslActionSchema.parse(request.body ?? {});
-    const domain = await prisma.domain.findUniqueOrThrow({
-      where: { id: domainId },
-      select: { id: true, name: true, documentRoot: true, account: { select: { homeRoot: true } } }
-    });
+    const domain = await prisma.domain.findUniqueOrThrow({ where: { id: domainId }, select: { id: true, name: true, documentRoot: true } });
     return runSslPreflight(domain, body.includeWww);
   });
 
@@ -444,10 +376,7 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
   app.post("/domains/:domainId/issue", async (request, reply) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const body = sslActionSchema.parse(request.body ?? {});
-    const domain = await prisma.domain.findUniqueOrThrow({
-      where: { id: domainId },
-      select: { id: true, name: true, forceSsl: true, documentRoot: true, account: { select: { homeRoot: true } } }
-    });
+    const domain = await prisma.domain.findUniqueOrThrow({ where: { id: domainId }, select: { id: true, name: true, forceSsl: true, documentRoot: true } });
     const preflight = await runSslPreflight(domain, body.includeWww);
     const job = await sslQueue.add("issue", {
       domainId,
@@ -490,12 +419,10 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
       source: "subdomain-ssl"
     });
 
-    if (!(await subdomainHasDeploymentBinding(subdomainId))) {
-      await prisma.subdomain.update({
-        where: { id: subdomainId },
-        data: { sslEnabled: false }
-      });
-    }
+    await prisma.subdomain.update({
+      where: { id: subdomainId },
+      data: { sslEnabled: false }
+    });
     await redis.del("domain_list", `ssl_expiry:${preflight.fqdn}`);
 
     return reply.code(202).send({ queued: true, jobId: job.id });
@@ -504,10 +431,7 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
   app.post("/domains/:domainId/renew", async (request, reply) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const body = sslActionSchema.parse(request.body ?? {});
-    const domain = await prisma.domain.findUniqueOrThrow({
-      where: { id: domainId },
-      select: { id: true, name: true, forceSsl: true, documentRoot: true, account: { select: { homeRoot: true } } }
-    });
+    const domain = await prisma.domain.findUniqueOrThrow({ where: { id: domainId }, select: { id: true, name: true, forceSsl: true, documentRoot: true } });
     const preflight = await runSslPreflight(domain, body.includeWww);
     const job = await sslQueue.add("renew", {
       domainId,

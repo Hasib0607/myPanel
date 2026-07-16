@@ -1,45 +1,8 @@
-import sys
-import types
 import unittest
 from unittest import mock
 
-psutil = types.ModuleType("psutil")
-sys.modules.setdefault("psutil", psutil)
-
-fastapi = types.ModuleType("fastapi")
-
-
-class HTTPException(Exception):
-    def __init__(self, status_code: int, detail: str):
-        super().__init__(detail)
-        self.status_code = status_code
-        self.detail = detail
-
-
-fastapi.HTTPException = HTTPException
-fastapi.APIRouter = lambda *args, **kwargs: types.SimpleNamespace(
-    get=lambda *route_args, **route_kwargs: (lambda fn: fn),
-    post=lambda *route_args, **route_kwargs: (lambda fn: fn),
-    patch=lambda *route_args, **route_kwargs: (lambda fn: fn),
-    delete=lambda *route_args, **route_kwargs: (lambda fn: fn),
-)
-sys.modules.setdefault("fastapi", fastapi)
-
-pydantic_settings = types.ModuleType("pydantic_settings")
-
-
-class BaseSettings:
-    def __init__(self, **values):
-        for key, value in values.items():
-            setattr(self, key, value)
-
-
-pydantic_settings.BaseSettings = BaseSettings
-pydantic_settings.SettingsConfigDict = lambda **kwargs: kwargs
-sys.modules.setdefault("pydantic_settings", pydantic_settings)
-
 from app.command import run_command
-from app.routers.deployments import HealthRequest, _curl_public_route, _supervisor_process_mismatch
+from app.routers.deployments import HealthRequest, _supervisor_process_mismatch
 
 
 class DeploymentLiveCommandTests(unittest.TestCase):
@@ -83,24 +46,6 @@ class DeploymentLiveCommandTests(unittest.TestCase):
             result,
             "Supervisor is not installed. Approve the install-supervisor runtime tool action, then redeploy.",
         )
-
-    def test_public_route_probe_uses_real_child_host_for_wildcard(self) -> None:
-        calls: list[list[str]] = []
-
-        def fake_run_command(command: list[str], **_kwargs):
-            calls.append(command)
-            return {"returncode": 0, "stdout": "ok\n__http_code=200\n__effective_url=http://vps-panel-wildcard-probe.ebitan.store/", "stderr": ""}
-
-        with mock.patch("app.routers.deployments.letsencrypt_certificate_exists", return_value=False):
-            with mock.patch("app.routers.deployments.run_command", side_effect=fake_run_command):
-                result = _curl_public_route("*.ebitan.store", "/", "/var/www/app", "NEXTJS", require_https=True)
-
-        self.assertEqual(result["returncode"], 0)
-        self.assertTrue(calls)
-        command_text = " ".join(calls[0])
-        self.assertIn("Host: vps-panel-wildcard-probe.ebitan.store", command_text)
-        self.assertIn("http://vps-panel-wildcard-probe.ebitan.store/", command_text)
-        self.assertNotIn("*.ebitan.store", command_text)
 
 
 if __name__ == "__main__":

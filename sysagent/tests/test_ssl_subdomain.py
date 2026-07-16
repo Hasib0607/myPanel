@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from app.config import settings
 from app.routers import ssl as ssl_router
-from app.routers.ssl import CertificateRequest, DnsCertificateRequest, certificate_names_cover, certbot_should_include_www, dns_hook_script
+from app.routers.ssl import CertificateRequest, DnsCertificateRequest, certbot_should_include_www, dns_hook_script
 
 
 class CertbotIncludeWwwTests(unittest.TestCase):
@@ -73,9 +73,3 @@ class CertbotIncludeWwwTests(unittest.TestCase):
         )
 
         compile(script, "certbot-dns-hook.py", "exec")
-
-    def test_reusable_certificate_accepts_one_level_wildcard(self) -> None:
-        self.assertTrue(certificate_names_cover("fahpet.ebitan.store", ["*.ebitan.store"]))
-        self.assertTrue(certificate_names_cover("fahpet.ebitan.store", ["fahpet.ebitan.store"]))
-        self.assertFalse(certificate_names_cover("deep.fahpet.ebitan.store", ["*.ebitan.store"]))
-        self.assertFalse(certificate_names_cover("ebitan.store", ["*.ebitan.store"]))

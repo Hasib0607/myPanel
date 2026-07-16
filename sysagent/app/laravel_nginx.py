@@ -16,14 +16,8 @@ def laravel_fpm_socket(deployment_id: str) -> str:
     return str(socket_dir / f"{laravel_fpm_pool_name(deployment_id)}.sock")
 
 
-def nginx_proxy_headers(upstream_port: int, *, loopback_host: bool = False, websocket_upgrade: bool = False) -> str:
+def nginx_proxy_headers(upstream_port: int, *, loopback_host: bool = False) -> str:
     host_header = f"127.0.0.1:{upstream_port}" if loopback_host else "$http_host"
-    upgrade_headers = (
-        "        proxy_set_header Upgrade $http_upgrade;\n"
-        "        proxy_set_header Connection \"upgrade\";\n"
-        if websocket_upgrade
-        else "        proxy_set_header Connection \"\";\n"
-    )
     return (
         "        proxy_http_version 1.1;\n"
         f"        proxy_pass http://127.0.0.1:{upstream_port};\n"
@@ -36,7 +30,8 @@ def nginx_proxy_headers(upstream_port: int, *, loopback_host: bool = False, webs
         "        proxy_set_header X-Forwarded-Proto $scheme;\n"
         "        proxy_set_header X-Forwarded-Ssl $https;\n"
         "        proxy_set_header HTTPS $https;\n"
-        f"{upgrade_headers}"
+        "        proxy_set_header Upgrade $http_upgrade;\n"
+        "        proxy_set_header Connection \"upgrade\";\n"
         "        proxy_connect_timeout 10s;\n"
         "        proxy_request_buffering off;\n"
         "        proxy_buffering off;\n"
@@ -49,16 +44,16 @@ def nginx_proxy_headers(upstream_port: int, *, loopback_host: bool = False, webs
     )
 
 
-def nginx_upstream_proxy_locations(upstream_port: int, *, loopback_host: bool = False, websocket_upgrade: bool = False) -> str:
+def nginx_upstream_proxy_locations(upstream_port: int, *, loopback_host: bool = False) -> str:
     """Proxy all traffic to the app process (Vite preview, Next.js, Node APIs)."""
     return (
         "    location / {\n"
-        f"{nginx_proxy_headers(upstream_port, loopback_host=loopback_host, websocket_upgrade=websocket_upgrade)}"
+        f"{nginx_proxy_headers(upstream_port, loopback_host=loopback_host)}"
         "    }\n"
     )
 
 
-def nginx_spa_static_locations(public_root: str, upstream_port: int, fallback_error_page: str) -> str:
+def nginx_spa_static_locations(public_root: str, upstream_port: int) -> str:
     """Serve a built SPA from disk; fall back to the upstream for missing routes."""
     return (
         f"    root {public_root};\n"
@@ -98,10 +93,9 @@ def nginx_app_locations(
         # with X-Forwarded-Proto when constructing rewrite URLs; a loopback Host
         # would turn an HTTPS request into https://localhost:<plain-http-port>.
         effective_loopback_host = loopback_proxy_host and normalized == "NODEJS"
-        websocket_upgrade = normalized in {"NODEJS", "NEXTJS"}
-        return nginx_upstream_proxy_locations(upstream_port, loopback_host=effective_loopback_host, websocket_upgrade=websocket_upgrade)
+        return nginx_upstream_proxy_locations(upstream_port, loopback_host=effective_loopback_host)
     if normalized == "STATIC":
-        return nginx_spa_static_locations(public_root, upstream_port, fallback_error_page)
+        return nginx_spa_static_locations(public_root, upstream_port)
     return nginx_laravel_app_locations(
         deployment_id=deployment_id,
         public_root=public_root,

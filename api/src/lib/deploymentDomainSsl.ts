@@ -29,13 +29,7 @@ function publicHtmlRootPath(domainName: string, documentRoot?: string | null) {
 }
 
 function accountPublicRootPath(domain: { name: string; documentRoot?: string | null; account?: { homeRoot?: string | null } | null }) {
-  if (domain.account?.homeRoot) {
-    const documentRoot = normalizeDocumentRoot(domain.documentRoot);
-    if (documentRoot === domain.name || documentRoot.startsWith(`${domain.name}/`)) {
-      return path.join(domain.account.homeRoot, documentRoot);
-    }
-    return path.join(domain.account.homeRoot, domain.name, documentRoot);
-  }
+  if (domain.account?.homeRoot) return path.join(domain.account.homeRoot, normalizeDocumentRoot(domain.documentRoot));
   return publicHtmlRootPath(domain.name, domain.documentRoot);
 }
 
@@ -102,7 +96,7 @@ export function deploymentSslCertificatePaths(domain: BoundDomain | null) {
 export async function deploymentHttpsReady(domain: BoundDomain | null) {
   if (!domain?.name) return false;
   try {
-    const status = await sysagent.certificateFindReusable(domain.name);
+    const status = await sysagent.certificateExists(certbotCertificateName(domain.name));
     return Boolean(status.exists);
   } catch {
     return false;
@@ -110,17 +104,8 @@ export async function deploymentHttpsReady(domain: BoundDomain | null) {
 }
 
 export async function deploymentSslCertificatePathsWhenReady(domain: BoundDomain | null) {
-  if (!domain) return {};
-  try {
-    const status = await sysagent.certificateFindReusable(domain.name);
-    if (!status.exists) return {};
-    return {
-      sslCertificate: status.certificate,
-      sslCertificateKey: status.privateKey
-    };
-  } catch {
-    return {};
-  }
+  if (!domain || !(await deploymentHttpsReady(domain))) return {};
+  return deploymentSslCertificatePaths(domain);
 }
 
 export function deploymentFallbackRootPath(domain: BoundDomain | null) {
@@ -136,14 +121,13 @@ export async function publishPublicHtmlNginxVhost(domain: BoundDomain | null) {
   const serverName = deploymentServerName(domain);
   const rootPath = deploymentFallbackRootPath(domain);
   if (!domain?.name || !serverName || !rootPath) return null;
-  const sslPaths = await deploymentSslCertificatePathsWhenReady(domain);
-  const httpsReady = Boolean(sslPaths.sslCertificate && sslPaths.sslCertificateKey);
+  const httpsReady = await deploymentHttpsReady(domain);
   return sysagent.writeStaticNginxVhost({
     name: nginxResourceName("domain", domain.name),
     serverName,
     rootPath,
     forceHttps: Boolean(domain.forceSsl && httpsReady),
-    ...(httpsReady ? sslPaths : {})
+    ...(httpsReady ? deploymentSslCertificatePaths(domain) : {})
   });
 }
 
@@ -204,11 +188,6 @@ export async function enableDeploymentTlsInDatabase(domain: BoundDomain) {
 export async function disableDeploymentTlsInDatabase(domain: BoundDomain, options?: { clearForceSsl?: boolean }) {
   const clearForceSsl = options?.clearForceSsl ?? false;
   if (domain.id.startsWith("subdomain:")) {
-    if (!clearForceSsl) {
-      // Subdomains do not have a separate forceSsl field. Keep sslEnabled as
-      // the user's SSL intent when deploy temporarily cannot confirm a cert.
-      return domain;
-    }
     const subdomainId = domain.id.slice("subdomain:".length);
     await prisma.subdomain.update({
       where: { id: subdomainId },
@@ -244,7 +223,6 @@ export async function syncDeploymentTlsWithCertificate(domain: BoundDomain | nul
 }
 
 export async function findDeploymentProxyTarget(fqdn: string) {
-  const normalizedFqdn = fqdn.toLowerCase();
   const subdomainBindings = await prisma.deploymentDomain.findMany({
     where: { subdomainId: { not: null } },
     include: {
@@ -253,7 +231,7 @@ export async function findDeploymentProxyTarget(fqdn: string) {
     }
   });
   const subdomainHit = subdomainBindings.find(
-    (binding) => binding.subdomain && subdomainBindingMatchesFqdn(binding.subdomain, normalizedFqdn)
+    (binding) => binding.subdomain && `${binding.subdomain.name}.${binding.subdomain.domain.name}` === fqdn
   );
   if (subdomainHit?.deployment) {
     if (!deploymentIsRoutable(subdomainHit.deployment)) return null;
@@ -293,22 +271,6 @@ export async function findDeploymentProxyTarget(fqdn: string) {
   if (!deployment) return null;
   if (!deploymentIsRoutable(deployment)) return null;
   return { deployment, domain, subdomainId: null as string | null, includeWww: true };
-}
-
-export function subdomainBindingMatchesFqdn(
-  subdomain: { name: string; domain: { name: string } },
-  fqdn: string
-) {
-  const normalizedFqdn = fqdn.toLowerCase();
-  const parent = subdomain.domain.name.toLowerCase();
-  const name = subdomain.name.toLowerCase();
-  if (name === "*") {
-    const suffix = `.${parent}`;
-    if (!normalizedFqdn.endsWith(suffix)) return false;
-    const left = normalizedFqdn.slice(0, -suffix.length);
-    return Boolean(left) && !left.includes(".");
-  }
-  return `${name}.${parent}` === normalizedFqdn;
 }
 
 export function deploymentNginxPublicDirectory(input: {
@@ -376,8 +338,7 @@ export async function publishDeploymentProxyNginx(input: {
     sslEnabled: input.forceHttps
   };
   const hasExplicitCertificate = Boolean(input.sslCertificate && input.sslCertificateKey);
-  const reusableSslPaths = hasExplicitCertificate || !input.forceHttps ? {} : await deploymentSslCertificatePathsWhenReady(bound);
-  const httpsReady = hasExplicitCertificate || Boolean(reusableSslPaths.sslCertificate && reusableSslPaths.sslCertificateKey);
+  const httpsReady = hasExplicitCertificate || (input.forceHttps ? await deploymentHttpsReady(bound) : false);
   return sysagent.deploymentNginx(
     buildDeploymentNginxRequest({
       deploymentId: input.deploymentId,
@@ -393,7 +354,7 @@ export async function publishDeploymentProxyNginx(input: {
       requireSsl: input.requireSsl ?? false,
       ...(hasExplicitCertificate
         ? { sslCertificate: input.sslCertificate, sslCertificateKey: input.sslCertificateKey }
-        : httpsReady ? reusableSslPaths : {})
+        : httpsReady ? deploymentSslCertificatePaths(bound) : {})
     })
   );
 }

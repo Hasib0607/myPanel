@@ -6,10 +6,6 @@ export function isWildcardHostname(value: string) {
   return value.trim().startsWith("*.");
 }
 
-export function serverNameHasWildcard(value: string) {
-  return value.split(/\s+/).some((hostname) => isWildcardHostname(hostname));
-}
-
 export function certbotCertificateName(value: string) {
   return nginxResourceName(value.trim().split(/\s+/)[0] ?? value);
 }

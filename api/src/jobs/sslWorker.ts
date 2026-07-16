@@ -8,9 +8,8 @@ import { resolvePublicA } from "../lib/publicDns.js";
 import { currentVpsIp } from "../lib/serverIp.js";
 import { sysagent, type SysagentCommandResult } from "../lib/sysagent.js";
 import { subdomainFolderName } from "../lib/domainFiles.js";
-import { certbotCertificateName, isWildcardHostname, nginxResourceName, serverNameHasWildcard } from "../lib/nginxNames.js";
+import { certbotCertificateName, isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
 import {
-  boundDomainFromBinding,
   deploymentFallbackRootPath,
   deploymentIsRoutable,
   deploymentServerName,
@@ -79,7 +78,6 @@ function certificatePaths(domain: string, certificate?: ReusableCertificate | nu
 type NginxPublishResult = {
   test: SysagentCommandResult;
   reload: SysagentCommandResult;
-  postReloadCheck?: SysagentCommandResult;
   [key: string]: unknown;
 };
 
@@ -215,9 +213,6 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
 
   assertLiveCommandSucceeded("Nginx certificate vhost test", result.test);
   assertLiveCommandSucceeded("Nginx certificate vhost reload", result.reload);
-  if (result.postReloadCheck && !serverNameHasWildcard(sslServerName(domainName, includeWww))) {
-    assertLiveCommandSucceeded("Nginx certificate vhost route check", result.postReloadCheck);
-  }
   return result;
 }
 
@@ -243,63 +238,6 @@ async function markSslIssued(job: { data: { domain: string; domainId?: string | 
   }
 }
 
-function activeDeploymentRootPath(deployment: { rootPath: string; processConfig?: unknown }) {
-  const processConfig = deployment.processConfig && typeof deployment.processConfig === "object" && !Array.isArray(deployment.processConfig)
-    ? deployment.processConfig as Record<string, unknown>
-    : {};
-  return typeof processConfig.activeArtifactPath === "string" && processConfig.activeArtifactPath.trim()
-    ? processConfig.activeArtifactPath
-    : deployment.rootPath;
-}
-
-async function republishSubdomainDeploymentBindings(subdomainId: string, certificate?: ReusableCertificate | null) {
-  const bindings = await prisma.deploymentDomain.findMany({
-    where: { subdomainId },
-    include: {
-      deployment: true,
-      subdomain: { include: { domain: true } },
-      domain: true
-    }
-  });
-  const results = [];
-  for (const binding of bindings) {
-    if (!deploymentIsRoutable(binding.deployment)) continue;
-    const domain = boundDomainFromBinding(binding);
-    const serverName = deploymentServerName(domain);
-    if (!domain || !serverName) continue;
-    const result = await publishDeploymentProxyNginx({
-      deploymentId: binding.deployment.id,
-      fqdn: serverName,
-      upstreamPort: binding.deployment.port,
-      rootPath: activeDeploymentRootPath(binding.deployment),
-      framework: binding.deployment.framework,
-      startCommand: binding.deployment.startCommand,
-      publicDirectory: binding.deployment.publicDirectory,
-      outputDirectory: binding.deployment.outputDirectory,
-      fallbackRootPath: deploymentFallbackRootPath(domain),
-      forceHttps: true,
-      requireSsl: true,
-      ...certificatePaths(domain.name, certificate)
-    });
-    assertLiveCommandSucceeded("Nginx subdomain deployment SSL route test", result.test as SysagentCommandResult);
-    assertLiveCommandSucceeded("Nginx subdomain deployment SSL route reload", result.reload as SysagentCommandResult);
-    results.push({ deploymentId: binding.deployment.id, domain: domain.name, result });
-  }
-  return results;
-}
-
-async function hasRoutableSubdomainDeploymentBinding(subdomainId: string | null | undefined) {
-  if (!subdomainId) return false;
-  const binding = await prisma.deploymentDomain.findFirst({
-    where: {
-      subdomainId,
-      deployment: { status: "RUNNING" }
-    },
-    select: { id: true }
-  });
-  return Boolean(binding);
-}
-
 async function publishHttpChallengeVhost(domainName: string, domainId: string | null | undefined, includeWww: boolean, webRoot?: string | null) {
   if (!webRoot) return;
   const result = await sysagent.writeStaticNginxVhost({
@@ -310,15 +248,13 @@ async function publishHttpChallengeVhost(domainName: string, domainId: string | 
   });
   assertLiveCommandSucceeded("Nginx HTTP challenge vhost test", result.test as SysagentCommandResult);
   assertLiveCommandSucceeded("Nginx HTTP challenge vhost reload", result.reload as SysagentCommandResult);
-  if (result.postReloadCheck) assertLiveCommandSucceeded("Nginx HTTP challenge vhost route check", result.postReloadCheck as SysagentCommandResult);
   if (domainId) {
     await redis.del("domain_list", `domain:${domainId}`);
   }
 }
 
-function firstFailedPreflightChallenge(preflight: { checks?: SysagentCommandResult[]; localChecks?: SysagentCommandResult[]; publicChecks?: SysagentCommandResult[] }) {
-  const publicChecks = preflight.publicChecks?.length ? preflight.publicChecks : preflight.checks ?? [];
-  const checks = [...(preflight.localChecks ?? []), ...publicChecks];
+function firstFailedPreflightChallenge(preflight: { checks?: SysagentCommandResult[]; localChecks?: SysagentCommandResult[] }) {
+  const checks = preflight.localChecks?.length ? preflight.localChecks : preflight.checks ?? [];
   return checks.find((check) => check.returncode !== 0 || check.dryRun);
 }
 
@@ -452,20 +388,14 @@ export const sslWorker = new Worker(
       }
       reusableCertificate = verifiedCertificate.certificate;
 
-      const shouldPublishDeploymentOnly = await hasRoutableSubdomainDeploymentBinding(job.data.subdomainId);
       const domain = job.data.domainId
         ? await prisma.domain.findUnique({ where: { id: job.data.domainId }, select: { forceSsl: true } })
         : null;
+      const vhost = await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true, includeWww, job.data.webRoot, reusableCertificate);
       await markSslIssued(job, reusableCertificate);
-      const deploymentRoutes = job.data.subdomainId
-        ? await republishSubdomainDeploymentBindings(job.data.subdomainId, reusableCertificate)
-        : [];
-      const vhost = shouldPublishDeploymentOnly
-        ? { skipped: true, reason: "Subdomain is bound to a deployment; static HTTPS vhost was not published.", deploymentRoutes }
-        : await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true, includeWww, job.data.webRoot, reusableCertificate);
 
       await redis.del("domain_list", `ssl_expiry:${job.data.domain}`);
-      return { certbot: result, nginx: vhost, deploymentRoutes };
+      return { certbot: result, nginx: vhost };
     }
 
     if (job.name === "renew") {
@@ -496,20 +426,14 @@ export const sslWorker = new Worker(
       }
       reusableCertificate = verifiedCertificate.certificate;
 
-      const shouldPublishDeploymentOnly = await hasRoutableSubdomainDeploymentBinding(job.data.subdomainId);
       const domain = job.data.domainId
         ? await prisma.domain.findUnique({ where: { id: job.data.domainId }, select: { forceSsl: true } })
         : null;
+      const vhost = await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true, includeWww, job.data.webRoot, reusableCertificate);
       await markSslIssued(job, reusableCertificate);
-      const deploymentRoutes = job.data.subdomainId
-        ? await republishSubdomainDeploymentBindings(job.data.subdomainId, reusableCertificate)
-        : [];
-      const vhost = shouldPublishDeploymentOnly
-        ? { skipped: true, reason: "Subdomain is bound to a deployment; static HTTPS vhost was not published.", deploymentRoutes }
-        : await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true, includeWww, job.data.webRoot, reusableCertificate);
 
       await redis.del("domain_list", `ssl_expiry:${job.data.domain}`);
-      return { certbot: result, nginx: vhost, deploymentRoutes };
+      return { certbot: result, nginx: vhost };
     }
 
     throw new Error(`Unknown SSL job: ${job.name}`);
