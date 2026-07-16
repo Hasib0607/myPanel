@@ -38,6 +38,7 @@ from app.nginx_manager import (
     probe_host_for_server_name,
     remove_conflicting_configs,
     route_ownership_header,
+    server_name_has_wildcard,
 )
 
 
@@ -58,6 +59,11 @@ class NginxManagerTests(unittest.TestCase):
             "vps-panel-wildcard-probe.ebitans.store",
         )
         self.assertEqual(probe_host_for_server_name("shop.ebitans.store"), "shop.ebitans.store")
+
+    def test_server_name_has_wildcard_detects_any_token(self) -> None:
+        self.assertTrue(server_name_has_wildcard("*.ebitans.store"))
+        self.assertTrue(server_name_has_wildcard("shop.ebitans.store *.ebitans.store"))
+        self.assertFalse(server_name_has_wildcard("shop.ebitans.store www.shop.ebitans.store"))
 
     def test_detects_wildcard_server_name_directive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

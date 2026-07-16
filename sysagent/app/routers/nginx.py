@@ -24,6 +24,7 @@ from app.nginx_manager import (
     safe_letsencrypt_path,
     safe_nginx_path,
     safe_web_root,
+    server_name_has_wildcard,
 )
 
 router = APIRouter()
@@ -221,6 +222,21 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
         )
 
     def route_ownership_probe(*, https: bool = False) -> dict:
+        if server_name_has_wildcard(body.serverName):
+            result = run_command(["nginx", "-T"], allow_live=True)
+            output = f"{result.get('stdout') or ''}\n{result.get('stderr') or ''}"
+            expected_header = f'{ROUTE_OWNERSHIP_HEADER} "{body.name}"'
+            if result.get("returncode") == 0 and f"server_name {body.serverName};" in output and expected_header in output:
+                return result
+            return {
+                **result,
+                "returncode": 1,
+                "stderr": (
+                    f"Generated wildcard vhost {body.name!r} is not present in the active nginx config; "
+                    f"missing server_name {body.serverName!r} or {ROUTE_OWNERSHIP_HEADER} header."
+                ),
+            }
+
         primary_host = probe_host_for_server_name(body.serverName)
         scheme = "https" if https else "http"
         port = "443" if https else "80"

@@ -53,6 +53,7 @@ from app.nginx_manager import (
     safe_nginx_path,
     safe_web_root,
     server_name_directive_tokens,
+    server_name_has_wildcard,
     server_name_tokens,
     _config_has_insecure_port443,
     _config_has_server_name,
@@ -2136,6 +2137,21 @@ def _laravel_nginx_post_reload_check(server_name: str, public_root: str, framewo
 
 
 def _nginx_route_ownership_probe(server_name: str, config_name: str, *, require_https: bool) -> dict:
+    if server_name_has_wildcard(server_name):
+        result = run_command(["nginx", "-T"], allow_live=True)
+        output = f"{result.get('stdout') or ''}\n{result.get('stderr') or ''}"
+        expected_header = f'{ROUTE_OWNERSHIP_HEADER} "{config_name}"'
+        if result.get("returncode") == 0 and f"server_name {server_name};" in output and expected_header in output:
+            return result
+        return {
+            **result,
+            "returncode": 1,
+            "stderr": (
+                f"Generated wildcard vhost {config_name!r} is not present in the active nginx config; "
+                f"missing server_name {server_name!r} or {ROUTE_OWNERSHIP_HEADER} header."
+            ),
+        }
+
     primary = probe_host_for_server_name(server_name)
     scheme = "https" if require_https else "http"
     port = "443" if require_https else "80"

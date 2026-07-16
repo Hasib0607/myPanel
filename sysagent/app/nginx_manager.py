@@ -158,6 +158,10 @@ def server_name_tokens(server_name: str) -> list[str]:
     return [part.strip() for part in server_name.split() if part.strip()]
 
 
+def server_name_has_wildcard(server_name: str) -> bool:
+    return any(token.startswith("*.") for token in server_name_tokens(server_name))
+
+
 def server_name_directive_tokens(text: str) -> list[str]:
     tokens: list[str] = []
     for match in re.finditer(r"\bserver_name\b\s+([^;]+);", text):
