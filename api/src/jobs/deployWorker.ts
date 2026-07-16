@@ -3854,7 +3854,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
   const processAction = action === "redeploy" || action === "deploy" ? "start" : action;
 
   try {
-    await runStep(deployment.id, releaseId, "PREFLIGHT", "Sysagent live command preflight", () =>
+    await runStepWithSysagentConnectionRepair(deployment.id, releaseId, "PREFLIGHT", "Sysagent live command preflight", () =>
       assertSysagentLiveCommandsEnabled(deployment.id, releaseId)
     );
 
@@ -4053,7 +4053,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       sourceProvider: deployment.sourceProvider,
       envCount: deployment.env.length
     }));
-    await runStep(deployment.id, releaseId, "PREFLIGHT", "Sysagent live command preflight", () =>
+    await runStepWithSysagentConnectionRepair(deployment.id, releaseId, "PREFLIGHT", "Sysagent live command preflight", () =>
       assertSysagentLiveCommandsEnabled(deployment.id, releaseId)
     );
     if (env.DEPLOY_WEB_RUNTIME_OPTIMIZATION_ENABLED) {
