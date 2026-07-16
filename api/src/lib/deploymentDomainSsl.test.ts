@@ -39,6 +39,34 @@ test("wildcard deployment certificates use the safe certbot lineage name", async
   assert.equal(paths.sslCertificateKey, "/etc/letsencrypt/live/wildcard.ebitans.store/privkey.pem");
 });
 
+test("subdomain deployments reuse matching wildcard certificate paths", async () => {
+  const { deploymentSslCertificatePathsWhenReady } = await import("./deploymentDomainSsl.js");
+  const { sysagent } = await import("./sysagent.js");
+  const original = sysagent.certificateFindReusable;
+  sysagent.certificateFindReusable = async () => ({
+    requested: "fahpet.ebitan.store",
+    domain: "wildcard.ebitan.store",
+    exists: true,
+    expiry: null,
+    names: ["*.ebitan.store"],
+    certificate: "/etc/letsencrypt/live/wildcard.ebitan.store/fullchain.pem",
+    privateKey: "/etc/letsencrypt/live/wildcard.ebitan.store/privkey.pem"
+  });
+
+  try {
+    const paths = await deploymentSslCertificatePathsWhenReady({
+      id: "subdomain:sub_1",
+      name: "fahpet.ebitan.store",
+      forceSsl: true
+    });
+
+    assert.equal(paths.sslCertificate, "/etc/letsencrypt/live/wildcard.ebitan.store/fullchain.pem");
+    assert.equal(paths.sslCertificateKey, "/etc/letsencrypt/live/wildcard.ebitan.store/privkey.pem");
+  } finally {
+    sysagent.certificateFindReusable = original;
+  }
+});
+
 test("wildcard deployment skips HTTP ACME webroot preparation", async () => {
   const { ensureAcmeWebroot } = await import("./deploymentDomainSsl.js");
   const { sysagent } = await import("./sysagent.js");
@@ -56,6 +84,64 @@ test("wildcard deployment skips HTTP ACME webroot preparation", async () => {
   }
 
   assert.equal(calls, 0);
+});
+
+test("subdomain SSL intent survives deploy certificate probe misses", async () => {
+  const { syncDeploymentTlsWithCertificate } = await import("./deploymentDomainSsl.js");
+  const { sysagent } = await import("./sysagent.js");
+  const { prisma } = await import("./prisma.js");
+  const originalFindReusable = sysagent.certificateFindReusable;
+  const originalUpdate = prisma.subdomain.update;
+  let updates = 0;
+
+  sysagent.certificateFindReusable = async () => ({
+    requested: "*.ebitans.store",
+    domain: "*.ebitans.store",
+    exists: false,
+    expiry: null,
+    names: [],
+    certificate: "",
+    privateKey: ""
+  });
+  (prisma.subdomain as any).update = async () => {
+    updates += 1;
+    throw new Error("subdomain sslEnabled should not be cleared");
+  };
+
+  try {
+    const result = await syncDeploymentTlsWithCertificate({
+      id: "subdomain:sub_1",
+      name: "*.ebitans.store",
+      forceSsl: true,
+      sslEnabled: true
+    });
+
+    assert.equal(result.httpsReady, false);
+    assert.equal(result.domain?.sslEnabled, true);
+    assert.equal(result.domain?.forceSsl, true);
+    assert.equal(updates, 0);
+  } finally {
+    sysagent.certificateFindReusable = originalFindReusable;
+    (prisma.subdomain as any).update = originalUpdate;
+  }
+});
+
+test("wildcard subdomain deployment binding matches one-level child hosts", async () => {
+  const { subdomainBindingMatchesFqdn } = await import("./deploymentDomainSsl.js");
+  const wildcard = { name: "*", domain: { name: "ecommercex.store" } };
+
+  assert.equal(subdomainBindingMatchesFqdn(wildcard, "a9.ecommercex.store"), true);
+  assert.equal(subdomainBindingMatchesFqdn(wildcard, "A10.ecommercex.store"), true);
+  assert.equal(subdomainBindingMatchesFqdn(wildcard, "deep.a9.ecommercex.store"), false);
+  assert.equal(subdomainBindingMatchesFqdn(wildcard, "ecommercex.store"), false);
+});
+
+test("exact subdomain deployment binding still matches only itself", async () => {
+  const { subdomainBindingMatchesFqdn } = await import("./deploymentDomainSsl.js");
+  const exact = { name: "admin", domain: { name: "ecommercex.store" } };
+
+  assert.equal(subdomainBindingMatchesFqdn(exact, "admin.ecommercex.store"), true);
+  assert.equal(subdomainBindingMatchesFqdn(exact, "a9.ecommercex.store"), false);
 });
 
 test("Next.js proxy requests always preserve the public Host", async () => {

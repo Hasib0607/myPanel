@@ -27,6 +27,7 @@ import {
   runGuardianDeploymentRepair,
   sleep as guardianRepairSleep
 } from "../lib/deploymentGuardianRepair.js";
+import { localRuntimeHealthUrl } from "../lib/deploymentHealthUrl.js";
 import { env } from "../config/env.js";
 import { prisma } from "../lib/prisma.js";
 import { sanitizePrismaJson, sanitizePrismaText } from "../lib/prismaSanitize.js";
@@ -52,6 +53,7 @@ import {
   deploymentSslCertificatePathsWhenReady,
   deploymentCertbotIncludeWww,
   deploymentSslContactEmail,
+  deploymentWantsSsl,
   disableDeploymentTlsInDatabase,
   syncDeploymentTlsWithCertificate,
   ensureAcmeWebroot,
@@ -170,6 +172,10 @@ const defaultProcessManagerByFramework: Record<DeploymentFramework, DeploymentPr
 
 async function writeLog(deploymentId: string, releaseId: string | undefined, step: DeployStep, message: string, metadata: Prisma.InputJsonObject = {}, level = "info") {
   await pruneBuildLogs(deploymentId);
+  await prisma.deployment.update({
+    where: { id: deploymentId },
+    data: { updatedAt: new Date() }
+  }).catch(() => undefined);
   return prisma.deploymentLog.create({
     data: {
       deploymentId,
@@ -188,6 +194,49 @@ function deploymentLogDir(slug: string) {
 
 function deploymentProcessConfig(value: unknown): Record<string, any> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {};
+}
+
+function deploymentArtifactRootPath(deployment: { rootPath: string; processConfig: unknown }) {
+  const config = deploymentProcessConfig(deployment.processConfig);
+  return typeof config.activeArtifactPath === "string" && config.activeArtifactPath.trim()
+    ? config.activeArtifactPath
+    : deployment.rootPath;
+}
+
+function deploymentReleaseRootPath(deployment: { rootPath: string }, releaseId: string | undefined) {
+  const safeReleaseId = (releaseId || new Date().toISOString()).replace(/[^a-zA-Z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "");
+  return path.join(deployment.rootPath, ".panel-releases", `${Date.now()}-${safeReleaseId || "release"}`);
+}
+
+function deploymentUsesAtomicArtifact(deployment: { framework: DeploymentFramework; gitUrl: string | null; processManager: DeploymentProcessManager | null }) {
+  return Boolean(deployment.gitUrl) && deployment.processManager === "PM2" && (deployment.framework === "NEXTJS" || deployment.framework === "NODEJS");
+}
+
+async function activateDeploymentArtifact(deployment: DeploymentWithWorkerRelations, releaseId: string | undefined, artifactRootPath: string | null) {
+  const currentConfig = deploymentProcessConfig(deployment.processConfig);
+  if (!artifactRootPath && !currentConfig.activeArtifactPath) return deployment;
+  const nextProcessConfig = {
+    ...currentConfig
+  };
+  if (artifactRootPath) {
+    nextProcessConfig.activeArtifactPath = artifactRootPath;
+  } else {
+    delete nextProcessConfig.activeArtifactPath;
+  }
+  if (releaseId) {
+    await prisma.deploymentRelease.updateMany({
+      where: { id: releaseId, status: { not: "CANCELLED" } },
+      data: {
+        sourcePath: deployment.rootPath,
+        artifactPath: artifactRootPath
+      }
+    });
+  }
+  return prisma.deployment.update({
+    where: { id: deployment.id },
+    data: { processConfig: nextProcessConfig as Prisma.InputJsonValue },
+    include: deploymentWorkerInclude
+  });
 }
 
 function laravelWorkerConfig(value: unknown) {
@@ -461,6 +510,83 @@ async function runStep<T>(deploymentId: string, releaseId: string | undefined, s
     const detail = sanitizePrismaText(error instanceof Error ? error.message : "Unknown deployment step error");
     await writeLog(deploymentId, releaseId, step, `${message} failed`, { error: detail }, "error");
     throw error;
+  }
+}
+
+function isSysagentConnectionRefused(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /sysagent .* request failed: .*ECONNREFUSED/i.test(message);
+}
+
+function sudoNeedsPassword(error: unknown) {
+  const text = `${error instanceof Error ? error.message : String(error)} ${(error as { stderr?: string } | undefined)?.stderr ?? ""}`;
+  return /sudo:.*password is required|a password is required|sudo: a terminal is required/i.test(text);
+}
+
+async function waitForSysagentHealthy(maxAttempts = 20) {
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const health = await sysagent.health();
+      return { attempt, health };
+    } catch (error) {
+      lastError = error;
+      await sleep(1000);
+    }
+  }
+  const detail = lastError instanceof Error ? lastError.message : String(lastError ?? "unknown error");
+  throw new Error(`Sysagent health check failed after ${maxAttempts} seconds: ${detail}`);
+}
+
+async function repairSysagentConnectionForDeployment(deploymentId: string, releaseId: string | undefined, step: DeployStep, reason: string) {
+  await writeLog(deploymentId, releaseId, step, "Sysagent connection repair started", { reason }, "warn");
+  let restart: Awaited<ReturnType<typeof systemctlRestart>>;
+  try {
+    restart = await systemctlRestart("vps-panel-sysagent");
+  } catch (error) {
+    if (sudoNeedsPassword(error)) {
+      await ensureDoctorApprovalExists(deploymentId, {
+        actionKey: "repair-sysagent-service",
+        label: "Restart VPS panel sysagent service",
+        command: "sudo systemctl restart vps-panel-sysagent && sudo systemctl enable vps-panel-sysagent",
+        reason: "Deployments require vps-panel-sysagent for live git/build/process/nginx operations. The service is down and the panel user cannot restart it without passwordless sudo permission."
+      });
+      await writeLog(deploymentId, releaseId, step, "Sysagent connection repair needs root permission", {
+        reason,
+        command: "sudo systemctl restart vps-panel-sysagent && sudo systemctl enable vps-panel-sysagent",
+        sudoError: error instanceof Error ? error.message : String(error)
+      }, "error");
+      throw new Error(
+        "vps-panel-sysagent is not running and the panel user cannot restart it because sudo requires a password. Run `sudo systemctl restart vps-panel-sysagent && sudo systemctl enable vps-panel-sysagent`, or add passwordless sudo permission for restarting vps-panel-sysagent, then redeploy."
+      );
+    }
+    throw error;
+  }
+  const ready = await waitForSysagentHealthy();
+  await writeLog(deploymentId, releaseId, step, "Sysagent connection repair completed", {
+    restart: {
+      stdout: restart.stdout,
+      stderr: restart.stderr
+    },
+    ready
+  });
+  return ready;
+}
+
+async function runStepWithSysagentConnectionRepair<T>(
+  deploymentId: string,
+  releaseId: string | undefined,
+  step: DeployStep,
+  message: string,
+  fn: () => Promise<T>
+) {
+  try {
+    return await runStep(deploymentId, releaseId, step, message, fn);
+  } catch (error) {
+    if (!isSysagentConnectionRefused(error)) throw error;
+    const reason = error instanceof Error ? error.message : String(error);
+    await repairSysagentConnectionForDeployment(deploymentId, releaseId, step, reason);
+    return runStep(deploymentId, releaseId, step, `${message} retry after sysagent restart`, fn);
   }
 }
 
@@ -970,8 +1096,8 @@ async function applyPriorityReserveToDeployBudget(deploymentId: string, budget: 
 async function markRelease(releaseId: string | undefined, status: "RUNNING" | "SUCCEEDED" | "FAILED" | "ROLLED_BACK", startedAt?: Date) {
   if (!releaseId) return;
   const finished = status === "SUCCEEDED" || status === "FAILED" || status === "ROLLED_BACK" ? new Date() : undefined;
-  await prisma.deploymentRelease.update({
-    where: { id: releaseId },
+  await prisma.deploymentRelease.updateMany({
+    where: { id: releaseId, status: { not: "CANCELLED" } },
     data: {
       status,
       startedAt: startedAt ?? (status === "RUNNING" ? new Date() : undefined),
@@ -998,17 +1124,16 @@ function gitSyncCommitInfo(result: unknown): GitSyncCommitInfo | null {
   return sha || message || author ? { sha, message, author } : null;
 }
 
-async function syncReleaseCommitInfo(deploymentId: string, releaseId: string | undefined, commit: GitSyncCommitInfo | null) {
+async function syncReleaseCommitInfo(releaseId: string | undefined, commit: GitSyncCommitInfo | null) {
   if (!commit?.sha) return;
   const data = {
     commitSha: commit.sha,
     commitMessage: commit.message,
     commitAuthor: commit.author
   };
-  await prisma.deployment.update({ where: { id: deploymentId }, data: { commitSha: commit.sha } });
   if (releaseId) {
-    await prisma.deploymentRelease.update({
-      where: { id: releaseId },
+    await prisma.deploymentRelease.updateMany({
+      where: { id: releaseId, status: { not: "CANCELLED" } },
       data
     });
   }
@@ -1358,7 +1483,7 @@ async function runHealthCheckWithGuardianRecovery(
         sysagent.deploymentHealth({
           deploymentId: deployment.id,
           port: deployment.port,
-          healthUrl: deployment.healthUrl,
+          healthUrl: localRuntimeHealthUrl(deployment.healthUrl, deployment.port),
           processName: deployment.slug,
           processManager,
           rootPath: appPath,
@@ -1578,6 +1703,48 @@ async function republishDeploymentNginxVhost(
   );
 }
 
+async function inspectAndRepairDeploymentNginxRoute(
+  deploymentId: string,
+  releaseId: string | undefined,
+  deployment: {
+    id: string;
+    port: number;
+    rootPath: string;
+    framework: DeploymentFramework;
+    startCommand?: string | null;
+    publicDirectory?: string | null;
+    outputDirectory?: string | null;
+  },
+  domain: BoundDomain,
+  reason: string
+) {
+  const serverName = deploymentServerName(domain);
+  const inspect = await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Inspect public nginx route after upstream failure", () =>
+    sysagent.deploymentNginxInspect({
+      deploymentId: deployment.id,
+      serverName: serverName ?? domain.name,
+      upstreamPort: deployment.port,
+      rootPath: deployment.rootPath,
+      framework: deployment.framework
+    })
+  );
+  const inspectFailed = liveResultFailureMessage(inspect, "Inspect public nginx route after upstream failure");
+  if (inspectFailed) {
+    await writeLog(deploymentId, releaseId, "HEALTH_CHECK", "Public nginx route inspection found a stale or wrong vhost", {
+      reason,
+      inspect: inspect as Prisma.InputJsonValue
+    }, "warn");
+    await republishDeploymentNginxVhost(deploymentId, releaseId, deployment, domain);
+    return { repaired: true, inspect };
+  }
+
+  await writeLog(deploymentId, releaseId, "HEALTH_CHECK", "Public nginx route points at the expected upstream", {
+    reason,
+    inspect: inspect as Prisma.InputJsonValue
+  }, "warn");
+  return { repaired: false, inspect };
+}
+
 async function publishDeploymentNginxRoute(
   deploymentId: string,
   releaseId: string | undefined,
@@ -1595,7 +1762,7 @@ async function publishDeploymentNginxRoute(
   label = `Nginx proxy config for ${domain.name}`
 ) {
   const serverName = deploymentServerName(domain);
-  const nginxResult = await runStep(deploymentId, releaseId, "CONFIGURING_PROXY", label, async () =>
+  const nginxResult = await runStepWithSysagentConnectionRepair(deploymentId, releaseId, "CONFIGURING_PROXY", label, async () =>
     sysagent.deploymentNginx(
       buildDeploymentNginxRequest({
         deploymentId: deployment.id,
@@ -2040,7 +2207,7 @@ async function optionalPublicRouteWarning(
     }
 
     if (nginxUpstreamFailure(publicRoute, firstMessage)) {
-      await republishDeploymentNginxVhost(deploymentId, releaseId, { ...deployment, rootPath: appPath }, domain);
+      await inspectAndRepairDeploymentNginxRoute(deploymentId, releaseId, { ...deployment, rootPath: appPath }, domain, firstMessage);
     }
     await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Guardian public-route repair", () =>
       runGuardianDeploymentRepair({ rootPath: appPath, framework: deployment.framework, envVars })
@@ -2077,7 +2244,12 @@ async function optionalPublicRouteWarning(
     const message = error instanceof Error ? error.message : "Public route check failed";
     await writeLog(deploymentId, releaseId, "HEALTH_CHECK", `${label} warning`, { warning: message }, "warn");
     if (nginxUpstreamFailure(publicRoute, message)) {
-      throw new Error(`${message}\n\nGuardian rewrote the Nginx vhost and restarted the deployment process, but the upstream still returns 502/503/504.`);
+      await inspectAndRepairDeploymentNginxRoute(deploymentId, releaseId, { ...deployment, rootPath: appPath }, domain, message).catch((inspectError) =>
+        writeLog(deploymentId, releaseId, "HEALTH_CHECK", "Public nginx route inspection failed", {
+          warning: inspectError instanceof Error ? inspectError.message : String(inspectError)
+        }, "warn")
+      );
+      return `${message}\n\nThe app passed localhost health, so deploy will continue. The public Nginx route still returns 502/503/504 after repair; check the generated vhost, conflicting server_name configs, and nginx error log for ${domain.name}.`;
     }
     return message;
   }
@@ -2854,14 +3026,15 @@ async function reconcileMisdetectedLaravelFramework(
 async function reconcileDeploymentRootDirectory(
   deployment: DeploymentWithWorkerRelations,
   releaseId: string | undefined,
-  appPath: string
+  appPath: string,
+  searchRootPath = deployment.rootPath
 ) {
-  const detected = await findDeploymentAppRoot(deployment.rootPath, deployment.rootDirectory, deployment.framework);
+  const detected = await findDeploymentAppRoot(searchRootPath, deployment.rootDirectory, deployment.framework);
   if (!detected) {
     return { deployment, appPath };
   }
 
-  const rootPath = path.resolve(deployment.rootPath);
+  const rootPath = path.resolve(searchRootPath);
   const detectedAppPath = path.resolve(detected.appPath);
   const currentAppPath = path.resolve(appPath);
   if (detectedAppPath === currentAppPath) {
@@ -3707,7 +3880,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
   const processAction = action === "redeploy" || action === "deploy" ? "start" : action;
 
   try {
-    await runStep(deployment.id, releaseId, "PREFLIGHT", "Sysagent live command preflight", () =>
+    await runStepWithSysagentConnectionRepair(deployment.id, releaseId, "PREFLIGHT", "Sysagent live command preflight", () =>
       assertSysagentLiveCommandsEnabled(deployment.id, releaseId)
     );
 
@@ -3725,8 +3898,9 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
     });
 
     const envVars = await resolveEnvVars(deployment.env);
-    let appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
-    ({ deployment, appPath } = await reconcileDeploymentRootDirectory(deployment, releaseId, appPath));
+    const lifecycleRootPath = deploymentArtifactRootPath(deployment);
+    let appPath = deploymentAppPath(lifecycleRootPath, deployment.rootDirectory);
+    ({ deployment, appPath } = await reconcileDeploymentRootDirectory(deployment, releaseId, appPath, lifecycleRootPath));
     ({ deployment, appPath } = await reconcileLaravelRootDirectory(deployment, releaseId, appPath));
     deployment = await reconcilePythonStartCommand(deployment, releaseId, appPath);
     const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
@@ -3871,14 +4045,17 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
     );
 
     const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, `${action} public website check`, { ...deployment, domain }, appPath, envVars, processManager);
+    if (publicRouteWarning) {
+      throw new Error(`${action} public website check failed. ${publicRouteWarning}`);
+    }
 
     const healthStatus = publicRouteWarning || healthOutcome.degraded ? "DEGRADED" : "HEALTHY";
     await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "RUNNING", healthStatus, lastHealthCheckAt: new Date() } });
     return { result, health, status: "RUNNING", healthStatus, publicRouteWarning };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown lifecycle error";
-    const nextStatus = processAction === "stop" ? "RUNNING" : "FAILED";
-    const nextHealth = processAction === "stop" ? "UNKNOWN" : "DOWN";
+    const nextStatus = processAction === "stop" ? "STOPPED" : "FAILED";
+    const nextHealth = "DOWN";
     await prisma.deployment.update({
       where: { id: deployment.id },
       data: { status: nextStatus, healthStatus: nextHealth, lastHealthCheckAt: new Date() }
@@ -3888,10 +4065,11 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
   }
 }
 
-async function processDeploy(action: string, deploymentId: string, releaseId: string | undefined) {
+async function processDeploy(action: string, deploymentId: string, releaseId: string | undefined): Promise<Record<string, unknown>> {
   const startedAt = new Date();
   let deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: deploymentWorkerInclude });
   const release = releaseId ? await prisma.deploymentRelease.findUnique({ where: { id: releaseId } }) : null;
+  let artifactRootPath: string | null = null;
   await resetBuildLogs(deployment.id);
   await markRelease(releaseId, "RUNNING", startedAt);
   await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "DEPLOYING" } });
@@ -3904,7 +4082,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       sourceProvider: deployment.sourceProvider,
       envCount: deployment.env.length
     }));
-    await runStep(deployment.id, releaseId, "PREFLIGHT", "Sysagent live command preflight", () =>
+    await runStepWithSysagentConnectionRepair(deployment.id, releaseId, "PREFLIGHT", "Sysagent live command preflight", () =>
       assertSysagentLiveCommandsEnabled(deployment.id, releaseId)
     );
     if (env.DEPLOY_WEB_RUNTIME_OPTIMIZATION_ENABLED) {
@@ -3912,15 +4090,27 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         sysagent.ensureWebRuntimeOptimizations()
       );
     }
-    let deployBudget = await prepareDeployResourceBudget(deployment.id, releaseId, deployment.rootPath);
+    const rollbackArtifactPath = action === "rollback" && release?.artifactPath ? release.artifactPath : null;
+    const shouldUseAtomicArtifact = !rollbackArtifactPath && deploymentUsesAtomicArtifact(deployment);
+    let workingRootPath = rollbackArtifactPath || (shouldUseAtomicArtifact ? deploymentReleaseRootPath(deployment, releaseId) : deployment.rootPath);
+    artifactRootPath = workingRootPath !== deployment.rootPath ? workingRootPath : null;
+    if (artifactRootPath) {
+      await writeLog(deployment.id, releaseId, "PREFLIGHT", "Using isolated release artifact directory", {
+        sourceRootPath: deployment.rootPath,
+        artifactRootPath,
+        reason: rollbackArtifactPath ? "Rollback release has a built artifact path" : "Next/Node PM2 deployments build outside the active runtime directory"
+      });
+    }
 
-    if (deployment.gitUrl || action === "pull") {
+    let deployBudget = await prepareDeployResourceBudget(deployment.id, releaseId, workingRootPath);
+
+    if ((deployment.gitUrl || action === "pull") && !rollbackArtifactPath) {
       const gitToken = await githubCloneToken(deployment.sourceProvider, deployment.gitUrl, deployment.accountId);
       const commitSha = sourceSyncCommitSha(action, release, deployment);
       const syncResult = await runStep(deployment.id, releaseId, "CLONING", "Source sync", () =>
         sysagent.deploymentGitSync({
-          rootPath: deployment.rootPath,
-          gitUrl: action === "pull" ? null : deployment.gitUrl,
+          rootPath: workingRootPath,
+          gitUrl: artifactRootPath ? deployment.gitUrl : action === "pull" ? null : deployment.gitUrl,
           branch: deployment.branch,
           commitSha,
           gitToken,
@@ -3928,16 +4118,19 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         })
       );
       assertCommandTree(syncResult, "Source sync");
-      await syncReleaseCommitInfo(deployment.id, releaseId, gitSyncCommitInfo(syncResult));
+      await syncReleaseCommitInfo(releaseId, gitSyncCommitInfo(syncResult));
     } else {
-      await writeLog(deployment.id, releaseId, "CLONING", "Source sync skipped for non-Git source", { sourceProvider: deployment.sourceProvider });
+      await writeLog(deployment.id, releaseId, "CLONING", "Source sync skipped", {
+        sourceProvider: deployment.sourceProvider,
+        reason: rollbackArtifactPath ? "Rollback is using an existing release artifact" : "Non-Git source"
+      });
     }
 
-    let appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
-    ({ deployment, appPath } = await reconcileDeploymentRootDirectory(deployment, releaseId, appPath));
+    let appPath = deploymentAppPath(workingRootPath, deployment.rootDirectory);
+    ({ deployment, appPath } = await reconcileDeploymentRootDirectory(deployment, releaseId, appPath, workingRootPath));
 
     const detection = await runStep(deployment.id, releaseId, "PREFLIGHT", "Runtime detection", () =>
-      detectDeploymentSource(deployment.rootPath, deployment.rootDirectory)
+      detectDeploymentSource(workingRootPath, deployment.rootDirectory)
     );
     deployment = await prisma.deployment.update({
       where: { id: deployment.id },
@@ -3965,6 +4158,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     if (deployment.processManager === "NONE" && deployment.framework !== "STATIC") {
       throw new Error(`No runnable start command found for ${deployment.slug}. Add a package.json start script or set a manual start command.`);
     }
+    workingRootPath = path.resolve(appPath, deployment.rootDirectory && deployment.rootDirectory !== "." ? ".." : ".");
     deployBudget = await prepareDeployResourceBudget(deployment.id, releaseId, appPath);
     let domain = deploymentDomain(deployment);
     let routeDomains = deploymentRouteDomains(deployment);
@@ -4410,20 +4604,21 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       const primaryDomain = tlsSync.domain;
       domain = primaryDomain;
       proxyHttpsReady = tlsSync.httpsReady;
-      routeDomains = [primaryDomain, ...routeDomains.filter((routeDomain) => routeDomain.name.toLowerCase() !== primaryDomain.name.toLowerCase())];
-      for (const routeDomain of routeDomains) {
-        const routeTlsSync = routeDomain.name.toLowerCase() === primaryDomain.name.toLowerCase()
-          ? { domain: primaryDomain, httpsReady: proxyHttpsReady }
-          : await syncDeploymentTlsWithCertificate(routeDomain);
-        if (!routeTlsSync.domain) continue;
-        await publishDeploymentNginxRoute(
-          deployment.id,
-          releaseId,
-          { ...deployment, rootPath: appPath },
-          routeTlsSync.domain,
-          routeTlsSync.httpsReady,
-          `Nginx proxy config for ${routeTlsSync.domain.name}`
-        );
+      await publishDeploymentNginxRoute(
+        deployment.id,
+        releaseId,
+        { ...deployment, rootPath: appPath },
+        primaryDomain,
+        proxyHttpsReady,
+        `Nginx proxy config for ${primaryDomain.name}`
+      );
+      const secondaryRouteDomains = routeDomains.filter((routeDomain) => routeDomain.name.toLowerCase() !== primaryDomain.name.toLowerCase());
+      if (secondaryRouteDomains.length > 0) {
+        await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "Deferred secondary domain proxy refresh until after release activation", {
+          primaryDomain: primaryDomain.name,
+          deferredDomains: secondaryRouteDomains.map((routeDomain) => routeDomain.name),
+          reason: "Existing secondary routes point at the same managed upstream port, so refreshing every vhost before process start delays latest-code activation."
+        }, "warn");
       }
     } else {
       await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config skipped", {
@@ -4455,6 +4650,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           return { queued: true, jobId: sslJob.id, completed: true };
         });
         proxyHttpsReady = true;
+        const httpsSslPaths = await deploymentSslCertificatePathsWhenReady(domain);
         const httpsNginx = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx HTTPS proxy config", () =>
           publishDeploymentProxyNginx({
             deploymentId: deployment.id,
@@ -4466,7 +4662,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
             publicDirectory: deployment.publicDirectory,
             outputDirectory: deployment.outputDirectory,
             fallbackRootPath: deploymentFallbackRootPath(domain),
-            forceHttps: true
+            forceHttps: true,
+            ...httpsSslPaths
           })
         );
         assertLiveResult((httpsNginx as { write?: unknown }).write, "Nginx HTTPS proxy config write");
@@ -4478,8 +4675,11 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           envVars = await ensureLaravelAppKey(deployment.id, releaseId, appPath, deployment.port, envVars);
         }
       } catch (error) {
-        domain = await disableDeploymentTlsInDatabase(domain, { clearForceSsl: false });
         const sslDetail = error instanceof Error ? error.message : String(error);
+        if (deploymentWantsSsl(domain)) {
+          throw new Error(`SSL is required for ${domain.name}, but deployment could not attach or issue a valid certificate. ${sslDetail}`);
+        }
+        domain = await disableDeploymentTlsInDatabase(domain, { clearForceSsl: false });
         await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "SSL certificate issue warning", {
           warning: sslDetail,
           hint: `Use http://${domain.name}/ until SSL succeeds. Check ALLOW_LIVE_SSL=true, certbot installed, and DNS A record for ${domain.name}.`
@@ -4510,6 +4710,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       const tlsSync = await syncDeploymentTlsWithCertificate(domain);
       const activeDomain = tlsSync.domain ?? domain;
       domain = activeDomain;
+      const activeSslPaths = tlsSync.httpsReady ? await deploymentSslCertificatePathsWhenReady(activeDomain) : {};
       await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Finalize deployment proxy vhost", () =>
         publishDeploymentProxyNginx({
           deploymentId: deployment.id,
@@ -4521,7 +4722,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           publicDirectory: deployment.publicDirectory,
           outputDirectory: deployment.outputDirectory,
           fallbackRootPath: deploymentFallbackRootPath(activeDomain),
-          forceHttps: tlsSync.httpsReady
+          forceHttps: tlsSync.httpsReady,
+          ...activeSslPaths
         })
       );
       const diagnose = await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Public access diagnose", () =>
@@ -4597,8 +4799,18 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       "Health check"
     );
 
+    deployment = await activateDeploymentArtifact(deployment, releaseId, artifactRootPath);
     const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, "Public website check", { ...deployment, domain }, appPath, envVars, processManager);
-
+    if (publicRouteWarning) {
+      await writeLog(deployment.id, releaseId, "HEALTH_CHECK", "Public website check warning; keeping latest release active", {
+        warning: publicRouteWarning,
+        appPath,
+        artifactRootPath
+      }, "warn");
+    }
+    const completedRelease = releaseId
+      ? await prisma.deploymentRelease.findUnique({ where: { id: releaseId }, select: { commitSha: true } })
+      : null;
     await markRelease(releaseId, action === "rollback" ? "ROLLED_BACK" : "SUCCEEDED", startedAt);
     const healthStatus = publicRouteWarning || healthOutcome.degraded ? "DEGRADED" : "HEALTHY";
     await prisma.deployment.update({
@@ -4607,15 +4819,58 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         status: "RUNNING",
         healthStatus,
         lastHealthCheckAt: new Date(),
-        lastDeployAt: new Date()
+        lastDeployAt: new Date(),
+        ...(completedRelease?.commitSha ? { commitSha: completedRelease.commitSha } : {})
       }
     });
     await writeLog(deployment.id, releaseId, action === "rollback" ? "ROLLBACK" : "SUCCEEDED", `${action} completed`, { dryRun: false, publicRouteWarning });
     return { dryRun: false, completed: true, status: "RUNNING", healthStatus, publicRouteWarning };
   } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
     await markRelease(releaseId, "FAILED", startedAt);
+    await writeLog(deployment.id, releaseId, "FAILED", `${action} failed`, { error: message }, "error");
+    if (action !== "rollback") {
+      const previousRelease = await prisma.deploymentRelease.findFirst({
+        where: {
+          deploymentId: deployment.id,
+          status: { in: ["SUCCEEDED", "ROLLED_BACK", "RUNNING"] },
+          ...(releaseId ? { id: { not: releaseId } } : {})
+        },
+        orderBy: { createdAt: "desc" }
+      });
+      const rollbackHasUsableSource = previousRelease && (!deployment.gitUrl || previousRelease.commitSha);
+      if (rollbackHasUsableSource) {
+        await writeLog(deployment.id, releaseId, "ROLLBACK", "Auto rollback to last successful release started", {
+          failedReleaseId: releaseId ?? null,
+          rollbackReleaseId: previousRelease.id,
+          commitSha: previousRelease.commitSha
+        }, "warn");
+        try {
+          const rollback: Record<string, unknown> = await processDeploy("rollback", deployment.id, previousRelease.id);
+          await writeLog(deployment.id, releaseId, "ROLLBACK", "Auto rollback to last successful release completed", {
+            failedReleaseId: releaseId ?? null,
+            rollbackReleaseId: previousRelease.id,
+            rollback: rollback as Prisma.InputJsonValue
+          });
+          return { dryRun: false, completed: false, recovered: true, failedReleaseId: releaseId, rollbackReleaseId: previousRelease.id, rollback };
+        } catch (rollbackError) {
+          await writeLog(deployment.id, releaseId, "ROLLBACK", "Auto rollback to last successful release failed", {
+            failedReleaseId: releaseId ?? null,
+            rollbackReleaseId: previousRelease.id,
+            error: rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
+          }, "error");
+        }
+      } else {
+        await writeLog(deployment.id, releaseId, "ROLLBACK", "Auto rollback skipped; no previous usable release snapshot", {
+          failedReleaseId: releaseId ?? null,
+          previousReleaseId: previousRelease?.id ?? null,
+          previousReleaseStatus: previousRelease?.status ?? null,
+          hasCommitSha: Boolean(previousRelease?.commitSha),
+          gitUrl: Boolean(deployment.gitUrl)
+        }, "warn");
+      }
+    }
     await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "FAILED", healthStatus: "DOWN" } });
-    await writeLog(deployment.id, releaseId, "FAILED", `${action} failed`, { error: error instanceof Error ? error.message : "Unknown error" }, "error");
     throw error;
   }
 }

@@ -4,9 +4,9 @@ server {
 
     client_max_body_size 0;
 
-    location /.well-known/acme-challenge/ {
-        root {{ACME_ROOT}};
-        try_files $uri =404;
+    location ^~ /.well-known/acme-challenge/ {
+        alias {{ACME_ROOT}}/.well-known/acme-challenge/;
+        default_type text/plain;
     }
 
     location / {

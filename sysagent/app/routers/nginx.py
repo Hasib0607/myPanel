@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import secrets
+import stat
+import time
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -10,12 +13,20 @@ from app.command import run_command
 from app.config import settings
 from app.nginx_paths import nginx_sites_available, nginx_sites_enabled
 from app.nginx_manager import (
+    ROUTE_OWNERSHIP_HEADER,
     acme_location,
+    loaded_conflicting_config_files,
+    make_web_root_readable,
     publish_nginx_config,
+    probe_host_for_server_name,
+    route_ownership_config_seen,
+    route_ownership_header,
+    route_ownership_header_seen,
     run_live_step,
     safe_letsencrypt_path,
     safe_nginx_path,
     safe_web_root,
+    server_name_has_wildcard,
 )
 
 router = APIRouter()
@@ -41,6 +52,26 @@ PHP_INI_TUNING = {
     "opcache.max_accelerated_files": "20000",
     "opcache.validate_timestamps": "0",
 }
+
+
+def make_acme_probe_readable(root_path: Path, challenge_dir: Path, probe_file: Path) -> dict:
+    permissions = make_web_root_readable(root_path)
+    changed = list(permissions.get("changed") or [])
+
+    def chmod_or(path: Path, bits: int) -> None:
+        mode = path.stat().st_mode
+        next_mode = mode | bits
+        if next_mode != mode:
+            path.chmod(stat.S_IMODE(next_mode))
+            changed.append(str(path))
+
+    well_known = challenge_dir.parent
+    for directory in [well_known, challenge_dir]:
+        if directory.exists():
+            chmod_or(directory, stat.S_IROTH | stat.S_IXOTH)
+    if probe_file.exists():
+        chmod_or(probe_file, stat.S_IROTH)
+    return {**permissions, "changed": changed, "challengeDir": str(challenge_dir), "probeFile": str(probe_file)}
 
 
 class VhostRequest(BaseModel):
@@ -143,6 +174,7 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
         f"    root {root_path};\n"
         "    index index.html index.htm index.php;\n"
         "    client_max_body_size 0;\n"
+        f"{route_ownership_header(body.name)}"
         "\n"
         f"{http_location}"
         "}\n"
@@ -157,6 +189,7 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
             f"    root {root_path};\n"
             "    index index.html index.htm index.php;\n"
             "    client_max_body_size 0;\n"
+            f"{route_ownership_header(body.name)}"
             f"    ssl_certificate {ssl_certificate};\n"
             f"    ssl_certificate_key {ssl_certificate_key};\n"
             "    ssl_protocols TLSv1.2 TLSv1.3;\n"
@@ -171,12 +204,165 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
             "}\n"
         )
 
+    permissions = {"changed": [], "webRoot": str(root_path)}
     if settings.allow_live_nginx:
         run_live_step("website root create", lambda: root_path.mkdir(parents=True, exist_ok=True))
-    result = publish_nginx_config(body.name, config, sites_available, sites_enabled, server_name=body.serverName)
+        permissions = run_live_step("website root permissions", lambda: make_web_root_readable(root_path))
+
+    probe_file: Path | None = None
+    probe_expected = ""
+    if settings.allow_live_nginx:
+        probe_token = f"vps-panel-vhost-{secrets.token_hex(12)}"
+        probe_expected = f"ok-{probe_token}"
+        challenge_dir = root_path / ".well-known" / "acme-challenge"
+        probe_file = challenge_dir / probe_token
+        run_live_step("ACME vhost probe directory create", lambda: challenge_dir.mkdir(parents=True, exist_ok=True))
+        run_live_step("ACME vhost probe write", lambda: probe_file.write_text(probe_expected, encoding="utf-8"))
+        permissions = run_live_step(
+            "ACME vhost probe permissions",
+            lambda: make_acme_probe_readable(root_path, challenge_dir, probe_file),
+        )
+
+    def route_ownership_probe(*, https: bool = False) -> dict:
+        if server_name_has_wildcard(body.serverName):
+            result = run_command(["nginx", "-T"], allow_live=True)
+            output = f"{result.get('stdout') or ''}\n{result.get('stderr') or ''}"
+            output_lower = output.lower()
+            if (
+                result.get("returncode") == 0
+                and f"server_name {body.serverName.lower()};" in output_lower
+                and route_ownership_config_seen(output, body.name)
+            ):
+                return result
+            return {
+                **result,
+                "returncode": 1,
+                "stderr": (
+                    f"Generated wildcard vhost {body.name!r} is not present in the active nginx config; "
+                    f"missing server_name {body.serverName!r} or {ROUTE_OWNERSHIP_HEADER} header."
+                ),
+            }
+
+        primary_host = probe_host_for_server_name(body.serverName)
+        scheme = "https" if https else "http"
+        port = "443" if https else "80"
+        command = [
+            "curl",
+            "-sS",
+            "-i",
+            *(["-k"] if https else []),
+            "--resolve",
+            f"{primary_host}:{port}:127.0.0.1",
+            "--max-time",
+            "10",
+            "--noproxy",
+            "*",
+            "-H",
+            f"Host: {primary_host}",
+            f"{scheme}://{primary_host}/",
+        ]
+        result = run_command(command, allow_live=True)
+        output = f"{result.get('stdout') or ''}\n{result.get('stderr') or ''}"
+        if result.get("returncode") == 0 and route_ownership_header_seen(output, body.name):
+            return result
+        loaded_conflicts = loaded_conflicting_config_files(body.name, body.serverName)
+        conflict_hint = (
+            f" Loaded conflicting nginx configs: {', '.join(loaded_conflicts)}."
+            if loaded_conflicts
+            else ""
+        )
+        return {
+            **result,
+            "returncode": 1,
+            "stderr": (
+                f"Generated vhost {body.name!r} is not the active {scheme.upper()} route "
+                f"for {primary_host}:{port}; missing {ROUTE_OWNERSHIP_HEADER} response header."
+                f"{conflict_hint}"
+            ),
+        }
+
+    def post_reload_check() -> dict:
+        if not probe_file:
+            return route_ownership_probe(https=has_ssl)
+        primary_host = probe_host_for_server_name(body.serverName)
+        probe_url = f"http://127.0.0.1/.well-known/acme-challenge/{probe_file.name}"
+        curl_base = [
+            "curl",
+            "-fsS",
+            "--max-time",
+            "10",
+            "--noproxy",
+            "*",
+            "-H",
+            f"Host: {primary_host}",
+            probe_url,
+        ]
+        result: dict = {"returncode": 1, "stdout": "", "stderr": "", "command": curl_base}
+        for attempt in range(3):
+            if attempt:
+                time.sleep(0.25)
+            result = run_command(curl_base, allow_live=True)
+            if result.get("returncode") == 0 and (result.get("stdout") or "").strip() == probe_expected:
+                ownership = route_ownership_probe(https=has_ssl and (body.forceHttps or body.requireSsl))
+                return ownership if ownership.get("returncode") != 0 else result
+        if result.get("returncode") != 0:
+            debug = run_command([
+                "curl",
+                "-sS",
+                "-i",
+                "--max-time",
+                "10",
+                "--noproxy",
+                "*",
+                "-H",
+                f"Host: {primary_host}",
+                probe_url,
+            ], allow_live=True)
+            loaded_conflicts = loaded_conflicting_config_files(body.name, body.serverName)
+            conflict_hint = (
+                f" Loaded conflicting nginx configs: {', '.join(loaded_conflicts)}."
+                if loaded_conflicts
+                else ""
+            )
+            result = {
+                **result,
+                "stderr": (
+                    f"{result.get('stderr') or ''}\n"
+                    f"ACME vhost probe failed for serverName={body.serverName!r}, "
+                    f"rootPath={str(root_path)!r}, probeFile={str(probe_file)!r}. "
+                    f"Debug response: stdout={(debug.get('stdout') or '').strip()!r}; "
+                    f"stderr={(debug.get('stderr') or '').strip()!r}; "
+                    f"returncode={debug.get('returncode')}.{conflict_hint}"
+                ).strip(),
+            }
+        elif (result.get("stdout") or "").strip() != probe_expected:
+            result = {
+                **result,
+                "returncode": 1,
+                "stderr": (
+                    f"ACME vhost probe returned unexpected body from local Nginx. "
+                    f"Expected {probe_expected!r}, got {(result.get('stdout') or '').strip()!r}. "
+                    f"serverName={body.serverName!r}, rootPath={str(root_path)!r}, probeFile={str(probe_file)!r}."
+                ),
+            }
+        return result
+
+    try:
+        result = publish_nginx_config(
+            body.name,
+            config,
+            sites_available,
+            sites_enabled,
+            server_name=body.serverName,
+            post_reload_check=post_reload_check if settings.allow_live_nginx else None,
+        )
+    finally:
+        if probe_file and settings.allow_live_nginx:
+            run_live_step("ACME vhost probe cleanup", lambda: probe_file.unlink(missing_ok=True))
     return {
         **result,
         "rootPath": str(root_path),
+        "permissions": permissions,
         "sslEnabled": has_ssl,
         "forceHttps": body.forceHttps,
     }
