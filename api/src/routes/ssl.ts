@@ -319,6 +319,14 @@ async function publishSubdomainHttpVhost(target: Awaited<ReturnType<typeof subdo
   return result;
 }
 
+async function subdomainHasDeploymentBinding(subdomainId: string) {
+  const binding = await prisma.deploymentDomain.findFirst({
+    where: { subdomainId },
+    select: { id: true }
+  });
+  return Boolean(binding);
+}
+
 async function runSubdomainSslPreflight(subdomainId: string) {
   const target = await subdomainSslTarget(subdomainId);
   if (isWildcardHostname(target.fqdn)) {
@@ -341,7 +349,10 @@ async function runSubdomainSslPreflight(subdomainId: string) {
   await publishDomainDnsZone(target.parentDomain.id);
   const records = await assertARecordPointsToVps(target.fqdn, target.parentDomain.id, target.parentDomain.name);
   const dnsChecks = [{ host: target.fqdn, records, ok: true, skipped: false }];
-  const httpVhost = await publishSubdomainHttpVhost(target);
+  const deploymentBound = await subdomainHasDeploymentBinding(subdomainId);
+  const httpVhost = deploymentBound
+    ? { skipped: true, reason: "Subdomain is bound to a deployment; static HTTP challenge vhost was not published." }
+    : await publishSubdomainHttpVhost(target);
   const preflight = await sysagent.sslPreflight({ domain: target.fqdn, webRoot: target.webRoot, includeWww: false });
 
   if (!commandSucceeded(preflight.certbot)) {
@@ -353,7 +364,9 @@ async function runSubdomainSslPreflight(subdomainId: string) {
   if (failedCheck) {
     const detail = commandFailureDetail(failedCheck.check);
     const hint = failedCheck.scope === "local"
-      ? "The local Nginx challenge vhost did not return the token. Check the generated vhost and document root."
+      ? deploymentBound
+        ? "The deployment proxy vhost did not return the ACME token. Redeploy or run Deployment Doctor so the proxy route includes the ACME webroot location."
+        : "The local Nginx challenge vhost did not return the token. Check the generated vhost and document root."
       : "Publish the subdomain first, keep port 80 open, and confirm public DNS points to this VPS.";
     throw Object.assign(new Error(`HTTP ACME challenge failed for ${target.fqdn}. ${hint}${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
   }
@@ -477,10 +490,12 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
       source: "subdomain-ssl"
     });
 
-    await prisma.subdomain.update({
-      where: { id: subdomainId },
-      data: { sslEnabled: false }
-    });
+    if (!(await subdomainHasDeploymentBinding(subdomainId))) {
+      await prisma.subdomain.update({
+        where: { id: subdomainId },
+        data: { sslEnabled: false }
+      });
+    }
     await redis.del("domain_list", `ssl_expiry:${preflight.fqdn}`);
 
     return reply.code(202).send({ queued: true, jobId: job.id });
