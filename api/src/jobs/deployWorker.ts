@@ -4604,20 +4604,21 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       const primaryDomain = tlsSync.domain;
       domain = primaryDomain;
       proxyHttpsReady = tlsSync.httpsReady;
-      routeDomains = [primaryDomain, ...routeDomains.filter((routeDomain) => routeDomain.name.toLowerCase() !== primaryDomain.name.toLowerCase())];
-      for (const routeDomain of routeDomains) {
-        const routeTlsSync = routeDomain.name.toLowerCase() === primaryDomain.name.toLowerCase()
-          ? { domain: primaryDomain, httpsReady: proxyHttpsReady }
-          : await syncDeploymentTlsWithCertificate(routeDomain);
-        if (!routeTlsSync.domain) continue;
-        await publishDeploymentNginxRoute(
-          deployment.id,
-          releaseId,
-          { ...deployment, rootPath: appPath },
-          routeTlsSync.domain,
-          routeTlsSync.httpsReady,
-          `Nginx proxy config for ${routeTlsSync.domain.name}`
-        );
+      await publishDeploymentNginxRoute(
+        deployment.id,
+        releaseId,
+        { ...deployment, rootPath: appPath },
+        primaryDomain,
+        proxyHttpsReady,
+        `Nginx proxy config for ${primaryDomain.name}`
+      );
+      const secondaryRouteDomains = routeDomains.filter((routeDomain) => routeDomain.name.toLowerCase() !== primaryDomain.name.toLowerCase());
+      if (secondaryRouteDomains.length > 0) {
+        await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "Deferred secondary domain proxy refresh until after release activation", {
+          primaryDomain: primaryDomain.name,
+          deferredDomains: secondaryRouteDomains.map((routeDomain) => routeDomain.name),
+          reason: "Existing secondary routes point at the same managed upstream port, so refreshing every vhost before process start delays latest-code activation."
+        }, "warn");
       }
     } else {
       await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "Nginx proxy config skipped", {
