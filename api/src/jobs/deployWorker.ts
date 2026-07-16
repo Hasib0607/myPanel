@@ -53,6 +53,7 @@ import {
   deploymentSslCertificatePathsWhenReady,
   deploymentCertbotIncludeWww,
   deploymentSslContactEmail,
+  deploymentWantsSsl,
   disableDeploymentTlsInDatabase,
   syncDeploymentTlsWithCertificate,
   ensureAcmeWebroot,
@@ -4018,6 +4019,9 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
     );
 
     const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, `${action} public website check`, { ...deployment, domain }, appPath, envVars, processManager);
+    if (publicRouteWarning) {
+      throw new Error(`${action} public website check failed. ${publicRouteWarning}`);
+    }
 
     const healthStatus = publicRouteWarning || healthOutcome.degraded ? "DEGRADED" : "HEALTHY";
     await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "RUNNING", healthStatus, lastHealthCheckAt: new Date() } });
@@ -4642,8 +4646,11 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           envVars = await ensureLaravelAppKey(deployment.id, releaseId, appPath, deployment.port, envVars);
         }
       } catch (error) {
-        domain = await disableDeploymentTlsInDatabase(domain, { clearForceSsl: false });
         const sslDetail = error instanceof Error ? error.message : String(error);
+        if (deploymentWantsSsl(domain)) {
+          throw new Error(`SSL is required for ${domain.name}, but deployment could not attach or issue a valid certificate. ${sslDetail}`);
+        }
+        domain = await disableDeploymentTlsInDatabase(domain, { clearForceSsl: false });
         await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "SSL certificate issue warning", {
           warning: sslDetail,
           hint: `Use http://${domain.name}/ until SSL succeeds. Check ALLOW_LIVE_SSL=true, certbot installed, and DNS A record for ${domain.name}.`
@@ -4762,6 +4769,9 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     );
 
     const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, "Public website check", { ...deployment, domain }, appPath, envVars, processManager);
+    if (publicRouteWarning) {
+      throw new Error(`Public website check failed. ${publicRouteWarning}`);
+    }
 
     deployment = await activateDeploymentArtifact(deployment, releaseId, artifactRootPath);
     const completedRelease = releaseId

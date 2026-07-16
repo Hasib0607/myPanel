@@ -2651,13 +2651,13 @@ def _curl_public_route(server_name: str, path: str = "/", root_path: str | None 
                 "returncode": ip_probe.get("returncode") if ip_probe else None,
                 "stderr": ip_probe.get("stderr") if ip_probe else None,
             }
-        dns_failed_ssl = dns_probe.get("returncode") == 35
-        ip_failed_ssl = bool(ip_probe and ip_probe.get("returncode") == 35)
+        dns_failed_ssl = dns_probe.get("returncode") in {35, 51, 60}
+        ip_failed_ssl = bool(ip_probe and ip_probe.get("returncode") in {35, 51, 60})
         if dns_failed_ssl or ip_failed_ssl:
             result["degraded"] = True
             result["returncode"] = 0
             hints = [
-                "Local nginx HTTPS on 127.0.0.1:443 works, but the public internet path does not.",
+                "Local nginx HTTPS on 127.0.0.1:443 works, but the public internet path does not serve a valid certificate for this hostname.",
                 "Point DNS A record for this hostname to this VPS IP"
                 + (f" ({server_ip})" if server_ip else "")
                 + ", set Cloudflare to DNS only (grey cloud) or SSL Full, and disable browser VPN while testing.",
