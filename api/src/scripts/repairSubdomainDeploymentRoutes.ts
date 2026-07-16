@@ -20,6 +20,13 @@ function assertCommand(action: string, result: SysagentCommandResult | undefined
   }
 }
 
+function assertPublished(action: string, result: Record<string, unknown>) {
+  if (!result.rolledBack) return;
+  const postReloadCheck = result.postReloadCheck as { stderr?: string; stdout?: string } | undefined;
+  const detail = [postReloadCheck?.stderr, postReloadCheck?.stdout].filter(Boolean).join("\n").trim();
+  throw new Error(`${action} rolled back${detail ? `: ${detail}` : ""}`);
+}
+
 function splitSubdomainFqdn(fqdn: string) {
   const normalized = fqdn.trim().toLowerCase().replace(/^https?:\/\//, "").split(/[/?#:]/)[0]?.replace(/\.$/, "");
   if (!normalized || !normalized.includes(".")) throw new Error("Pass a subdomain FQDN like *.example.com or app.example.com");
@@ -92,6 +99,7 @@ async function main() {
     });
     assertCommand("Nginx test", result.test as SysagentCommandResult);
     assertCommand("Nginx reload", result.reload as SysagentCommandResult);
+    assertPublished("Nginx publish", result);
     repaired.push({
       deployment: binding.deployment.slug,
       domain: bound.name,

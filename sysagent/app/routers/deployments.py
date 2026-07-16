@@ -45,6 +45,7 @@ from app.nginx_manager import (
     letsencrypt_certificate_exists,
     loaded_conflicting_config_files,
     publish_nginx_config,
+    probe_host_for_server_name,
     remove_conflicting_configs,
     remove_insecure_port443_configs,
     route_ownership_header,
@@ -2135,7 +2136,7 @@ def _laravel_nginx_post_reload_check(server_name: str, public_root: str, framewo
 
 
 def _nginx_route_ownership_probe(server_name: str, config_name: str, *, require_https: bool) -> dict:
-    primary = server_name.split()[0].strip()
+    primary = probe_host_for_server_name(server_name)
     scheme = "https" if require_https else "http"
     port = "443" if require_https else "80"
     command = [

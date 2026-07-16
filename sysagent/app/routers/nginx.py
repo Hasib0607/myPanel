@@ -18,6 +18,7 @@ from app.nginx_manager import (
     loaded_conflicting_config_files,
     make_web_root_readable,
     publish_nginx_config,
+    probe_host_for_server_name,
     route_ownership_header,
     run_live_step,
     safe_letsencrypt_path,
@@ -220,7 +221,7 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
         )
 
     def route_ownership_probe(*, https: bool = False) -> dict:
-        primary_host = body.serverName.split()[0]
+        primary_host = probe_host_for_server_name(body.serverName)
         scheme = "https" if https else "http"
         port = "443" if https else "80"
         command = [
@@ -261,7 +262,7 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
     def post_reload_check() -> dict:
         if not probe_file:
             return route_ownership_probe(https=has_ssl)
-        primary_host = body.serverName.split()[0]
+        primary_host = probe_host_for_server_name(body.serverName)
         probe_url = f"http://127.0.0.1/.well-known/acme-challenge/{probe_file.name}"
         curl_base = [
             "curl",

@@ -81,6 +81,13 @@ def primary_server_name(server_name: str) -> str:
     return server_name.split()[0].strip() if server_name else ""
 
 
+def probe_host_for_server_name(server_name: str) -> str:
+    primary = primary_server_name(server_name)
+    if primary.startswith("*.") and len(primary) > 2:
+        return f"vps-panel-wildcard-probe.{primary[2:]}"
+    return primary
+
+
 def acme_root_for_server_name(server_name: str) -> Path:
     primary = primary_server_name(server_name)
     if not primary:

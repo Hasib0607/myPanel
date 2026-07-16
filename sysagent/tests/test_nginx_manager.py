@@ -35,6 +35,7 @@ from app.nginx_manager import (
     _nginx_include_text_loads_directory,
     acme_location,
     make_web_root_readable,
+    probe_host_for_server_name,
     remove_conflicting_configs,
     route_ownership_header,
 )
@@ -50,6 +51,13 @@ class NginxManagerTests(unittest.TestCase):
     def test_route_ownership_header_rejects_protected_panel_config(self) -> None:
         with self.assertRaises(HTTPException):
             route_ownership_header("panel")
+
+    def test_probe_host_for_wildcard_server_name_uses_real_child_host(self) -> None:
+        self.assertEqual(
+            probe_host_for_server_name("*.ebitans.store"),
+            "vps-panel-wildcard-probe.ebitans.store",
+        )
+        self.assertEqual(probe_host_for_server_name("shop.ebitans.store"), "shop.ebitans.store")
 
     def test_detects_wildcard_server_name_directive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
