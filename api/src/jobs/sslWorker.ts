@@ -456,13 +456,13 @@ export const sslWorker = new Worker(
       const domain = job.data.domainId
         ? await prisma.domain.findUnique({ where: { id: job.data.domainId }, select: { forceSsl: true } })
         : null;
-      await markSslIssued(job, reusableCertificate);
       const deploymentRoutes = job.data.subdomainId
         ? await republishSubdomainDeploymentBindings(job.data.subdomainId, reusableCertificate)
         : [];
       const vhost = shouldPublishDeploymentOnly
         ? { skipped: true, reason: "Subdomain is bound to a deployment; static HTTPS vhost was not published.", deploymentRoutes }
         : await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true, includeWww, job.data.webRoot, reusableCertificate);
+      await markSslIssued(job, reusableCertificate);
 
       await redis.del("domain_list", `ssl_expiry:${job.data.domain}`);
       return { certbot: result, nginx: vhost, deploymentRoutes };
@@ -500,13 +500,13 @@ export const sslWorker = new Worker(
       const domain = job.data.domainId
         ? await prisma.domain.findUnique({ where: { id: job.data.domainId }, select: { forceSsl: true } })
         : null;
-      await markSslIssued(job, reusableCertificate);
       const deploymentRoutes = job.data.subdomainId
         ? await republishSubdomainDeploymentBindings(job.data.subdomainId, reusableCertificate)
         : [];
       const vhost = shouldPublishDeploymentOnly
         ? { skipped: true, reason: "Subdomain is bound to a deployment; static HTTPS vhost was not published.", deploymentRoutes }
         : await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true, includeWww, job.data.webRoot, reusableCertificate);
+      await markSslIssued(job, reusableCertificate);
 
       await redis.del("domain_list", `ssl_expiry:${job.data.domain}`);
       return { certbot: result, nginx: vhost, deploymentRoutes };
