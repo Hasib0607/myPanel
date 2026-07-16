@@ -44,7 +44,9 @@ from app.nginx_manager import (
     make_web_root_readable,
     probe_host_for_server_name,
     remove_conflicting_configs,
+    route_ownership_config_seen,
     route_ownership_header,
+    route_ownership_header_seen,
     server_name_has_wildcard,
 )
 
@@ -59,6 +61,16 @@ class NginxManagerTests(unittest.TestCase):
     def test_route_ownership_header_rejects_protected_panel_config(self) -> None:
         with self.assertRaises(HTTPException):
             route_ownership_header("panel")
+
+    def test_route_ownership_header_seen_accepts_http2_lowercase_headers(self) -> None:
+        output = "HTTP/2 200\r\nx-vps-panel-route: domain-nextsoftpremium.com\r\n"
+
+        self.assertTrue(route_ownership_header_seen(output, "domain-nextsoftpremium.com"))
+
+    def test_route_ownership_config_seen_accepts_mixed_case_nginx_dump(self) -> None:
+        output = 'add_header X-VPS-Panel-Route "deployment-wildcard.ebitan.store" always;'
+
+        self.assertTrue(route_ownership_config_seen(output, "deployment-wildcard.ebitan.store"))
 
     def test_probe_host_for_wildcard_server_name_uses_real_child_host(self) -> None:
         self.assertEqual(

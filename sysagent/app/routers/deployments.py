@@ -48,7 +48,9 @@ from app.nginx_manager import (
     probe_host_for_server_name,
     remove_conflicting_configs,
     remove_insecure_port443_configs,
+    route_ownership_config_seen,
     route_ownership_header,
+    route_ownership_header_seen,
     safe_letsencrypt_path,
     safe_nginx_path,
     safe_web_root,
@@ -2156,8 +2158,12 @@ def _nginx_route_ownership_probe(server_name: str, config_name: str, *, require_
     if server_name_has_wildcard(server_name):
         result = run_command(["nginx", "-T"], allow_live=True)
         output = f"{result.get('stdout') or ''}\n{result.get('stderr') or ''}"
-        expected_header = f'{ROUTE_OWNERSHIP_HEADER} "{config_name}"'
-        if result.get("returncode") == 0 and f"server_name {server_name};" in output and expected_header in output:
+        output_lower = output.lower()
+        if (
+            result.get("returncode") == 0
+            and f"server_name {server_name.lower()};" in output_lower
+            and route_ownership_config_seen(output, config_name)
+        ):
             return result
         return {
             **result,
@@ -2188,7 +2194,7 @@ def _nginx_route_ownership_probe(server_name: str, config_name: str, *, require_
     ]
     result = run_command(command, allow_live=True)
     output = f"{result.get('stdout') or ''}\n{result.get('stderr') or ''}"
-    if result.get("returncode") == 0 and f"{ROUTE_OWNERSHIP_HEADER}: {config_name}" in output:
+    if result.get("returncode") == 0 and route_ownership_header_seen(output, config_name):
         return result
     conflicts = loaded_conflicting_config_files(config_name, server_name)
     conflict_hint = f" Loaded conflicting nginx configs: {', '.join(conflicts)}." if conflicts else ""

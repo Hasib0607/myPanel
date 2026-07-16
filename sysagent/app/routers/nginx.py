@@ -19,7 +19,9 @@ from app.nginx_manager import (
     make_web_root_readable,
     publish_nginx_config,
     probe_host_for_server_name,
+    route_ownership_config_seen,
     route_ownership_header,
+    route_ownership_header_seen,
     run_live_step,
     safe_letsencrypt_path,
     safe_nginx_path,
@@ -225,8 +227,12 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
         if server_name_has_wildcard(body.serverName):
             result = run_command(["nginx", "-T"], allow_live=True)
             output = f"{result.get('stdout') or ''}\n{result.get('stderr') or ''}"
-            expected_header = f'{ROUTE_OWNERSHIP_HEADER} "{body.name}"'
-            if result.get("returncode") == 0 and f"server_name {body.serverName};" in output and expected_header in output:
+            output_lower = output.lower()
+            if (
+                result.get("returncode") == 0
+                and f"server_name {body.serverName.lower()};" in output_lower
+                and route_ownership_config_seen(output, body.name)
+            ):
                 return result
             return {
                 **result,
@@ -257,7 +263,7 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
         ]
         result = run_command(command, allow_live=True)
         output = f"{result.get('stdout') or ''}\n{result.get('stderr') or ''}"
-        if result.get("returncode") == 0 and f"{ROUTE_OWNERSHIP_HEADER}: {body.name}" in output:
+        if result.get("returncode") == 0 and route_ownership_header_seen(output, body.name):
             return result
         loaded_conflicts = loaded_conflicting_config_files(body.name, body.serverName)
         conflict_hint = (

@@ -32,6 +32,14 @@ def route_ownership_header(name: str) -> str:
     return f'    add_header {ROUTE_OWNERSHIP_HEADER} "{name}" always;\n'
 
 
+def route_ownership_header_seen(output: str, name: str) -> bool:
+    return f"{ROUTE_OWNERSHIP_HEADER.lower()}: {name.lower()}" in output.lower()
+
+
+def route_ownership_config_seen(output: str, name: str) -> bool:
+    return f'{ROUTE_OWNERSHIP_HEADER.lower()} "{name.lower()}"' in output.lower()
+
+
 def safe_nginx_path(root: str, name: str) -> Path:
     assert_managed_config_name(name)
     directory = Path(root).resolve()
