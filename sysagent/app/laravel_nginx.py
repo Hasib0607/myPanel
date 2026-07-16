@@ -118,6 +118,31 @@ def nginx_laravel_app_locations(
     fallback_location: str,
 ) -> str:
     socket_path = laravel_fpm_socket(deployment_id)
+    has_spa_index = Path(public_root, "index.html").exists()
+    api_locations = (
+        "    location ^~ /react-admin-api/ {\n"
+        "        try_files $uri /index.php?$query_string;\n"
+        "    }\n"
+        "\n"
+        "    location ^~ /api/ {\n"
+        "        try_files $uri /index.php?$query_string;\n"
+        "    }\n"
+        "\n"
+        "    location ^~ /sanctum/ {\n"
+        "        try_files $uri /index.php?$query_string;\n"
+        "    }\n"
+        "\n"
+    )
+    root_location = (
+        "    location / {\n"
+        "        try_files $uri $uri/ /index.html;\n"
+        "    }\n"
+        if has_spa_index
+        else
+        "    location / {\n"
+        "        try_files $uri /index.php?$query_string;\n"
+        "    }\n"
+    )
     return (
         f"    root {public_root};\n"
         "    index index.php;\n"
@@ -137,9 +162,8 @@ def nginx_laravel_app_locations(
         "        add_header Cache-Control \"public\";\n"
         "    }\n"
         "\n"
-        "    location / {\n"
-        "        try_files $uri /index.php?$query_string;\n"
-        "    }\n"
+        f"{api_locations}"
+        f"{root_location}"
         "\n"
         "    location = /index.php {\n"
         f"{fallback_error_page}"

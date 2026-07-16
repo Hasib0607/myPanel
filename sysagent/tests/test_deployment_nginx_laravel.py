@@ -1,4 +1,6 @@
 import unittest
+from tempfile import TemporaryDirectory
+from pathlib import Path
 
 from app.laravel_nginx import nginx_app_locations, nginx_laravel_app_locations, nginx_upstream_proxy_locations
 
@@ -13,8 +15,26 @@ class DeploymentNginxLaravelTests(unittest.TestCase):
         )
         self.assertIn("    location / {\n        try_files $uri /index.php?$query_string;", block)
         self.assertIn("fastcgi_pass unix:/run/php-fpm/vps-panel-example.sock;", block)
+        self.assertIn("location ^~ /react-admin-api/", block)
+        self.assertIn("location ^~ /api/", block)
+        self.assertIn("location ^~ /sanctum/", block)
         self.assertNotIn("proxy_pass http://127.0.0.1:10002;", block)
         self.assertNotIn("try_files $uri $uri/", block)
+
+    def test_laravel_with_spa_index_routes_api_to_php_and_root_to_index_html(self) -> None:
+        with TemporaryDirectory() as public_root:
+            Path(public_root, "index.html").write_text("<div id=\"root\"></div>", encoding="utf-8")
+            block = nginx_laravel_app_locations(
+                deployment_id="example",
+                public_root=public_root,
+                fallback_error_page="",
+                fallback_location="",
+            )
+
+        self.assertIn("location ^~ /react-admin-api/ {\n        try_files $uri /index.php?$query_string;", block)
+        self.assertIn("location ^~ /api/ {\n        try_files $uri /index.php?$query_string;", block)
+        self.assertIn("location ^~ /sanctum/ {\n        try_files $uri /index.php?$query_string;", block)
+        self.assertIn("    location / {\n        try_files $uri $uri/ /index.html;", block)
 
     def test_legacy_public_prefixed_assets_map_to_laravel_public_root(self) -> None:
         block = nginx_laravel_app_locations(
