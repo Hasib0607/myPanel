@@ -1097,14 +1097,13 @@ function gitSyncCommitInfo(result: unknown): GitSyncCommitInfo | null {
   return sha || message || author ? { sha, message, author } : null;
 }
 
-async function syncReleaseCommitInfo(deploymentId: string, releaseId: string | undefined, commit: GitSyncCommitInfo | null) {
+async function syncReleaseCommitInfo(releaseId: string | undefined, commit: GitSyncCommitInfo | null) {
   if (!commit?.sha) return;
   const data = {
     commitSha: commit.sha,
     commitMessage: commit.message,
     commitAuthor: commit.author
   };
-  await prisma.deployment.update({ where: { id: deploymentId }, data: { commitSha: commit.sha } });
   if (releaseId) {
     await prisma.deploymentRelease.updateMany({
       where: { id: releaseId, status: { not: "CANCELLED" } },
@@ -4089,7 +4088,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         })
       );
       assertCommandTree(syncResult, "Source sync");
-      await syncReleaseCommitInfo(deployment.id, releaseId, gitSyncCommitInfo(syncResult));
+      await syncReleaseCommitInfo(releaseId, gitSyncCommitInfo(syncResult));
     } else {
       await writeLog(deployment.id, releaseId, "CLONING", "Source sync skipped", {
         sourceProvider: deployment.sourceProvider,
@@ -4765,6 +4764,9 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, "Public website check", { ...deployment, domain }, appPath, envVars, processManager);
 
     deployment = await activateDeploymentArtifact(deployment, releaseId, artifactRootPath);
+    const completedRelease = releaseId
+      ? await prisma.deploymentRelease.findUnique({ where: { id: releaseId }, select: { commitSha: true } })
+      : null;
     await markRelease(releaseId, action === "rollback" ? "ROLLED_BACK" : "SUCCEEDED", startedAt);
     const healthStatus = publicRouteWarning || healthOutcome.degraded ? "DEGRADED" : "HEALTHY";
     await prisma.deployment.update({
@@ -4773,7 +4775,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         status: "RUNNING",
         healthStatus,
         lastHealthCheckAt: new Date(),
-        lastDeployAt: new Date()
+        lastDeployAt: new Date(),
+        ...(completedRelease?.commitSha ? { commitSha: completedRelease.commitSha } : {})
       }
     });
     await writeLog(deployment.id, releaseId, action === "rollback" ? "ROLLBACK" : "SUCCEEDED", `${action} completed`, { dryRun: false, publicRouteWarning });

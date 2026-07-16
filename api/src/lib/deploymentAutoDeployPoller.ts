@@ -3,6 +3,7 @@ import { deployQueue } from "../jobs/queues.js";
 import { logger } from "./logger.js";
 import { prisma } from "./prisma.js";
 import { getSecret } from "./secrets.js";
+import { deploymentNeedsRecoveryDeploy } from "./deploymentAutoDeployState.js";
 
 type GithubCommitResponse = {
   sha?: string;
@@ -108,6 +109,9 @@ async function addPollLog(deploymentId: string, message: string, metadata: Prism
 
 async function shouldQueueRemoteHead(deployment: PollableDeployment, remoteSha: string) {
   if (shaMatches(deployment.commitSha, remoteSha)) {
+    if (deploymentNeedsRecoveryDeploy(deployment)) {
+      return { queue: true, reason: `deployment records remote head but is ${deployment.status}/${deployment.healthStatus ?? "UNKNOWN"}; redeploying` };
+    }
     return { queue: false, reason: "deployment already points at remote head" };
   }
 
@@ -127,6 +131,9 @@ async function shouldQueueRemoteHead(deployment: PollableDeployment, remoteSha: 
   }
   const alreadyReleased = recentReleases.find((release) => shaMatches(release.commitSha, remoteSha) && release.status === "SUCCEEDED");
   if (alreadyReleased) {
+    if (deploymentNeedsRecoveryDeploy(deployment)) {
+      return { queue: true, reason: `remote head has succeeded release ${alreadyReleased.id}, but deployment is ${deployment.status}/${deployment.healthStatus ?? "UNKNOWN"}; redeploying` };
+    }
     await prisma.deployment.update({ where: { id: deployment.id }, data: { commitSha: alreadyReleased.commitSha ?? remoteSha } });
     return { queue: false, reason: `remote head already deployed by release ${alreadyReleased.id}` };
   }
