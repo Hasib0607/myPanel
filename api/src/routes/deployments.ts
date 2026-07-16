@@ -1,6 +1,8 @@
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { DeploymentFramework, DeploymentProcessManager, Prisma } from "@prisma/client";
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
@@ -34,6 +36,8 @@ import {
 } from "../lib/laravelProcesses.js";
 import { deploymentPriorityDefaults, normalizeDeploymentResourcePolicy } from "../lib/deploymentResourcePolicy.js";
 import { localRuntimeHealthUrl } from "../lib/deploymentHealthUrl.js";
+
+const execFileAsync = promisify(execFile);
 
 const frameworkSchema = z.enum(["LARAVEL", "NEXTJS", "NODEJS", "PYTHON", "GO", "STATIC"]);
 const statusSchema = z.enum(["QUEUED", "RUNNING", "STOPPED", "DEPLOYING", "BUILDING", "FAILED"]);
@@ -1327,6 +1331,14 @@ function uniqueRiskyActions(actions: Array<{ key: string; label: string; command
 }
 
 async function executeDoctorApproval(deployment: Awaited<ReturnType<typeof findDeployment>>, approval: { actionKey: string }) {
+  if (approval.actionKey === "repair-sysagent-service") {
+    const restart = await execFileAsync("sudo", ["-n", "/usr/bin/systemctl", "restart", "vps-panel-sysagent"], { timeout: 60_000 });
+    const enable = await execFileAsync("sudo", ["-n", "/usr/bin/systemctl", "enable", "vps-panel-sysagent"], { timeout: 60_000 });
+    return {
+      restart: { stdout: restart.stdout, stderr: restart.stderr },
+      enable: { stdout: enable.stdout, stderr: enable.stderr }
+    };
+  }
   if (approval.actionKey.startsWith("install-")) {
     const toolMap: Record<string, string> = {
       "install-composer": "composer",

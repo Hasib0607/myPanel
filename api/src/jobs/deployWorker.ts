@@ -518,6 +518,11 @@ function isSysagentConnectionRefused(error: unknown) {
   return /sysagent .* request failed: .*ECONNREFUSED/i.test(message);
 }
 
+function sudoNeedsPassword(error: unknown) {
+  const text = `${error instanceof Error ? error.message : String(error)} ${(error as { stderr?: string } | undefined)?.stderr ?? ""}`;
+  return /sudo:.*password is required|a password is required|sudo: a terminal is required/i.test(text);
+}
+
 async function waitForSysagentHealthy(maxAttempts = 20) {
   let lastError: unknown = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -535,7 +540,28 @@ async function waitForSysagentHealthy(maxAttempts = 20) {
 
 async function repairSysagentConnectionForDeployment(deploymentId: string, releaseId: string | undefined, step: DeployStep, reason: string) {
   await writeLog(deploymentId, releaseId, step, "Sysagent connection repair started", { reason }, "warn");
-  const restart = await systemctlRestart("vps-panel-sysagent");
+  let restart: Awaited<ReturnType<typeof systemctlRestart>>;
+  try {
+    restart = await systemctlRestart("vps-panel-sysagent");
+  } catch (error) {
+    if (sudoNeedsPassword(error)) {
+      await ensureDoctorApprovalExists(deploymentId, {
+        actionKey: "repair-sysagent-service",
+        label: "Restart VPS panel sysagent service",
+        command: "sudo systemctl restart vps-panel-sysagent && sudo systemctl enable vps-panel-sysagent",
+        reason: "Deployments require vps-panel-sysagent for live git/build/process/nginx operations. The service is down and the panel user cannot restart it without passwordless sudo permission."
+      });
+      await writeLog(deploymentId, releaseId, step, "Sysagent connection repair needs root permission", {
+        reason,
+        command: "sudo systemctl restart vps-panel-sysagent && sudo systemctl enable vps-panel-sysagent",
+        sudoError: error instanceof Error ? error.message : String(error)
+      }, "error");
+      throw new Error(
+        "vps-panel-sysagent is not running and the panel user cannot restart it because sudo requires a password. Run `sudo systemctl restart vps-panel-sysagent && sudo systemctl enable vps-panel-sysagent`, or add passwordless sudo permission for restarting vps-panel-sysagent, then redeploy."
+      );
+    }
+    throw error;
+  }
   const ready = await waitForSysagentHealthy();
   await writeLog(deploymentId, releaseId, step, "Sysagent connection repair completed", {
     restart: {
