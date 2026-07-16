@@ -474,12 +474,29 @@ async function ensureManagedDeploymentPort(deployment: DeploymentWithWorkerRelat
       });
     }
 
+    if (owner) {
+      await writeLog(deployment.id, releaseId, "PREFLIGHT", `Deployment port ${currentPort} is already assigned to another deployment`, {
+        port: currentPort,
+        owner,
+        hint: "Deployment ports are persistent. Fix the duplicate database port assignment instead of moving this deployment automatically, otherwise existing domain vhosts can point at a stale upstream after restart."
+      }, "error");
+      throw new Error(`Deployment port ${currentPort} is already assigned to ${owner.name || owner.slug}. Fix the duplicate port assignment; the panel will not silently move this deployment to a different port.`);
+    }
+
+    if (liveOwner) {
+      await writeLog(deployment.id, releaseId, "PREFLIGHT", `Deployment port ${currentPort} is already occupied by another live process`, {
+        port: currentPort,
+        owner: liveOwner,
+        hint: "Deployment ports are persistent. Free this port or stop the conflicting process instead of moving the deployment to a new port, otherwise existing domain vhosts can point at a stale upstream after restart."
+      }, "error");
+      throw new Error(`Deployment port ${currentPort} is already occupied by another live process. Stop the conflicting process or free the saved deployment port; the panel will not silently move this deployment to a different port.`);
+    }
+
     blockedPorts.add(currentPort);
-    const reason = policyError
-      ?? (owner ? `already used by ${owner.name || owner.slug}` : `already used by a live process`);
+    const reason = policyError ?? "unavailable";
     await writeLog(deployment.id, releaseId, "PREFLIGHT", `Port ${currentPort} is ${reason}; searching for a free port`, {
       port: currentPort,
-      owner: owner ?? liveOwner
+      owner: null
     }, "warn");
     currentPort = await nextAvailableDeploymentPort(deployment.id, blockedPorts);
   }
