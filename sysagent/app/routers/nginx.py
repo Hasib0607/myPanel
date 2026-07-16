@@ -303,7 +303,7 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
                 time.sleep(0.25)
             result = run_command(curl_base, allow_live=True)
             if result.get("returncode") == 0 and (result.get("stdout") or "").strip() == probe_expected:
-                ownership = route_ownership_probe(https=has_ssl)
+                ownership = route_ownership_probe(https=has_ssl and (body.forceHttps or body.requireSsl))
                 return ownership if ownership.get("returncode") != 0 else result
         if result.get("returncode") != 0:
             debug = run_command([
