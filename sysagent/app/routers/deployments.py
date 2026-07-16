@@ -2525,10 +2525,10 @@ def _server_primary_ip() -> str | None:
 
 
 def _curl_public_route(server_name: str, path: str = "/", root_path: str | None = None, framework: str | None = None, require_https: bool = False) -> dict:
-    primary = server_name.split()[0].strip()
+    primary = probe_host_for_server_name(server_name)
     clean_path = path if path.startswith("/") else f"/{path}"
     is_laravel = (framework or "").upper() == "LARAVEL"
-    use_https = require_https and letsencrypt_certificate_exists(primary)
+    use_https = require_https and letsencrypt_certificate_exists(server_name)
 
     def probe(url: str, *, accept_http_errors: bool, loopback: bool, insecure_tls: bool = False) -> dict:
         command = [

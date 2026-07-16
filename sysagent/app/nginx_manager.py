@@ -52,8 +52,15 @@ def safe_web_root(root_path: str, detail: str = "Website root escapes file manag
     return target
 
 
+def certificate_name_for_server_name(server_name: str) -> str:
+    primary = primary_server_name(server_name)
+    if primary.startswith("*.") and len(primary) > 2:
+        return f"wildcard.{primary[2:]}"
+    return primary
+
+
 def letsencrypt_certificate_exists(domain: str) -> bool:
-    primary = domain.split()[0].strip()
+    primary = certificate_name_for_server_name(domain)
     cert = Path(f"/etc/letsencrypt/live/{primary}/fullchain.pem")
     key = Path(f"/etc/letsencrypt/live/{primary}/privkey.pem")
     if not cert.is_file() or not key.is_file():

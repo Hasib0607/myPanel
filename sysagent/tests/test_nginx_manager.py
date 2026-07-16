@@ -16,6 +16,12 @@ class HTTPException(Exception):
 
 
 fastapi.HTTPException = HTTPException
+fastapi.APIRouter = lambda *args, **kwargs: types.SimpleNamespace(
+    get=lambda *route_args, **route_kwargs: (lambda fn: fn),
+    post=lambda *route_args, **route_kwargs: (lambda fn: fn),
+    patch=lambda *route_args, **route_kwargs: (lambda fn: fn),
+    delete=lambda *route_args, **route_kwargs: (lambda fn: fn),
+)
 sys.modules.setdefault("fastapi", fastapi)
 
 command = types.ModuleType("app.command")
@@ -34,6 +40,7 @@ from app.nginx_manager import (
     _normalize_conflict_path,
     _nginx_include_text_loads_directory,
     acme_location,
+    certificate_name_for_server_name,
     make_web_root_readable,
     probe_host_for_server_name,
     remove_conflicting_configs,
@@ -59,6 +66,10 @@ class NginxManagerTests(unittest.TestCase):
             "vps-panel-wildcard-probe.ebitans.store",
         )
         self.assertEqual(probe_host_for_server_name("shop.ebitans.store"), "shop.ebitans.store")
+
+    def test_certificate_name_for_wildcard_server_name_uses_certbot_name(self) -> None:
+        self.assertEqual(certificate_name_for_server_name("*.ebitan.store"), "wildcard.ebitan.store")
+        self.assertEqual(certificate_name_for_server_name("shop.ebitan.store"), "shop.ebitan.store")
 
     def test_server_name_has_wildcard_detects_any_token(self) -> None:
         self.assertTrue(server_name_has_wildcard("*.ebitans.store"))
