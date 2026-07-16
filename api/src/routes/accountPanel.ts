@@ -18,7 +18,7 @@ import { githubApiErrorMessage, isGithubWebhookPermissionError } from "../lib/gi
 import { publishDomainDnsZone } from "../lib/domainDnsPublish.js";
 import { detectDeploymentFiles } from "../lib/deploymentDetection.js";
 import { deploymentRuntimeReview, prepareDeploymentRuntimeTools } from "../lib/deploymentRuntimeReview.js";
-import { buildDeploymentNginxRequest, deploymentIsRoutable, publishDeploymentProxyNginx } from "../lib/deploymentDomainSsl.js";
+import { boundDomainFromBinding, deploymentFallbackRootPath, deploymentIsRoutable, deploymentServerName, buildDeploymentNginxRequest, publishDeploymentProxyNginx } from "../lib/deploymentDomainSsl.js";
 import { prisma } from "../lib/prisma.js";
 import { resolvePublicA } from "../lib/publicDns.js";
 import { deleteSecret, getSecret, getSecretRecord, putSecret } from "../lib/secrets.js";
@@ -1261,6 +1261,36 @@ async function publishAccountDomainRoute(request: any, account: { id: string; ho
         });
   await audit(request, { action: "APPLY", resource: "domain", resourceId: domain.id, description: `Account published DNS and website for ${domain.name}`, metadata: { dnsResult, nginxResult } as any });
   return { domain, dnsResult, nginxResult };
+}
+
+async function publishAccountDeploymentBindingRoute(
+  deployment: {
+    id: string;
+    status?: string | null;
+    port: number;
+    rootPath: string;
+    rootDirectory: string;
+    framework: DeploymentFramework;
+    startCommand?: string | null;
+    publicDirectory?: string | null;
+    outputDirectory?: string | null;
+  },
+  binding: { domain?: any; subdomain?: any }
+) {
+  const domain = boundDomainFromBinding(binding);
+  if (!domain || !deploymentIsRoutable(deployment)) return null;
+  return publishDeploymentProxyNginx({
+    deploymentId: deployment.id,
+    fqdn: deploymentServerName(domain) ?? domain.name,
+    upstreamPort: deployment.port,
+    rootPath: accountDeploymentAppPath(deployment),
+    framework: deployment.framework,
+    startCommand: deployment.startCommand,
+    publicDirectory: deployment.publicDirectory,
+    outputDirectory: deployment.outputDirectory,
+    fallbackRootPath: deploymentFallbackRootPath(domain),
+    forceHttps: domain.forceSsl
+  });
 }
 
 async function createAndBindAccountDeploymentDomain(
@@ -3303,6 +3333,8 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     if (target.domainId) {
       const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
       await publishAccountDomainRoute(request, account, target.domainId);
+    } else {
+      await publishAccountDeploymentBindingRoute(deployment, binding);
     }
     await audit(request, { action: "UPDATE", resource: "deployment", resourceId: deployment.id, description: `Account bound domain ${target.displayName} to ${deployment.slug}` });
     return reply.code(201).send(serializeAccountDeploymentBinding(binding));
