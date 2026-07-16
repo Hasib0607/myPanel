@@ -9,6 +9,7 @@ import {
   deploymentServerName,
   publishDeploymentProxyNginx
 } from "../lib/deploymentDomainSsl.js";
+import { certbotCertificateName } from "../lib/nginxNames.js";
 
 function assertCommand(action: string, result: SysagentCommandResult | undefined) {
   if (!result) throw new Error(`${action} did not return a command result`);
@@ -42,7 +43,7 @@ async function main() {
     include: { domain: true }
   });
   const domainName = `${subdomain.name}.${subdomain.domain.name}`;
-  const certificate = await sysagent.certificateFindReusable(domainName);
+  const certificate = await sysagent.certificateFindReusable(certbotCertificateName(domainName));
   if (!certificate.exists) {
     throw new Error(`No reusable certificate found for ${domainName}. Issue SSL first, then rerun this repair.`);
   }
