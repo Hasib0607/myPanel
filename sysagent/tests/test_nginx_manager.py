@@ -81,7 +81,7 @@ server {
             self.assertFalse(stale.exists())
             self.assertTrue(own.exists())
 
-    def test_exact_domain_removes_conflicting_parent_wildcard_config(self) -> None:
+    def test_exact_domain_keeps_parent_wildcard_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             stale = root / "stale-wildcard.conf"
@@ -91,8 +91,8 @@ server {
 
             removed = remove_conflicting_configs("domain-store.ebitans.store", "store.ebitans.store", tmp)
 
-            self.assertEqual(removed, ["stale-wildcard.conf"])
-            self.assertFalse(stale.exists())
+            self.assertEqual(removed, [])
+            self.assertTrue(stale.exists())
             self.assertTrue(own.exists())
 
     def test_removes_default_config_when_it_claims_requested_domain(self) -> None:
@@ -186,12 +186,12 @@ server {
             self.assertFalse(_config_has_server_name(sibling, "*.ebitan.store"))
             self.assertFalse(_config_has_server_name(own, "*.ebitans.store"))
 
-    def test_wildcard_matches_only_one_child_label(self) -> None:
+    def test_parent_wildcard_does_not_conflict_with_child_labels(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "wildcard.conf"
             config.write_text("server { listen 80; server_name *.ebitans.store; }\n", encoding="utf-8")
 
-            self.assertTrue(_config_has_server_name(config, "shop.ebitans.store"))
+            self.assertFalse(_config_has_server_name(config, "shop.ebitans.store"))
             self.assertFalse(_config_has_server_name(config, "deep.shop.ebitans.store"))
 
     def test_make_web_root_readable_allows_nginx_parent_traversal(self) -> None:

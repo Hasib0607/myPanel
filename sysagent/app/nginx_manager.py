@@ -163,19 +163,7 @@ def _server_name_token_matches(claimed: str, requested: str) -> bool:
     requested = requested.strip().lower().rstrip(".")
     if not claimed or not requested:
         return False
-    if claimed == requested:
-        return True
-    if claimed.startswith("*."):
-        parent = claimed[2:]
-        requested_labels = requested.split(".")
-        parent_labels = parent.split(".")
-        return (
-            not requested.startswith("*.")
-            and requested != parent
-            and requested.endswith(f".{parent}")
-            and len(requested_labels) == len(parent_labels) + 1
-        )
-    return False
+    return claimed == requested
 
 
 def _config_has_server_name(path: Path, server_name: str) -> bool:
