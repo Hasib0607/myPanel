@@ -204,6 +204,11 @@ export async function enableDeploymentTlsInDatabase(domain: BoundDomain) {
 export async function disableDeploymentTlsInDatabase(domain: BoundDomain, options?: { clearForceSsl?: boolean }) {
   const clearForceSsl = options?.clearForceSsl ?? false;
   if (domain.id.startsWith("subdomain:")) {
+    if (!clearForceSsl) {
+      // Subdomains do not have a separate forceSsl field. Keep sslEnabled as
+      // the user's SSL intent when deploy temporarily cannot confirm a cert.
+      return domain;
+    }
     const subdomainId = domain.id.slice("subdomain:".length);
     await prisma.subdomain.update({
       where: { id: subdomainId },

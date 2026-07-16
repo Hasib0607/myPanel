@@ -86,6 +86,46 @@ test("wildcard deployment skips HTTP ACME webroot preparation", async () => {
   assert.equal(calls, 0);
 });
 
+test("subdomain SSL intent survives deploy certificate probe misses", async () => {
+  const { syncDeploymentTlsWithCertificate } = await import("./deploymentDomainSsl.js");
+  const { sysagent } = await import("./sysagent.js");
+  const { prisma } = await import("./prisma.js");
+  const originalFindReusable = sysagent.certificateFindReusable;
+  const originalUpdate = prisma.subdomain.update;
+  let updates = 0;
+
+  sysagent.certificateFindReusable = async () => ({
+    requested: "*.ebitans.store",
+    domain: "*.ebitans.store",
+    exists: false,
+    expiry: null,
+    names: [],
+    certificate: "",
+    privateKey: ""
+  });
+  (prisma.subdomain as any).update = async () => {
+    updates += 1;
+    throw new Error("subdomain sslEnabled should not be cleared");
+  };
+
+  try {
+    const result = await syncDeploymentTlsWithCertificate({
+      id: "subdomain:sub_1",
+      name: "*.ebitans.store",
+      forceSsl: true,
+      sslEnabled: true
+    });
+
+    assert.equal(result.httpsReady, false);
+    assert.equal(result.domain?.sslEnabled, true);
+    assert.equal(result.domain?.forceSsl, true);
+    assert.equal(updates, 0);
+  } finally {
+    sysagent.certificateFindReusable = originalFindReusable;
+    (prisma.subdomain as any).update = originalUpdate;
+  }
+});
+
 test("wildcard subdomain deployment binding matches one-level child hosts", async () => {
   const { subdomainBindingMatchesFqdn } = await import("./deploymentDomainSsl.js");
   const wildcard = { name: "*", domain: { name: "ecommercex.store" } };
