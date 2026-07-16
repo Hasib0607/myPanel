@@ -4798,12 +4798,15 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       "Health check"
     );
 
+    deployment = await activateDeploymentArtifact(deployment, releaseId, artifactRootPath);
     const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, "Public website check", { ...deployment, domain }, appPath, envVars, processManager);
     if (publicRouteWarning) {
-      throw new Error(`Public website check failed. ${publicRouteWarning}`);
+      await writeLog(deployment.id, releaseId, "HEALTH_CHECK", "Public website check warning; keeping latest release active", {
+        warning: publicRouteWarning,
+        appPath,
+        artifactRootPath
+      }, "warn");
     }
-
-    deployment = await activateDeploymentArtifact(deployment, releaseId, artifactRootPath);
     const completedRelease = releaseId
       ? await prisma.deploymentRelease.findUnique({ where: { id: releaseId }, select: { commitSha: true } })
       : null;
