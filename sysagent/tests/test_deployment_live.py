@@ -123,6 +123,27 @@ class DeploymentLiveCommandTests(unittest.TestCase):
         self.assertTrue(result["reusable"])
         self.assertTrue(result["cwdMatches"])
 
+    def test_port_status_reuses_pm2_process_in_release_artifact_cwd(self) -> None:
+        body = PortStatusRequest(
+            rootPath="/var/www/accounts/demo/deployments/app",
+            port=10012,
+            processName="new-slug",
+            processManager="PM2",
+        )
+        owner = {
+            "name": "old-slug",
+            "cwd": "/var/www/accounts/demo/deployments/app/.panel-releases/123-release",
+            "port": 10012,
+        }
+
+        with mock.patch("app.routers.deployments.path_info", return_value={"allowed": True}):
+            with mock.patch("app.routers.deployments._pm2_owner_for_port", return_value=owner):
+                result = port_status(body)
+
+        self.assertFalse(result["occupied"])
+        self.assertTrue(result["reusable"])
+        self.assertTrue(result["cwdMatches"])
+
 
 if __name__ == "__main__":
     unittest.main()

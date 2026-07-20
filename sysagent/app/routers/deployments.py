@@ -3603,7 +3603,17 @@ def port_status(body: PortStatusRequest) -> dict:
     pm2_owner = _pm2_owner_for_port(body.port) if (body.processManager or "").upper() == "PM2" else None
     if pm2_owner:
         same_process = pm2_owner.get("name") == body.processName
-        same_cwd = str(Path(str(pm2_owner.get("cwd") or "")).resolve()) == str(Path(body.rootPath).resolve()) if pm2_owner.get("cwd") else False
+        same_cwd = False
+        if pm2_owner.get("cwd"):
+            owner_cwd = Path(str(pm2_owner.get("cwd"))).resolve()
+            expected_root = Path(body.rootPath).resolve()
+            same_cwd = owner_cwd == expected_root
+            if not same_cwd:
+                try:
+                    owner_cwd.relative_to(expected_root / ".panel-releases")
+                    same_cwd = True
+                except ValueError:
+                    pass
         reusable = same_process or same_cwd
         return {
             "dryRun": False,
