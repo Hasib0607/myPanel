@@ -39,7 +39,7 @@ pydantic_settings.SettingsConfigDict = lambda **kwargs: kwargs
 sys.modules.setdefault("pydantic_settings", pydantic_settings)
 
 from app.command import run_command
-from app.routers.deployments import HealthRequest, _curl_public_route, _supervisor_process_mismatch
+from app.routers.deployments import HealthRequest, PortStatusRequest, _curl_public_route, _supervisor_process_mismatch, port_status
 
 
 class DeploymentLiveCommandTests(unittest.TestCase):
@@ -101,6 +101,27 @@ class DeploymentLiveCommandTests(unittest.TestCase):
         self.assertIn("Host: vps-panel-wildcard-probe.ebitan.store", command_text)
         self.assertIn("http://vps-panel-wildcard-probe.ebitan.store/", command_text)
         self.assertNotIn("*.ebitan.store", command_text)
+
+    def test_port_status_reuses_pm2_process_with_same_cwd(self) -> None:
+        body = PortStatusRequest(
+            rootPath="/var/www/accounts/demo/deployments/app",
+            port=10012,
+            processName="new-slug",
+            processManager="PM2",
+        )
+        owner = {
+            "name": "old-slug",
+            "cwd": "/var/www/accounts/demo/deployments/app",
+            "port": 10012,
+        }
+
+        with mock.patch("app.routers.deployments.path_info", return_value={"allowed": True}):
+            with mock.patch("app.routers.deployments._pm2_owner_for_port", return_value=owner):
+                result = port_status(body)
+
+        self.assertFalse(result["occupied"])
+        self.assertTrue(result["reusable"])
+        self.assertTrue(result["cwdMatches"])
 
 
 if __name__ == "__main__":

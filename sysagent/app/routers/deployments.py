@@ -3604,7 +3604,7 @@ def port_status(body: PortStatusRequest) -> dict:
     if pm2_owner:
         same_process = pm2_owner.get("name") == body.processName
         same_cwd = str(Path(str(pm2_owner.get("cwd") or "")).resolve()) == str(Path(body.rootPath).resolve()) if pm2_owner.get("cwd") else False
-        reusable = same_process
+        reusable = same_process or same_cwd
         return {
             "dryRun": False,
             "command": ["pm2", "jlist"],
