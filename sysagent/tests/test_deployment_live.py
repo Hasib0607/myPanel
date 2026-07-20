@@ -144,6 +144,28 @@ class DeploymentLiveCommandTests(unittest.TestCase):
         self.assertTrue(result["reusable"])
         self.assertTrue(result["cwdMatches"])
 
+    def test_port_status_reuses_ss_process_in_release_artifact_cwd(self) -> None:
+        body = PortStatusRequest(
+            rootPath="/var/www/accounts/demo/deployments/app",
+            port=10012,
+            processName="python-app",
+            processManager="PYTHON",
+        )
+        ss_output = (
+            "State  Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess\n"
+            "LISTEN 0      2048       127.0.0.1:10012      0.0.0.0:*    "
+            "users:((\"python\",pid=2679898,fd=3))"
+        )
+
+        with mock.patch("app.routers.deployments.path_info", return_value={"allowed": True}):
+            with mock.patch("app.routers.deployments.run_command", return_value={"returncode": 0, "stdout": ss_output, "stderr": ""}):
+                with mock.patch("app.routers.deployments._process_cwd", return_value="/var/www/accounts/demo/deployments/app/.panel-releases/123-release"):
+                    result = port_status(body)
+
+        self.assertFalse(result["occupied"])
+        self.assertTrue(result["reusable"])
+        self.assertTrue(result["cwdMatches"])
+
 
 if __name__ == "__main__":
     unittest.main()

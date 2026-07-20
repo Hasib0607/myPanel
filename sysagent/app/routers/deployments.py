@@ -2767,6 +2767,42 @@ def _pm2_owner_for_port(port: int) -> dict | None:
     return None
 
 
+def _cwd_belongs_to_deployment(cwd: str | None, root_path: str) -> bool:
+    if not cwd:
+        return False
+    owner_cwd = Path(str(cwd)).resolve()
+    expected_root = Path(root_path).resolve()
+    if owner_cwd == expected_root:
+        return True
+    try:
+        owner_cwd.relative_to(expected_root / ".panel-releases")
+        return True
+    except ValueError:
+        return False
+
+
+def _pids_from_ss_output(output: str) -> list[int]:
+    return [int(value) for value in re.findall(r"pid=(\d+)", output)]
+
+
+def _process_cwd(pid: int) -> str | None:
+    try:
+        return str(Path(f"/proc/{pid}/cwd").resolve())
+    except OSError:
+        return None
+
+
+def _ss_owner_cwd_matches(output: str, root_path: str) -> tuple[bool, list[dict]]:
+    owners = []
+    for pid in _pids_from_ss_output(output):
+        cwd = _process_cwd(pid)
+        matches = _cwd_belongs_to_deployment(cwd, root_path)
+        owners.append({"pid": pid, "cwd": cwd, "cwdMatches": matches})
+        if matches:
+            return True, owners
+    return False, owners
+
+
 def _pm2_process_mismatch(body: HealthRequest) -> str | None:
     if not body.processName or (body.processManager or "").upper() != "PM2":
         return None
@@ -3603,17 +3639,7 @@ def port_status(body: PortStatusRequest) -> dict:
     pm2_owner = _pm2_owner_for_port(body.port) if (body.processManager or "").upper() == "PM2" else None
     if pm2_owner:
         same_process = pm2_owner.get("name") == body.processName
-        same_cwd = False
-        if pm2_owner.get("cwd"):
-            owner_cwd = Path(str(pm2_owner.get("cwd"))).resolve()
-            expected_root = Path(body.rootPath).resolve()
-            same_cwd = owner_cwd == expected_root
-            if not same_cwd:
-                try:
-                    owner_cwd.relative_to(expected_root / ".panel-releases")
-                    same_cwd = True
-                except ValueError:
-                    pass
+        same_cwd = _cwd_belongs_to_deployment(pm2_owner.get("cwd"), body.rootPath)
         reusable = same_process or same_cwd
         return {
             "dryRun": False,
@@ -3632,12 +3658,15 @@ def port_status(body: PortStatusRequest) -> dict:
     ss = run_command(["ss", "-ltnp", f"sport = :{body.port}"], allow_live=DEPLOYMENT_COMMANDS_LIVE)
     stdout = ss.get("stdout") or ""
     occupied = f":{body.port}" in stdout
+    cwd_matches, process_owners = _ss_owner_cwd_matches(stdout, body.rootPath) if occupied else (False, [])
+    reusable = cwd_matches
     return {
         **ss,
         "path": info,
-        "occupied": occupied,
-        "reusable": False,
-        "owner": {"source": "ss", "detail": stdout.strip()} if occupied else None,
+        "occupied": occupied and not reusable,
+        "reusable": reusable,
+        "cwdMatches": cwd_matches,
+        "owner": {"source": "ss", "detail": stdout.strip(), "processes": process_owners} if occupied else None,
     }
 
 
