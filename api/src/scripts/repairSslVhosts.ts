@@ -7,7 +7,6 @@ import {
   boundDomainFromBinding,
   certificateNamesCoverHost,
   deploymentFallbackRootPath,
-  deploymentIsRoutable,
   deploymentServerName,
   deploymentSslCertificatePathsWhenReady,
   publishDeploymentProxyNginx,
@@ -18,7 +17,7 @@ import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
 import { currentVpsIp } from "../lib/serverIp.js";
 import { sysagent, type SysagentCommandResult } from "../lib/sysagent.js";
-import { nginxResourceName } from "../lib/nginxNames.js";
+import { isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
 
 const domainRepairInclude = {
   account: { select: { homeRoot: true } },
@@ -80,10 +79,15 @@ function parseArgs() {
 }
 
 async function staticSubdomainSslPaths(fqdn: string, wantsSsl: boolean) {
-  if (!wantsSsl) return {};
+  if (!wantsSsl && !isWildcardHostname(fqdn)) return {};
   const cert = await sysagent.certificateFindReusable(fqdn).catch(() => null);
   if (!cert?.exists || !certificateNamesCoverHost(fqdn, cert.names ?? [])) return {};
   return { sslCertificate: cert.certificate, sslCertificateKey: cert.privateKey };
+}
+
+function deploymentCanBeRepairedAsProxy(deployment: { status?: string | null; port?: number | null } | null | undefined) {
+  if (!deployment?.port) return false;
+  return deployment.status !== "STOPPED" && deployment.status !== "FAILED";
 }
 
 async function repairDomain(domain: RepairDomain, dryRun: boolean) {
@@ -108,7 +112,7 @@ async function repairDomain(domain: RepairDomain, dryRun: boolean) {
     const deployment = domain.hostingDeploymentId
       ? await prisma.deployment.findUnique({ where: { id: domain.hostingDeploymentId } })
       : domain.deploymentBindings[0]?.deployment ?? domain.deployments[0] ?? null;
-    if (deployment && deploymentIsRoutable(deployment)) {
+    if (deployment && deploymentCanBeRepairedAsProxy(deployment)) {
       result = await publishDeploymentProxyNginx({
         deploymentId: deployment.id,
         fqdn: serverName,
@@ -126,15 +130,7 @@ async function repairDomain(domain: RepairDomain, dryRun: boolean) {
         ...sslPaths
       });
     } else {
-      result = await publishPublicHtmlNginxVhost({
-        id: domain.id,
-        name: domain.name,
-        forceSsl: domain.forceSsl,
-        sslEnabled: domain.sslEnabled,
-        documentRoot: domain.documentRoot,
-        account: domain.account,
-        includeWww: true
-      }) as Record<string, unknown>;
+      return { domain: domain.name, mode: domain.hostingMode, skipped: true, reason: "deployment proxy target is not repairable" };
     }
   } else if (domain.hostingMode === "REDIRECT") {
     if (!domain.redirectUrl) {
@@ -177,7 +173,7 @@ async function repairSubdomain(subdomain: RepairSubdomain, dryRun: boolean) {
 
   let result: Record<string, unknown> | null = null;
   const bindings = subdomain.deploymentBindings ?? [];
-  const binding = bindings.find((row) => deploymentIsRoutable(row.deployment));
+  const binding = bindings.find((row) => deploymentCanBeRepairedAsProxy(row.deployment));
   if (binding) {
     const bound = boundDomainFromBinding(binding);
     const serverName = deploymentServerName(bound) ?? fqdn;
@@ -191,7 +187,7 @@ async function repairSubdomain(subdomain: RepairSubdomain, dryRun: boolean) {
       publicDirectory: binding.deployment.publicDirectory,
       outputDirectory: binding.deployment.outputDirectory,
       fallbackRootPath: deploymentFallbackRootPath(bound),
-      forceHttps: subdomain.sslEnabled && httpsReady,
+      forceHttps: (subdomain.sslEnabled || isWildcardHostname(fqdn)) && httpsReady,
       requireSsl: false,
       ...sslPaths
     });
@@ -201,7 +197,7 @@ async function repairSubdomain(subdomain: RepairSubdomain, dryRun: boolean) {
       name: `domain-${nginxResourceName(fqdn)}`,
       serverName: fqdn,
       rootPath: path.join(env.FILE_MANAGER_ROOT, scaffold.relativeRoot),
-      forceHttps: subdomain.sslEnabled && httpsReady,
+      forceHttps: (subdomain.sslEnabled || isWildcardHostname(fqdn)) && httpsReady,
       ...sslPaths
     }) as Record<string, unknown>;
   } else {
