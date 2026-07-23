@@ -2387,15 +2387,19 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
     const cert = await sysagent.certificateFindReusable(domain.name).catch(() => null);
+    const servedApex = await sysagent.servedCertificate({ domain: domain.name }).catch(() => null);
+    const servedWww = await sysagent.servedCertificate({ domain: `www.${domain.name}` }).catch(() => null);
+    const servedMatches = Boolean(servedApex?.matches && servedWww?.matches);
     const certificateMatches = Boolean(cert?.exists && certificateNamesCoverServerName(`${domain.name} www.${domain.name}`, cert.names ?? []));
-    const effectiveExpiry = domain.sslEnabled && certificateMatches && cert?.expiry ? new Date(cert.expiry) : null;
-    const hosts = [domain.name, `www.${domain.name}`].map((host) => sslHostStatus(host, cert));
+    const effectiveExpiry = domain.sslEnabled && certificateMatches && servedMatches && cert?.expiry ? new Date(cert.expiry) : null;
+    const hosts = [sslHostStatus(domain.name, servedApex?.matches ? cert : null), sslHostStatus(`www.${domain.name}`, servedWww?.matches ? cert : null)];
     return {
       domainId: domain.id,
       domain: domain.name,
-      sslEnabled: domain.sslEnabled && certificateMatches,
+      sslEnabled: domain.sslEnabled && certificateMatches && servedMatches,
       sslExpiry: effectiveExpiry,
       hosts,
+      servedCertificate: { apex: servedApex, www: servedWww },
       forceSsl: domain.forceSsl,
       activeJobId: await activeAccountSslJobIdForResource({ domainId: domain.id }),
       ...expiryStatus(effectiveExpiry)
@@ -2494,15 +2498,19 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
     const cert = await sysagent.certificateFindReusable(domain.name).catch(() => null);
+    const servedApex = await sysagent.servedCertificate({ domain: domain.name }).catch(() => null);
+    const servedWww = await sysagent.servedCertificate({ domain: `www.${domain.name}` }).catch(() => null);
+    const servedMatches = Boolean(servedApex?.matches && servedWww?.matches);
     const certificateMatches = Boolean(cert?.exists && certificateNamesCoverServerName(`${domain.name} www.${domain.name}`, cert.names ?? []));
-    const effectiveExpiry = domain.sslEnabled && certificateMatches && cert?.expiry ? new Date(cert.expiry) : null;
-    const hosts = [domain.name, `www.${domain.name}`].map((host) => sslHostStatus(host, cert));
+    const effectiveExpiry = domain.sslEnabled && certificateMatches && servedMatches && cert?.expiry ? new Date(cert.expiry) : null;
+    const hosts = [sslHostStatus(domain.name, servedApex?.matches ? cert : null), sslHostStatus(`www.${domain.name}`, servedWww?.matches ? cert : null)];
     return {
       domainId: domain.id,
       domain: domain.name,
-      sslEnabled: domain.sslEnabled && certificateMatches,
+      sslEnabled: domain.sslEnabled && certificateMatches && servedMatches,
       sslExpiry: effectiveExpiry,
       hosts,
+      servedCertificate: { apex: servedApex, www: servedWww },
       forceSsl: domain.forceSsl,
       activeJobId: await activeAccountSslJobIdForResource({ domainId: domain.id }),
       ...expiryStatus(effectiveExpiry)

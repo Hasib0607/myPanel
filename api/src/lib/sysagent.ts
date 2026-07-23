@@ -222,6 +222,8 @@ export const sysagent = {
     request<{ domain: string; exists: boolean; expiry: string | null; names: string[]; certificate: string; privateKey: string }>(`/ssl/certificate-status/${encodeURIComponent(domain.split(" ")[0] ?? domain)}`),
   certificateFindReusable: (domain: string) =>
     request<{ requested: string; domain: string; exists: boolean; expiry: string | null; names: string[]; certificate: string; privateKey: string; candidates?: unknown[] }>(`/ssl/certificate-reusable/${encodeURIComponent(domain.split(" ")[0] ?? domain)}`),
+  servedCertificate: (body: { domain: string; connectHost?: string | null; port?: number }) =>
+    request<{ domain: string; connectHost?: string; connectedIp?: string | null; port: number; exists: boolean; matches: boolean; names: string[]; subject?: string | null; issuer?: string | null; notAfter?: string | null; error?: string | null }>("/ssl/served-certificate", { method: "POST", body: JSON.stringify(body) }),
   ensureAcmeWebroot: (body: { domain: string; webRoot?: string | null }) =>
     request<SysagentCommandResult & { webRoot?: string; challengeDir?: string }>("/ssl/ensure-acme-webroot", { method: "POST", body: JSON.stringify(body) }),
   killSslProcess: (body: { domain: string; certName?: string | null }) =>

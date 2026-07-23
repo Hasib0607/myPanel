@@ -1,6 +1,8 @@
 from __future__ import annotations
 import re
 import secrets
+import socket
+import ssl
 import subprocess
 import tempfile
 import stat
@@ -54,6 +56,12 @@ class CertificatePreflightRequest(BaseModel):
 class EnsureAcmeWebrootRequest(BaseModel):
     domain: str = Field(pattern=r"^[a-zA-Z0-9.-]+$")
     webRoot: str | None = None
+
+
+class ServedCertificateRequest(BaseModel):
+    domain: str = Field(pattern=r"^[a-zA-Z0-9.-]+$")
+    connectHost: str | None = Field(default=None, max_length=255)
+    port: int = Field(default=443, ge=1, le=65535)
 
 
 class KillSslProcessRequest(BaseModel):
@@ -113,6 +121,80 @@ def certificate_names(domain: str) -> list[str]:
     if result.returncode != 0:
         return []
     return sorted({name.lower() for name in re.findall(r"DNS:([^,\s]+)", result.stdout, re.IGNORECASE)})
+
+
+def decode_pem_certificate(pem: str) -> dict:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
+        handle.write(pem)
+        temp_path = Path(handle.name)
+    try:
+        return ssl._ssl._test_decode_cert(str(temp_path))  # type: ignore[attr-defined]
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def decoded_certificate_names(decoded: dict) -> list[str]:
+    names: list[str] = []
+    for key, value in decoded.get("subjectAltName", []):
+        if key.lower() == "dns":
+            names.append(str(value).lower())
+    return sorted(set(names))
+
+
+def decoded_subject_common_name(decoded: dict) -> str | None:
+    for part in decoded.get("subject", []):
+        for key, value in part:
+            if key == "commonName":
+                return str(value)
+    return None
+
+
+def decoded_issuer_common_name(decoded: dict) -> str | None:
+    for part in decoded.get("issuer", []):
+        for key, value in part:
+            if key == "commonName":
+                return str(value)
+    return None
+
+
+def read_served_certificate(domain: str, connect_host: str | None = None, port: int = 443) -> dict:
+    target = connect_host or domain
+    context = ssl._create_unverified_context()
+    try:
+        with socket.create_connection((target, port), timeout=10) as raw_sock:
+            peer = raw_sock.getpeername()
+            with context.wrap_socket(raw_sock, server_hostname=domain) as tls_sock:
+                der = tls_sock.getpeercert(binary_form=True)
+                if not der:
+                    raise RuntimeError("TLS peer did not present a certificate")
+                pem = ssl.DER_cert_to_PEM_cert(der)
+                decoded = decode_pem_certificate(pem)
+    except Exception as error:
+        return {
+            "domain": domain,
+            "connectHost": target,
+            "port": port,
+            "exists": False,
+            "matches": False,
+            "error": str(error),
+            "names": [],
+        }
+
+    names = decoded_certificate_names(decoded)
+    common_name = decoded_subject_common_name(decoded)
+    issuer = decoded_issuer_common_name(decoded)
+    return {
+        "domain": domain,
+        "connectHost": target,
+        "connectedIp": peer[0] if isinstance(peer, tuple) and peer else None,
+        "port": port,
+        "exists": True,
+        "matches": certificate_names_cover(domain, names),
+        "names": names,
+        "subject": common_name,
+        "issuer": issuer,
+        "notAfter": decoded.get("notAfter"),
+    }
 
 
 def make_acme_webroot_readable(web_root: Path, challenge_dir: Path, challenge_file: Path) -> dict:
@@ -215,6 +297,11 @@ def certificate_reusable(domain: str) -> dict:
         "privateKey": f"/etc/letsencrypt/live/{primary}/privkey.pem",
         "candidates": [],
     }
+
+
+@router.post("/served-certificate")
+def served_certificate(body: ServedCertificateRequest) -> dict:
+    return read_served_certificate(body.domain, body.connectHost, body.port)
 
 
 @router.post("/ensure-acme-webroot")

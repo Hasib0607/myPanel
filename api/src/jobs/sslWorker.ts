@@ -348,6 +348,25 @@ async function assertHttpSslDnsReady(domainName: string, includeWww: boolean) {
   }
 }
 
+async function assertServedCertificateMatches(hostnames: string[]) {
+  const failures = [];
+  for (const hostname of hostnames) {
+    const served = await sysagent.servedCertificate({ domain: hostname });
+    if (served.exists && served.matches) continue;
+    const detail = served.exists
+      ? `served certificate subject=${served.subject ?? "unknown"}, SAN=${served.names.join(", ") || "none"}, connectedIp=${served.connectedIp ?? "unknown"}`
+      : `could not read served certificate${served.error ? `: ${served.error}` : ""}`;
+    failures.push(`${hostname}: ${detail}`);
+  }
+  if (failures.length) {
+    throw new Error(
+      "SSL certificate was issued and Nginx was updated, but the public HTTPS endpoint is still not serving a matching certificate. "
+      + failures.join("; ")
+      + ". Check duplicate/default 443 Nginx vhosts, SNI routing, Cloudflare/proxy mode, and public DNS."
+    );
+  }
+}
+
 async function rescheduleAccountAutoSslForDns(job: any, error: unknown) {
   if (job.data?.source !== "account-auto-domain-ssl") return null;
   if (job.data?.domainId) {
@@ -462,6 +481,9 @@ export const sslWorker = new Worker(
       const vhost = shouldPublishDeploymentOnly
         ? { skipped: true, reason: "Subdomain is bound to a deployment; static HTTPS vhost was not published.", deploymentRoutes }
         : await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true, includeWww, job.data.webRoot, reusableCertificate);
+      if (!isWildcardHostname(job.data.domain)) {
+        await assertServedCertificateMatches(requiredNames);
+      }
       await markSslIssued(job, reusableCertificate);
 
       await redis.del("domain_list", `ssl_expiry:${job.data.domain}`);
@@ -506,6 +528,9 @@ export const sslWorker = new Worker(
       const vhost = shouldPublishDeploymentOnly
         ? { skipped: true, reason: "Subdomain is bound to a deployment; static HTTPS vhost was not published.", deploymentRoutes }
         : await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true, includeWww, job.data.webRoot, reusableCertificate);
+      if (!isWildcardHostname(job.data.domain)) {
+        await assertServedCertificateMatches(requiredNames);
+      }
       await markSslIssued(job, reusableCertificate);
 
       await redis.del("domain_list", `ssl_expiry:${job.data.domain}`);

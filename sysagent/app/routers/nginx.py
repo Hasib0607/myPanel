@@ -279,18 +279,6 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
             if loaded_conflicts
             else ""
         )
-        if https and not loaded_conflicts and own_header_loaded and own_server_name_loaded:
-            return {
-                **result,
-                "returncode": 0,
-                "stderr": (
-                    f"Local HTTPS route probe for {primary_host}:{port} did not see "
-                    f"{ROUTE_OWNERSHIP_HEADER} and returned {(result.get('stdout') or result.get('stderr') or '').strip()[:300]!r}. "
-                    "Nginx active config still contains the generated HTTPS server_name and route header, "
-                    "so the certificate vhost was kept active."
-                    f"{dump_status}"
-                ),
-            }
         return {
             **result,
             "returncode": 1,
