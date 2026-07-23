@@ -207,7 +207,16 @@ repair_panel_permissions() {
   fi
 
   local needs_repair=false
-  for path in "$APP_DIR" "$APP_DIR/.git" "$APP_DIR/.git/objects" "$APP_DIR/frontend" "$APP_DIR/api"; do
+  for path in \
+    "$APP_DIR" \
+    "$APP_DIR/.git" \
+    "$APP_DIR/.git/objects" \
+    "$APP_DIR/frontend" \
+    "$APP_DIR/frontend/.next" \
+    "$APP_DIR/api" \
+    "$APP_DIR/api/dist" \
+    "$APP_DIR/api/node_modules/.prisma" \
+    "$APP_DIR/api/node_modules/@prisma/client"; do
     if [[ -e "$path" && ! -w "$path" ]]; then
       needs_repair=true
     fi
@@ -1000,6 +1009,7 @@ ensure_large_upload_config
 repair_self_update_service_unit
 repair_frontend_service_unit
 repair_sysagent_runtime
+repair_panel_permissions
 
 npm_install_with_recovery
 run "$NPM_BIN" --workspace api run prisma:generate
