@@ -773,12 +773,36 @@ def publish_nginx_config(
 
         route_check = post_reload_check() if post_reload_check else None
         if route_check and route_check.get("returncode") != 0:
+            restart_result = run_command(["systemctl", "restart", "nginx"], allow_live=True)
+            restart_route_check = post_reload_check() if restart_result.get("returncode") == 0 and post_reload_check else None
+            if restart_route_check and restart_route_check.get("returncode") == 0:
+                return {
+                    "write": write,
+                    "enable": enable,
+                    "test": test,
+                    "reload": reload_result,
+                    "restart": restart_result,
+                    "postReloadCheck": restart_route_check,
+                    "initialPostReloadCheck": route_check,
+                    "configPath": str(available),
+                    "enabledPath": str(enabled),
+                    "rolledBack": False,
+                    "removedConflicts": removed,
+                    "postReloadRecoveredByRestart": True,
+                }
+            if restart_result.get("returncode") == 0:
+                route_check = {
+                    **route_check,
+                    "restart": restart_result,
+                    "postRestartCheck": restart_route_check,
+                }
             if not rollback_on_post_reload_failure:
                 return {
                     "write": write,
                     "enable": enable,
                     "test": test,
                     "reload": reload_result,
+                    "restart": restart_result,
                     "postReloadCheck": route_check,
                     "configPath": str(available),
                     "enabledPath": str(enabled),
