@@ -380,6 +380,7 @@ function summarizeNginxRouteBlocks(diagnosis: {
 async function assertServedCertificateMatches(hostnames: string[], expectedRoute?: string | null) {
   const failures = [];
   const localFailures = [];
+  const localConnectHost = await currentVpsIp().catch(() => env.VPS_IP);
   for (const hostname of hostnames) {
     const served = await sysagent.servedCertificate({ domain: hostname });
     if (served.exists && served.matches) continue;
@@ -387,7 +388,7 @@ async function assertServedCertificateMatches(hostnames: string[], expectedRoute
       ? `served certificate subject=${served.subject ?? "unknown"}, SAN=${served.names.join(", ") || "none"}, connectedIp=${served.connectedIp ?? "unknown"}`
       : `could not read served certificate${served.error ? `: ${served.error}` : ""}`;
     failures.push(`${hostname}: ${detail}`);
-    const local = await sysagent.servedCertificate({ domain: hostname, connectHost: "127.0.0.1" }).catch((error) => ({
+    const local = await sysagent.servedCertificate({ domain: hostname, connectHost: localConnectHost }).catch((error) => ({
       exists: false,
       matches: false,
       names: [],
@@ -397,7 +398,7 @@ async function assertServedCertificateMatches(hostnames: string[], expectedRoute
       const localDetail = local.exists
         ? `local certificate subject=${(local as { subject?: string | null }).subject ?? "unknown"}, SAN=${local.names.join(", ") || "none"}`
         : `local certificate unavailable${local.error ? `: ${local.error}` : ""}`;
-      localFailures.push(`${hostname}: ${localDetail}`);
+      localFailures.push(`${hostname} via ${localConnectHost}: ${localDetail}`);
     }
   }
   if (failures.length) {

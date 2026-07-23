@@ -65,8 +65,11 @@ def nginx_listen_directives(port: int, *, ssl: bool = False, http2: bool = False
     if http2:
         flags.append("http2")
     suffix = f" {' '.join(flags)}" if flags else ""
-    directives = [f"    listen {port}{suffix};\n"]
-    for ip in server_listen_ips():
+    ips = server_listen_ips()
+    if not ips:
+        return f"    listen {port}{suffix};\n"
+    directives = []
+    for ip in ips:
         directives.append(f"    listen {ip}:{port}{suffix};\n")
     return "".join(directives)
 

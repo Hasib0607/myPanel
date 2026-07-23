@@ -88,7 +88,7 @@ class NginxManagerTests(unittest.TestCase):
 
             self.assertEqual(
                 nginx_listen_directives(443, ssl=True, http2=True),
-                "    listen 443 ssl http2;\n    listen 72.60.235.117:443 ssl http2;\n",
+                "    listen 72.60.235.117:443 ssl http2;\n",
             )
         finally:
             nginx_manager.settings.allow_live_nginx = previous_allow_live
@@ -110,7 +110,7 @@ class NginxManagerTests(unittest.TestCase):
 
             self.assertEqual(
                 nginx_listen_directives(443, ssl=True, http2=True),
-                "    listen 443 ssl http2;\n    listen 72.60.235.117:443 ssl http2;\n    listen 10.0.0.5:443 ssl http2;\n",
+                "    listen 72.60.235.117:443 ssl http2;\n    listen 10.0.0.5:443 ssl http2;\n",
             )
         finally:
             nginx_manager.settings.allow_live_nginx = previous_allow_live
