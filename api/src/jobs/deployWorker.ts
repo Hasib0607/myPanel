@@ -212,6 +212,63 @@ function deploymentUsesAtomicArtifact(deployment: { framework: DeploymentFramewo
   return Boolean(deployment.gitUrl) && deployment.processManager === "PM2" && (deployment.framework === "NEXTJS" || deployment.framework === "NODEJS");
 }
 
+const nodeWorkspaceLockfiles = ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb"];
+
+function pathIsInside(child: string, parent: string) {
+  const relative = path.relative(path.resolve(parent), path.resolve(child));
+  return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+async function quarantineParentNodeLockfilesForRelease(
+  deploymentId: string,
+  releaseId: string | undefined,
+  framework: DeploymentFramework,
+  appPath: string,
+  deploymentRootPath: string
+) {
+  if (!["NEXTJS", "NODEJS"].includes(framework)) return [];
+  const deploymentRoot = path.resolve(deploymentRootPath);
+  const releaseRoot = path.join(deploymentRoot, ".panel-releases");
+  const resolvedAppPath = path.resolve(appPath);
+  if (!pathIsInside(resolvedAppPath, releaseRoot)) return [];
+
+  const backupDir = path.join(deploymentRoot, ".panel-stale-root-lockfiles");
+  const moved: Array<{ from: string; to: string }> = [];
+  for (const filename of nodeWorkspaceLockfiles) {
+    const source = path.join(deploymentRoot, filename);
+    try {
+      await fs.access(source);
+    } catch {
+      continue;
+    }
+    await fs.mkdir(backupDir, { recursive: true });
+    const target = path.join(backupDir, `${Date.now()}-${filename}`);
+    await fs.rename(source, target);
+    moved.push({ from: source, to: target });
+  }
+  if (moved.length > 0) {
+    await writeLog(deploymentId, releaseId, "PREFLIGHT", "Quarantined stale parent Node lockfiles for release app", {
+      appPath,
+      deploymentRootPath,
+      moved,
+      reason: "Next.js can infer the parent deployment directory as workspace root when both parent and release lockfiles exist, causing next start to miss the release .next build."
+    }, "warn");
+  }
+  return moved;
+}
+
+async function assertNextProductionBuildReady(deploymentId: string, releaseId: string | undefined, framework: DeploymentFramework, appPath: string) {
+  if (framework !== "NEXTJS") return;
+  const buildIdPath = path.join(appPath, ".next", "BUILD_ID");
+  if (await pathExists(buildIdPath)) return;
+  await writeLog(deploymentId, releaseId, "STARTING", "Blocked Next.js start without production build", {
+    appPath,
+    buildIdPath,
+    fix: "Run a successful next build for this release before starting the process."
+  }, "error");
+  throw new Error(`Next.js production build is missing at ${buildIdPath}. The deployment will not start until next build succeeds for this release.`);
+}
+
 async function activateDeploymentArtifact(deployment: DeploymentWithWorkerRelations, releaseId: string | undefined, artifactRootPath: string | null) {
   const currentConfig = deploymentProcessConfig(deployment.processConfig);
   if (!artifactRootPath && !currentConfig.activeArtifactPath) return deployment;
@@ -4007,6 +4064,10 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
     ({ deployment, appPath } = await reconcileDeploymentRootDirectory(deployment, releaseId, appPath, lifecycleRootPath));
     ({ deployment, appPath } = await reconcileLaravelRootDirectory(deployment, releaseId, appPath));
     deployment = await reconcilePythonStartCommand(deployment, releaseId, appPath);
+    if (processAction !== "stop") {
+      await quarantineParentNodeLockfilesForRelease(deployment.id, releaseId, deployment.framework, appPath, deployment.rootPath);
+      await assertNextProductionBuildReady(deployment.id, releaseId, deployment.framework, appPath);
+    }
     const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
     const domain = deploymentDomain(deployment);
     const routeDomains = deploymentRouteDomains(deployment);
@@ -4232,6 +4293,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
 
     let appPath = deploymentAppPath(workingRootPath, deployment.rootDirectory);
     ({ deployment, appPath } = await reconcileDeploymentRootDirectory(deployment, releaseId, appPath, workingRootPath));
+    await quarantineParentNodeLockfilesForRelease(deployment.id, releaseId, deployment.framework, appPath, deployment.rootPath);
 
     const detection = await runStep(deployment.id, releaseId, "PREFLIGHT", "Runtime detection", () =>
       detectDeploymentSource(workingRootPath, deployment.rootDirectory)
@@ -4263,6 +4325,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       throw new Error(`No runnable start command found for ${deployment.slug}. Add a package.json start script or set a manual start command.`);
     }
     workingRootPath = path.resolve(appPath, deployment.rootDirectory && deployment.rootDirectory !== "." ? ".." : ".");
+    await quarantineParentNodeLockfilesForRelease(deployment.id, releaseId, deployment.framework, appPath, deployment.rootPath);
     deployBudget = await prepareDeployResourceBudget(deployment.id, releaseId, appPath);
     let domain = deploymentDomain(deployment);
     let routeDomains = deploymentRouteDomains(deployment);
@@ -4859,6 +4922,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       await prepareLaravelForStart(deployment.id, releaseId, appPath, deployment.port, envVars);
       await gracefulLaravelWorkerReload(deployment, releaseId, appPath, envVars);
     }
+    await assertNextProductionBuildReady(deployment.id, releaseId, deployment.framework, appPath);
     const startResult = await runLiveDeploymentProcess(
       deployment.id,
       releaseId,
