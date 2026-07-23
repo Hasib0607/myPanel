@@ -1099,6 +1099,42 @@ async function publishAccountDomainHttpChallengeVhost(
   });
 }
 
+async function publishAccountSubdomainHttpChallengeVhost(
+  target: Awaited<ReturnType<typeof accountSubdomainSslTarget>>
+): Promise<{ test?: unknown; reload?: unknown; postReloadCheck?: unknown }> {
+  const proxyTarget = await findDeploymentProxyTarget(target.fqdn);
+  if (proxyTarget) {
+    return publishDeploymentProxyNginx({
+      deploymentId: proxyTarget.deployment.id,
+      fqdn: target.fqdn,
+      upstreamPort: proxyTarget.deployment.port,
+      rootPath: proxyTarget.deployment.rootPath,
+      framework: proxyTarget.deployment.framework,
+      startCommand: proxyTarget.deployment.startCommand,
+      publicDirectory: proxyTarget.deployment.publicDirectory,
+      outputDirectory: proxyTarget.deployment.outputDirectory,
+      fallbackRootPath: deploymentFallbackRootPath({
+        id: `subdomain:${target.subdomain.id}`,
+        parentDomainId: target.parentDomain.id,
+        name: target.fqdn,
+        forceSsl: false,
+        sslEnabled: false,
+        documentRoot: null,
+        publicRootPath: target.webRoot,
+        includeWww: false
+      }),
+      forceHttps: false,
+      requireSsl: false
+    });
+  }
+  return sysagent.writeStaticNginxVhost({
+    name: `domain-${nginxResourceName(target.fqdn)}`,
+    serverName: target.fqdn,
+    rootPath: target.webRoot,
+    forceHttps: false
+  });
+}
+
 async function accountSslPreflight(request: any, domain: { id: string; name: string; documentRoot?: string | null }, includeWww: boolean) {
   await ensureAccountDomainDns(request, domain);
   const vpsIp = await currentVpsIp();
@@ -1212,12 +1248,7 @@ async function accountSubdomainSslPreflight(request: any, subdomainId: string) {
 
   const vpsIp = await currentVpsIp();
   const records = await waitForPublicA(target.fqdn, vpsIp);
-  const nginxResult = await sysagent.writeStaticNginxVhost({
-    name: `domain-${nginxResourceName(target.fqdn)}`,
-    serverName: target.fqdn,
-    rootPath: target.webRoot,
-    forceHttps: false
-  });
+  const nginxResult = await publishAccountSubdomainHttpChallengeVhost(target);
   const nginxFailure = failedCommand(nginxResult.test) ?? failedCommand(nginxResult.reload) ?? failedCommand(nginxResult.postReloadCheck);
   if (nginxFailure) {
     throw Object.assign(new Error(`Could not publish HTTP challenge vhost for ${target.fqdn}. ${nginxFailure}`), { statusCode: 400 });
