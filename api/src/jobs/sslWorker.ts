@@ -313,6 +313,42 @@ async function hasRoutableSubdomainDeploymentBinding(subdomainId: string | null 
 
 async function publishHttpChallengeVhost(domainName: string, domainId: string | null | undefined, includeWww: boolean, webRoot?: string | null) {
   if (!webRoot) return;
+  const proxyTarget = await findDeploymentProxyTarget(domainName);
+  if (proxyTarget) {
+    const serverName = deploymentServerName({
+      name: domainName,
+      includeWww: includeWww && proxyTarget.includeWww !== false
+    }) ?? domainName;
+    const bound = {
+      id: domainName,
+      name: domainName,
+      forceSsl: false,
+      sslEnabled: false,
+      documentRoot: proxyTarget.domain.documentRoot,
+      publicRootPath: webRoot,
+      includeWww: includeWww && proxyTarget.includeWww !== false
+    };
+    const result = await publishDeploymentProxyNginx({
+      deploymentId: proxyTarget.deployment.id,
+      fqdn: serverName,
+      upstreamPort: proxyTarget.deployment.port,
+      rootPath: activeDeploymentRootPath(proxyTarget.deployment),
+      framework: proxyTarget.deployment.framework,
+      startCommand: proxyTarget.deployment.startCommand,
+      publicDirectory: proxyTarget.deployment.publicDirectory,
+      outputDirectory: proxyTarget.deployment.outputDirectory,
+      fallbackRootPath: deploymentFallbackRootPath(bound),
+      forceHttps: false,
+      requireSsl: false
+    }) as NginxPublishResult;
+    assertLiveCommandSucceeded("Nginx HTTP challenge deployment vhost test", result.test as SysagentCommandResult);
+    assertLiveCommandSucceeded("Nginx HTTP challenge deployment vhost reload", result.reload as SysagentCommandResult);
+    if (result.postReloadCheck) assertLiveCommandSucceeded("Nginx HTTP challenge deployment vhost route check", result.postReloadCheck as SysagentCommandResult);
+    if (domainId) {
+      await redis.del("domain_list", `domain:${domainId}`);
+    }
+    return;
+  }
   const result = await sysagent.writeStaticNginxVhost({
     name: `domain-${nginxResourceName(domainName)}`,
     serverName: sslServerName(domainName, includeWww),

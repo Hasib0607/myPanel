@@ -19,7 +19,7 @@ import { publishDomainDnsZone } from "../lib/domainDnsPublish.js";
 import { detectDeploymentFiles } from "../lib/deploymentDetection.js";
 import { deploymentRuntimeReview, prepareDeploymentRuntimeTools } from "../lib/deploymentRuntimeReview.js";
 import { processConfigWithoutManualStop, requestDeploymentManualStop } from "../lib/deploymentStopControl.js";
-import { accountDomainWebRootPath, boundDomainFromBinding, certificateNamesCoverHost, certificateNamesCoverServerName, deploymentFallbackRootPath, deploymentIsRoutable, deploymentServerName, deploymentSslCertificatePathsWhenReady, publishDeploymentProxyNginx } from "../lib/deploymentDomainSsl.js";
+import { accountDomainWebRootPath, boundDomainFromBinding, certificateNamesCoverHost, certificateNamesCoverServerName, deploymentFallbackRootPath, deploymentIsRoutable, deploymentServerName, deploymentSslCertificatePathsWhenReady, findDeploymentProxyTarget, publishDeploymentProxyNginx } from "../lib/deploymentDomainSsl.js";
 import { prisma } from "../lib/prisma.js";
 import { resolvePublicA } from "../lib/publicDns.js";
 import { deleteSecret, getSecret, getSecretRecord, putSecret } from "../lib/secrets.js";
@@ -1058,6 +1058,47 @@ async function waitForPublicA(hostname: string, expectedIp: string, timeoutMs = 
   throw Object.assign(new Error(`SSL cannot be issued yet. ${detail}, but this VPS is ${expectedIp}. DNS has been published where this panel controls the zone; wait for propagation or update the registrar DNS.`), { statusCode: 400 });
 }
 
+async function publishAccountDomainHttpChallengeVhost(
+  domain: { name: string; documentRoot?: string | null },
+  webRoot: string,
+  includeWww: boolean
+): Promise<{ test?: unknown; reload?: unknown; postReloadCheck?: unknown }> {
+  const proxyTarget = await findDeploymentProxyTarget(domain.name);
+  if (proxyTarget) {
+    const serverName = deploymentServerName({
+      name: domain.name,
+      includeWww: includeWww && proxyTarget.includeWww !== false
+    }) ?? domain.name;
+    return publishDeploymentProxyNginx({
+      deploymentId: proxyTarget.deployment.id,
+      fqdn: serverName,
+      upstreamPort: proxyTarget.deployment.port,
+      rootPath: proxyTarget.deployment.rootPath,
+      framework: proxyTarget.deployment.framework,
+      startCommand: proxyTarget.deployment.startCommand,
+      publicDirectory: proxyTarget.deployment.publicDirectory,
+      outputDirectory: proxyTarget.deployment.outputDirectory,
+      fallbackRootPath: deploymentFallbackRootPath({
+        id: domain.name,
+        name: domain.name,
+        forceSsl: false,
+        sslEnabled: false,
+        documentRoot: proxyTarget.domain.documentRoot ?? domain.documentRoot,
+        publicRootPath: webRoot,
+        includeWww: includeWww && proxyTarget.includeWww !== false
+      }),
+      forceHttps: false,
+      requireSsl: false
+    });
+  }
+  return sysagent.writeStaticNginxVhost({
+    name: `domain-${nginxResourceName(domain.name)}`,
+    serverName: includeWww ? `${domain.name} www.${domain.name}` : domain.name,
+    rootPath: webRoot,
+    forceHttps: false
+  });
+}
+
 async function accountSslPreflight(request: any, domain: { id: string; name: string; documentRoot?: string | null }, includeWww: boolean) {
   await ensureAccountDomainDns(request, domain);
   const vpsIp = await currentVpsIp();
@@ -1097,12 +1138,7 @@ async function accountSslPreflight(request: any, domain: { id: string; name: str
   const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
   const webRoot = accountDomainWebRoot(account, domain);
   await fs.mkdir(path.join(webRoot, ".well-known", "acme-challenge"), { recursive: true });
-  const nginxResult = await sysagent.writeStaticNginxVhost({
-    name: `domain-${nginxResourceName(domain.name)}`,
-    serverName: effectiveIncludeWww ? `${domain.name} www.${domain.name}` : domain.name,
-    rootPath: webRoot,
-    forceHttps: false
-  });
+  const nginxResult = await publishAccountDomainHttpChallengeVhost(domain, webRoot, effectiveIncludeWww);
   const nginxFailure = failedCommand(nginxResult.test) ?? failedCommand(nginxResult.reload) ?? failedCommand(nginxResult.postReloadCheck);
   if (nginxFailure) {
     throw Object.assign(new Error(`Could not publish HTTP challenge vhost for ${domain.name}. ${nginxFailure}`), { statusCode: 400 });

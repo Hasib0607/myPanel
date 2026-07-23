@@ -11,7 +11,14 @@ import { redis } from "../lib/redis.js";
 import { sysagent, type SysagentCommandResult } from "../lib/sysagent.js";
 import { certbotCertificateName, isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
 import { currentVpsIp } from "../lib/serverIp.js";
-import { certificateNamesCoverHost, certificateNamesCoverServerName, deploymentServerName } from "../lib/deploymentDomainSsl.js";
+import {
+  certificateNamesCoverHost,
+  certificateNamesCoverServerName,
+  deploymentFallbackRootPath,
+  deploymentServerName,
+  findDeploymentProxyTarget,
+  publishDeploymentProxyNginx
+} from "../lib/deploymentDomainSsl.js";
 import { refreshDomainHostSsl, refreshSubdomainHostSsl, syncDomainHostRows, syncSubdomainHostRow } from "../lib/domainHosts.js";
 import { sslExpiryStatus, sslHostStatus } from "../lib/sslHostStatus.js";
 
@@ -259,6 +266,49 @@ async function runSslPreflight(domain: SslDomain, includeWww: boolean) {
 
 async function publishDomainHttpVhost(domainName: string, webRoot: string, includeWww: boolean) {
   const serverName = includeWww ? `${domainName} www.${domainName}` : domainName;
+  const proxyTarget = await findDeploymentProxyTarget(domainName);
+  if (proxyTarget) {
+    const proxyServerName = deploymentServerName({
+      name: domainName,
+      includeWww: includeWww && proxyTarget.includeWww !== false
+    }) ?? domainName;
+    const result = await publishDeploymentProxyNginx({
+      deploymentId: proxyTarget.deployment.id,
+      fqdn: proxyServerName,
+      upstreamPort: proxyTarget.deployment.port,
+      rootPath: proxyTarget.deployment.rootPath,
+      framework: proxyTarget.deployment.framework,
+      startCommand: proxyTarget.deployment.startCommand,
+      publicDirectory: proxyTarget.deployment.publicDirectory,
+      outputDirectory: proxyTarget.deployment.outputDirectory,
+      fallbackRootPath: deploymentFallbackRootPath({
+        id: domainName,
+        name: domainName,
+        forceSsl: false,
+        sslEnabled: false,
+        documentRoot: proxyTarget.domain.documentRoot,
+        publicRootPath: webRoot,
+        includeWww: includeWww && proxyTarget.includeWww !== false
+      }),
+      forceHttps: false,
+      requireSsl: false
+    }) as { test?: SysagentCommandResult; reload?: SysagentCommandResult; postReloadCheck?: SysagentCommandResult };
+
+    if (result.test && !commandSucceeded(result.test)) {
+      const detail = commandFailureDetail(result.test);
+      throw Object.assign(new Error(`Could not publish HTTP deployment challenge vhost for ${domainName}.${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
+    }
+    if (result.reload && !commandSucceeded(result.reload)) {
+      const detail = commandFailureDetail(result.reload);
+      throw Object.assign(new Error(`Could not reload Nginx for ${domainName}.${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
+    }
+    if (result.postReloadCheck && !commandSucceeded(result.postReloadCheck)) {
+      const detail = commandFailureDetail(result.postReloadCheck);
+      throw Object.assign(new Error(`Could not verify HTTP deployment challenge vhost for ${domainName}.${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
+    }
+
+    return result;
+  }
   const result = await sysagent.writeStaticNginxVhost({
     name: `domain-${nginxResourceName(domainName)}`,
     serverName,
