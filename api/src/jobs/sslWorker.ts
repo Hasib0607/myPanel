@@ -359,8 +359,27 @@ async function assertHttpSslDnsReady(domainName: string, includeWww: boolean) {
   }
 }
 
-async function assertServedCertificateMatches(hostnames: string[]) {
+function summarizeNginxRouteBlocks(diagnosis: {
+  matchingServerNameBlocks?: unknown[];
+  expectedRouteBlocks?: unknown[];
+  defaultSslBlocks?: unknown[];
+} | null) {
+  if (!diagnosis) return "";
+  const summarize = (blocks: unknown[] | undefined) => (blocks ?? []).slice(0, 5).map((block) => {
+    const row = block as { file?: string; serverNames?: string[]; listens?: string[]; sslCertificates?: string[]; routeHeaders?: string[] };
+    return `${row.file ?? "unknown"} names=${(row.serverNames ?? []).join("|") || "none"} listen=${(row.listens ?? []).join("|") || "none"} cert=${(row.sslCertificates ?? []).join("|") || "none"} route=${(row.routeHeaders ?? []).join("|") || "none"}`;
+  });
+  const parts = [
+    `expected route blocks: ${summarize(diagnosis.expectedRouteBlocks).join(" ; ") || "none"}`,
+    `matching server_name blocks: ${summarize(diagnosis.matchingServerNameBlocks).join(" ; ") || "none"}`,
+    `default SSL blocks: ${summarize(diagnosis.defaultSslBlocks).join(" ; ") || "none"}`
+  ];
+  return ` Nginx diagnosis: ${parts.join(". ")}.`;
+}
+
+async function assertServedCertificateMatches(hostnames: string[], expectedRoute?: string | null) {
   const failures = [];
+  const localFailures = [];
   for (const hostname of hostnames) {
     const served = await sysagent.servedCertificate({ domain: hostname });
     if (served.exists && served.matches) continue;
@@ -368,11 +387,29 @@ async function assertServedCertificateMatches(hostnames: string[]) {
       ? `served certificate subject=${served.subject ?? "unknown"}, SAN=${served.names.join(", ") || "none"}, connectedIp=${served.connectedIp ?? "unknown"}`
       : `could not read served certificate${served.error ? `: ${served.error}` : ""}`;
     failures.push(`${hostname}: ${detail}`);
+    const local = await sysagent.servedCertificate({ domain: hostname, connectHost: "127.0.0.1" }).catch((error) => ({
+      exists: false,
+      matches: false,
+      names: [],
+      error: error instanceof Error ? error.message : String(error)
+    }));
+    if (!local.exists || !local.matches) {
+      const localDetail = local.exists
+        ? `local certificate subject=${(local as { subject?: string | null }).subject ?? "unknown"}, SAN=${local.names.join(", ") || "none"}`
+        : `local certificate unavailable${local.error ? `: ${local.error}` : ""}`;
+      localFailures.push(`${hostname}: ${localDetail}`);
+    }
   }
   if (failures.length) {
+    const diagnosis = await sysagent.nginxRouteDiagnose({
+      serverName: hostnames.join(" "),
+      expectedRoute
+    }).catch(() => null);
     throw new Error(
       "SSL certificate was issued and Nginx was updated, but the public HTTPS endpoint is still not serving a matching certificate. "
       + failures.join("; ")
+      + (localFailures.length ? ` Local SNI check also failed: ${localFailures.join("; ")}.` : " Local SNI check passed, so the public listener/proxy path is serving a different vhost.")
+      + summarizeNginxRouteBlocks(diagnosis)
       + ". Check duplicate/default 443 Nginx vhosts, SNI routing, Cloudflare/proxy mode, and public DNS."
     );
   }
@@ -496,7 +533,7 @@ export const sslWorker = new Worker(
         ? { skipped: true, reason: "Subdomain is bound to a deployment; static HTTPS vhost was not published.", deploymentRoutes }
         : await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true, includeWww, job.data.webRoot, reusableCertificate);
       if (!isWildcardHostname(job.data.domain)) {
-        await assertServedCertificateMatches(requiredNames);
+        await assertServedCertificateMatches(requiredNames, `domain-${nginxResourceName(job.data.domain)}`);
       }
       await markSslIssued(job, reusableCertificate);
 
@@ -546,7 +583,7 @@ export const sslWorker = new Worker(
         ? { skipped: true, reason: "Subdomain is bound to a deployment; static HTTPS vhost was not published.", deploymentRoutes }
         : await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true, includeWww, job.data.webRoot, reusableCertificate);
       if (!isWildcardHostname(job.data.domain)) {
-        await assertServedCertificateMatches(requiredNames);
+        await assertServedCertificateMatches(requiredNames, `domain-${nginxResourceName(job.data.domain)}`);
       }
       await markSslIssued(job, reusableCertificate);
 

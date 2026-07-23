@@ -14,10 +14,12 @@ from app.config import settings
 from app.nginx_paths import nginx_sites_available, nginx_sites_enabled
 from app.nginx_manager import (
     ROUTE_OWNERSHIP_HEADER,
+    _config_dump_sections,
     acme_location,
     certificate_file_covers_server_name,
     loaded_conflicting_config_files,
     make_web_root_readable,
+    nginx_config_dump,
     nginx_listen_directives,
     publish_nginx_config,
     probe_host_for_server_name,
@@ -28,7 +30,9 @@ from app.nginx_manager import (
     safe_letsencrypt_path,
     safe_nginx_path,
     safe_web_root,
+    server_name_directive_tokens,
     server_name_has_wildcard,
+    server_name_tokens,
 )
 
 router = APIRouter()
@@ -112,6 +116,56 @@ class RedirectVhostRequest(BaseModel):
     requireSsl: bool = False
     sitesAvailable: str = ""
     sitesEnabled: str = ""
+
+
+class RouteDiagnoseRequest(BaseModel):
+    serverName: str = Field(pattern=r"^[a-zA-Z0-9_*.-]+( [a-zA-Z0-9_*.-]+)*$")
+    expectedRoute: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_.-]+$")
+
+
+def _server_block_summaries(server_name: str, expected_route: str | None = None) -> dict:
+    text, dump = nginx_config_dump()
+    requested = {token.lower() for token in server_name_tokens(server_name)}
+    expected = (expected_route or "").lower()
+    matching = []
+    default_ssl = []
+    expected_blocks = []
+    for file_path, file_text in _config_dump_sections(text):
+        names = [name.lower() for name in server_name_directive_tokens(file_text)]
+        listens = re.findall(r"\blisten\s+([^;]+);", file_text, re.IGNORECASE)
+        ssl_certs = [
+            cert.strip()
+            for cert in re.findall(r"^\s*ssl_certificate\s+([^;]+);", file_text, re.IGNORECASE | re.MULTILINE)
+            if "ssl_certificate_key" not in cert
+        ]
+        route_headers = re.findall(rf'{ROUTE_OWNERSHIP_HEADER}\s+"([^"]+)"', file_text, re.IGNORECASE)
+        is_ssl = any("443" in listen or "ssl" in listen.lower() for listen in listens) or bool(ssl_certs)
+        summary = {
+            "file": file_path,
+            "serverNames": names,
+            "listens": listens,
+            "sslCertificates": ssl_certs,
+            "routeHeaders": route_headers,
+        }
+        if expected and any(header.lower() == expected for header in route_headers):
+            expected_blocks.append(summary)
+        if is_ssl and any("default_server" in listen.lower() for listen in listens):
+            default_ssl.append(summary)
+        if requested and any(name in requested for name in names):
+            matching.append(summary)
+    return {
+        "serverName": server_name,
+        "expectedRoute": expected_route,
+        "dump": {"returncode": dump.get("returncode"), "stderr": dump.get("stderr")},
+        "matchingServerNameBlocks": matching,
+        "expectedRouteBlocks": expected_blocks,
+        "defaultSslBlocks": default_ssl,
+    }
+
+
+@router.post("/route-diagnose")
+def route_diagnose(body: RouteDiagnoseRequest) -> dict:
+    return _server_block_summaries(body.serverName, body.expectedRoute)
 
 
 @router.post("/vhost")

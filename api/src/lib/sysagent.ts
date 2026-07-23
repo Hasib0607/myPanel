@@ -300,6 +300,8 @@ export const sysagent = {
     request<{ ok: boolean; results: Record<string, unknown> }>("/nginx/web-runtime-optimizations", { method: "POST", body: "{}" }),
   writeStaticNginxVhost: (body: unknown) =>
     request<{ write: SysagentCommandResult; enable: SysagentCommandResult; test: SysagentCommandResult; reload: SysagentCommandResult; postReloadCheck?: SysagentCommandResult; configPath: string; rootPath: string; sslEnabled?: boolean; forceHttps?: boolean }>("/nginx/static-vhost", { method: "POST", body: JSON.stringify(body) }),
+  nginxRouteDiagnose: (body: unknown) =>
+    request<{ serverName: string; expectedRoute?: string | null; matchingServerNameBlocks?: unknown[]; expectedRouteBlocks?: unknown[]; defaultSslBlocks?: unknown[]; dump?: unknown }>("/nginx/route-diagnose", { method: "POST", body: JSON.stringify(body) }),
   writeRedirectNginxVhost: (body: unknown) =>
     request<{ write: SysagentCommandResult; enable: SysagentCommandResult; test: SysagentCommandResult; reload: SysagentCommandResult; configPath: string; redirectUrl: string; sslEnabled?: boolean }>("/nginx/redirect-vhost", { method: "POST", body: JSON.stringify(body) }),
   certbotStatus: () =>
