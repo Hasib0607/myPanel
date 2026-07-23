@@ -2443,6 +2443,7 @@ server {{
                 body.framework,
                 require_https=has_ssl and body.forceSsl,
             ),
+            rollback_on_post_reload_failure=not (has_ssl and body.requireSsl),
         )
         return {
             **result,

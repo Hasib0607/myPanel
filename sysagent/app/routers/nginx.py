@@ -364,6 +364,7 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
             sites_enabled,
             server_name=body.serverName,
             post_reload_check=post_reload_check if settings.allow_live_nginx else None,
+            rollback_on_post_reload_failure=not has_ssl,
         )
     finally:
         if probe_file and settings.allow_live_nginx:

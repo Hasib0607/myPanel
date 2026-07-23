@@ -8,7 +8,7 @@ import { resolvePublicA } from "../lib/publicDns.js";
 import { currentVpsIp } from "../lib/serverIp.js";
 import { sysagent, type SysagentCommandResult } from "../lib/sysagent.js";
 import { subdomainFolderName } from "../lib/domainFiles.js";
-import { certbotCertificateName, isWildcardHostname, nginxResourceName, serverNameHasWildcard } from "../lib/nginxNames.js";
+import { certbotCertificateName, isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
 import {
   boundDomainFromBinding,
   deploymentFallbackRootPath,
@@ -215,9 +215,6 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
 
   assertLiveCommandSucceeded("Nginx certificate vhost test", result.test);
   assertLiveCommandSucceeded("Nginx certificate vhost reload", result.reload);
-  if (result.postReloadCheck && !serverNameHasWildcard(sslServerName(domainName, includeWww))) {
-    assertLiveCommandSucceeded("Nginx certificate vhost route check", result.postReloadCheck);
-  }
   return result;
 }
 

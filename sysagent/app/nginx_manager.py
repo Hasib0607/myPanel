@@ -563,6 +563,7 @@ def publish_nginx_config(
     *,
     server_name: str | None = None,
     post_reload_check: Callable[[], dict] | None = None,
+    rollback_on_post_reload_failure: bool = True,
 ) -> dict:
     requested_available = safe_nginx_path(sites_available, name)
     requested_enabled = safe_nginx_path(sites_enabled, name)
@@ -751,6 +752,19 @@ def publish_nginx_config(
 
         route_check = post_reload_check() if post_reload_check else None
         if route_check and route_check.get("returncode") != 0:
+            if not rollback_on_post_reload_failure:
+                return {
+                    "write": write,
+                    "enable": enable,
+                    "test": test,
+                    "reload": reload_result,
+                    "postReloadCheck": route_check,
+                    "configPath": str(available),
+                    "enabledPath": str(enabled),
+                    "rolledBack": False,
+                    "removedConflicts": removed,
+                    "postReloadCheckNonFatal": True,
+                }
             run_live_step("rollback config", lambda: _restore(available, old_available))
             run_live_step("rollback enabled config", lambda: _restore(enabled, old_enabled))
             rollback_reload = run_command(["systemctl", "reload", "nginx"], allow_live=True)
