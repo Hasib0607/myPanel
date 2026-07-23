@@ -38,7 +38,7 @@ import {
 } from "../lib/laravelProcesses.js";
 import { assertDomainUsesHostingNameServers, defaultRecords, domainNameserverReadiness, withLiveDomainSsl } from "./domains.js";
 import { renderZone } from "./dns.js";
-import { refreshDomainHostSsl, syncDomainHostRows } from "../lib/domainHosts.js";
+import { refreshDomainHostSsl, refreshSubdomainHostSsl, syncDomainHostRows, syncSubdomainHostRow } from "../lib/domainHosts.js";
 
 function accountId(request: any) {
   return request.user.accountId as string;
@@ -968,6 +968,7 @@ async function createAccountSubdomainShortcut(ownerAccountId: string, fqdnName: 
       dnsRecord: { type: recordType, name: managedParent.subdomainName, value: target, ttl: 300 }
     };
   });
+  await syncSubdomainHostRow({ ...created.subdomain, domain: managedParent.parent });
 
   let publishWarning: string | undefined;
   try {
@@ -1473,7 +1474,7 @@ function assertLimit(current: number, limit: number | null | undefined, label: s
 function domainInclude() {
   return {
     _count: { select: { subdomains: true, dnsRecords: true, mailAccounts: true } },
-    subdomains: { orderBy: { name: "asc" as const } },
+    subdomains: { orderBy: { name: "asc" as const }, include: { hosts: { orderBy: [{ kind: "asc" as const }, { hostname: "asc" as const }] } } },
     hosts: { orderBy: [{ kind: "asc" as const }, { hostname: "asc" as const }] }
   };
 }
@@ -2131,7 +2132,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       where: { id: domainId, accountId: accountId(request) },
       include: {
         dnsRecords: { orderBy: [{ type: "asc" as const }, { name: "asc" as const }] },
-        subdomains: { orderBy: { name: "asc" as const } },
+        subdomains: { orderBy: { name: "asc" as const }, include: { hosts: { orderBy: [{ kind: "asc" as const }, { hostname: "asc" as const }] } } },
         mailAccounts: { orderBy: { username: "asc" as const } },
         deployments: { orderBy: { createdAt: "desc" as const }, take: 1 }
       }
@@ -2214,6 +2215,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       });
       return { subdomain, dnsRecord: { type: recordType, name: body.name, value: body.target } };
     });
+    await syncSubdomainHostRow({ ...result.subdomain, domain });
     await audit(request, { action: "CREATE", resource: "subdomain", resourceId: result.subdomain.id, description: `Account created subdomain ${body.name}.${domain.name}` });
     return reply.code(201).send(result);
   });
@@ -2441,14 +2443,19 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const target = await accountSubdomainSslTarget(request, subdomainId);
     const cert = await sysagent.certificateFindReusable(target.fqdn) as { exists?: boolean; expiry?: string | null; names?: string[] };
     const certificateMatches = Boolean(cert.exists && certificateNamesCoverHost(target.fqdn, cert.names ?? []));
-    const expiry = certificateMatches && cert.expiry ? new Date(cert.expiry) : null;
-    const hosts = [sslHostStatus(target.fqdn, cert)];
+    const served = await sysagent.servedCertificate({ domain: target.fqdn }).catch(() => null);
+    const servedMatches = Boolean(served?.matches);
+    const effectiveCert = certificateMatches && servedMatches ? cert : null;
+    const expiry = effectiveCert?.expiry ? new Date(effectiveCert.expiry) : null;
+    const hosts = [sslHostStatus(target.fqdn, effectiveCert)];
+    await refreshSubdomainHostSsl(target.subdomain, effectiveCert);
     return {
       subdomainId,
       domain: target.fqdn,
-      sslEnabled: target.subdomain.sslEnabled && certificateMatches,
+      sslEnabled: target.subdomain.sslEnabled && certificateMatches && servedMatches,
       sslExpiry: expiry,
       hosts,
+      servedCertificate: served,
       forceSsl: target.subdomain.sslEnabled,
       activeJobId: await activeAccountSslJobIdForResource({ subdomainId }),
       ...expiryStatus(expiry)
@@ -2506,6 +2513,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
   app.post("/ssl/subdomains/:subdomainId/:action", async (request: any, reply) => {
     const { subdomainId, action } = z.object({ subdomainId: z.string(), action: z.enum(["issue", "renew"]) }).parse(request.params);
     const preflight = await accountSubdomainSslPreflight(request, subdomainId);
+    await syncSubdomainHostRow(preflight.subdomain);
     const job = await sslQueue.add(action, {
       domainId: null,
       subdomainId,
@@ -2521,6 +2529,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     });
     if (action === "issue") {
       await prisma.subdomain.update({ where: { id: subdomainId }, data: { sslEnabled: false } });
+      await refreshSubdomainHostSsl({ ...preflight.subdomain, sslEnabled: true }, null);
     }
     await audit(request, { action: "APPLY", resource: "ssl", resourceId: subdomainId, description: `Account queued SSL ${action} for ${preflight.fqdn}` });
     return reply.code(202).send({ queued: true, jobId: job.id });

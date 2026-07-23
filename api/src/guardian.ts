@@ -10,10 +10,12 @@ const laravelProductionIntervalMs = Number(process.env.GUARDIAN_LARAVEL_PRODUCTI
 const autoDeployPollIntervalMs = Number(process.env.GUARDIAN_AUTO_DEPLOY_POLL_INTERVAL_MS ?? 60_000);
 const panelUpdatePollIntervalMs = Number(process.env.PANEL_UPDATE_POLL_INTERVAL_MS ?? 60_000);
 const sslRenewIntervalMs = Number(process.env.GUARDIAN_SSL_RENEW_INTERVAL_MS ?? 12 * 60 * 60_000);
+const domainHostSyncIntervalMs = Number(process.env.GUARDIAN_DOMAIN_HOST_SYNC_INTERVAL_MS ?? 30 * 60_000);
 const autoHealEnabled = process.env.GUARDIAN_AUTO_HEAL === "true";
 const autoDeployPollEnabled = process.env.GUARDIAN_AUTO_DEPLOY_POLL_ENABLED !== "false";
 const panelUpdatePollEnabled = process.env.PANEL_UPDATE_POLL_ENABLED !== "false";
 const sslRenewEnabled = process.env.GUARDIAN_SSL_RENEW_ENABLED !== "false";
+const domainHostSyncEnabled = process.env.GUARDIAN_DOMAIN_HOST_SYNC_ENABLED !== "false";
 
 async function scheduleGuardian() {
   try {
@@ -78,6 +80,14 @@ async function scheduleGuardian() {
         removeOnFail: 100
       });
     }
+    if (domainHostSyncEnabled) {
+      await guardianQueue.add("domain-host-sync", {}, {
+        jobId: "guardian-domain-host-sync",
+        repeat: { every: domainHostSyncIntervalMs },
+        removeOnComplete: 100,
+        removeOnFail: 100
+      });
+    }
     logger.info("guardian repeat job scheduled", {
       name,
       autoHealEnabled,
@@ -91,7 +101,9 @@ async function scheduleGuardian() {
       panelUpdatePollEnabled,
       panelUpdatePollIntervalMs,
       sslRenewEnabled,
-      sslRenewIntervalMs
+      sslRenewIntervalMs,
+      domainHostSyncEnabled,
+      domainHostSyncIntervalMs
     });
   } catch (error) {
     logger.warn("guardian repeat schedule failed", { error: error instanceof Error ? error.message : String(error) });

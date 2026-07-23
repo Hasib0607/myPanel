@@ -12,7 +12,7 @@ import { sysagent, type SysagentCommandResult } from "../lib/sysagent.js";
 import { certbotCertificateName, isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
 import { currentVpsIp } from "../lib/serverIp.js";
 import { certificateNamesCoverHost, certificateNamesCoverServerName, deploymentServerName } from "../lib/deploymentDomainSsl.js";
-import { refreshDomainHostSsl, syncDomainHostRows } from "../lib/domainHosts.js";
+import { refreshDomainHostSsl, refreshSubdomainHostSsl, syncDomainHostRows, syncSubdomainHostRow } from "../lib/domainHosts.js";
 
 const sslActionSchema = z.object({
   email: z.string().email().optional(),
@@ -435,14 +435,19 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
     const target = await subdomainSslTarget(subdomainId);
     const cert = await sysagent.certificateFindReusable(target.fqdn);
     const certificateMatches = Boolean(cert.exists && certificateNamesCoverHost(target.fqdn, cert.names ?? []));
-    const expiry = certificateMatches && cert.expiry ? new Date(cert.expiry) : null;
-    const hosts = [sslHostStatus(target.fqdn, cert)];
+    const served = await sysagent.servedCertificate({ domain: target.fqdn }).catch(() => null);
+    const servedMatches = Boolean(served?.matches);
+    const effectiveCert = certificateMatches && servedMatches ? cert : null;
+    const expiry = effectiveCert?.expiry ? new Date(effectiveCert.expiry) : null;
+    const hosts = [sslHostStatus(target.fqdn, effectiveCert)];
+    await refreshSubdomainHostSsl(target.subdomain, effectiveCert);
     return {
       subdomainId,
       domain: target.fqdn,
-      sslEnabled: target.subdomain.sslEnabled && certificateMatches,
+      sslEnabled: target.subdomain.sslEnabled && certificateMatches && servedMatches,
       sslExpiry: expiry,
       hosts,
+      servedCertificate: served,
       forceSsl: target.subdomain.sslEnabled,
       activeJobId: await activeSslJobIdForResource({ subdomainId }),
       ...expiryStatus(expiry)
@@ -501,6 +506,7 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
   app.post("/subdomains/:subdomainId/issue", async (request, reply) => {
     const { subdomainId } = z.object({ subdomainId: z.string() }).parse(request.params);
     const preflight = await runSubdomainSslPreflight(subdomainId);
+    await syncSubdomainHostRow(preflight.subdomain);
     const job = await sslQueue.add("issue", {
       domainId: null,
       subdomainId,
@@ -521,6 +527,7 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
         data: { sslEnabled: false }
       });
     }
+    await refreshSubdomainHostSsl({ ...preflight.subdomain, sslEnabled: true }, null);
     await redis.del("domain_list", `ssl_expiry:${preflight.fqdn}`);
 
     return reply.code(202).send({ queued: true, jobId: job.id });
@@ -553,6 +560,7 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
     const { subdomainId } = z.object({ subdomainId: z.string() }).parse(request.params);
     const target = await subdomainSslTarget(subdomainId);
     const preflight = await runSubdomainSslPreflight(subdomainId);
+    await syncSubdomainHostRow(preflight.subdomain);
     const job = await sslQueue.add("renew", {
       domainId: null,
       subdomainId,

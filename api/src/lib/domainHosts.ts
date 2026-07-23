@@ -17,6 +17,20 @@ type DomainRef = {
   forceSsl?: boolean | null;
 };
 
+type SubdomainRef = {
+  id: string;
+  name: string;
+  sslEnabled?: boolean | null;
+  domain: {
+    id: string;
+    name: string;
+  };
+};
+
+export function subdomainHostName(subdomain: SubdomainRef) {
+  return `${subdomain.name.trim().toLowerCase().replace(/\.$/, "")}.${subdomain.domain.name.trim().toLowerCase().replace(/\.$/, "")}`;
+}
+
 export function managedDomainHostnames(domainName: string, includeWww = true) {
   const clean = domainName.trim().toLowerCase().replace(/\.$/, "");
   if (!clean) return [];
@@ -46,6 +60,25 @@ export async function syncDomainHostRows(domain: DomainRef, options?: { includeW
   return rows;
 }
 
+export async function syncSubdomainHostRow(subdomain: SubdomainRef) {
+  const hostname = subdomainHostName(subdomain);
+  return prisma.domainHost.upsert({
+    where: { domainId_hostname: { domainId: subdomain.domain.id, hostname } },
+    update: {
+      subdomainId: subdomain.id,
+      kind: "CUSTOM"
+    },
+    create: {
+      domainId: subdomain.domain.id,
+      subdomainId: subdomain.id,
+      hostname,
+      kind: "CUSTOM",
+      sslEnabled: Boolean(subdomain.sslEnabled),
+      sslStatus: subdomain.sslEnabled ? "PENDING" as any : "MISSING" as any
+    }
+  });
+}
+
 export function sslHostCoverage(domain: { name: string; forceSsl?: boolean | null }, certificate: CertificateLike | null | undefined) {
   const expiryDate = certificate?.expiry ? new Date(certificate.expiry) : null;
   const expired = expiryDate ? expiryDate.getTime() <= Date.now() : false;
@@ -62,6 +95,23 @@ export function sslHostCoverage(domain: { name: string; forceSsl?: boolean | nul
       sslStatus: sslEnabled ? "VALID" : covered && expired ? "EXPIRED" : domain.forceSsl ? "PENDING" : "MISSING"
     };
   });
+}
+
+export function subdomainSslHostCoverage(subdomain: SubdomainRef, certificate: CertificateLike | null | undefined) {
+  const hostname = subdomainHostName(subdomain);
+  const expiryDate = certificate?.expiry ? new Date(certificate.expiry) : null;
+  const expired = expiryDate ? expiryDate.getTime() <= Date.now() : false;
+  const covered = Boolean(certificate?.exists && certificateNamesCoverHost(hostname, certificate.names ?? []));
+  const sslEnabled = covered && !expired;
+  return {
+    host: hostname,
+    hostname,
+    kind: "CUSTOM" as const,
+    sslEnabled,
+    covered,
+    expiry: sslEnabled ? certificate?.expiry ?? null : null,
+    sslStatus: sslEnabled ? "VALID" : covered && expired ? "EXPIRED" : subdomain.sslEnabled ? "PENDING" : "MISSING"
+  };
 }
 
 export async function refreshDomainHostSsl(domain: DomainRef, certificate?: CertificateLike | null) {
@@ -90,6 +140,31 @@ export async function refreshDomainHostSsl(domain: DomainRef, certificate?: Cert
       sslEnabled: allValid,
       sslExpiry: allValid && cert?.expiry ? new Date(cert.expiry) : null
     }
+  });
+  return coverage;
+}
+
+export async function refreshSubdomainHostSsl(subdomain: SubdomainRef, certificate?: CertificateLike | null) {
+  await syncSubdomainHostRow(subdomain);
+  const cert = certificate === undefined
+    ? await sysagent.certificateFindReusable(subdomainHostName(subdomain)).catch(() => null)
+    : certificate;
+  const coverage = subdomainSslHostCoverage(subdomain, cert);
+  const now = new Date();
+  await prisma.domainHost.update({
+    where: { domainId_hostname: { domainId: subdomain.domain.id, hostname: coverage.hostname } },
+    data: {
+      subdomainId: subdomain.id,
+      sslEnabled: coverage.sslEnabled,
+      sslStatus: coverage.sslStatus as any,
+      sslExpiry: coverage.sslEnabled && coverage.expiry ? new Date(coverage.expiry) : null,
+      lastCheckedAt: now,
+      lastError: coverage.sslEnabled ? null : cert?.exists ? "Certificate SAN does not cover this hostname." : "No matching certificate."
+    }
+  });
+  await prisma.subdomain.update({
+    where: { id: subdomain.id },
+    data: { sslEnabled: coverage.sslEnabled }
   });
   return coverage;
 }
@@ -125,4 +200,33 @@ export async function refreshDomainHostDns(domain: DomainRef, expectedIp?: strin
     results.push({ hostname: host.hostname, kind: host.kind, dnsStatus: status, records, expectedIp: targetIp, error });
   }
   return results;
+}
+
+export async function refreshSubdomainHostDns(subdomain: SubdomainRef, expectedIp?: string) {
+  const row = await syncSubdomainHostRow(subdomain);
+  const targetIp = expectedIp ?? await currentVpsIp();
+  const now = new Date();
+  let records: string[] = [];
+  let status: "READY" | "PENDING" | "MISMATCH" = "PENDING";
+  let error: string | null = null;
+  try {
+    records = await resolvePublicA(row.hostname);
+    status = records.includes(targetIp) ? "READY" : "MISMATCH";
+    if (status === "MISMATCH") {
+      error = `${row.hostname} resolves to ${records.join(", ") || "no A record"}, expected ${targetIp}.`;
+    }
+  } catch (caught) {
+    status = "PENDING";
+    error = caught instanceof Error ? caught.message : "Public DNS lookup failed.";
+  }
+  await prisma.domainHost.update({
+    where: { domainId_hostname: { domainId: subdomain.domain.id, hostname: row.hostname } },
+    data: {
+      dnsStatus: status as any,
+      dnsRecords: records,
+      lastCheckedAt: now,
+      lastError: error
+    }
+  });
+  return { hostname: row.hostname, kind: "CUSTOM" as const, dnsStatus: status, records, expectedIp: targetIp, error };
 }

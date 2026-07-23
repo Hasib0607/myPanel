@@ -14,7 +14,7 @@ import { nginxResourceName } from "../lib/nginxNames.js";
 import { renderZone } from "./dns.js";
 import { currentVpsIp } from "../lib/serverIp.js";
 import { sslQueue } from "../jobs/queues.js";
-import { sslHostCoverage } from "../lib/domainHosts.js";
+import { sslHostCoverage, syncSubdomainHostRow } from "../lib/domainHosts.js";
 
 export function normalizeDomainName(value: string) {
   return value
@@ -307,6 +307,7 @@ export function defaultRecords(domainId: string, domain: string, nameServers: Ac
 function domainInclude() {
   return {
     _count: { select: { subdomains: true, dnsRecords: true, mailAccounts: true } },
+    subdomains: { orderBy: { name: "asc" as const }, include: { hosts: { orderBy: [{ kind: "asc" as const }, { hostname: "asc" as const }] } } },
     hosts: { orderBy: [{ kind: "asc" as const }, { hostname: "asc" as const }] }
   };
 }
@@ -667,6 +668,7 @@ async function createSubdomainForDomain(input: {
   }
 
   const parentDomain = await prisma.domain.findUniqueOrThrow({ where: { id: input.domainId } });
+  await syncSubdomainHostRow({ ...subdomain, domain: parentDomain });
   const fileScaffold = await ensureSubdomainFileStructure(parentDomain.name, input.name);
   let nginxResult = null;
   let nginxWarning: string | undefined;
@@ -764,7 +766,7 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
         take: query.pageSize,
         include: {
           _count: { select: { subdomains: true, dnsRecords: true, mailAccounts: true } },
-          subdomains: { orderBy: { name: "asc" } },
+          subdomains: { orderBy: { name: "asc" }, include: { hosts: { orderBy: [{ kind: "asc" }, { hostname: "asc" }] } } },
           hosts: { orderBy: [{ kind: "asc" }, { hostname: "asc" }] }
         }
       }),

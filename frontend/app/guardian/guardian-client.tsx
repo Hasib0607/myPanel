@@ -245,6 +245,7 @@ export function GuardianClient() {
   const [autoHealResult, setAutoHealResult] = useState<string | null>(null);
   const [autoHealBusy, setAutoHealBusy] = useState(false);
   const [panelUpdateBusy, setPanelUpdateBusy] = useState(false);
+  const [domainSyncBusy, setDomainSyncBusy] = useState(false);
   const [serviceBusy, setServiceBusy] = useState<string | null>(null);
   const [securityNotice, setSecurityNotice] = useState<string | null>(null);
   const [allowCidr, setAllowCidr] = useState("");
@@ -326,6 +327,20 @@ export function GuardianClient() {
       setAutoHealResult(error instanceof Error ? error.message : "Could not start panel update.");
     } finally {
       setPanelUpdateBusy(false);
+    }
+  }
+
+  async function syncDomainHosts() {
+    setDomainSyncBusy(true);
+    setAutoHealResult(null);
+    try {
+      const result = await apiPost<{ jobId: string }>("/guardian/domain-hosts/sync", {});
+      setAutoHealResult(`Domain host DNS/SSL sync queued${result.jobId ? ` as job ${result.jobId}` : ""}.`);
+      await overview.refetch();
+    } catch (error) {
+      setAutoHealResult(error instanceof Error ? error.message : "Could not queue domain host sync.");
+    } finally {
+      setDomainSyncBusy(false);
     }
   }
 
@@ -485,6 +500,15 @@ export function GuardianClient() {
             >
               <Rocket size={16} />
               Panel Update
+            </button>
+            <button
+              className="flex h-10 items-center gap-2 rounded-md border border-panel-line bg-white px-3 text-sm font-semibold hover:bg-slate-50"
+              disabled={domainSyncBusy}
+              onClick={syncDomainHosts}
+              type="button"
+            >
+              <RefreshCw size={16} />
+              Sync SSL Hosts
             </button>
             <button
               className="flex h-10 items-center gap-2 rounded-md border border-panel-line bg-white px-3 text-sm font-semibold hover:bg-slate-50"

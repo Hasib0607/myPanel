@@ -11,6 +11,7 @@ import { startPanelSelfUpdate } from "../lib/panelSelfUpdate.js";
 import { prisma } from "../lib/prisma.js";
 import { sysagent } from "../lib/sysagent.js";
 import { normalizeDeploymentResourcePolicy, processConfigWithResourcePolicy } from "../lib/deploymentResourcePolicy.js";
+import { guardianQueue } from "../jobs/queues.js";
 
 const ipActionSchema = z.object({
   ip: z.string().trim().min(3),
@@ -671,6 +672,25 @@ export const guardianRoutes: FastifyPluginAsync = async (app) => {
       metadata: { actionId: action.id, result } as any
     });
     return reply.code(202).send({ accepted: true, action, result });
+  });
+
+  app.post("/domain-hosts/sync", async (request, reply) => {
+    const job = await guardianQueue.add("domain-host-sync", {
+      requestedBy: (request as any).user?.id ?? null,
+      source: "guardian-manual"
+    }, {
+      jobId: `manual-domain-host-sync:${Date.now()}`,
+      attempts: 1,
+      removeOnComplete: 50,
+      removeOnFail: 200
+    });
+    await audit(request, {
+      action: "APPLY",
+      resource: "guardian_domain_hosts",
+      resourceId: String(job.id),
+      description: "Queued domain host DNS and SSL sync"
+    });
+    return reply.code(202).send({ accepted: true, jobId: job.id });
   });
 
   app.post("/auto-heal", async (request, reply) => {

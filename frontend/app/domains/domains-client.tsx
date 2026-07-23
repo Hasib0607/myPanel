@@ -27,7 +27,7 @@ type Domain = {
   redirectUrl: string | null;
   hostingDeploymentId: string | null;
   createdAt: string;
-  subdomains: Array<{ id: string; name: string; target: string; sslEnabled: boolean; fqdn?: string; domainId?: string; isDomainAlias?: boolean; dnsRecords?: number }>;
+  subdomains: Array<{ id: string; name: string; target: string; sslEnabled: boolean; fqdn?: string; domainId?: string; isDomainAlias?: boolean; dnsRecords?: number; hosts?: Array<{ hostname: string; sslEnabled?: boolean; sslStatus?: string }> }>;
   _count: {
     subdomains: number;
     dnsRecords: number;
@@ -132,6 +132,14 @@ function sslSummary(domain: Domain) {
   if (covered > 0) return `${covered}/${hosts.length} valid`;
   if (domain.forceSsl) return "pending";
   return "off";
+}
+
+function subdomainSslLabel(subdomain: Domain["subdomains"][number]) {
+  const host = subdomain.hosts?.[0];
+  if (host?.sslStatus === "VALID" || host?.sslEnabled) return "enabled";
+  if (host?.sslStatus === "PENDING") return "pending";
+  if (host?.sslStatus === "MISMATCH" || host?.sslStatus === "EXPIRED") return "attention";
+  return subdomain.sslEnabled ? "enabled" : "pending";
 }
 
 function statusClass(status: DomainStatus) {
@@ -858,7 +866,7 @@ export function DomainsClient({
                           <div className="truncate text-xs text-panel-muted">{subdomain.target}</div>
                         </div>
                       </td>
-                      <td className="px-4 py-3">{subdomain.sslEnabled ? "enabled" : "pending"}</td>
+                      <td className="px-4 py-3">{subdomainSslLabel(subdomain)}</td>
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
                           <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line bg-white hover:bg-slate-100" href={subdomain.isDomainAlias && subdomain.domainId ? `${linkBase}/${subdomain.domainId}/overview` : `${linkBase}/${domain.id}/subdomains`} title="Manage subdomains">

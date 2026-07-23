@@ -313,6 +313,7 @@ model Domain {
 model DomainHost {
   id            String              @id @default(cuid())
   domainId      String              @map("domain_id")
+  subdomainId   String?             @map("subdomain_id")
   hostname      String
   kind          DomainHostKind      @default(CUSTOM)
   dnsStatus     DomainHostDnsStatus @default(UNKNOWN) @map("dns_status")
@@ -325,9 +326,11 @@ model DomainHost {
   createdAt     DateTime            @default(now()) @map("created_at")
   updatedAt     DateTime            @updatedAt @map("updated_at")
   domain        Domain              @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  subdomain     Subdomain?          @relation(fields: [subdomainId], references: [id], onDelete: Cascade)
 
   @@unique([domainId, hostname])
   @@index([hostname])
+  @@index([subdomainId])
   @@index([dnsStatus, sslStatus])
   @@map("domain_hosts")
 }
@@ -402,6 +405,7 @@ model Subdomain {
   target     String
   sslEnabled Boolean @default(false) @map("ssl_enabled")
   domain     Domain  @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  hosts      DomainHost[]
   deploymentBindings DeploymentDomain[]
 
   @@unique([domainId, name])

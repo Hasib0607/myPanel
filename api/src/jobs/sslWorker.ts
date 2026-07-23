@@ -18,7 +18,7 @@ import {
   publishDeploymentProxyNginx,
   publishPublicHtmlNginxVhost
 } from "../lib/deploymentDomainSsl.js";
-import { refreshDomainHostSsl, syncDomainHostRows } from "../lib/domainHosts.js";
+import { refreshDomainHostSsl, refreshSubdomainHostSsl, syncDomainHostRows } from "../lib/domainHosts.js";
 
 function assertLiveCommandSucceeded(action: string, result: SysagentCommandResult) {
   if (result.dryRun) {
@@ -221,10 +221,12 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
 
 async function markSslIssued(job: { data: { domain: string; domainId?: string | null; subdomainId?: string | null; forceSsl?: boolean } }, certificate?: ReusableCertificate | null) {
   if (job.data.subdomainId) {
-    await prisma.subdomain.update({
+    const subdomain = await prisma.subdomain.update({
       where: { id: job.data.subdomainId },
-      data: { sslEnabled: true }
+      data: { sslEnabled: true },
+      include: { domain: { select: { id: true, name: true } } }
     });
+    await refreshSubdomainHostSsl(subdomain, certificate);
     return;
   }
   if (job.data.domainId) {

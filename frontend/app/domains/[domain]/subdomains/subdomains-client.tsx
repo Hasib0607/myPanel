@@ -11,8 +11,16 @@ import { ConfirmModal } from "@/components/confirm-modal";
 type DomainDetail = {
   id: string;
   name: string;
-  subdomains: Array<{ id: string; name: string; target: string; sslEnabled: boolean }>;
+  subdomains: Array<{ id: string; name: string; target: string; sslEnabled: boolean; hosts?: Array<{ hostname: string; sslEnabled?: boolean; sslStatus?: string }> }>;
 };
+
+function subdomainSslLabel(subdomain: DomainDetail["subdomains"][number]) {
+  const host = subdomain.hosts?.[0];
+  if (host?.sslStatus === "VALID" || host?.sslEnabled) return "enabled";
+  if (host?.sslStatus === "PENDING") return "pending";
+  if (host?.sslStatus === "MISMATCH" || host?.sslStatus === "EXPIRED") return "attention";
+  return subdomain.sslEnabled ? "enabled" : "pending";
+}
 
 export function SubdomainsClient({ domainId }: { domainId: string }) {
   const queryClient = useQueryClient();
@@ -64,7 +72,7 @@ export function SubdomainsClient({ domainId }: { domainId: string }) {
                 <tr key={subdomain.id} className="border-t border-panel-line">
                   <td className="px-4 py-3 font-medium">{subdomain.name}.{domain.data?.name}</td>
                   <td className="px-4 py-3">{subdomain.target}</td>
-                  <td className="px-4 py-3">{subdomain.sslEnabled ? "enabled" : "pending"}</td>
+                  <td className="px-4 py-3">{subdomainSslLabel(subdomain)}</td>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2">
                       <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`/domains/${domainId}/subdomains/${subdomain.id}/ssl`} title="SSL">

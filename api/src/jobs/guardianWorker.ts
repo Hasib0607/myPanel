@@ -9,7 +9,7 @@ import { prisma } from "../lib/prisma.js";
 import { sysagent } from "../lib/sysagent.js";
 import { checkPanelRemoteUpdate } from "../lib/panelUpdateMonitor.js";
 import { runDeploymentAutoDeployPoll } from "../lib/deploymentAutoDeployPoller.js";
-import { deployQueue, sslQueue } from "./queues.js";
+import { deployQueue } from "./queues.js";
 import { requiredRuntimeExecutables, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import { laravelPublicCwdMissing, nginxProxyMissingDomainFailure, permissionRepairNeeded, prismaDatabaseAuthFailure, pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded } from "../lib/deploymentFailureRuntimeRepairs.js";
 import path from "node:path";
@@ -20,8 +20,7 @@ import {
   queueGroupCommand
 } from "../lib/laravelProcesses.js";
 import { normalizeDeploymentResourcePolicy } from "../lib/deploymentResourcePolicy.js";
-import { certificateNamesCoverHost, certificateNamesCoverServerName, deploymentServerName } from "../lib/deploymentDomainSsl.js";
-import { managedDomainHostnames, refreshDomainHostSsl } from "../lib/domainHosts.js";
+import { runDomainHostSync } from "../lib/domainHostSync.js";
 
 const staleDeploymentMs = Number(process.env.GUARDIAN_STALE_DEPLOYMENT_MS ?? 6 * 60_000);
 const queuedReleaseRecoveryMs = Number(process.env.GUARDIAN_QUEUED_RELEASE_RECOVERY_MS ?? 90_000);
@@ -1278,85 +1277,8 @@ async function runSslRenewWatch() {
     throw new Error(`Certbot auto-renew failed${renew.returncode !== undefined ? ` with exit code ${renew.returncode}` : ""}: ${[renew.stderr, renew.stdout].filter(Boolean).join("\n").trim()}`);
   }
 
-  const domains = await prisma.domain.findMany({
-    where: { OR: [{ sslEnabled: true }, { forceSsl: true }] },
-    select: {
-      id: true,
-      name: true,
-      sslExpiry: true,
-      forceSsl: true,
-      documentRoot: true,
-      account: { select: { homeRoot: true } }
-    }
-  });
-  const updated = [];
-  const stale = [];
-  const repairQueued = [];
-  for (const domain of domains) {
-    try {
-      const status = await sysagent.certificateFindReusable(domain.name);
-      const serverName = deploymentServerName({ name: domain.name, includeWww: true }) ?? domain.name;
-      const fileMatches = Boolean(status.exists && status.expiry && certificateNamesCoverServerName(serverName, status.names ?? []));
-      const hostCoverage = await refreshDomainHostSsl(domain, status);
-      const servedFailures = [];
-      if (fileMatches) {
-        for (const host of managedDomainHostnames(domain.name)) {
-          const served = await sysagent.servedCertificate({ domain: host.hostname }).catch((error) => ({
-            exists: false,
-            matches: false,
-            names: [],
-            error: error instanceof Error ? error.message : String(error)
-          }));
-          if (!served.exists || !certificateNamesCoverHost(host.hostname, served.names ?? [])) {
-            servedFailures.push({
-              host: host.hostname,
-              reason: served.exists ? "served certificate SAN mismatch" : served.error ?? "served certificate missing"
-            });
-          }
-        }
-      }
-      const matches = fileMatches && servedFailures.length === 0;
-      if (matches && status.expiry) {
-        const sslExpiry = new Date(status.expiry);
-        await prisma.domain.update({ where: { id: domain.id }, data: { sslExpiry } });
-        updated.push({ domain: domain.name, sslExpiry, hosts: hostCoverage });
-      } else {
-        await prisma.domain.update({ where: { id: domain.id }, data: { sslEnabled: false, sslExpiry: null } });
-        const reason = !status.exists
-          ? "certificate missing"
-          : !fileMatches
-            ? "certificate SAN mismatch"
-            : "served certificate mismatch";
-        stale.push({ domain: domain.name, serverName, reason, servedFailures });
-        if (domain.forceSsl) {
-          const job = await sslQueue.add("issue", {
-            domainId: domain.id,
-            domain: domain.name,
-            email: `admin@${domain.name}`,
-            webRoot: domain.account?.homeRoot
-              ? path.join(domain.account.homeRoot, domain.name, domain.documentRoot || "public_html")
-              : path.join(process.env.FILE_MANAGER_ROOT ?? "/var/www", domain.name, domain.documentRoot || "public_html"),
-            includeWww: true,
-            forceSsl: true,
-            source: "guardian-host-ssl-sync"
-          }, {
-            jobId: `guardian-host-ssl-sync:${domain.id}`,
-            attempts: 2,
-            backoff: { type: "fixed", delay: 60_000 },
-            removeOnComplete: 100,
-            removeOnFail: 500
-          });
-          repairQueued.push({ domain: domain.name, jobId: job.id, reason });
-        }
-      }
-    } catch (error) {
-      logger.warn("ssl renew watch failed to sync certificate status", {
-        domain: domain.name,
-        error: error instanceof Error ? error.message : String(error)
-      });
-    }
-  }
-  return { renew, checked: domains.length, updated, stale, repairQueued };
+  const hostSync = await runDomainHostSync({ includeDns: true, queueRepair: true });
+  return { renew, ...hostSync };
 }
 
 export const guardianWorker = new Worker(
@@ -1392,6 +1314,9 @@ export const guardianWorker = new Worker(
     }
     if (job.name === "ssl-renew-watch") {
       return runSslRenewWatch();
+    }
+    if (job.name === "domain-host-sync") {
+      return runDomainHostSync({ includeDns: true, queueRepair: true });
     }
 
     const diagnosis = await sysagent.guardianDiagnosis() as GuardianDiagnosis;
