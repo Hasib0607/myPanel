@@ -96,7 +96,8 @@ type SortDirection = "asc" | "desc";
 
 function compareSsl(a: Domain, b: Domain, direction: SortDirection) {
   const rank = (domain: Domain) => {
-    if (domain.liveSslEnabled) return direction === "asc" ? 1 : 0;
+    const enabled = domain.liveSslEnabled ?? domain.sslEnabled;
+    if (enabled) return direction === "asc" ? 1 : 0;
     if (domain.forceSsl) return direction === "asc" ? 0 : 1;
     return 2;
   };
@@ -104,7 +105,7 @@ function compareSsl(a: Domain, b: Domain, direction: SortDirection) {
 }
 
 function sslLabel(domain: Domain) {
-  if (domain.liveSslEnabled) return "enabled";
+  if (domain.liveSslEnabled ?? domain.sslEnabled) return "enabled";
   if (domain.forceSsl) return "pending";
   return "off";
 }

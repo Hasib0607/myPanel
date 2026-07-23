@@ -292,7 +292,11 @@ function clearDomainCaches(domainId?: string) {
 async function withLiveDomainSsl<T extends { name: string; forceSsl: boolean; sslEnabled: boolean; sslExpiry?: Date | string | null }>(domain: T) {
   const serverName = deploymentServerName({ name: domain.name, includeWww: true }) ?? domain.name;
   try {
-    const cert = await sysagent.certificateFindReusable(domain.name);
+    const cert = await Promise.race([
+      sysagent.certificateFindReusable(domain.name),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 2500))
+    ]);
+    if (!cert) throw new Error("Live SSL lookup timed out");
     const liveSslEnabled = Boolean(cert.exists && certificateNamesCoverServerName(serverName, cert.names ?? []));
     return {
       ...domain,
@@ -703,8 +707,7 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
       prisma.domain.count({ where })
     ]);
 
-    const itemsWithLiveSsl = await Promise.all(items.map((item) => withLiveDomainSsl(item)));
-    return { items: itemsWithLiveSsl, total, page: query.page, pageSize: query.pageSize };
+    return { items, total, page: query.page, pageSize: query.pageSize };
   });
 
   app.post("/", async (request, reply) => {
