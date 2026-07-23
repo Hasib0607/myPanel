@@ -621,6 +621,17 @@ def pm2_env(port: int | None) -> dict[str, str]:
     return env
 
 
+def scrub_node_host_runtime_env(env: dict[str, str], framework: str | None) -> dict[str, str]:
+    if (framework or "").upper() not in {"NEXTJS", "NODEJS"}:
+        return env
+    cleaned = dict(env)
+    for key in ("HOST", "HOSTNAME", "VERCEL_URL", "NEXT_PUBLIC_HOST", "NEXT_PUBLIC_HOSTNAME"):
+        value = str(cleaned.get(key) or "").strip().lower()
+        if value and value not in {"127.0.0.1", "localhost", "0.0.0.0"}:
+            cleaned.pop(key, None)
+    return cleaned
+
+
 def pm2_processes(root_path: str) -> dict:
     return guarded_command(root_path, ["pm2", "jlist"], cwd=deployment_cwd(root_path))
 
@@ -1738,7 +1749,7 @@ def pm2_start(body: ProcessRequest, start_command: list[str]) -> dict:
         *start_command[1:],
     ]
     # Runtime PORT must stay panel-owned so Nginx points at the process that actually starts.
-    process_env = constrained_runtime_env({**(body.env or {}), **pm2_env(body.port)}, effective_resource_limits(body.resourceLimits))
+    process_env = constrained_runtime_env({**scrub_node_host_runtime_env(body.env or {}, body.framework), **pm2_env(body.port)}, effective_resource_limits(body.resourceLimits))
     start = guarded_command_with_env(body.rootPath, command, cwd=cwd, env=process_env)
     save = guarded_command(body.rootPath, ["pm2", "save"], cwd=cwd) if start.get("returncode") == 0 else {
         "dryRun": start.get("dryRun", False),

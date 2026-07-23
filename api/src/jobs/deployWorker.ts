@@ -1385,6 +1385,72 @@ function deploymentEnvWithPublicUrl(envVars: Record<string, string>, domain: Bou
   return merged;
 }
 
+const sharedDomainRuntimeEnvKeys = [
+  "APP_URL",
+  "ASSET_URL",
+  "APP_ORIGIN",
+  "AUTH_URL",
+  "BASE_URL",
+  "HOST",
+  "HOSTNAME",
+  "NEXTAUTH_URL",
+  "NEXT_PUBLIC_APP_URL",
+  "NEXT_PUBLIC_APP_ORIGIN",
+  "NEXT_PUBLIC_BASE_URL",
+  "NEXT_PUBLIC_DOMAIN",
+  "NEXT_PUBLIC_HOST",
+  "NEXT_PUBLIC_HOSTNAME",
+  "NEXT_PUBLIC_ORIGIN",
+  "NEXT_PUBLIC_SITE_URL",
+  "NEXT_PUBLIC_URL",
+  "ORIGIN",
+  "PUBLIC_URL",
+  "SERVER_URL",
+  "SITE_URL",
+  "URL",
+  "VERCEL_URL",
+  "VITE_APP_URL",
+  "VITE_BASE_URL",
+  "VITE_PUBLIC_URL"
+] as const;
+
+function envValueHostname(value: string | undefined) {
+  if (!value) return null;
+  try {
+    return new URL(value).hostname.toLowerCase();
+  } catch {
+    return value.replace(/^https?:\/\//i, "").split("/")[0]?.split(":")[0]?.toLowerCase() || null;
+  }
+}
+
+function scrubSharedNodeDomainRuntimeEnv(envVars: Record<string, string>, framework: DeploymentFramework, routeDomains: BoundDomain[]) {
+  if (!["NEXTJS", "NODEJS"].includes(framework) || routeDomains.length <= 1) return envVars;
+  const routeHosts = new Set(routeDomains.map((domain) => domain.name.toLowerCase()));
+  const nextEnv = { ...envVars };
+  for (const key of sharedDomainRuntimeEnvKeys) {
+    const hostname = envValueHostname(nextEnv[key]);
+    if (hostname && routeHosts.has(hostname)) {
+      delete nextEnv[key];
+    }
+  }
+  return nextEnv;
+}
+
+function deploymentRuntimeEnvWithPublicUrl(
+  envVars: Record<string, string>,
+  domain: BoundDomain | null,
+  routeDomains: BoundDomain[],
+  framework: DeploymentFramework,
+  httpsReady = false,
+  deploymentPort?: number
+) {
+  return scrubSharedNodeDomainRuntimeEnv(
+    deploymentEnvWithPublicUrl(envVars, domain, httpsReady, deploymentPort),
+    framework,
+    routeDomains
+  );
+}
+
 function isPostgresDeploymentEnvironment(deployment: { dbType?: string | null }, envVars: Record<string, string>) {
   if (deployment.dbType === "MYSQL") return false;
   return deployment.dbType === "POSTGRESQL"
@@ -1984,7 +2050,8 @@ async function optionalPublicRouteWarning(
   deployment: { id: string; slug: string; rootPath: string; publicDirectory?: string | null; framework: DeploymentFramework; port: number; startCommand: string | null; processManager: DeploymentProcessManager | null; domain?: BoundDomain | null; dbType?: "POSTGRESQL" | "MYSQL" | null; dbName?: string | null; dbUser?: string | null; dbPasswordSecretRef?: string | null },
   appPath: string,
   envVars: Record<string, string>,
-  processManager: DeploymentProcessManager
+  processManager: DeploymentProcessManager,
+  routeDomains: BoundDomain[] = deployment.domain ? [deployment.domain] : []
 ) {
   const domain = deployment.domain;
   if (!domain) return null;
@@ -2012,7 +2079,7 @@ async function optionalPublicRouteWarning(
       sysagent.deploymentRepairLaravelWritablePaths({ rootPath: appPath })
     );
     if (await deploymentHttpsReady(domain)) {
-      envVars = deploymentEnvWithPublicUrl(envVars, domain, true, deployment.port);
+      envVars = deploymentRuntimeEnvWithPublicUrl(envVars, domain, routeDomains, deployment.framework, true, deployment.port);
     }
     envVars = await ensureLaravelAppKey(deploymentId, releaseId, appPath, deployment.port, envVars);
     await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Guardian preflight repair", () =>
@@ -2175,7 +2242,7 @@ async function optionalPublicRouteWarning(
       && httpsReady
       && routeMeta.effectiveUrl?.toLowerCase().startsWith(`http://${domain.name.toLowerCase()}`)
     ) {
-      envVars = deploymentEnvWithPublicUrl(envVars, domain, true, deployment.port);
+      envVars = deploymentRuntimeEnvWithPublicUrl(envVars, domain, routeDomains, deployment.framework, true, deployment.port);
       envVars = await ensureLaravelAppKey(deploymentId, releaseId, appPath, deployment.port, envVars);
       await republishDeploymentNginxVhost(deploymentId, releaseId, { ...deployment, rootPath: appPath }, domain);
       await runStep(deploymentId, releaseId, "HEALTH_CHECK", "Restart after HTTPS URL repair", () =>
@@ -3943,7 +4010,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
     const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
     const domain = deploymentDomain(deployment);
     const routeDomains = deploymentRouteDomains(deployment);
-    const runtimeEnvVars = deploymentEnvWithPublicUrl(envVars, domain, false, deployment.port);
+    const runtimeEnvVars = deploymentRuntimeEnvWithPublicUrl(envVars, domain, routeDomains, deployment.framework, false, deployment.port);
 
     if (processAction !== "stop" && domain && await deploymentRunsLaravel(deployment.framework, appPath)) {
       await ensureLaravelPublicIndexForDomain(deployment.id, releaseId, appPath, domain);
@@ -4081,7 +4148,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
       `${action} health check`
     );
 
-    const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, `${action} public website check`, { ...deployment, domain }, appPath, envVars, processManager);
+    const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, `${action} public website check`, { ...deployment, domain }, appPath, envVars, processManager, routeDomains);
     if (publicRouteWarning) {
       throw new Error(`${action} public website check failed. ${publicRouteWarning}`);
     }
@@ -4200,7 +4267,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     let domain = deploymentDomain(deployment);
     let routeDomains = deploymentRouteDomains(deployment);
     let envVars = {
-      ...deploymentEnvWithPublicUrl(await resolveEnvVars(deployment.env), domain, false, deployment.port),
+      ...deploymentRuntimeEnvWithPublicUrl(await resolveEnvVars(deployment.env), domain, routeDomains, deployment.framework, false, deployment.port),
       ...deployBudget.env
     };
     const databaseRuntime = await buildDatabaseRuntimeEnv(deployment, envVars, { releaseId });
@@ -4707,7 +4774,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         assertLiveResult((httpsNginx as { enable?: unknown }).enable, "Nginx HTTPS proxy config enable");
         assertLiveResult((httpsNginx as { test?: unknown }).test, "Nginx HTTPS config test");
         assertLiveResult((httpsNginx as { reload?: unknown }).reload, "Nginx HTTPS reload");
-        envVars = deploymentEnvWithPublicUrl(envVars, domain, true, deployment.port);
+        envVars = deploymentRuntimeEnvWithPublicUrl(envVars, domain, routeDomains, deployment.framework, true, deployment.port);
         if (await deploymentRunsLaravel(deployment.framework, appPath)) {
           envVars = await ensureLaravelAppKey(deployment.id, releaseId, appPath, deployment.port, envVars);
         }
@@ -4771,7 +4838,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         })
       );
       if (!tlsSync.httpsReady) {
-        envVars = deploymentEnvWithPublicUrl(envVars, activeDomain, false, deployment.port);
+        envVars = deploymentRuntimeEnvWithPublicUrl(envVars, activeDomain, routeDomains, deployment.framework, false, deployment.port);
         await repairDeploymentSslAccess(deployment.id, releaseId, { ...deployment, rootPath: appPath }, activeDomain).catch((error) =>
           writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "Automatic SSL repair skipped", {
             warning: error instanceof Error ? error.message : String(error)
@@ -4782,7 +4849,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           diagnose: JSON.parse(JSON.stringify(diagnose)) as Prisma.InputJsonValue
         }, "warn");
       } else {
-        envVars = deploymentEnvWithPublicUrl(envVars, activeDomain, true, deployment.port);
+        envVars = deploymentRuntimeEnvWithPublicUrl(envVars, activeDomain, routeDomains, deployment.framework, true, deployment.port);
       }
     }
 
@@ -4837,7 +4904,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     );
 
     deployment = await activateDeploymentArtifact(deployment, releaseId, artifactRootPath);
-    const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, "Public website check", { ...deployment, domain }, appPath, envVars, processManager);
+    const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, "Public website check", { ...deployment, domain }, appPath, envVars, processManager, routeDomains);
     if (publicRouteWarning) {
       await writeLog(deployment.id, releaseId, "HEALTH_CHECK", "Public website check warning; keeping latest release active", {
         warning: publicRouteWarning,

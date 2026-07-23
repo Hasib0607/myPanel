@@ -11,6 +11,7 @@ from app.deployment_commands import (
     parse_deployment_command,
     resolve_laravel_public_root,
 )
+from app.routers.deployments import scrub_node_host_runtime_env
 
 
 class DeploymentCommandTests(unittest.TestCase):
@@ -97,6 +98,30 @@ class DeploymentCommandTests(unittest.TestCase):
         public_command, root_command = laravel_public_permission_commands(root)
         self.assertEqual(public_command, ["chmod", "-R", "a+rX", f"{root}/public"])
         self.assertEqual(root_command, ["chmod", "o+x", root])
+
+    def test_next_runtime_env_strips_domain_host_poisoning(self) -> None:
+        cleaned = scrub_node_host_runtime_env(
+            {
+                "HOST": "need4you.xyz",
+                "HOSTNAME": "need4you.xyz",
+                "NEXT_PUBLIC_HOST": "need4you.xyz",
+                "NEXT_PUBLIC_HOSTNAME": "need4you.xyz",
+                "APP_URL": "https://need4you.xyz",
+            },
+            "NEXTJS",
+        )
+
+        self.assertNotIn("HOST", cleaned)
+        self.assertNotIn("HOSTNAME", cleaned)
+        self.assertNotIn("NEXT_PUBLIC_HOST", cleaned)
+        self.assertNotIn("NEXT_PUBLIC_HOSTNAME", cleaned)
+        self.assertEqual(cleaned["APP_URL"], "https://need4you.xyz")
+
+    def test_next_runtime_env_keeps_loopback_bind_host(self) -> None:
+        cleaned = scrub_node_host_runtime_env({"HOST": "127.0.0.1", "HOSTNAME": "localhost"}, "NEXTJS")
+
+        self.assertEqual(cleaned["HOST"], "127.0.0.1")
+        self.assertEqual(cleaned["HOSTNAME"], "localhost")
 
 
 if __name__ == "__main__":
