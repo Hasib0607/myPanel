@@ -44,6 +44,7 @@ from app.nginx_manager import (
     acme_location,
     letsencrypt_certificate_exists,
     loaded_conflicting_config_files,
+    nginx_listen_directives,
     publish_nginx_config,
     probe_host_for_server_name,
     remove_conflicting_configs,
@@ -2399,7 +2400,7 @@ def nginx(body: NginxRequest) -> dict:
         error_log = Path("/var/log/nginx") / f"vps-panel-{config_name}.error.log"
         config = f"""
 server {{
-    listen 80;
+{nginx_listen_directives(80).rstrip()}
     server_name {server_name};
     access_log {access_log} combined;
     error_log {error_log} warn;
@@ -2411,7 +2412,7 @@ server {{
             config += f"""
 
 server {{
-    listen 443 ssl http2;
+{nginx_listen_directives(443, ssl=True, http2=True).rstrip()}
     server_name {server_name};
     access_log {access_log} combined;
     error_log {error_log} warn;

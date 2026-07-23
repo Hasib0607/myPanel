@@ -42,6 +42,7 @@ from app.nginx_manager import (
     acme_location,
     certificate_name_for_server_name,
     make_web_root_readable,
+    nginx_listen_directives,
     probe_host_for_server_name,
     remove_conflicting_configs,
     route_ownership_config_seen,
@@ -49,6 +50,7 @@ from app.nginx_manager import (
     route_ownership_header_seen,
     server_name_has_wildcard,
 )
+import app.nginx_manager as nginx_manager
 
 
 class NginxManagerTests(unittest.TestCase):
@@ -66,6 +68,28 @@ class NginxManagerTests(unittest.TestCase):
         output = "HTTP/2 200\r\nx-vps-panel-route: domain-nextsoftpremium.com\r\n"
 
         self.assertTrue(route_ownership_header_seen(output, "domain-nextsoftpremium.com"))
+
+    def test_listen_directives_keep_dry_run_config_deterministic(self) -> None:
+        self.assertEqual(nginx_listen_directives(443, ssl=True, http2=True), "    listen 443 ssl http2;\n")
+
+    def test_listen_directives_include_primary_ip_in_live_mode(self) -> None:
+        previous_allow_live = nginx_manager.settings.allow_live_nginx
+        previous_run_command = nginx_manager.run_command
+        try:
+            nginx_manager.settings.allow_live_nginx = True
+            nginx_manager.run_command = lambda *args, **kwargs: {
+                "returncode": 0,
+                "stdout": "127.0.0.1 72.60.235.117\n",
+                "stderr": "",
+            }
+
+            self.assertEqual(
+                nginx_listen_directives(443, ssl=True, http2=True),
+                "    listen 443 ssl http2;\n    listen 72.60.235.117:443 ssl http2;\n",
+            )
+        finally:
+            nginx_manager.settings.allow_live_nginx = previous_allow_live
+            nginx_manager.run_command = previous_run_command
 
     def test_route_ownership_config_seen_accepts_mixed_case_nginx_dump(self) -> None:
         output = 'add_header X-VPS-Panel-Route "deployment-wildcard.ebitan.store" always;'

@@ -32,6 +32,32 @@ def route_ownership_header(name: str) -> str:
     return f'    add_header {ROUTE_OWNERSHIP_HEADER} "{name}" always;\n'
 
 
+def server_primary_ip() -> str | None:
+    if not settings.allow_live_nginx:
+        return None
+    result = run_command(["hostname", "-I"], allow_live=DEPLOYMENT_COMMANDS_LIVE)
+    if result.get("returncode") != 0:
+        return None
+    for token in (result.get("stdout") or "").split():
+        if token and not token.startswith("127."):
+            return token
+    return None
+
+
+def nginx_listen_directives(port: int, *, ssl: bool = False, http2: bool = False) -> str:
+    flags = []
+    if ssl:
+        flags.append("ssl")
+    if http2:
+        flags.append("http2")
+    suffix = f" {' '.join(flags)}" if flags else ""
+    directives = [f"    listen {port}{suffix};\n"]
+    primary_ip = server_primary_ip()
+    if primary_ip:
+        directives.append(f"    listen {primary_ip}:{port}{suffix};\n")
+    return "".join(directives)
+
+
 def route_ownership_header_seen(output: str, name: str) -> bool:
     return f"{ROUTE_OWNERSHIP_HEADER.lower()}: {name.lower()}" in output.lower()
 

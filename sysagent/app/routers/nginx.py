@@ -17,6 +17,7 @@ from app.nginx_manager import (
     acme_location,
     loaded_conflicting_config_files,
     make_web_root_readable,
+    nginx_listen_directives,
     publish_nginx_config,
     probe_host_for_server_name,
     route_ownership_config_seen,
@@ -116,7 +117,7 @@ class RedirectVhostRequest(BaseModel):
 def write_vhost(body: VhostRequest) -> dict:
     config = (
         "server {\n"
-        "    listen 80;\n"
+        f"{nginx_listen_directives(80)}"
         f"    server_name {body.serverName};\n"
         "\n"
         f"{acme_location(body.serverName)}"
@@ -169,7 +170,7 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
 
     config = (
         "server {\n"
-        "    listen 80;\n"
+        f"{nginx_listen_directives(80)}"
         f"    server_name {body.serverName};\n"
         f"    root {root_path};\n"
         "    index index.html index.htm index.php;\n"
@@ -184,7 +185,7 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
         config += (
             "\n"
             "server {\n"
-            "    listen 443 ssl http2;\n"
+            f"{nginx_listen_directives(443, ssl=True, http2=True)}"
             f"    server_name {body.serverName};\n"
             f"    root {root_path};\n"
             "    index index.html index.htm index.php;\n"
@@ -394,7 +395,7 @@ def write_redirect_vhost(body: RedirectVhostRequest) -> dict:
 
     config = (
         "server {\n"
-        "    listen 80;\n"
+        f"{nginx_listen_directives(80)}"
         f"    server_name {body.serverName};\n"
         "\n"
         f"{acme_location(body.serverName)}"
@@ -407,7 +408,7 @@ def write_redirect_vhost(body: RedirectVhostRequest) -> dict:
         config += (
             "\n"
             "server {\n"
-            "    listen 443 ssl http2;\n"
+            f"{nginx_listen_directives(443, ssl=True, http2=True)}"
             f"    server_name {body.serverName};\n"
             f"    ssl_certificate {ssl_certificate};\n"
             f"    ssl_certificate_key {ssl_certificate_key};\n"
