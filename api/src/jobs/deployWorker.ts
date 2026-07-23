@@ -44,6 +44,7 @@ import {
 import { normalizeDeploymentResourcePolicy } from "../lib/deploymentResourcePolicy.js";
 import { deploymentManualStopRequested } from "../lib/deploymentStopControl.js";
 import { sslQueue } from "./queues.js";
+import { runDomainHostSync } from "../lib/domainHostSync.js";
 import {
   type BoundDomain,
   boundDomainFromBinding,
@@ -1379,6 +1380,34 @@ function deploymentRouteDomains(deployment: { domain?: BoundDomain | null; domai
     seen.add(key);
     return true;
   });
+}
+
+async function refreshDeploymentDomainHostState(deploymentId: string, releaseId: string | undefined, routeDomains: BoundDomain[]) {
+  const domainNames = [...new Set(routeDomains.map((domain) => domain.name.toLowerCase()).filter(Boolean))];
+  if (domainNames.length === 0) return null;
+  try {
+    const result = await runDomainHostSync({
+      includeDns: true,
+      queueRepair: true,
+      domainNames,
+      limit: Math.max(domainNames.length * 4, 20)
+    });
+    await writeLog(deploymentId, releaseId, "CONFIGURING_PROXY", "Domain host SSL state refreshed", {
+      domainNames,
+      checked: result.checked,
+      stale: result.stale.length,
+      repairQueued: result.repairQueued.length,
+      errors: result.errors.length
+    }, result.stale.length || result.errors.length ? "warn" : "info");
+    return result;
+  } catch (error) {
+    const warning = error instanceof Error ? error.message : String(error);
+    await writeLog(deploymentId, releaseId, "CONFIGURING_PROXY", "Domain host SSL state refresh warning", {
+      domainNames,
+      warning
+    }, "warn");
+    return null;
+  }
 }
 
 function deploymentPublicEnv(domain: BoundDomain | null, httpsReady = false) {
@@ -5050,6 +5079,13 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       }
       if (refreshed.length > 0) {
         await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "Secondary domain proxy refresh completed", { refreshed });
+      }
+    }
+
+    if (!backendOnlyLaravel && routeDomains.length > 0) {
+      const hostSync = await refreshDeploymentDomainHostState(deployment.id, releaseId, routeDomains);
+      if (hostSync?.stale.length || hostSync?.errors.length) {
+        sslDeploymentWarning = sslDeploymentWarning ?? "One or more deployment domains need SSL/DNS repair; HTTP routes stayed active and repair was queued where DNS is ready.";
       }
     }
 

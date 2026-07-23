@@ -1,10 +1,11 @@
 import path from "node:path";
 import { env } from "../config/env.js";
 import { sslQueue } from "../jobs/queues.js";
-import { certificateNamesCoverHost, certificateNamesCoverServerName, deploymentServerName } from "./deploymentDomainSsl.js";
+import { certificateNamesCoverHost } from "./deploymentDomainSsl.js";
 import { ensureSubdomainFileStructure } from "./domainFiles.js";
 import { managedDomainHostnames, refreshDomainHostDns, refreshDomainHostSsl, refreshSubdomainHostDns, refreshSubdomainHostSsl, subdomainHostName, syncDomainHostRows, syncSubdomainHostRow } from "./domainHosts.js";
 import { logger } from "./logger.js";
+import { isWildcardHostname } from "./nginxNames.js";
 import { prisma } from "./prisma.js";
 import { currentVpsIp } from "./serverIp.js";
 import { sysagent } from "./sysagent.js";
@@ -13,6 +14,7 @@ type SyncOptions = {
   limit?: number;
   includeDns?: boolean;
   queueRepair?: boolean;
+  domainNames?: string[];
 };
 
 function domainWebRoot(domain: { name: string; documentRoot: string; account?: { homeRoot: string | null } | null }) {
@@ -30,19 +32,57 @@ async function subdomainWebRoot(subdomain: { name: string; domain: { name: strin
   return path.join(env.FILE_MANAGER_ROOT, scaffold.relativeRoot);
 }
 
-async function queueDomainRepair(domain: { id: string; name: string; documentRoot: string; forceSsl: boolean; account?: { homeRoot: string | null } | null }, reason: string) {
+function hourlyRepairJobId(prefix: string, id: string) {
+  return `${prefix}:${id}:${Math.floor(Date.now() / 3_600_000)}`;
+}
+
+function normalizeHostname(value: string) {
+  return value.trim().toLowerCase().replace(/\.$/, "");
+}
+
+function candidateDomainNames(hostnames: string[]) {
+  const names = new Set<string>();
+  for (const hostname of hostnames.map(normalizeHostname).filter(Boolean)) {
+    names.add(hostname);
+    if (hostname.startsWith("www.")) names.add(hostname.slice(4));
+    if (hostname.startsWith("*.")) names.add(hostname.slice(2));
+  }
+  return [...names];
+}
+
+function candidateParentDomainNames(hostnames: string[]) {
+  const names = new Set<string>();
+  for (const hostname of hostnames.map(normalizeHostname).filter(Boolean)) {
+    const clean = hostname.startsWith("*.") ? hostname.slice(2) : hostname;
+    const labels = clean.split(".").filter(Boolean);
+    if (labels.length > 2) names.add(labels.slice(1).join("."));
+  }
+  return [...names];
+}
+
+function hostDnsReady(hostname: string, dnsResults: Array<{ hostname: string; dnsStatus: string }> | null, includeDns: boolean) {
+  if (!includeDns) return true;
+  if (isWildcardHostname(hostname)) return true;
+  return Boolean(dnsResults?.find((row) => normalizeHostname(row.hostname) === normalizeHostname(hostname) && row.dnsStatus === "READY"));
+}
+
+async function queueDomainRepair(
+  domain: { id: string; name: string; documentRoot: string; forceSsl: boolean; account?: { homeRoot: string | null } | null },
+  reason: string,
+  includeWww: boolean
+) {
   if (!domain.forceSsl) return null;
   const job = await sslQueue.add("issue", {
     domainId: domain.id,
     domain: domain.name,
     email: `admin@${domain.name}`,
     webRoot: domainWebRoot(domain),
-    includeWww: true,
+    includeWww,
     forceSsl: true,
     source: "guardian-domain-host-sync",
     reason
   }, {
-    jobId: `guardian-domain-host-sync:${domain.id}`,
+    jobId: hourlyRepairJobId("guardian-domain-host-sync", domain.id),
     attempts: 2,
     backoff: { type: "fixed", delay: 60_000 },
     removeOnComplete: 100,
@@ -64,7 +104,7 @@ async function queueSubdomainRepair(subdomain: { id: string; name: string; domai
     source: "guardian-subdomain-host-sync",
     reason
   }, {
-    jobId: `guardian-subdomain-host-sync:${subdomain.id}`,
+    jobId: hourlyRepairJobId("guardian-subdomain-host-sync", subdomain.id),
     attempts: 2,
     backoff: { type: "fixed", delay: 60_000 },
     removeOnComplete: 100,
@@ -85,7 +125,11 @@ async function servedHostFailures(hostnames: string[]) {
     if (!served.exists || !certificateNamesCoverHost(hostname, served.names ?? [])) {
       failures.push({
         host: hostname,
-        reason: served.exists ? "served certificate SAN mismatch" : served.error ?? "served certificate missing"
+        reason: served.exists ? "served certificate SAN mismatch" : served.error ?? "served certificate missing",
+        subject: (served as { subject?: string | null }).subject ?? null,
+        issuer: (served as { issuer?: string | null }).issuer ?? null,
+        expiry: (served as { expiry?: string | null }).expiry ?? null,
+        names: served.names ?? []
       });
     }
   }
@@ -97,8 +141,12 @@ export async function runDomainHostSync(options: SyncOptions = {}) {
   const limit = Math.min(Math.max(options.limit ?? configuredLimit, 1), 10_000);
   const includeDns = options.includeDns ?? true;
   const queueRepair = options.queueRepair ?? true;
+  const filterNames = options.domainNames?.map(normalizeHostname).filter(Boolean) ?? [];
+  const domainNameFilter = filterNames.length > 0 ? candidateDomainNames(filterNames) : null;
+  const subdomainParentFilter = filterNames.length > 0 ? candidateParentDomainNames(filterNames) : null;
   const expectedIp = includeDns ? await currentVpsIp().catch(() => null) : null;
   const domains = await prisma.domain.findMany({
+    ...(domainNameFilter ? { where: { name: { in: domainNameFilter } } } : {}),
     orderBy: { updatedAt: "desc" },
     take: limit,
     select: {
@@ -112,6 +160,7 @@ export async function runDomainHostSync(options: SyncOptions = {}) {
     }
   });
   const subdomains = await prisma.subdomain.findMany({
+    ...(subdomainParentFilter ? { where: { domain: { name: { in: subdomainParentFilter } } } } : {}),
     orderBy: { id: "asc" },
     take: limit,
     include: { domain: { select: { id: true, name: true, account: { select: { homeRoot: true } } } } }
@@ -125,21 +174,51 @@ export async function runDomainHostSync(options: SyncOptions = {}) {
   for (const domain of domains) {
     try {
       await syncDomainHostRows(domain);
-      if (expectedIp) await refreshDomainHostDns(domain, expectedIp);
+      const dnsResults = expectedIp ? await refreshDomainHostDns(domain, expectedIp) : null;
+      const includeWww = !isWildcardHostname(domain.name);
+      const desiredHosts = managedDomainHostnames(domain.name, includeWww);
+      const desiredHostnames = desiredHosts.map((host) => host.hostname);
       const cert = await sysagent.certificateFindReusable(domain.name).catch(() => null);
-      const serverName = deploymentServerName({ name: domain.name, includeWww: true }) ?? domain.name;
-      const serverHosts = serverName.split(/\s+/).filter(Boolean);
-      const fileMatches = Boolean(cert?.exists && cert.expiry && certificateNamesCoverServerName(serverName, cert.names ?? []));
-      const servedFailures = fileMatches ? await servedHostFailures(serverHosts) : [];
-      const matches = fileMatches && servedFailures.length === 0;
-      const hosts = await refreshDomainHostSsl(domain, matches ? cert : null);
+      const fileCoveredHosts = desiredHostnames.filter((hostname) =>
+        Boolean(cert?.exists && cert.expiry && certificateNamesCoverHost(hostname, cert.names ?? []))
+      );
+      const servedFailures = fileCoveredHosts.length > 0 ? await servedHostFailures(fileCoveredHosts) : [];
+      const servedFailureHosts = new Set(servedFailures.map((failure) => normalizeHostname(failure.host)));
+      const matchingHosts = fileCoveredHosts.filter((hostname) => !servedFailureHosts.has(normalizeHostname(hostname)));
+      const hosts = await refreshDomainHostSsl(domain, cert?.exists ? cert : null);
+      if (servedFailures.length > 0) {
+        const now = new Date();
+        await Promise.all(servedFailures.map((failure) =>
+          prisma.domainHost.update({
+            where: { domainId_hostname: { domainId: domain.id, hostname: failure.host } },
+            data: {
+              sslEnabled: false,
+              sslStatus: "MISMATCH",
+              lastCheckedAt: now,
+              lastError: `${failure.reason}${failure.subject ? `; served subject: ${failure.subject}` : ""}`
+            }
+          })
+        ));
+        await prisma.domain.update({ where: { id: domain.id }, data: { sslEnabled: false } });
+      }
+      const matches = desiredHostnames.length > 0 && desiredHostnames.every((hostname) =>
+        matchingHosts.some((match) => normalizeHostname(match) === normalizeHostname(hostname))
+      );
       if (matches) {
         updated.push({ type: "domain", domain: domain.name, hosts });
       } else {
-        const reason = !cert?.exists ? "certificate missing" : !fileMatches ? "certificate SAN mismatch" : "served certificate mismatch";
-        stale.push({ type: "domain", domain: domain.name, reason, servedFailures });
+        const reason = !cert?.exists ? "certificate missing" : fileCoveredHosts.length < desiredHostnames.length ? "certificate SAN mismatch" : "served certificate mismatch";
+        const apexReady = hostDnsReady(domain.name, dnsResults, includeDns);
+        const wwwHost = `www.${normalizeHostname(domain.name)}`;
+        const wwwWanted = desiredHostnames.includes(wwwHost);
+        const wwwReady = wwwWanted && hostDnsReady(wwwHost, dnsResults, includeDns);
+        stale.push({ type: "domain", domain: domain.name, reason, servedFailures, dnsReady: { apex: apexReady, www: wwwWanted ? wwwReady : null } });
         if (queueRepair) {
-          const queued = await queueDomainRepair(domain, reason);
+          const needsRepair = desiredHostnames.some((hostname) =>
+            hostDnsReady(hostname, dnsResults, includeDns)
+            && !matchingHosts.some((match) => normalizeHostname(match) === normalizeHostname(hostname))
+          );
+          const queued = needsRepair && apexReady ? await queueDomainRepair(domain, reason, wwwReady) : null;
           if (queued) repairQueued.push(queued);
         }
       }
@@ -155,7 +234,7 @@ export async function runDomainHostSync(options: SyncOptions = {}) {
     const wantsSsl = subdomain.sslEnabled;
     try {
       await syncSubdomainHostRow(subdomain);
-      if (expectedIp) await refreshSubdomainHostDns(subdomain, expectedIp);
+      const dnsResult = expectedIp ? await refreshSubdomainHostDns(subdomain, expectedIp) : null;
       const cert = await sysagent.certificateFindReusable(fqdn).catch(() => null);
       const fileMatches = Boolean(cert?.exists && cert.expiry && certificateNamesCoverHost(fqdn, cert.names ?? []));
       const servedFailures = fileMatches ? await servedHostFailures([fqdn]) : [];
@@ -165,8 +244,9 @@ export async function runDomainHostSync(options: SyncOptions = {}) {
         updated.push({ type: "subdomain", domain: fqdn, hosts: [host] });
       } else {
         const reason = !cert?.exists ? "certificate missing" : !fileMatches ? "certificate SAN mismatch" : "served certificate mismatch";
-        stale.push({ type: "subdomain", domain: fqdn, reason, servedFailures });
-        if (queueRepair && wantsSsl) repairQueued.push(await queueSubdomainRepair(subdomain, reason));
+        const dnsReady = hostDnsReady(fqdn, dnsResult ? [dnsResult] : null, includeDns);
+        stale.push({ type: "subdomain", domain: fqdn, reason, servedFailures, dnsReady });
+        if (queueRepair && wantsSsl && dnsReady) repairQueued.push(await queueSubdomainRepair(subdomain, reason));
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
