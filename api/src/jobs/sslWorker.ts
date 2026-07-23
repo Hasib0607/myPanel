@@ -366,8 +366,19 @@ function summarizeNginxRouteBlocks(diagnosis: {
 } | null) {
   if (!diagnosis) return "";
   const summarize = (blocks: unknown[] | undefined) => (blocks ?? []).slice(0, 5).map((block) => {
-    const row = block as { file?: string; serverNames?: string[]; listens?: string[]; sslCertificates?: string[]; routeHeaders?: string[] };
-    return `${row.file ?? "unknown"} names=${(row.serverNames ?? []).join("|") || "none"} listen=${(row.listens ?? []).join("|") || "none"} cert=${(row.sslCertificates ?? []).join("|") || "none"} route=${(row.routeHeaders ?? []).join("|") || "none"}`;
+    const row = block as {
+      file?: string;
+      block?: number;
+      serverNames?: string[];
+      listens?: string[];
+      sslCertificates?: string[];
+      certificateNames?: Record<string, string[]>;
+      routeHeaders?: string[];
+    };
+    const certNames = Object.entries(row.certificateNames ?? {})
+      .map(([cert, names]) => `${cert}=>${names.join("|") || "none"}`)
+      .join(",");
+    return `${row.file ?? "unknown"}#${row.block ?? "?"} names=${(row.serverNames ?? []).join("|") || "none"} listen=${(row.listens ?? []).join("|") || "none"} cert=${(row.sslCertificates ?? []).join("|") || "none"} certNames=${certNames || "none"} route=${(row.routeHeaders ?? []).join("|") || "none"}`;
   });
   const parts = [
     `expected route blocks: ${summarize(diagnosis.expectedRouteBlocks).join(" ; ") || "none"}`,

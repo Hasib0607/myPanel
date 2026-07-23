@@ -16,6 +16,7 @@ from app.nginx_manager import (
     ROUTE_OWNERSHIP_HEADER,
     _config_dump_sections,
     acme_location,
+    certificate_dns_names,
     certificate_file_covers_server_name,
     loaded_conflicting_config_files,
     make_web_root_readable,
@@ -131,28 +132,32 @@ def _server_block_summaries(server_name: str, expected_route: str | None = None)
     default_ssl = []
     expected_blocks = []
     for file_path, file_text in _config_dump_sections(text):
-        names = [name.lower() for name in server_name_directive_tokens(file_text)]
-        listens = re.findall(r"\blisten\s+([^;]+);", file_text, re.IGNORECASE)
-        ssl_certs = [
-            cert.strip()
-            for cert in re.findall(r"^\s*ssl_certificate\s+([^;]+);", file_text, re.IGNORECASE | re.MULTILINE)
-            if "ssl_certificate_key" not in cert
-        ]
-        route_headers = re.findall(rf'{ROUTE_OWNERSHIP_HEADER}\s+"([^"]+)"', file_text, re.IGNORECASE)
-        is_ssl = any("443" in listen or "ssl" in listen.lower() for listen in listens) or bool(ssl_certs)
-        summary = {
-            "file": file_path,
-            "serverNames": names,
-            "listens": listens,
-            "sslCertificates": ssl_certs,
-            "routeHeaders": route_headers,
-        }
-        if expected and any(header.lower() == expected for header in route_headers):
-            expected_blocks.append(summary)
-        if is_ssl and any("default_server" in listen.lower() for listen in listens):
-            default_ssl.append(summary)
-        if requested and any(name in requested for name in names):
-            matching.append(summary)
+        blocks = _server_blocks(file_text) or [file_text]
+        for index, block_text in enumerate(blocks, start=1):
+            names = [name.lower() for name in server_name_directive_tokens(block_text)]
+            listens = re.findall(r"\blisten\s+([^;]+);", block_text, re.IGNORECASE)
+            ssl_certs = [
+                cert.strip()
+                for cert in re.findall(r"^\s*ssl_certificate\s+([^;]+);", block_text, re.IGNORECASE | re.MULTILINE)
+                if "ssl_certificate_key" not in cert
+            ]
+            route_headers = re.findall(rf'{ROUTE_OWNERSHIP_HEADER}\s+"([^"]+)"', block_text, re.IGNORECASE)
+            is_ssl = any("443" in listen or "ssl" in listen.lower() for listen in listens) or bool(ssl_certs)
+            summary = {
+                "file": file_path,
+                "block": index,
+                "serverNames": names,
+                "listens": listens,
+                "sslCertificates": ssl_certs,
+                "certificateNames": {cert: certificate_dns_names(Path(cert)) for cert in ssl_certs},
+                "routeHeaders": route_headers,
+            }
+            if expected and any(header.lower() == expected for header in route_headers):
+                expected_blocks.append(summary)
+            if is_ssl and any("default_server" in listen.lower() for listen in listens):
+                default_ssl.append(summary)
+            if requested and any(name in requested for name in names):
+                matching.append(summary)
     return {
         "serverName": server_name,
         "expectedRoute": expected_route,
@@ -161,6 +166,28 @@ def _server_block_summaries(server_name: str, expected_route: str | None = None)
         "expectedRouteBlocks": expected_blocks,
         "defaultSslBlocks": default_ssl,
     }
+
+
+def _server_blocks(text: str) -> list[str]:
+    blocks: list[str] = []
+    offset = 0
+    while True:
+        match = re.search(r"(?m)^\s*server\s*\{", text[offset:])
+        if not match:
+            break
+        start = offset + match.start()
+        pos = offset + match.end()
+        depth = 1
+        while pos < len(text) and depth > 0:
+            char = text[pos]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+            pos += 1
+        blocks.append(text[start:pos])
+        offset = pos
+    return blocks
 
 
 @router.post("/route-diagnose")
