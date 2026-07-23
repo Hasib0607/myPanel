@@ -236,10 +236,10 @@ server {
             web_root.mkdir(parents=True)
 
             location = acme_location("shop.test", web_root)
-            challenge_root = (web_root / ".well-known" / "acme-challenge").resolve()
 
-            self.assertIn(f"alias {challenge_root}/;", location)
-            self.assertNotIn("try_files", location)
+            self.assertIn(f"root {web_root.resolve()};", location)
+            self.assertIn("try_files $uri =404;", location)
+            self.assertNotIn("alias", location)
 
     def test_similar_wildcard_domains_do_not_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
