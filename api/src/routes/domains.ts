@@ -6,7 +6,7 @@ import { Prisma } from "@prisma/client";
 import { env } from "../config/env.js";
 import { audit } from "../lib/audit.js";
 import { ensureDomainFileStructure, ensureSubdomainFileStructure, subdomainFolderName } from "../lib/domainFiles.js";
-import { buildDeploymentNginxRequest, deploymentIsRoutable, deploymentSslCertificatePathsWhenReady, publishPublicHtmlNginxVhost } from "../lib/deploymentDomainSsl.js";
+import { buildDeploymentNginxRequest, certificateNamesCoverServerName, deploymentIsRoutable, deploymentServerName, deploymentSslCertificatePathsWhenReady, publishPublicHtmlNginxVhost } from "../lib/deploymentDomainSsl.js";
 import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
 import { sysagent } from "../lib/sysagent.js";
@@ -287,6 +287,31 @@ function clearDomainCaches(domainId?: string) {
   const keys = ["domain_list"];
   if (domainId) keys.push(`dns_records:${domainId}`);
   return redis.del(...keys);
+}
+
+async function withLiveDomainSsl<T extends { name: string; forceSsl: boolean; sslEnabled: boolean; sslExpiry?: Date | string | null }>(domain: T) {
+  const serverName = deploymentServerName({ name: domain.name, includeWww: true }) ?? domain.name;
+  try {
+    const cert = await sysagent.certificateFindReusable(domain.name);
+    const liveSslEnabled = Boolean(cert.exists && certificateNamesCoverServerName(serverName, cert.names ?? []));
+    return {
+      ...domain,
+      liveSslEnabled,
+      liveSslExpiry: liveSslEnabled && cert.expiry ? cert.expiry : null,
+      sslHosts: serverName.split(/\s+/).filter(Boolean).map((host) => ({
+        host,
+        covered: liveSslEnabled && certificateNamesCoverServerName(host, cert.names ?? []),
+        expiry: liveSslEnabled ? cert.expiry : null
+      }))
+    };
+  } catch {
+    return {
+      ...domain,
+      liveSslEnabled: false,
+      liveSslExpiry: null,
+      sslHosts: serverName.split(/\s+/).filter(Boolean).map((host) => ({ host, covered: false, expiry: null }))
+    };
+  }
 }
 
 function zodIssueMessage(error: z.ZodError) {
@@ -680,7 +705,8 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
       prisma.domain.count({ where })
     ]);
 
-    return { items, total, page: query.page, pageSize: query.pageSize };
+    const itemsWithLiveSsl = await Promise.all(items.map((item) => withLiveDomainSsl(item)));
+    return { items: itemsWithLiveSsl, total, page: query.page, pageSize: query.pageSize };
   });
 
   app.post("/", async (request, reply) => {
@@ -916,10 +942,11 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
 
   app.get("/:domainId", async (request) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
-    return prisma.domain.findUniqueOrThrow({
+    const domain = await prisma.domain.findUniqueOrThrow({
       where: { id: domainId },
       include: { subdomains: true, dnsRecords: true, mailAccounts: true, deployments: true }
     });
+    return withLiveDomainSsl(domain);
   });
 
   app.patch("/:domainId/status", async (request) => {
@@ -961,7 +988,7 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
     }
     await clearDomainCaches(domainId);
     await audit(request, { action: "UPDATE", resource: "domain", resourceId: domainId, description: `Updated domain ${domain.name}` });
-    return domain;
+    return withLiveDomainSsl(domain);
   });
 
   app.get("/:domainId/health", async (request) => {
@@ -980,6 +1007,8 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
     const hasSpf = domain.dnsRecords.some((record) => record.type === "TXT" && record.value.toLowerCase().includes("v=spf1"));
     const hasDmarc = domain.dnsRecords.some((record) => record.type === "TXT" && record.name.toLowerCase() === "_dmarc");
 
+    const liveSsl = await withLiveDomainSsl(domain);
+
     return {
       domainId: domain.id,
       checks: [
@@ -987,7 +1016,7 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
         { key: "mail_mx", label: "MX record", ok: hasMx, detail: hasMx ? "Mail exchange configured" : "MX record missing" },
         { key: "mail_spf", label: "SPF record", ok: hasSpf, detail: hasSpf ? "SPF policy present" : "SPF TXT record missing" },
         { key: "mail_dmarc", label: "DMARC record", ok: hasDmarc, detail: hasDmarc ? "DMARC policy present" : "DMARC TXT record missing" },
-        { key: "ssl", label: "SSL", ok: domain.sslEnabled, detail: domain.sslEnabled ? "SSL marked enabled" : "SSL not issued yet" },
+        { key: "ssl", label: "SSL", ok: liveSsl.liveSslEnabled, detail: liveSsl.liveSslEnabled ? "Live certificate matches domain" : domain.forceSsl ? "SSL pending or certificate mismatch" : "SSL not issued yet" },
         {
           key: "hosting",
           label: "Hosting",

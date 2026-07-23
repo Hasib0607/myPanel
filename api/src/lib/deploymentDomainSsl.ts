@@ -138,8 +138,13 @@ export async function deploymentHttpsReady(domain: BoundDomain | null) {
 export async function deploymentSslCertificatePathsWhenReady(domain: BoundDomain | null) {
   if (!domain) return {};
   const serverName = deploymentServerName(domain) ?? domain.name;
+  return verifiedSslPathsForServerName(serverName, domain.name);
+}
+
+export async function verifiedSslPathsForServerName(serverName: string, lookupDomain?: string) {
   try {
-    const status = await sysagent.certificateFindReusable(domain.name);
+    const lookup = lookupDomain || serverNameTokens(serverName)[0] || serverName;
+    const status = await sysagent.certificateFindReusable(lookup);
     if (!status.exists || !certificateNamesCoverServerName(serverName, status.names ?? [])) return {};
     return {
       sslCertificate: status.certificate,
@@ -396,15 +401,21 @@ export async function publishDeploymentProxyNginx(input: {
   sslCertificate?: string;
   sslCertificateKey?: string;
 }) {
+  const requestedServerName = input.fqdn;
   const bound: BoundDomain = {
     id: input.fqdn,
     name: input.fqdn.split(" ")[0] ?? input.fqdn,
     forceSsl: input.forceHttps,
     sslEnabled: input.forceHttps
   };
-  const hasExplicitCertificate = Boolean(input.sslCertificate && input.sslCertificateKey);
-  const reusableSslPaths = hasExplicitCertificate || !input.forceHttps ? {} : await deploymentSslCertificatePathsWhenReady(bound);
-  const httpsReady = hasExplicitCertificate || Boolean(reusableSslPaths.sslCertificate && reusableSslPaths.sslCertificateKey);
+  const reusableSslPaths = input.forceHttps ? await verifiedSslPathsForServerName(requestedServerName, bound.name) : {};
+  const explicitMatchesReusable = Boolean(
+    input.sslCertificate &&
+    input.sslCertificateKey &&
+    reusableSslPaths.sslCertificate === input.sslCertificate &&
+    reusableSslPaths.sslCertificateKey === input.sslCertificateKey
+  );
+  const httpsReady = Boolean(reusableSslPaths.sslCertificate && reusableSslPaths.sslCertificateKey);
   return sysagent.deploymentNginx(
     buildDeploymentNginxRequest({
       deploymentId: input.deploymentId,
@@ -418,7 +429,7 @@ export async function publishDeploymentProxyNginx(input: {
       fallbackRootPath: input.fallbackRootPath,
       forceSsl: input.forceHttps && httpsReady,
       requireSsl: input.requireSsl ?? false,
-      ...(hasExplicitCertificate
+      ...(explicitMatchesReusable
         ? { sslCertificate: input.sslCertificate, sslCertificateKey: input.sslCertificateKey }
         : httpsReady ? reusableSslPaths : {})
     })

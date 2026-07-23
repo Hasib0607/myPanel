@@ -265,15 +265,12 @@ async function runSslPreflight(domain: SslDomain, includeWww: boolean) {
 }
 
 async function publishDomainHttpVhost(domainName: string, webRoot: string, includeWww: boolean) {
-  const certName = certbotCertificateName(domainName);
   const serverName = includeWww ? `${domainName} www.${domainName}` : domainName;
   const result = await sysagent.writeStaticNginxVhost({
     name: `domain-${nginxResourceName(domainName)}`,
     serverName,
     rootPath: webRoot,
-    forceHttps: false,
-    sslCertificate: `/etc/letsencrypt/live/${certName}/fullchain.pem`,
-    sslCertificateKey: `/etc/letsencrypt/live/${certName}/privkey.pem`
+    forceHttps: false
   }) as { test?: SysagentCommandResult; reload?: SysagentCommandResult; postReloadCheck?: SysagentCommandResult };
 
   if (result.test && !commandSucceeded(result.test)) {
@@ -566,7 +563,19 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
   app.post("/domains/:domainId/mark-issued", async (request) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const body = z.object({ expiresAt: z.coerce.date().optional() }).parse(request.body ?? {});
-    const expiresAt = body.expiresAt ?? new Date(Date.now() + 90 * 86_400_000);
+    const existing = await prisma.domain.findUniqueOrThrow({ where: { id: domainId } });
+    const cert = await sysagent.certificateFindReusable(existing.name);
+    const serverName = deploymentServerName({ name: existing.name, includeWww: true }) ?? existing.name;
+    if (!cert.exists || !certificateNamesCoverServerName(serverName, cert.names ?? [])) {
+      throw Object.assign(
+        new Error(`Cannot mark SSL issued for ${existing.name}; no matching certificate covers ${serverName}.`),
+        { statusCode: 400 }
+      );
+    }
+    const expiresAt = cert.expiry ? new Date(cert.expiry) : body.expiresAt;
+    if (!expiresAt) {
+      throw Object.assign(new Error(`Cannot mark SSL issued for ${existing.name}; matching certificate has no expiry date.`), { statusCode: 400 });
+    }
     const domain = await prisma.domain.update({
       where: { id: domainId },
       data: {

@@ -20,6 +20,7 @@ import {
   queueGroupCommand
 } from "../lib/laravelProcesses.js";
 import { normalizeDeploymentResourcePolicy } from "../lib/deploymentResourcePolicy.js";
+import { certificateNamesCoverServerName, deploymentServerName } from "../lib/deploymentDomainSsl.js";
 
 const staleDeploymentMs = Number(process.env.GUARDIAN_STALE_DEPLOYMENT_MS ?? 6 * 60_000);
 const queuedReleaseRecoveryMs = Number(process.env.GUARDIAN_QUEUED_RELEASE_RECOVERY_MS ?? 90_000);
@@ -1281,13 +1282,19 @@ async function runSslRenewWatch() {
     select: { id: true, name: true, sslExpiry: true }
   });
   const updated = [];
+  const stale = [];
   for (const domain of domains) {
     try {
-      const status = await sysagent.certificateStatus(domain.name) as { exists: boolean; expiry: string | null };
-      if (status.exists && status.expiry) {
+      const status = await sysagent.certificateFindReusable(domain.name);
+      const serverName = deploymentServerName({ name: domain.name, includeWww: true }) ?? domain.name;
+      const matches = Boolean(status.exists && status.expiry && certificateNamesCoverServerName(serverName, status.names ?? []));
+      if (matches && status.expiry) {
         const sslExpiry = new Date(status.expiry);
         await prisma.domain.update({ where: { id: domain.id }, data: { sslExpiry } });
         updated.push({ domain: domain.name, sslExpiry });
+      } else {
+        await prisma.domain.update({ where: { id: domain.id }, data: { sslEnabled: false, sslExpiry: null } });
+        stale.push({ domain: domain.name, serverName, reason: status.exists ? "certificate SAN mismatch" : "certificate missing" });
       }
     } catch (error) {
       logger.warn("ssl renew watch failed to sync certificate status", {
@@ -1296,7 +1303,7 @@ async function runSslRenewWatch() {
       });
     }
   }
-  return { renew, checked: domains.length, updated };
+  return { renew, checked: domains.length, updated, stale };
 }
 
 export const guardianWorker = new Worker(

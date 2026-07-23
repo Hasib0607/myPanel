@@ -95,6 +95,50 @@ test("apex deployment SSL paths require certificate to cover www too", async () 
   }
 });
 
+test("proxy publish ignores explicit certificates that do not cover the server name", async () => {
+  const { publishDeploymentProxyNginx } = await import("./deploymentDomainSsl.js");
+  const { sysagent } = await import("./sysagent.js");
+  const originalFindReusable = sysagent.certificateFindReusable;
+  const originalDeploymentNginx = sysagent.deploymentNginx;
+  let request: any = null;
+
+  sysagent.certificateFindReusable = async () => ({
+    requested: "need4you.xyz",
+    domain: "boardkini.com",
+    exists: true,
+    expiry: null,
+    names: ["boardkini.com", "www.boardkini.com"],
+    certificate: "/etc/letsencrypt/live/boardkini.com/fullchain.pem",
+    privateKey: "/etc/letsencrypt/live/boardkini.com/privkey.pem"
+  });
+  sysagent.deploymentNginx = async (body: unknown) => {
+    request = body;
+    const ok = { returncode: 0, stdout: "", stderr: "" };
+    return { write: ok, enable: ok, test: ok, reload: ok, configPath: "/etc/nginx/conf.d/domain-need4you.xyz.conf" };
+  };
+
+  try {
+    await publishDeploymentProxyNginx({
+      deploymentId: "dep_1",
+      fqdn: "need4you.xyz",
+      upstreamPort: 10000,
+      rootPath: "/var/www/app",
+      framework: "NEXTJS",
+      fallbackRootPath: null,
+      forceHttps: true,
+      sslCertificate: "/etc/letsencrypt/live/need4you.xyz/fullchain.pem",
+      sslCertificateKey: "/etc/letsencrypt/live/need4you.xyz/privkey.pem"
+    });
+
+    assert.equal(request.forceSsl, false);
+    assert.equal("sslCertificate" in request, false);
+    assert.equal("sslCertificateKey" in request, false);
+  } finally {
+    sysagent.certificateFindReusable = originalFindReusable;
+    sysagent.deploymentNginx = originalDeploymentNginx;
+  }
+});
+
 test("wildcard certificate names cover one-level child hosts only", async () => {
   const { certificateNamesCoverHost } = await import("./deploymentDomainSsl.js");
   assert.equal(certificateNamesCoverHost("shop.example.com", ["*.example.com"]), true);

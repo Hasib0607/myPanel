@@ -4824,6 +4824,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       "before nginx proxy and SSL"
     ).catch(() => undefined);
     let proxyHttpsReady = false;
+    let sslDeploymentWarning: string | null = null;
     if (domain && !backendOnlyLaravel) {
       const tlsSync = await syncDeploymentTlsWithCertificate(domain);
       if (!tlsSync.domain) {
@@ -4904,10 +4905,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         }
       } catch (error) {
         const sslDetail = error instanceof Error ? error.message : String(error);
-        if (deploymentWantsSsl(domain)) {
-          throw new Error(`SSL is required for ${domain.name}, but deployment could not attach or issue a valid certificate. ${sslDetail}`);
-        }
         domain = await disableDeploymentTlsInDatabase(domain, { clearForceSsl: false });
+        sslDeploymentWarning = `SSL is pending for ${domain.name}; deployment stayed live over HTTP. ${sslDetail}`;
         await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "SSL certificate issue warning", {
           warning: sslDetail,
           hint: `Use http://${domain.name}/ until SSL succeeds. Check ALLOW_LIVE_SSL=true, certbot installed, and DNS A record for ${domain.name}.`
@@ -5006,6 +5005,53 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     );
     assertLiveResult(startResult, "Process start");
 
+    if (domain && !backendOnlyLaravel && routeDomains.length > 1) {
+      const primaryName = domain.name.toLowerCase();
+      const secondaryRouteDomains = routeDomains.filter((routeDomain) => routeDomain.name.toLowerCase() !== primaryName);
+      const refreshed = [];
+      for (const routeDomain of secondaryRouteDomains) {
+        try {
+          const tlsSync = await syncDeploymentTlsWithCertificate(routeDomain);
+          const activeRouteDomain = tlsSync.domain ?? routeDomain;
+          const includeWww = isWildcardHostname(activeRouteDomain.name) ? false : await wwwPointsToThisVps(activeRouteDomain);
+          const serverName = deploymentServerName({ ...activeRouteDomain, includeWww }) ?? activeRouteDomain.name;
+          const activeSslPaths = tlsSync.httpsReady ? await deploymentSslCertificatePathsWhenReady({ ...activeRouteDomain, includeWww }) : {};
+          await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", `Refresh secondary proxy vhost for ${activeRouteDomain.name}`, () =>
+            publishDeploymentProxyNginx({
+              deploymentId: deployment.id,
+              fqdn: serverName,
+              upstreamPort: deployment.port,
+              rootPath: appPath,
+              framework: deployment.framework,
+              startCommand: deployment.startCommand,
+              publicDirectory: deployment.publicDirectory,
+              outputDirectory: deployment.outputDirectory,
+              fallbackRootPath: deploymentFallbackRootPath(activeRouteDomain),
+              forceHttps: tlsSync.httpsReady,
+              ...activeSslPaths
+            })
+          );
+          if (!tlsSync.httpsReady && deploymentWantsSsl(activeRouteDomain)) {
+            await ensureAcmeWebroot(activeRouteDomain);
+            const sslJob = await sslQueue.add("issue", deploymentSslQueuePayload(activeRouteDomain, "deployment-secondary-refresh", includeWww));
+            sslDeploymentWarning = sslDeploymentWarning ?? `SSL is pending for one or more secondary domains; deployment stayed live over HTTP where needed.`;
+            refreshed.push({ domain: activeRouteDomain.name, httpsReady: false, sslQueued: true, jobId: sslJob.id });
+          } else {
+            refreshed.push({ domain: activeRouteDomain.name, httpsReady: tlsSync.httpsReady, sslQueued: false });
+          }
+        } catch (error) {
+          const warning = error instanceof Error ? error.message : String(error);
+          sslDeploymentWarning = sslDeploymentWarning ?? `Secondary domain proxy refresh warning: ${warning}`;
+          await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", `Secondary proxy refresh warning for ${routeDomain.name}`, {
+            warning
+          }, "warn");
+        }
+      }
+      if (refreshed.length > 0) {
+        await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "Secondary domain proxy refresh completed", { refreshed });
+      }
+    }
+
     if (await deploymentRunsLaravel(deployment.framework, appPath)) {
       const queueConfig = laravelWorkerConfig(deploymentProcessConfig(deployment.processConfig).laravelWorkers);
       await sysagent.deploymentLaravelWorkers({
@@ -5042,7 +5088,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       ? await prisma.deploymentRelease.findUnique({ where: { id: releaseId }, select: { commitSha: true } })
       : null;
     await markRelease(releaseId, action === "rollback" ? "ROLLED_BACK" : "SUCCEEDED", startedAt);
-    const healthStatus = publicRouteWarning || healthOutcome.degraded ? "DEGRADED" : "HEALTHY";
+    const healthStatus = publicRouteWarning || healthOutcome.degraded || sslDeploymentWarning ? "DEGRADED" : "HEALTHY";
     await prisma.deployment.update({
       where: { id: deployment.id },
       data: {
@@ -5053,8 +5099,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         ...(completedRelease?.commitSha ? { commitSha: completedRelease.commitSha } : {})
       }
     });
-    await writeLog(deployment.id, releaseId, action === "rollback" ? "ROLLBACK" : "SUCCEEDED", `${action} completed`, { dryRun: false, publicRouteWarning });
-    return { dryRun: false, completed: true, status: "RUNNING", healthStatus, publicRouteWarning };
+    await writeLog(deployment.id, releaseId, action === "rollback" ? "ROLLBACK" : "SUCCEEDED", `${action} completed`, { dryRun: false, publicRouteWarning, sslDeploymentWarning });
+    return { dryRun: false, completed: true, status: "RUNNING", healthStatus, publicRouteWarning, sslDeploymentWarning };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     if (isManualDeploymentStopError(error) || await deploymentIsManuallyStopped(deployment.id)) {

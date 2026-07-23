@@ -18,6 +18,8 @@ type Domain = {
   status: DomainStatus;
   sslEnabled: boolean;
   sslExpiry: string | null;
+  liveSslEnabled?: boolean;
+  liveSslExpiry?: string | null;
   forceSsl: boolean;
   hostingMode: DomainHostingMode;
   documentRoot: string;
@@ -94,11 +96,17 @@ type SortDirection = "asc" | "desc";
 
 function compareSsl(a: Domain, b: Domain, direction: SortDirection) {
   const rank = (domain: Domain) => {
-    if (domain.sslEnabled) return direction === "asc" ? 1 : 0;
+    if (domain.liveSslEnabled) return direction === "asc" ? 1 : 0;
     if (domain.forceSsl) return direction === "asc" ? 0 : 1;
     return 2;
   };
   return rank(a) - rank(b);
+}
+
+function sslLabel(domain: Domain) {
+  if (domain.liveSslEnabled) return "enabled";
+  if (domain.forceSsl) return "pending";
+  return "off";
 }
 
 function statusClass(status: DomainStatus) {
@@ -695,7 +703,7 @@ export function DomainsClient({
                         <div className="truncate text-xs text-panel-muted">{hostingLabel(domain)}</div>
                       </div>
                     </td>
-                    <td className="px-4 py-3">{domain.sslEnabled ? "enabled" : domain.forceSsl ? "pending" : "off"}</td>
+                    <td className="px-4 py-3">{sslLabel(domain)}</td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2">
                         <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`${linkBase}/${domain.id}/overview`} title="View domain">

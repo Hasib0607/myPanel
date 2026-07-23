@@ -13,6 +13,8 @@ type DomainDetail = {
   status: string;
   sslEnabled: boolean;
   sslExpiry: string | null;
+  liveSslEnabled?: boolean;
+  liveSslExpiry?: string | null;
   forceSsl: boolean;
   subdomains: Array<{ id: string; name: string; target: string; sslEnabled: boolean }>;
   dnsRecords: Array<{ id: string; type: string; name: string; value: string; ttl: number; priority: number | null }>;
@@ -35,6 +37,8 @@ export function DomainOverviewClient({ domainId }: { domainId: string }) {
   });
 
   const data = domain.data;
+  const liveSslEnabled = Boolean(data?.liveSslEnabled);
+  const sslValue = liveSslEnabled ? "Enabled" : data?.forceSsl ? "Pending" : "Off";
 
   return (
     <>
@@ -44,7 +48,7 @@ export function DomainOverviewClient({ domainId }: { domainId: string }) {
           <StatCard label="DNS Records" value={data?.dnsRecords.length ?? "..."} />
           <StatCard label="Subdomains" value={data?.subdomains.length ?? "..."} />
           <StatCard label="Mailboxes" value={data?.mailAccounts.length ?? "..."} />
-          <StatCard label="SSL" value={data?.sslEnabled ? "Enabled" : data?.forceSsl ? "Pending" : "Off"} tone={data?.sslEnabled ? "default" : "warn"} />
+          <StatCard label="SSL" value={sslValue} tone={liveSslEnabled ? "default" : "warn"} />
         </div>
 
         <div className="grid grid-cols-[1fr_360px] gap-6">
