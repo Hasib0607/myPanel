@@ -211,7 +211,7 @@ async function resolvePublicNameServers(domain: string) {
   throw Object.assign(new Error(`No public nameservers found. Resolver checks: ${errors.join("; ") || "none"}`), { statusCode: 400 });
 }
 
-async function assertDomainUsesHostingNameServers(domain: string, nameServers: ActiveNameServer[]) {
+export async function assertDomainUsesHostingNameServers(domain: string, nameServers: ActiveNameServer[]) {
   if (!env.REQUIRE_DOMAIN_NAMESERVER_MATCH) return;
 
   const expected = nameServers.map((nameServer) => normalizeNameServer(nameServer.hostname)).filter(Boolean);

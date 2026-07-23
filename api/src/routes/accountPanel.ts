@@ -19,7 +19,7 @@ import { publishDomainDnsZone } from "../lib/domainDnsPublish.js";
 import { detectDeploymentFiles } from "../lib/deploymentDetection.js";
 import { deploymentRuntimeReview, prepareDeploymentRuntimeTools } from "../lib/deploymentRuntimeReview.js";
 import { processConfigWithoutManualStop, requestDeploymentManualStop } from "../lib/deploymentStopControl.js";
-import { boundDomainFromBinding, deploymentFallbackRootPath, deploymentIsRoutable, deploymentServerName, buildDeploymentNginxRequest, publishDeploymentProxyNginx } from "../lib/deploymentDomainSsl.js";
+import { boundDomainFromBinding, certificateNamesCoverHost, certificateNamesCoverServerName, deploymentFallbackRootPath, deploymentIsRoutable, deploymentServerName, buildDeploymentNginxRequest, publishDeploymentProxyNginx } from "../lib/deploymentDomainSsl.js";
 import { prisma } from "../lib/prisma.js";
 import { resolvePublicA } from "../lib/publicDns.js";
 import { deleteSecret, getSecret, getSecretRecord, putSecret } from "../lib/secrets.js";
@@ -36,7 +36,7 @@ import {
   queueGroupCommand,
   renderLaravelProcessCommand
 } from "../lib/laravelProcesses.js";
-import { defaultRecords } from "./domains.js";
+import { assertDomainUsesHostingNameServers, defaultRecords } from "./domains.js";
 import { renderZone } from "./dns.js";
 
 function accountId(request: any) {
@@ -1879,6 +1879,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     await validateAccountHostingSettings(account.id, { ...body, redirectUrl });
     const vpsIp = await currentVpsIp();
     const nameServers = await activeNameServers();
+    await assertDomainUsesHostingNameServers(body.name, nameServers);
     try {
       const domain = await prisma.$transaction(async (tx) => {
         const created = await tx.domain.create({
@@ -1968,6 +1969,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
           continue;
         }
         assertLimit(currentDomainCount, account.domainLimit, "Domain");
+        await assertDomainUsesHostingNameServers(name, nameServers);
         const domain = await prisma.$transaction(async (tx) => {
           const created = await tx.domain.create({
             data: {
@@ -2368,11 +2370,13 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
   app.get("/ssl/domains/:domainId/status", async (request: any) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
-    const effectiveExpiry = domain.sslEnabled ? domain.sslExpiry : null;
+    const cert = await sysagent.certificateFindReusable(domain.name).catch(() => null);
+    const certificateMatches = Boolean(cert?.exists && certificateNamesCoverServerName(`${domain.name} www.${domain.name}`, cert.names ?? []));
+    const effectiveExpiry = domain.sslEnabled && certificateMatches && cert?.expiry ? new Date(cert.expiry) : null;
     return {
       domainId: domain.id,
       domain: domain.name,
-      sslEnabled: domain.sslEnabled,
+      sslEnabled: domain.sslEnabled && certificateMatches,
       sslExpiry: effectiveExpiry,
       forceSsl: domain.forceSsl,
       activeJobId: await activeAccountSslJobIdForResource({ domainId: domain.id }),
@@ -2383,12 +2387,13 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
   app.get("/ssl/subdomains/:subdomainId/status", async (request: any) => {
     const { subdomainId } = z.object({ subdomainId: z.string() }).parse(request.params);
     const target = await accountSubdomainSslTarget(request, subdomainId);
-    const cert = await sysagent.certificateStatus(certbotCertificateName(target.fqdn)) as { exists?: boolean; expiry?: string | null };
-    const expiry = cert.exists && cert.expiry ? new Date(cert.expiry) : null;
+    const cert = await sysagent.certificateFindReusable(target.fqdn) as { exists?: boolean; expiry?: string | null; names?: string[] };
+    const certificateMatches = Boolean(cert.exists && certificateNamesCoverHost(target.fqdn, cert.names ?? []));
+    const expiry = certificateMatches && cert.expiry ? new Date(cert.expiry) : null;
     return {
       subdomainId,
       domain: target.fqdn,
-      sslEnabled: target.subdomain.sslEnabled && Boolean(cert.exists),
+      sslEnabled: target.subdomain.sslEnabled && certificateMatches,
       sslExpiry: expiry,
       forceSsl: target.subdomain.sslEnabled,
       activeJobId: await activeAccountSslJobIdForResource({ subdomainId }),

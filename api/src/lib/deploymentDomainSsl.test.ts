@@ -67,6 +67,41 @@ test("subdomain deployments reuse matching wildcard certificate paths", async ()
   }
 });
 
+test("apex deployment SSL paths require certificate to cover www too", async () => {
+  const { deploymentSslCertificatePathsWhenReady } = await import("./deploymentDomainSsl.js");
+  const { sysagent } = await import("./sysagent.js");
+  const original = sysagent.certificateFindReusable;
+  sysagent.certificateFindReusable = async () => ({
+    requested: "example.com",
+    domain: "example.com",
+    exists: true,
+    expiry: null,
+    names: ["example.com"],
+    certificate: "/etc/letsencrypt/live/example.com/fullchain.pem",
+    privateKey: "/etc/letsencrypt/live/example.com/privkey.pem"
+  });
+
+  try {
+    const paths = await deploymentSslCertificatePathsWhenReady({
+      id: "dom_1",
+      name: "example.com",
+      forceSsl: true,
+      includeWww: true
+    });
+
+    assert.deepEqual(paths, {});
+  } finally {
+    sysagent.certificateFindReusable = original;
+  }
+});
+
+test("wildcard certificate names cover one-level child hosts only", async () => {
+  const { certificateNamesCoverHost } = await import("./deploymentDomainSsl.js");
+  assert.equal(certificateNamesCoverHost("shop.example.com", ["*.example.com"]), true);
+  assert.equal(certificateNamesCoverHost("deep.shop.example.com", ["*.example.com"]), false);
+  assert.equal(certificateNamesCoverHost("example.com", ["*.example.com"]), false);
+});
+
 test("wildcard deployment skips HTTP ACME webroot preparation", async () => {
   const { ensureAcmeWebroot } = await import("./deploymentDomainSsl.js");
   const { sysagent } = await import("./sysagent.js");

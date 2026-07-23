@@ -11,6 +11,7 @@ import { redis } from "../lib/redis.js";
 import { sysagent, type SysagentCommandResult } from "../lib/sysagent.js";
 import { certbotCertificateName, isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
 import { currentVpsIp } from "../lib/serverIp.js";
+import { certificateNamesCoverHost, certificateNamesCoverServerName, deploymentServerName } from "../lib/deploymentDomainSsl.js";
 
 const sslActionSchema = z.object({
   email: z.string().email().optional(),
@@ -398,11 +399,14 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
   app.get("/domains/:domainId/status", async (request) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const domain = await prisma.domain.findUniqueOrThrow({ where: { id: domainId } });
-    const effectiveExpiry = domain.sslEnabled ? domain.sslExpiry : null;
+    const cert = await sysagent.certificateFindReusable(domain.name).catch(() => null);
+    const serverName = deploymentServerName({ name: domain.name, includeWww: true }) ?? domain.name;
+    const certificateMatches = Boolean(cert?.exists && certificateNamesCoverServerName(serverName, cert.names ?? []));
+    const effectiveExpiry = domain.sslEnabled && certificateMatches && cert?.expiry ? new Date(cert.expiry) : null;
     return {
       domainId: domain.id,
       domain: domain.name,
-      sslEnabled: domain.sslEnabled,
+      sslEnabled: domain.sslEnabled && certificateMatches,
       sslExpiry: effectiveExpiry,
       forceSsl: domain.forceSsl,
       activeJobId: await activeSslJobIdForResource({ domainId: domain.id }),
@@ -413,12 +417,13 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
   app.get("/subdomains/:subdomainId/status", async (request) => {
     const { subdomainId } = z.object({ subdomainId: z.string() }).parse(request.params);
     const target = await subdomainSslTarget(subdomainId);
-    const cert = await sysagent.certificateStatus(certbotCertificateName(target.fqdn));
-    const expiry = cert.exists && cert.expiry ? new Date(cert.expiry) : null;
+    const cert = await sysagent.certificateFindReusable(target.fqdn);
+    const certificateMatches = Boolean(cert.exists && certificateNamesCoverHost(target.fqdn, cert.names ?? []));
+    const expiry = certificateMatches && cert.expiry ? new Date(cert.expiry) : null;
     return {
       subdomainId,
       domain: target.fqdn,
-      sslEnabled: target.subdomain.sslEnabled && cert.exists,
+      sslEnabled: target.subdomain.sslEnabled && certificateMatches,
       sslExpiry: expiry,
       forceSsl: target.subdomain.sslEnabled,
       activeJobId: await activeSslJobIdForResource({ subdomainId }),

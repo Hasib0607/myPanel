@@ -87,7 +87,32 @@ export function deploymentWantsSsl(domain: BoundDomain | null) {
 export function deploymentServerName(domain: { name: string; includeWww?: boolean } | null | undefined) {
   if (!domain?.name) return null;
   if (domain.includeWww === false) return domain.name;
-  return `${domain.name} www.${domain.name}`;
+  const labels = domain.name.replace(/^\*\./, "").split(".").filter(Boolean);
+  if (domain.includeWww === true || labels.length <= 2) return `${domain.name} www.${domain.name}`;
+  return domain.name;
+}
+
+function serverNameTokens(serverName: string) {
+  return serverName.split(/\s+/).map((token) => token.trim().toLowerCase()).filter(Boolean);
+}
+
+export function certificateNamesCoverHost(hostname: string, names: string[]) {
+  const requested = hostname.toLowerCase().replace(/\.$/, "");
+  const requestedLabels = requested.split(".");
+  for (const name of names) {
+    const candidate = name.toLowerCase().replace(/\.$/, "");
+    if (candidate === requested) return true;
+    if (!candidate.startsWith("*.")) continue;
+    const parent = candidate.slice(2);
+    const parentLabels = parent.split(".");
+    if (requested.endsWith(`.${parent}`) && requestedLabels.length === parentLabels.length + 1) return true;
+  }
+  return false;
+}
+
+export function certificateNamesCoverServerName(serverName: string, names: string[]) {
+  const tokens = serverNameTokens(serverName);
+  return tokens.length > 0 && tokens.every((token) => certificateNamesCoverHost(token, names));
 }
 
 export function deploymentSslCertificatePaths(domain: BoundDomain | null) {
@@ -101,9 +126,10 @@ export function deploymentSslCertificatePaths(domain: BoundDomain | null) {
 
 export async function deploymentHttpsReady(domain: BoundDomain | null) {
   if (!domain?.name) return false;
+  const serverName = deploymentServerName(domain) ?? domain.name;
   try {
     const status = await sysagent.certificateFindReusable(domain.name);
-    return Boolean(status.exists);
+    return Boolean(status.exists && certificateNamesCoverServerName(serverName, status.names ?? []));
   } catch {
     return false;
   }
@@ -111,9 +137,10 @@ export async function deploymentHttpsReady(domain: BoundDomain | null) {
 
 export async function deploymentSslCertificatePathsWhenReady(domain: BoundDomain | null) {
   if (!domain) return {};
+  const serverName = deploymentServerName(domain) ?? domain.name;
   try {
     const status = await sysagent.certificateFindReusable(domain.name);
-    if (!status.exists) return {};
+    if (!status.exists || !certificateNamesCoverServerName(serverName, status.names ?? [])) return {};
     return {
       sslCertificate: status.certificate,
       sslCertificateKey: status.privateKey
