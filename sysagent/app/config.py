@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     backup_root: str = "/var/backups/vps-panel"
     file_manager_root: str = "/var/www"
     guardian_file_watch_roots: str = "/var/www"
+    vps_ip: str = ""
     nginx_sites_available: str = ""
     nginx_sites_enabled: str = ""
 

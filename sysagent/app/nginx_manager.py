@@ -32,16 +32,30 @@ def route_ownership_header(name: str) -> str:
     return f'    add_header {ROUTE_OWNERSHIP_HEADER} "{name}" always;\n'
 
 
-def server_primary_ip() -> str | None:
-    if not settings.allow_live_nginx:
+def _valid_ipv4(value: str) -> str | None:
+    token = value.strip()
+    if not re.match(r"^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$", token):
         return None
+    if token.startswith("127."):
+        return None
+    return token
+
+
+def server_listen_ips() -> list[str]:
+    if not settings.allow_live_nginx:
+        return []
+    ips: list[str] = []
+    configured_ip = _valid_ipv4(getattr(settings, "vps_ip", "") or os.environ.get("VPS_IP", ""))
+    if configured_ip:
+        ips.append(configured_ip)
     result = run_command(["hostname", "-I"], allow_live=DEPLOYMENT_COMMANDS_LIVE)
     if result.get("returncode") != 0:
-        return None
+        return ips
     for token in (result.get("stdout") or "").split():
-        if token and not token.startswith("127."):
-            return token
-    return None
+        ip = _valid_ipv4(token)
+        if ip and ip not in ips:
+            ips.append(ip)
+    return ips
 
 
 def nginx_listen_directives(port: int, *, ssl: bool = False, http2: bool = False) -> str:
@@ -52,9 +66,8 @@ def nginx_listen_directives(port: int, *, ssl: bool = False, http2: bool = False
         flags.append("http2")
     suffix = f" {' '.join(flags)}" if flags else ""
     directives = [f"    listen {port}{suffix};\n"]
-    primary_ip = server_primary_ip()
-    if primary_ip:
-        directives.append(f"    listen {primary_ip}:{port}{suffix};\n")
+    for ip in server_listen_ips():
+        directives.append(f"    listen {ip}:{port}{suffix};\n")
     return "".join(directives)
 
 

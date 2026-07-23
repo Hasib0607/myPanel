@@ -75,9 +75,11 @@ class NginxManagerTests(unittest.TestCase):
 
     def test_listen_directives_include_primary_ip_in_live_mode(self) -> None:
         previous_allow_live = nginx_manager.settings.allow_live_nginx
+        previous_vps_ip = getattr(nginx_manager.settings, "vps_ip", "")
         previous_run_command = nginx_manager.run_command
         try:
             nginx_manager.settings.allow_live_nginx = True
+            nginx_manager.settings.vps_ip = ""
             nginx_manager.run_command = lambda *args, **kwargs: {
                 "returncode": 0,
                 "stdout": "127.0.0.1 72.60.235.117\n",
@@ -90,6 +92,29 @@ class NginxManagerTests(unittest.TestCase):
             )
         finally:
             nginx_manager.settings.allow_live_nginx = previous_allow_live
+            nginx_manager.settings.vps_ip = previous_vps_ip
+            nginx_manager.run_command = previous_run_command
+
+    def test_listen_directives_include_configured_public_ip_before_local_ips(self) -> None:
+        previous_allow_live = nginx_manager.settings.allow_live_nginx
+        previous_vps_ip = getattr(nginx_manager.settings, "vps_ip", "")
+        previous_run_command = nginx_manager.run_command
+        try:
+            nginx_manager.settings.allow_live_nginx = True
+            nginx_manager.settings.vps_ip = "72.60.235.117"
+            nginx_manager.run_command = lambda *args, **kwargs: {
+                "returncode": 0,
+                "stdout": "10.0.0.5 127.0.0.1\n",
+                "stderr": "",
+            }
+
+            self.assertEqual(
+                nginx_listen_directives(443, ssl=True, http2=True),
+                "    listen 443 ssl http2;\n    listen 72.60.235.117:443 ssl http2;\n    listen 10.0.0.5:443 ssl http2;\n",
+            )
+        finally:
+            nginx_manager.settings.allow_live_nginx = previous_allow_live
+            nginx_manager.settings.vps_ip = previous_vps_ip
             nginx_manager.run_command = previous_run_command
 
     def test_route_ownership_config_seen_accepts_mixed_case_nginx_dump(self) -> None:
