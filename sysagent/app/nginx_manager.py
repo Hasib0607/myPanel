@@ -119,6 +119,17 @@ def certificate_dns_names(cert: Path) -> list[str]:
     return sorted({name.lower() for name in re.findall(r"DNS:([^,\s]+)", result.get("stdout") or "", re.IGNORECASE)})
 
 
+def certificate_names_cover_server_name(server_name: str, names: list[str]) -> bool:
+    tokens = server_name_tokens(server_name)
+    return bool(tokens) and all(certificate_names_cover(token, names) for token in tokens)
+
+
+def certificate_file_covers_server_name(cert: Path, server_name: str) -> bool:
+    if not cert.is_file():
+        return False
+    return certificate_names_cover_server_name(server_name, certificate_dns_names(cert))
+
+
 def letsencrypt_certificate_exists(domain: str, *, require_name_match: bool = True) -> bool:
     primary = certificate_name_for_server_name(domain)
     cert = Path(f"/etc/letsencrypt/live/{primary}/fullchain.pem")

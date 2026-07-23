@@ -28,6 +28,13 @@ def certbot_should_include_www(domain: str, include_www: bool) -> bool:
     return len(labels) <= 2
 
 
+def certificate_required_names(domain: str, include_www: bool) -> list[str]:
+    names = [domain]
+    if certbot_should_include_www(domain, include_www):
+        names.append(f"www.{domain}")
+    return names
+
+
 class CertificateRequest(BaseModel):
     domain: str = Field(pattern=r"^[a-zA-Z0-9.-]+$")
     email: str
@@ -368,7 +375,32 @@ def issue_certificate(payload: CertificateRequest) -> dict:
     if certbot_should_include_www(payload.domain, payload.includeWww):
         command.extend(["-d", f"www.{payload.domain}", "--expand"])
 
-    return run_command(command, allow_live=settings.allow_live_ssl, timeout=settings.ssl_certbot_timeout_seconds)
+    result = run_command(command, allow_live=settings.allow_live_ssl, timeout=settings.ssl_certbot_timeout_seconds)
+    if result.get("returncode") != 0 or result.get("dryRun"):
+        return result
+
+    cert_name = payload.certName or payload.domain
+    names = certificate_names(cert_name)
+    required_names = certificate_required_names(payload.domain, payload.includeWww)
+    missing = [name for name in required_names if not certificate_names_cover(name, names)]
+    if missing:
+        return {
+            **result,
+            "returncode": 1,
+            "stderr": (
+                f"{result.get('stderr') or ''}\n"
+                f"Certbot completed, but installed certificate {cert_name!r} does not cover "
+                f"{', '.join(missing)}. Certificate SAN={', '.join(names) or 'none'}."
+            ).strip(),
+            "certificateNames": names,
+            "requiredNames": required_names,
+        }
+
+    return {
+        **result,
+        "certificateNames": names,
+        "requiredNames": required_names,
+    }
 
 
 def dns_hook_script(zone_path: Path, zone_dir: Path, named_conf_local: Path, parent_domain: str, action: str, propagation_seconds: int) -> str:

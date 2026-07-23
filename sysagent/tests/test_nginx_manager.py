@@ -41,6 +41,7 @@ from app.nginx_manager import (
     _nginx_include_text_loads_directory,
     acme_location,
     certificate_name_for_server_name,
+    certificate_names_cover_server_name,
     make_web_root_readable,
     nginx_listen_directives,
     probe_host_for_server_name,
@@ -106,6 +107,32 @@ class NginxManagerTests(unittest.TestCase):
     def test_certificate_name_for_wildcard_server_name_uses_certbot_name(self) -> None:
         self.assertEqual(certificate_name_for_server_name("*.ebitan.store"), "wildcard.ebitan.store")
         self.assertEqual(certificate_name_for_server_name("shop.ebitan.store"), "shop.ebitan.store")
+
+    def test_certificate_names_cover_all_server_name_tokens(self) -> None:
+        self.assertTrue(
+            certificate_names_cover_server_name(
+                "example.com www.example.com",
+                ["example.com", "www.example.com"],
+            )
+        )
+        self.assertFalse(
+            certificate_names_cover_server_name(
+                "example.com www.example.com",
+                ["example.com"],
+            )
+        )
+        self.assertTrue(
+            certificate_names_cover_server_name(
+                "shop.example.com",
+                ["*.example.com"],
+            )
+        )
+        self.assertFalse(
+            certificate_names_cover_server_name(
+                "deep.shop.example.com",
+                ["*.example.com"],
+            )
+        )
 
     def test_server_name_has_wildcard_detects_any_token(self) -> None:
         self.assertTrue(server_name_has_wildcard("*.ebitans.store"))

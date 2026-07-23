@@ -15,6 +15,7 @@ from app.nginx_paths import nginx_sites_available, nginx_sites_enabled
 from app.nginx_manager import (
     ROUTE_OWNERSHIP_HEADER,
     acme_location,
+    certificate_file_covers_server_name,
     loaded_conflicting_config_files,
     make_web_root_readable,
     nginx_listen_directives,
@@ -149,6 +150,10 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
     if has_ssl and settings.allow_live_nginx and (not ssl_certificate.exists() or not ssl_certificate_key.exists()):
         if body.requireSsl:
             raise HTTPException(status_code=409, detail="SSL certificate files do not exist yet")
+        has_ssl = False
+    if has_ssl and settings.allow_live_nginx and not certificate_file_covers_server_name(ssl_certificate, body.serverName):
+        if body.requireSsl:
+            raise HTTPException(status_code=409, detail=f"SSL certificate does not cover server_name {body.serverName}")
         has_ssl = False
 
     if (body.forceHttps or has_ssl) and not has_ssl:
@@ -392,6 +397,10 @@ def write_redirect_vhost(body: RedirectVhostRequest) -> dict:
     if has_ssl and settings.allow_live_nginx and (not ssl_certificate.exists() or not ssl_certificate_key.exists()):
         if body.requireSsl:
             raise HTTPException(status_code=409, detail="SSL certificate files do not exist yet")
+        has_ssl = False
+    if has_ssl and settings.allow_live_nginx and not certificate_file_covers_server_name(ssl_certificate, body.serverName):
+        if body.requireSsl:
+            raise HTTPException(status_code=409, detail=f"SSL certificate does not cover server_name {body.serverName}")
         has_ssl = False
 
     config = (

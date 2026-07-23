@@ -42,6 +42,7 @@ from app.nginx_paths import nginx_sites_available, nginx_sites_enabled
 from app.nginx_manager import (
     ROUTE_OWNERSHIP_HEADER,
     acme_location,
+    certificate_file_covers_server_name,
     letsencrypt_certificate_exists,
     loaded_conflicting_config_files,
     nginx_listen_directives,
@@ -2362,6 +2363,10 @@ def nginx(body: NginxRequest) -> dict:
         if has_ssl and settings.allow_live_nginx and (not ssl_certificate.exists() or not ssl_certificate_key.exists()):
             if body.requireSsl:
                 return blocked_command("SSL certificate files do not exist yet", ["write-nginx", config_name], path_info(body.rootPath))
+            has_ssl = False
+        if has_ssl and settings.allow_live_nginx and not certificate_file_covers_server_name(ssl_certificate, server_name):
+            if body.requireSsl:
+                return blocked_command(f"SSL certificate does not cover server_name {server_name}", ["write-nginx", config_name], path_info(body.rootPath))
             has_ssl = False
 
         fallback_location = ""
