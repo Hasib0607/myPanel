@@ -15,6 +15,7 @@
     "verify:phase11": "tsx src/scripts/verifyPhase11.ts",
     "migrate:deployment-ports": "tsx src/scripts/migrateDeploymentPorts.ts",
     "repair:subdomain-routes": "tsx src/scripts/repairSubdomainDeploymentRoutes.ts",
+    "repair:ssl-vhosts": "tsx src/scripts/repairSslVhosts.ts",
     "sync:domain-hosts": "tsx src/scripts/syncDomainHosts.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
