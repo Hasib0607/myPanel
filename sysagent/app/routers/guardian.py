@@ -692,9 +692,21 @@ def reload_nginx() -> dict[str, Any]:
 def restart_nginx() -> dict[str, Any]:
     test = run_command(["nginx", "-t"], timeout=30)
     if test.get("returncode") != 0:
-        return {"action": "restart-nginx", "restarted": False, "test": test, "restart": None}
-    restart_result = run_command(["systemctl", "restart", "nginx"], timeout=30)
-    return {"action": "restart-nginx", "restarted": restart_result.get("returncode") == 0, "test": test, "restart": restart_result}
+        return {"action": "restart-nginx", "restarted": False, "test": test, "restart": None, "start": None, "status": None}
+    restart_result = run_command(["systemctl", "restart", "nginx"], timeout=60)
+    start_result = None
+    if restart_result.get("returncode") != 0:
+        start_result = run_command(["systemctl", "start", "nginx"], timeout=60)
+    status_result = run_command(["systemctl", "status", "nginx", "--no-pager", "-l"], timeout=30)
+    recovered = restart_result.get("returncode") == 0 or (start_result is not None and start_result.get("returncode") == 0)
+    return {
+        "action": "restart-nginx",
+        "restarted": recovered,
+        "test": test,
+        "restart": restart_result,
+        "start": start_result,
+        "status": status_result,
+    }
 
 
 @router.post("/actions/cleanup-logs")
