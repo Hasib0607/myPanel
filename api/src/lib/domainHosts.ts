@@ -1,5 +1,5 @@
 import { prisma } from "./prisma.js";
-import { resolvePublicA } from "./publicDns.js";
+import { checkLetsEncryptCaa, resolvePublicA } from "./publicDns.js";
 import { currentVpsIp } from "./serverIp.js";
 import { sysagent } from "./sysagent.js";
 import { certificateNamesCoverHost } from "./deploymentDomainSsl.js";
@@ -184,6 +184,13 @@ export async function refreshDomainHostDns(domain: DomainRef, expectedIp?: strin
       if (status === "MISMATCH") {
         error = `${host.hostname} resolves to ${records.join(", ") || "no A record"}, expected ${targetIp}.`;
       }
+      if (status === "READY" && domain.forceSsl) {
+        const caa = await checkLetsEncryptCaa(host.hostname, { wildcard: isWildcardHostname(host.hostname) });
+        if (!caa.allowed) {
+          status = "MISMATCH";
+          error = caa.message;
+        }
+      }
     } catch (caught) {
       status = "PENDING";
       error = caught instanceof Error ? caught.message : "Public DNS lookup failed.";
@@ -214,6 +221,13 @@ export async function refreshSubdomainHostDns(subdomain: SubdomainRef, expectedI
     status = records.includes(targetIp) ? "READY" : "MISMATCH";
     if (status === "MISMATCH") {
       error = `${row.hostname} resolves to ${records.join(", ") || "no A record"}, expected ${targetIp}.`;
+    }
+    if (status === "READY" && subdomain.sslEnabled) {
+      const caa = await checkLetsEncryptCaa(row.hostname, { wildcard: isWildcardHostname(row.hostname) });
+      if (!caa.allowed) {
+        status = "MISMATCH";
+        error = caa.message;
+      }
     }
   } catch (caught) {
     status = "PENDING";

@@ -66,6 +66,13 @@ function hostDnsReady(hostname: string, dnsResults: Array<{ hostname: string; dn
   return Boolean(dnsResults?.find((row) => normalizeHostname(row.hostname) === normalizeHostname(hostname) && row.dnsStatus === "READY"));
 }
 
+function repairAction(reason: string) {
+  if (/dns|CAA/i.test(reason)) return "Update DNS/CAA, then Guardian will retry SSL.";
+  if (/served certificate/i.test(reason)) return "Republish HTTPS vhost and verify the served certificate.";
+  if (/SAN mismatch/i.test(reason)) return "Issue a certificate covering every hostname.";
+  return "Queue SSL repair when DNS is ready.";
+}
+
 async function queueDomainRepair(
   domain: { id: string; name: string; documentRoot: string; forceSsl: boolean; account?: { homeRoot: string | null } | null },
   reason: string,
@@ -212,7 +219,7 @@ export async function runDomainHostSync(options: SyncOptions = {}) {
         const wwwHost = `www.${normalizeHostname(domain.name)}`;
         const wwwWanted = desiredHostnames.includes(wwwHost);
         const wwwReady = wwwWanted && hostDnsReady(wwwHost, dnsResults, includeDns);
-        stale.push({ type: "domain", domain: domain.name, reason, servedFailures, dnsReady: { apex: apexReady, www: wwwWanted ? wwwReady : null } });
+        stale.push({ type: "domain", domain: domain.name, reason, action: repairAction(reason), servedFailures, dnsReady: { apex: apexReady, www: wwwWanted ? wwwReady : null } });
         if (queueRepair) {
           const needsRepair = desiredHostnames.some((hostname) =>
             hostDnsReady(hostname, dnsResults, includeDns)
@@ -245,7 +252,7 @@ export async function runDomainHostSync(options: SyncOptions = {}) {
       } else {
         const reason = !cert?.exists ? "certificate missing" : !fileMatches ? "certificate SAN mismatch" : "served certificate mismatch";
         const dnsReady = hostDnsReady(fqdn, dnsResult ? [dnsResult] : null, includeDns);
-        stale.push({ type: "subdomain", domain: fqdn, reason, servedFailures, dnsReady });
+        stale.push({ type: "subdomain", domain: fqdn, reason, action: repairAction(reason), servedFailures, dnsReady });
         if (queueRepair && wantsSsl && dnsReady) repairQueued.push(await queueSubdomainRepair(subdomain, reason));
       }
     } catch (error) {

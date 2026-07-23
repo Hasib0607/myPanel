@@ -139,6 +139,88 @@ test("proxy publish ignores explicit certificates that do not cover the server n
   }
 });
 
+test("proxy publish keeps HTTP when apex certificate does not cover www", async () => {
+  const { publishDeploymentProxyNginx } = await import("./deploymentDomainSsl.js");
+  const { sysagent } = await import("./sysagent.js");
+  const originalFindReusable = sysagent.certificateFindReusable;
+  const originalDeploymentNginx = sysagent.deploymentNginx;
+  let request: any = null;
+
+  sysagent.certificateFindReusable = async () => ({
+    requested: "need4home.xyz",
+    domain: "need4home.xyz",
+    exists: true,
+    expiry: "2026-10-20T00:00:00.000Z",
+    names: ["need4home.xyz"],
+    certificate: "/etc/letsencrypt/live/need4home.xyz/fullchain.pem",
+    privateKey: "/etc/letsencrypt/live/need4home.xyz/privkey.pem"
+  });
+  sysagent.deploymentNginx = async (body: unknown) => {
+    request = body;
+    const ok = { returncode: 0, stdout: "", stderr: "" };
+    return { write: ok, enable: ok, test: ok, reload: ok, configPath: "/etc/nginx/conf.d/domain-need4home.xyz.conf" };
+  };
+
+  try {
+    await publishDeploymentProxyNginx({
+      deploymentId: "dep_1",
+      fqdn: "need4home.xyz www.need4home.xyz",
+      upstreamPort: 10000,
+      rootPath: "/var/www/app",
+      framework: "NEXTJS",
+      fallbackRootPath: null,
+      forceHttps: true
+    });
+
+    assert.equal(request.forceSsl, false);
+    assert.equal("sslCertificate" in request, false);
+  } finally {
+    sysagent.certificateFindReusable = originalFindReusable;
+    sysagent.deploymentNginx = originalDeploymentNginx;
+  }
+});
+
+test("proxy publish reuses existing wildcard certificate for a child host", async () => {
+  const { publishDeploymentProxyNginx } = await import("./deploymentDomainSsl.js");
+  const { sysagent } = await import("./sysagent.js");
+  const originalFindReusable = sysagent.certificateFindReusable;
+  const originalDeploymentNginx = sysagent.deploymentNginx;
+  let request: any = null;
+
+  sysagent.certificateFindReusable = async () => ({
+    requested: "shop.ebitans.store",
+    domain: "wildcard.ebitans.store",
+    exists: true,
+    expiry: "2026-10-20T00:00:00.000Z",
+    names: ["*.ebitans.store"],
+    certificate: "/etc/letsencrypt/live/wildcard.ebitans.store/fullchain.pem",
+    privateKey: "/etc/letsencrypt/live/wildcard.ebitans.store/privkey.pem"
+  });
+  sysagent.deploymentNginx = async (body: unknown) => {
+    request = body;
+    const ok = { returncode: 0, stdout: "", stderr: "" };
+    return { write: ok, enable: ok, test: ok, reload: ok, configPath: "/etc/nginx/conf.d/domain-shop.ebitans.store.conf" };
+  };
+
+  try {
+    await publishDeploymentProxyNginx({
+      deploymentId: "dep_1",
+      fqdn: "shop.ebitans.store",
+      upstreamPort: 10000,
+      rootPath: "/var/www/app",
+      framework: "NEXTJS",
+      fallbackRootPath: null,
+      forceHttps: true
+    });
+
+    assert.equal(request.forceSsl, true);
+    assert.equal(request.sslCertificate, "/etc/letsencrypt/live/wildcard.ebitans.store/fullchain.pem");
+  } finally {
+    sysagent.certificateFindReusable = originalFindReusable;
+    sysagent.deploymentNginx = originalDeploymentNginx;
+  }
+});
+
 test("wildcard certificate names cover one-level child hosts only", async () => {
   const { certificateNamesCoverHost } = await import("./deploymentDomainSsl.js");
   assert.equal(certificateNamesCoverHost("shop.example.com", ["*.example.com"]), true);

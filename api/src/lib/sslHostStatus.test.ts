@@ -31,6 +31,19 @@ test("host status detects admin/default certificates served by nginx", async () 
   assert.equal(status.sslEnabled, false);
   assert.equal(status.status, "HTTPS_ROUTE_MISMATCH");
   assert.match(status.message, /admin\.ebitans\.com/);
+  assert.match(status.message, /default\/admin|stale vhost/);
+});
+
+test("host status reports CAA blocks before certificate repair advice", async () => {
+  const { sslHostStatus } = await import("./sslHostStatus.js");
+  const status = sslHostStatus("need4home.xyz", null, null, {
+    dnsStatus: "MISMATCH",
+    lastError: "CAA blocks Let's Encrypt. Current issue values: digicert.com. Found at need4home.xyz."
+  });
+
+  assert.equal(status.sslEnabled, false);
+  assert.equal(status.status, "CAA_BLOCKED");
+  assert.match(status.action, /CAA record/);
 });
 
 test("host status prioritizes DNS pending before SSL repair messaging", async () => {

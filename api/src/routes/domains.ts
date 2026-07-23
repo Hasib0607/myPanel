@@ -15,6 +15,7 @@ import { renderZone } from "./dns.js";
 import { currentVpsIp } from "../lib/serverIp.js";
 import { sslQueue } from "../jobs/queues.js";
 import { sslHostCoverage, syncSubdomainHostRow } from "../lib/domainHosts.js";
+import { checkLetsEncryptCaa, resolvePublicA } from "../lib/publicDns.js";
 
 export function normalizeDomainName(value: string) {
   return value
@@ -239,6 +240,7 @@ export async function assertDomainUsesHostingNameServers(domain: string, nameSer
 
 export async function domainNameserverReadiness(domain: string, nameServers: ActiveNameServer[]) {
   const expected = nameServers.map((nameServer) => normalizeNameServer(nameServer.hostname)).filter(Boolean);
+  const vpsIp = await currentVpsIp().catch(() => env.VPS_IP);
   let actual: string[] = [];
   let lookupError: string | null = null;
   try {
@@ -250,16 +252,60 @@ export async function domainNameserverReadiness(domain: string, nameServers: Act
   const expectedPresent = expected.length > 0 && expected.every((nameServer) => actualSet.has(nameServer));
   const vanityOk = await vanityNameserverGlueMatches(domain, nameServers).catch(() => false);
   const expectedVanityPending = hasExpectedVanityNameServers(domain, nameServers);
-  const ok = !env.REQUIRE_DOMAIN_NAMESERVER_MATCH || expectedPresent || vanityOk || expectedVanityPending;
+  const apexA = await resolvePublicA(domain).then((records) => ({
+    host: domain,
+    expectedIp: vpsIp,
+    records,
+    ok: records.includes(vpsIp),
+    message: records.includes(vpsIp)
+      ? `${domain} A record points to this VPS.`
+      : `${domain} A record must point to ${vpsIp}. Current A records: ${records.join(", ") || "none"}.`
+  })).catch((error) => ({
+    host: domain,
+    expectedIp: vpsIp,
+    records: [] as string[],
+    ok: false,
+    message: error instanceof Error ? error.message : `${domain} A record lookup failed.`
+  }));
+  const wwwHost = `www.${domain}`;
+  const wwwA = await resolvePublicA(wwwHost).then((records) => ({
+    host: wwwHost,
+    expectedIp: vpsIp,
+    records,
+    ok: records.includes(vpsIp),
+    message: records.includes(vpsIp)
+      ? `${wwwHost} A record points to this VPS.`
+      : `${wwwHost} A/CNAME must resolve to ${vpsIp}. Current A records: ${records.join(", ") || "none"}.`
+  })).catch((error) => ({
+    host: wwwHost,
+    expectedIp: vpsIp,
+    records: [] as string[],
+    ok: false,
+    message: error instanceof Error ? error.message : `${wwwHost} A record lookup failed.`
+  }));
+  const caa = await checkLetsEncryptCaa(domain).catch((error) => ({
+    hostname: domain,
+    lookupName: null,
+    allowed: false,
+    records: [],
+    message: error instanceof Error ? error.message : "CAA lookup failed."
+  }));
+  const nsOk = !env.REQUIRE_DOMAIN_NAMESERVER_MATCH || expectedPresent || vanityOk || expectedVanityPending;
+  const ok = nsOk && apexA.ok && caa.allowed;
   return {
     domain,
     ok,
     status: ok ? "READY" : "PENDING",
     expectedNameServers: expected,
     currentNameServers: actual,
+    dns: { apex: apexA, www: wwwA, caa },
     message: ok
-      ? `${domain} nameservers are ready for this hosting server.`
-      : `${nameserverMismatchMessage(domain, expected, actual)}${lookupError ? ` ${lookupError}` : ""}`
+      ? `${domain} DNS is ready for this hosting server.`
+      : [
+          !nsOk ? `${nameserverMismatchMessage(domain, expected, actual)}${lookupError ? ` ${lookupError}` : ""}` : null,
+          !apexA.ok ? apexA.message : null,
+          !caa.allowed ? caa.message : null
+        ].filter(Boolean).join(" ")
   };
 }
 

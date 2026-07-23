@@ -15,6 +15,7 @@ type DnsJsonResponse = {
 const DNS_TYPE_A = 1;
 const DNS_TYPE_NS = 2;
 const DNS_RCODE_SERVFAIL = 2;
+const LETS_ENCRYPT_CA = "letsencrypt.org";
 
 function resolverList() {
   return env.DOMAIN_NAMESERVER_RESOLVERS.split(",").map((resolver) => resolver.trim()).filter(Boolean);
@@ -112,6 +113,91 @@ export async function resolvePublicA(hostname: string) {
   }
 
   throw Object.assign(new Error(formatMissingARecordError(hostname, errors)), { statusCode: 400 });
+}
+
+export type PublicCaaRecord = {
+  critical?: number;
+  tag?: string;
+  value?: string;
+  issue?: string;
+  issuewild?: string;
+  iodef?: string;
+};
+
+function normalizeCaaValue(value: string) {
+  return value.trim().toLowerCase().replace(/^"|"$/g, "");
+}
+
+function caaAuthorizesLetsEncrypt(value: string | undefined) {
+  const normalized = normalizeCaaValue(value ?? "");
+  if (!normalized || normalized === ";") return false;
+  return normalized.split(";")[0]?.trim() === LETS_ENCRYPT_CA;
+}
+
+function caaLookupNames(hostname: string) {
+  const clean = hostname.trim().toLowerCase().replace(/^\*\./, "").replace(/\.$/, "");
+  const labels = clean.split(".").filter(Boolean);
+  const names = [];
+  for (let index = 0; index <= labels.length - 2; index += 1) {
+    names.push(labels.slice(index).join("."));
+  }
+  return names;
+}
+
+function normalizeCaaRecords(records: PublicCaaRecord[]) {
+  return records.map((record) => {
+    const tag = (record.tag ?? (record.issue !== undefined ? "issue" : record.issuewild !== undefined ? "issuewild" : record.iodef !== undefined ? "iodef" : "")).toLowerCase();
+    const value = record.value ?? record.issue ?? record.issuewild ?? record.iodef ?? "";
+    return { tag, value: normalizeCaaValue(value) };
+  });
+}
+
+export function evaluateLetsEncryptCaaRecords(records: PublicCaaRecord[], options: { wildcard?: boolean } = {}) {
+  const normalized = normalizeCaaRecords(records);
+  const issue = normalized.filter((record) => record.tag === "issue");
+  const issueWild = normalized.filter((record) => record.tag === "issuewild");
+  const relevant = options.wildcard && issueWild.length > 0 ? issueWild : issue;
+  if (relevant.length === 0) return { allowed: true, reason: "No CAA issue restriction found." };
+  if (relevant.some((record) => caaAuthorizesLetsEncrypt(record.value))) {
+    return { allowed: true, reason: "CAA allows Let's Encrypt." };
+  }
+  const values = relevant.map((record) => record.value || "(empty)").join(", ");
+  return {
+    allowed: false,
+    reason: `CAA blocks Let's Encrypt. Current ${options.wildcard && issueWild.length > 0 ? "issuewild" : "issue"} values: ${values}. Add issue "letsencrypt.org" or remove the blocking CAA record.`
+  };
+}
+
+export async function checkLetsEncryptCaa(hostname: string, options: { wildcard?: boolean } = {}) {
+  const errors: string[] = [];
+  for (const lookupName of caaLookupNames(hostname)) {
+    try {
+      const records = await dns.resolveCaa(lookupName);
+      if (records.length === 0) continue;
+      const result = evaluateLetsEncryptCaaRecords(records as PublicCaaRecord[], options);
+      return {
+        hostname,
+        lookupName,
+        allowed: result.allowed,
+        records,
+        message: result.allowed ? `CAA at ${lookupName} allows Let's Encrypt.` : `${result.reason} Found at ${lookupName}.`
+      };
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : "";
+      if (code === "ENODATA" || code === "ENOTFOUND" || code === "ENODOMAIN" || code === "SERVFAIL") {
+        errors.push(`${lookupName}: ${error instanceof Error ? error.message : "lookup failed"}`);
+        continue;
+      }
+      errors.push(`${lookupName}: ${error instanceof Error ? error.message : "lookup failed"}`);
+    }
+  }
+  return {
+    hostname,
+    lookupName: null as string | null,
+    allowed: true,
+    records: [] as PublicCaaRecord[],
+    message: errors.length ? `No blocking CAA record found. Lookup notes: ${errors.join("; ")}` : "No CAA record found; Let's Encrypt is allowed."
+  };
 }
 
 export type PublicNameServerLookup = {

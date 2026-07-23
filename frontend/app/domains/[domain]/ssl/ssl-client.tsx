@@ -168,6 +168,15 @@ export function SslClient({ domainId, subdomainId, domainApiBase = "/domains", s
     daysRemaining: status?.daysRemaining ?? null,
     alert: Boolean(status?.alert)
   }];
+  const hostBadge = (host: (typeof hostStatuses)[number]) => {
+    if (host.sslEnabled) return "Valid";
+    if (host.status === "CAA_BLOCKED") return "CAA blocked";
+    if (host.status === "HTTPS_ROUTE_MISMATCH") return "Route mismatch";
+    if (host.status === "CERT_SAN_MISMATCH") return "SAN mismatch";
+    if (host.status === "DNS_PENDING") return "DNS pending";
+    if (host.status === "CERT_EXPIRED") return "Expired";
+    return "Pending";
+  };
 
   return (
     <>
@@ -261,8 +270,8 @@ export function SslClient({ domainId, subdomainId, domainApiBase = "/domains", s
                       <div className="mt-1 text-xs text-panel-muted">DNS: {host.dnsStatus}</div>
                     ) : null}
                   </div>
-                  <span className={`rounded-md px-2 py-1 text-xs font-semibold ${host.sslEnabled ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
-                    {host.sslEnabled ? "Valid" : "Pending"}
+                  <span className={`rounded-md px-2 py-1 text-xs font-semibold ${host.sslEnabled ? "bg-emerald-50 text-emerald-700" : host.status === "HTTPS_ROUTE_MISMATCH" || host.status === "CERT_SAN_MISMATCH" || host.status === "CAA_BLOCKED" ? "bg-red-50 text-panel-danger" : "bg-amber-50 text-amber-700"}`}>
+                    {hostBadge(host)}
                   </span>
                   <span className="text-xs uppercase text-panel-muted">{host.status ?? host.state}</span>
                 </div>

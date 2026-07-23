@@ -34,6 +34,8 @@ export function sslExpiryStatus(expiry: Date | null) {
 export function sslHostStatus(host: string, cert: CertificateLike | null, served?: ServedCertificateLike | null, dns?: DnsHostLike | null) {
   const dnsStatus = dns?.dnsStatus ?? null;
   const dnsNotReady = dnsStatus === "PENDING" || dnsStatus === "MISMATCH";
+  const dnsError = dns?.lastError ?? "";
+  const caaBlocked = /CAA blocks Let's Encrypt/i.test(dnsError);
   const certExists = Boolean(cert?.exists);
   const certificateMatches = certExists && certificateNamesCoverHost(host, cert?.names ?? []);
   const expiry = certificateMatches && cert?.expiry ? new Date(cert.expiry) : null;
@@ -46,9 +48,13 @@ export function sslHostStatus(host: string, cert: CertificateLike | null, served
   let message = "Live certificate matches this hostname.";
   let action = "No action needed.";
 
-  if (dnsNotReady) {
+  if (caaBlocked) {
+    status = "CAA_BLOCKED";
+    message = dnsError;
+    action = "Update the domain CAA record to allow Let's Encrypt, then retry SSL.";
+  } else if (dnsNotReady) {
     status = "DNS_PENDING";
-    message = dns?.lastError || `${host} DNS is not pointing to this VPS yet.`;
+    message = dnsError || `${host} DNS is not pointing to this VPS yet.`;
     action = "Update DNS at the registrar or wait for propagation, then retry SSL.";
   } else if (!certExists) {
     status = "CERT_MISSING";
@@ -64,8 +70,11 @@ export function sslHostStatus(host: string, cert: CertificateLike | null, served
     action = "Renew certificate.";
   } else if (!servedMatches) {
     status = "HTTPS_ROUTE_MISMATCH";
+    const defaultRoute = served?.subject && !certificateNamesCoverHost(host, served.names ?? [])
+      ? " The active HTTPS listener is likely a default/admin or stale vhost for this hostname."
+      : "";
     message = served?.exists
-      ? `Nginx is serving a different certificate${served.subject ? ` (${served.subject})` : ""}.`
+      ? `Nginx is serving a different certificate${served.subject ? ` (${served.subject})` : ""}.${defaultRoute}`
       : served?.error || "Nginx is not serving a certificate for this hostname.";
     action = "Republish the HTTPS vhost or let Guardian auto-heal reissue and reload Nginx.";
   } else if (expiryState.state === "expiring") {

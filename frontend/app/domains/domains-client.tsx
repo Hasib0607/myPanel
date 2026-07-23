@@ -98,6 +98,11 @@ type DomainReadinessResponse = {
   status: "READY" | "PENDING";
   expectedNameServers: string[];
   currentNameServers: string[];
+  dns?: {
+    apex?: { host: string; expectedIp: string; records: string[]; ok: boolean; message: string };
+    www?: { host: string; expectedIp: string; records: string[]; ok: boolean; message: string };
+    caa?: { hostname: string; lookupName: string | null; allowed: boolean; message: string };
+  };
   message: string;
 };
 
@@ -134,11 +139,13 @@ function sslSummary(domain: Domain) {
   return "off";
 }
 
-function sslHostLabel(host: { host: string; sslEnabled?: boolean; covered?: boolean; sslStatus?: string; dnsStatus?: string | null }) {
+function sslHostLabel(host: { host: string; sslEnabled?: boolean; covered?: boolean; sslStatus?: string; dnsStatus?: string | null; message?: string | null }) {
   const prefix = host.host.startsWith("www.") ? "www" : host.host.startsWith("*.") ? "wildcard" : "apex";
   if (sslHostCovered(host)) return `${prefix} valid`;
+  if (host.sslStatus === "CAA_BLOCKED" || /CAA blocks Let's Encrypt/i.test(host.message ?? "")) return `${prefix} caa`;
   if (host.dnsStatus === "PENDING" || host.dnsStatus === "MISMATCH") return `${prefix} dns`;
   if (host.sslStatus === "MISMATCH") return `${prefix} mismatch`;
+  if (host.sslStatus === "HTTPS_ROUTE_MISMATCH") return `${prefix} route`;
   if (host.sslStatus === "EXPIRED") return `${prefix} expired`;
   return `${prefix} pending`;
 }
@@ -575,7 +582,7 @@ export function DomainsClient({
                   ) : newDomainReadiness.data ? (
                     <div className="space-y-2">
                       <div className={`font-semibold ${newDomainReadiness.data.ok ? "text-emerald-700" : "text-amber-700"}`}>
-                        {newDomainReadiness.data.ok ? "Nameservers ready" : "Nameserver update required"}
+                        {newDomainReadiness.data.ok ? "DNS ready" : "DNS update required"}
                       </div>
                       <div className="grid gap-2 md:grid-cols-2">
                         <div>
@@ -591,6 +598,27 @@ export function DomainsClient({
                           </div>
                         </div>
                       </div>
+                      {newDomainReadiness.data.dns ? (
+                        <div className="grid gap-2 md:grid-cols-3">
+                          {[newDomainReadiness.data.dns.apex, newDomainReadiness.data.dns.www].filter(Boolean).map((check) => (
+                            <div className="rounded-md bg-slate-50 p-2" key={check!.host}>
+                              <div className={`font-semibold ${check!.ok ? "text-emerald-700" : "text-amber-700"}`}>{check!.host}</div>
+                              <div className="mt-1 break-words font-mono text-[11px] text-panel-text">
+                                {check!.records.length ? check!.records.join(", ") : "No public A record"}
+                              </div>
+                              {!check!.ok ? <div className="mt-1 text-panel-muted">{check!.message}</div> : null}
+                            </div>
+                          ))}
+                          {newDomainReadiness.data.dns.caa ? (
+                            <div className="rounded-md bg-slate-50 p-2">
+                              <div className={`font-semibold ${newDomainReadiness.data.dns.caa.allowed ? "text-emerald-700" : "text-amber-700"}`}>
+                                CAA
+                              </div>
+                              <div className="mt-1 text-panel-muted">{newDomainReadiness.data.dns.caa.message}</div>
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
                       {!newDomainReadiness.data.ok ? <div className="text-panel-muted">{newDomainReadiness.data.message}</div> : null}
                     </div>
                   ) : null}
