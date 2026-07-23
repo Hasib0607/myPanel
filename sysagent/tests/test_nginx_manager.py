@@ -73,7 +73,7 @@ class NginxManagerTests(unittest.TestCase):
     def test_listen_directives_keep_dry_run_config_deterministic(self) -> None:
         self.assertEqual(nginx_listen_directives(443, ssl=True, http2=True), "    listen 443 ssl http2;\n")
 
-    def test_listen_directives_include_primary_ip_in_live_mode(self) -> None:
+    def test_listen_directives_do_not_mix_wildcard_and_ip_listeners_in_live_mode(self) -> None:
         previous_allow_live = nginx_manager.settings.allow_live_nginx
         previous_vps_ip = getattr(nginx_manager.settings, "vps_ip", "")
         previous_run_command = nginx_manager.run_command
@@ -88,14 +88,14 @@ class NginxManagerTests(unittest.TestCase):
 
             self.assertEqual(
                 nginx_listen_directives(443, ssl=True, http2=True),
-                "    listen 72.60.235.117:443 ssl http2;\n",
+                "    listen 443 ssl http2;\n",
             )
         finally:
             nginx_manager.settings.allow_live_nginx = previous_allow_live
             nginx_manager.settings.vps_ip = previous_vps_ip
             nginx_manager.run_command = previous_run_command
 
-    def test_listen_directives_include_configured_public_ip_before_local_ips(self) -> None:
+    def test_listen_directives_ignore_configured_public_ip_to_keep_sni_table_shared(self) -> None:
         previous_allow_live = nginx_manager.settings.allow_live_nginx
         previous_vps_ip = getattr(nginx_manager.settings, "vps_ip", "")
         previous_run_command = nginx_manager.run_command
@@ -110,7 +110,7 @@ class NginxManagerTests(unittest.TestCase):
 
             self.assertEqual(
                 nginx_listen_directives(443, ssl=True, http2=True),
-                "    listen 72.60.235.117:443 ssl http2;\n    listen 10.0.0.5:443 ssl http2;\n",
+                "    listen 443 ssl http2;\n",
             )
         finally:
             nginx_manager.settings.allow_live_nginx = previous_allow_live
