@@ -251,6 +251,7 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
             "curl",
             "-sS",
             "-i",
+            "--http1.1",
             *(["-k"] if https else []),
             "--resolve",
             f"{primary_host}:{port}:127.0.0.1",
@@ -258,8 +259,6 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
             "10",
             "--noproxy",
             "*",
-            "-H",
-            f"Host: {primary_host}",
             f"{scheme}://{primary_host}/",
         ]
         result = run_command(command, allow_live=True)
