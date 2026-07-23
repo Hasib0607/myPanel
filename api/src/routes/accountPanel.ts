@@ -36,7 +36,7 @@ import {
   queueGroupCommand,
   renderLaravelProcessCommand
 } from "../lib/laravelProcesses.js";
-import { assertDomainUsesHostingNameServers, defaultRecords } from "./domains.js";
+import { assertDomainUsesHostingNameServers, defaultRecords, withLiveDomainSsl } from "./domains.js";
 import { renderZone } from "./dns.js";
 
 function accountId(request: any) {
@@ -1336,6 +1336,7 @@ async function createAndBindAccountDeploymentDomain(
   if (!domain) {
     const domainCount = account._count?.domains ?? await prisma.domain.count({ where: { accountId: account.id } });
     assertLimit(domainCount, account.domainLimit ?? null, "Domain");
+    await assertDomainUsesHostingNameServers(input.name, nameServers);
     domain = await prisma.$transaction(async (tx) => {
       const createdDomain = await tx.domain.create({
         data: {
@@ -1856,7 +1857,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     });
     const groupedItems = groupAccountDomainRows(rawItems);
     const start = (query.page - 1) * query.pageSize;
-    const items = groupedItems.slice(start, start + query.pageSize);
+    const items = await Promise.all(groupedItems.slice(start, start + query.pageSize).map((domain) => withLiveDomainSsl(domain)));
     return { items, total: groupedItems.length, page: query.page, pageSize: query.pageSize };
   });
 

@@ -20,6 +20,7 @@ type Domain = {
   sslExpiry: string | null;
   liveSslEnabled?: boolean;
   liveSslExpiry?: string | null;
+  sslHosts?: Array<{ host: string; sslEnabled?: boolean; covered?: boolean; expiry?: string | null }>;
   forceSsl: boolean;
   hostingMode: DomainHostingMode;
   documentRoot: string;
@@ -106,6 +107,20 @@ function compareSsl(a: Domain, b: Domain, direction: SortDirection) {
 
 function sslLabel(domain: Domain) {
   if (domain.liveSslEnabled ?? domain.sslEnabled) return "enabled";
+  if (domain.forceSsl) return "pending";
+  return "off";
+}
+
+function sslHostCovered(host: { sslEnabled?: boolean; covered?: boolean }) {
+  return Boolean(host.sslEnabled ?? host.covered);
+}
+
+function sslSummary(domain: Domain) {
+  const hosts = domain.sslHosts ?? [];
+  if (!hosts.length) return sslLabel(domain);
+  const covered = hosts.filter(sslHostCovered).length;
+  if (covered === hosts.length) return "enabled";
+  if (covered > 0) return `${covered}/${hosts.length} valid`;
   if (domain.forceSsl) return "pending";
   return "off";
 }
@@ -704,7 +719,27 @@ export function DomainsClient({
                         <div className="truncate text-xs text-panel-muted">{hostingLabel(domain)}</div>
                       </div>
                     </td>
-                    <td className="px-4 py-3">{sslLabel(domain)}</td>
+                    <td className="px-4 py-3">
+                      <div className="space-y-1">
+                        <div className="text-xs font-semibold text-slate-700">{sslSummary(domain)}</div>
+                        {domain.sslHosts?.length ? (
+                          <div className="flex max-w-52 flex-wrap gap-1">
+                            {domain.sslHosts.map((host) => {
+                              const covered = sslHostCovered(host);
+                              return (
+                                <span
+                                  className={`rounded-md px-1.5 py-0.5 text-[11px] font-semibold ${covered ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}
+                                  key={host.host}
+                                  title={host.host}
+                                >
+                                  {host.host.startsWith("www.") ? "www" : "apex"} {covered ? "valid" : "pending"}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        ) : null}
+                      </div>
+                    </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2">
                         <Link className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line hover:bg-slate-100" href={`${linkBase}/${domain.id}/overview`} title="View domain">

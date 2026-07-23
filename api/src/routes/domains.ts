@@ -289,8 +289,9 @@ function clearDomainCaches(domainId?: string) {
   return redis.del(...keys);
 }
 
-async function withLiveDomainSsl<T extends { name: string; forceSsl: boolean; sslEnabled: boolean; sslExpiry?: Date | string | null }>(domain: T) {
+export async function withLiveDomainSsl<T extends { name: string; forceSsl: boolean; sslEnabled: boolean; sslExpiry?: Date | string | null }>(domain: T) {
   const serverName = deploymentServerName({ name: domain.name, includeWww: true }) ?? domain.name;
+  const hosts = serverName.split(/\s+/).filter(Boolean);
   try {
     const cert = await Promise.race([
       sysagent.certificateFindReusable(domain.name),
@@ -298,22 +299,27 @@ async function withLiveDomainSsl<T extends { name: string; forceSsl: boolean; ss
     ]);
     if (!cert) throw new Error("Live SSL lookup timed out");
     const liveSslEnabled = Boolean(cert.exists && certificateNamesCoverServerName(serverName, cert.names ?? []));
+    const sslHosts = hosts.map((host) => {
+      const covered = Boolean(cert.exists && certificateNamesCoverServerName(host, cert.names ?? []));
+      return {
+        host,
+        sslEnabled: covered,
+        covered,
+        expiry: covered ? cert.expiry : null
+      };
+    });
     return {
       ...domain,
       liveSslEnabled,
       liveSslExpiry: liveSslEnabled && cert.expiry ? cert.expiry : null,
-      sslHosts: serverName.split(/\s+/).filter(Boolean).map((host) => ({
-        host,
-        covered: liveSslEnabled && certificateNamesCoverServerName(host, cert.names ?? []),
-        expiry: liveSslEnabled ? cert.expiry : null
-      }))
+      sslHosts
     };
   } catch {
     return {
       ...domain,
       liveSslEnabled: false,
       liveSslExpiry: null,
-      sslHosts: serverName.split(/\s+/).filter(Boolean).map((host) => ({ host, covered: false, expiry: null }))
+      sslHosts: hosts.map((host) => ({ host, sslEnabled: false, covered: false, expiry: null }))
     };
   }
 }
@@ -693,7 +699,7 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
           ]
         }
       : {};
-    const [items, total] = await Promise.all([
+    const [rawItems, total] = await Promise.all([
       prisma.domain.findMany({
         where,
         orderBy: { name: "asc" },
@@ -707,6 +713,7 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
       prisma.domain.count({ where })
     ]);
 
+    const items = await Promise.all(rawItems.map((domain) => withLiveDomainSsl(domain)));
     return { items, total, page: query.page, pageSize: query.pageSize };
   });
 

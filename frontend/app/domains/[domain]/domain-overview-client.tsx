@@ -15,6 +15,7 @@ type DomainDetail = {
   sslExpiry: string | null;
   liveSslEnabled?: boolean;
   liveSslExpiry?: string | null;
+  sslHosts?: Array<{ host: string; sslEnabled?: boolean; covered?: boolean; expiry?: string | null }>;
   forceSsl: boolean;
   subdomains: Array<{ id: string; name: string; target: string; sslEnabled: boolean }>;
   dnsRecords: Array<{ id: string; type: string; name: string; value: string; ttl: number; priority: number | null }>;
@@ -39,6 +40,7 @@ export function DomainOverviewClient({ domainId }: { domainId: string }) {
   const data = domain.data;
   const liveSslEnabled = Boolean(data?.liveSslEnabled);
   const sslValue = liveSslEnabled ? "Enabled" : data?.forceSsl ? "Pending" : "Off";
+  const sslHosts = data?.sslHosts ?? [];
 
   return (
     <>
@@ -50,6 +52,22 @@ export function DomainOverviewClient({ domainId }: { domainId: string }) {
           <StatCard label="Mailboxes" value={data?.mailAccounts.length ?? "..."} />
           <StatCard label="SSL" value={sslValue} tone={liveSslEnabled ? "default" : "warn"} />
         </div>
+
+        {sslHosts.length ? (
+          <div className="grid grid-cols-2 gap-3">
+            {sslHosts.map((host) => {
+              const covered = Boolean(host.sslEnabled ?? host.covered);
+              return (
+                <div className="rounded-md border border-panel-line bg-white px-4 py-3 text-sm" key={host.host}>
+                  <div className="font-semibold text-panel-ink">{host.host}</div>
+                  <div className={`mt-1 text-xs font-semibold ${covered ? "text-emerald-700" : "text-amber-700"}`}>
+                    {covered ? "SSL valid" : data?.forceSsl ? "SSL pending" : "SSL off"}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
 
         <div className="grid grid-cols-[1fr_360px] gap-6">
           <div className="rounded-md border border-panel-line bg-white p-4">
