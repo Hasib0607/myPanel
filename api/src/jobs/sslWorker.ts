@@ -388,9 +388,9 @@ function summarizeNginxRouteBlocks(diagnosis: {
   return ` Nginx diagnosis: ${parts.join(". ")}.`;
 }
 
-async function assertServedCertificateMatches(hostnames: string[], expectedRoute?: string | null) {
-  const failures = [];
-  const localFailures = [];
+async function collectServedCertificateFailures(hostnames: string[]) {
+  const failures: string[] = [];
+  const localFailures: string[] = [];
   const localConnectHost = await currentVpsIp().catch(() => env.VPS_IP);
   for (const hostname of hostnames) {
     const served = await sysagent.servedCertificate({ domain: hostname });
@@ -412,6 +412,30 @@ async function assertServedCertificateMatches(hostnames: string[], expectedRoute
       localFailures.push(`${hostname} via ${localConnectHost}: ${localDetail}`);
     }
   }
+  return { failures, localFailures };
+}
+
+function restartSummary(result: unknown) {
+  const row = result as { restarted?: boolean; test?: SysagentCommandResult; restart?: SysagentCommandResult | null } | null;
+  if (!row) return "";
+  const testCode = row.test?.returncode ?? "unknown";
+  const restartCode = row.restart?.returncode ?? "skipped";
+  return ` Nginx restart recovery attempted: restarted=${row.restarted ? "yes" : "no"}, nginxTest=${testCode}, restart=${restartCode}.`;
+}
+
+async function assertServedCertificateMatches(hostnames: string[], expectedRoute?: string | null) {
+  let { failures, localFailures } = await collectServedCertificateFailures(hostnames);
+  let restartResult: unknown = null;
+  if (failures.length) {
+    restartResult = await sysagent.guardianRestartNginx().catch((error) => ({
+      restarted: false,
+      test: { returncode: 1, stderr: error instanceof Error ? error.message : String(error) },
+      restart: null
+    }));
+    if ((restartResult as { restarted?: boolean } | null)?.restarted) {
+      ({ failures, localFailures } = await collectServedCertificateFailures(hostnames));
+    }
+  }
   if (failures.length) {
     const diagnosis = await sysagent.nginxRouteDiagnose({
       serverName: hostnames.join(" "),
@@ -422,6 +446,7 @@ async function assertServedCertificateMatches(hostnames: string[], expectedRoute
       + failures.join("; ")
       + (localFailures.length ? ` Local SNI check also failed: ${localFailures.join("; ")}.` : " Local SNI check passed, so the public listener/proxy path is serving a different vhost.")
       + summarizeNginxRouteBlocks(diagnosis)
+      + restartSummary(restartResult)
       + ". Check duplicate/default 443 Nginx vhosts, SNI routing, Cloudflare/proxy mode, and public DNS."
     );
   }

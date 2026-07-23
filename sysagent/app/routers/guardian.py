@@ -688,6 +688,15 @@ def reload_nginx() -> dict[str, Any]:
     return {"action": "reload-nginx", "reloaded": reload_result.get("returncode") == 0, "test": test, "reload": reload_result}
 
 
+@router.post("/actions/restart-nginx")
+def restart_nginx() -> dict[str, Any]:
+    test = run_command(["nginx", "-t"], timeout=30)
+    if test.get("returncode") != 0:
+        return {"action": "restart-nginx", "restarted": False, "test": test, "restart": None}
+    restart_result = run_command(["systemctl", "restart", "nginx"], timeout=30)
+    return {"action": "restart-nginx", "restarted": restart_result.get("returncode") == 0, "test": test, "restart": restart_result}
+
+
 @router.post("/actions/cleanup-logs")
 def cleanup_logs(body: LogCleanupRequest) -> dict[str, Any]:
     root = Path(settings.deployment_log_root).resolve()

@@ -116,6 +116,8 @@ export const sysagent = {
     request("/guardian/actions/restart-pm2", { method: "POST", body: JSON.stringify(body) }),
   guardianReloadNginx: () =>
     request("/guardian/actions/reload-nginx", { method: "POST" }),
+  guardianRestartNginx: () =>
+    request<{ action: string; restarted: boolean; test: SysagentCommandResult; restart: SysagentCommandResult | null }>("/guardian/actions/restart-nginx", { method: "POST" }),
   guardianCleanupLogs: (olderThanDays = 1) =>
     request("/guardian/actions/cleanup-logs", { method: "POST", body: JSON.stringify({ olderThanDays }) }),
   guardianBlockIp: (body: { ip: string; reason?: string }) =>
