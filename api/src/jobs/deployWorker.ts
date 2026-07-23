@@ -42,6 +42,7 @@ import {
   renderLaravelProcessCommand
 } from "../lib/laravelProcesses.js";
 import { normalizeDeploymentResourcePolicy } from "../lib/deploymentResourcePolicy.js";
+import { deploymentManualStopRequested } from "../lib/deploymentStopControl.js";
 import { sslQueue } from "./queues.js";
 import {
   type BoundDomain,
@@ -267,6 +268,49 @@ async function assertNextProductionBuildReady(deploymentId: string, releaseId: s
     fix: "Run a successful next build for this release before starting the process."
   }, "error");
   throw new Error(`Next.js production build is missing at ${buildIdPath}. The deployment will not start until next build succeeds for this release.`);
+}
+
+class ManualDeploymentStopError extends Error {
+  constructor() {
+    super("Deployment was manually stopped before it could start.");
+    this.name = "ManualDeploymentStopError";
+  }
+}
+
+function isManualDeploymentStopError(error: unknown) {
+  return error instanceof ManualDeploymentStopError;
+}
+
+async function assertDeploymentNotManuallyStopped(deploymentId: string) {
+  const deployment = await prisma.deployment.findUnique({
+    where: { id: deploymentId },
+    select: { status: true, processConfig: true }
+  });
+  if (!deployment) return;
+  if (deployment.status === "STOPPED" && deploymentManualStopRequested(deployment.processConfig)) {
+    throw new ManualDeploymentStopError();
+  }
+}
+
+async function deploymentIsManuallyStopped(deploymentId: string) {
+  const deployment = await prisma.deployment.findUnique({
+    where: { id: deploymentId },
+    select: { status: true, processConfig: true }
+  });
+  return Boolean(deployment?.status === "STOPPED" && deploymentManualStopRequested(deployment.processConfig));
+}
+
+async function cancelReleaseForManualStop(deploymentId: string, releaseId: string | undefined, startedAt: Date) {
+  if (!releaseId) return;
+  const finishedAt = new Date();
+  await prisma.deploymentRelease.updateMany({
+    where: { id: releaseId, deploymentId, status: { not: "CANCELLED" } },
+    data: {
+      status: "CANCELLED",
+      finishedAt,
+      durationMs: Math.max(0, finishedAt.getTime() - startedAt.getTime())
+    }
+  });
 }
 
 async function activateDeploymentArtifact(deployment: DeploymentWithWorkerRelations, releaseId: string | undefined, artifactRootPath: string | null) {
@@ -4048,15 +4092,17 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
     if (action !== "stop") {
       deployment = await ensureManagedDeploymentPort(deployment, releaseId);
     }
-    await assertRuntimeToolsInstalled(deployment.id, releaseId, {
-      framework: deployment.framework,
-      packageManager: deployment.packageManager,
-      runtime: deployment.runtime,
-      processManager: deployment.processManager,
-      installCommand: deployment.installCommand,
-      buildCommand: deployment.buildCommand,
-      startCommand: deployment.startCommand
-    });
+    if (processAction !== "stop") {
+      await assertRuntimeToolsInstalled(deployment.id, releaseId, {
+        framework: deployment.framework,
+        packageManager: deployment.packageManager,
+        runtime: deployment.runtime,
+        processManager: deployment.processManager,
+        installCommand: deployment.installCommand,
+        buildCommand: deployment.buildCommand,
+        startCommand: deployment.startCommand
+      });
+    }
 
     const envVars = await resolveEnvVars(deployment.env);
     const lifecycleRootPath = deploymentArtifactRootPath(deployment);
@@ -4065,6 +4111,7 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
     ({ deployment, appPath } = await reconcileLaravelRootDirectory(deployment, releaseId, appPath));
     deployment = await reconcilePythonStartCommand(deployment, releaseId, appPath);
     if (processAction !== "stop") {
+      await assertDeploymentNotManuallyStopped(deployment.id);
       await quarantineParentNodeLockfilesForRelease(deployment.id, releaseId, deployment.framework, appPath, deployment.rootPath);
       await assertNextProductionBuildReady(deployment.id, releaseId, deployment.framework, appPath);
     }
@@ -4219,7 +4266,8 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
     return { result, health, status: "RUNNING", healthStatus, publicRouteWarning };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown lifecycle error";
-    const nextStatus = processAction === "stop" ? "STOPPED" : "FAILED";
+    const manuallyStopped = isManualDeploymentStopError(error) || await deploymentIsManuallyStopped(deployment.id);
+    const nextStatus = processAction === "stop" || manuallyStopped ? "STOPPED" : "FAILED";
     const nextHealth = "DOWN";
     await prisma.deployment.update({
       where: { id: deployment.id },
@@ -4233,6 +4281,13 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
 async function processDeploy(action: string, deploymentId: string, releaseId: string | undefined): Promise<Record<string, unknown>> {
   const startedAt = new Date();
   let deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: deploymentWorkerInclude });
+  if (deploymentManualStopRequested(deployment.processConfig)) {
+    await cancelReleaseForManualStop(deployment.id, releaseId, startedAt);
+    await writeLog(deployment.id, releaseId, "STARTING", "Deploy skipped because the deployment is manually stopped", {
+      status: deployment.status
+    }, "warn");
+    return { dryRun: false, completed: false, cancelled: true, status: "STOPPED", healthStatus: "DOWN" };
+  }
   const release = releaseId ? await prisma.deploymentRelease.findUnique({ where: { id: releaseId } }) : null;
   let artifactRootPath: string | null = null;
   await resetBuildLogs(deployment.id);
@@ -4270,6 +4325,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     let deployBudget = await prepareDeployResourceBudget(deployment.id, releaseId, workingRootPath);
 
     if ((deployment.gitUrl || action === "pull") && !rollbackArtifactPath) {
+      await assertDeploymentNotManuallyStopped(deployment.id);
       const gitToken = await githubCloneToken(deployment.sourceProvider, deployment.gitUrl, deployment.accountId);
       const commitSha = sourceSyncCommitSha(action, release, deployment);
       const syncResult = await runStep(deployment.id, releaseId, "CLONING", "Source sync", () =>
@@ -4385,6 +4441,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     }
 
     if (deployment.installCommand || deployment.packageManager) {
+      await assertDeploymentNotManuallyStopped(deployment.id);
       await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "BUILDING" } });
       const installCommandText = deployment.framework === "PYTHON"
         ? renderPythonInstallCommand(deployment.installCommand, deployment.packageManager, deployment.port)
@@ -4540,6 +4597,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     }
 
     if (deployment.buildCommand) {
+      await assertDeploymentNotManuallyStopped(deployment.id);
       const rawDefaultBuildCommand = renderDeploymentCommand(deployment.buildCommand, deployment.port);
       const defaultBuildCommand = commandWithManagedNodeHeap(rawDefaultBuildCommand, deployBudget.summary.nodeHeapMb);
       const webpackBuildCommand = commandWithManagedNodeHeap(nextWebpackBuildCommand(defaultBuildCommand), deployBudget.summary.nodeHeapMb);
@@ -4917,6 +4975,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     }
 
     const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
+    await assertDeploymentNotManuallyStopped(deployment.id);
     if (await deploymentRunsLaravel(deployment.framework, appPath)) {
       envVars = await ensureLaravelAppKey(deployment.id, releaseId, appPath, deployment.port, envVars);
       await prepareLaravelForStart(deployment.id, releaseId, appPath, deployment.port, envVars);
@@ -4995,6 +5054,17 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     return { dryRun: false, completed: true, status: "RUNNING", healthStatus, publicRouteWarning };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
+    if (isManualDeploymentStopError(error) || await deploymentIsManuallyStopped(deployment.id)) {
+      await cancelReleaseForManualStop(deployment.id, releaseId, startedAt);
+      await prisma.deployment.update({
+        where: { id: deployment.id },
+        data: { status: "STOPPED", healthStatus: "DOWN", lastHealthCheckAt: new Date() }
+      });
+      await writeLog(deployment.id, releaseId, "STARTING", "Deploy cancelled because the deployment was manually stopped", {
+        error: message
+      }, "warn");
+      return { dryRun: false, completed: false, cancelled: true, status: "STOPPED", healthStatus: "DOWN" };
+    }
     await markRelease(releaseId, "FAILED", startedAt);
     await writeLog(deployment.id, releaseId, "FAILED", `${action} failed`, { error: message }, "error");
     if (action !== "rollback") {

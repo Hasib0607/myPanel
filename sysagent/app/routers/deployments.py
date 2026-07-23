@@ -1785,15 +1785,25 @@ def pm2_stop(body: ProcessRequest) -> dict:
     stop = guarded_command(body.rootPath, ["pm2", "stop", body.name], cwd=cwd)
     if "not found" in (stop.get("stderr") or "").lower() or "not found" in (stop.get("stdout") or "").lower():
         stop["returncode"] = 0
-    save = guarded_command(body.rootPath, ["pm2", "save"], cwd=cwd) if stop.get("returncode") == 0 else {
+    delete = guarded_command(body.rootPath, ["pm2", "delete", body.name], cwd=cwd) if stop.get("returncode") == 0 else {
         "dryRun": stop.get("dryRun", False),
-        "command": ["pm2", "save"],
+        "command": ["pm2", "delete", body.name],
         "cwd": cwd,
         "stdout": "",
         "stderr": "Skipped because pm2 stop failed",
         "returncode": 1,
     }
-    return combine_pm2_results(body.rootPath, {"stop": stop, "save": save}, ["stop", "save"])
+    if "not found" in (delete.get("stderr") or "").lower() or "not found" in (delete.get("stdout") or "").lower():
+        delete["returncode"] = 0
+    save = guarded_command(body.rootPath, ["pm2", "save"], cwd=cwd) if delete.get("returncode") == 0 else {
+        "dryRun": stop.get("dryRun", False),
+        "command": ["pm2", "save"],
+        "cwd": cwd,
+        "stdout": "",
+        "stderr": "Skipped because pm2 delete failed",
+        "returncode": 1,
+    }
+    return combine_pm2_results(body.rootPath, {"stop": stop, "delete": delete, "save": save}, ["stop", "delete", "save"])
 
 
 @router.post("/runtime-logs")

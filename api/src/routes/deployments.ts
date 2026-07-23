@@ -11,6 +11,7 @@ import { deployQueue } from "../jobs/queues.js";
 import { laravelPublicCwdMissing, nginxProxyMissingDomainFailure, nodePackageBinaryMissing, supervisorStartStillStarting } from "../lib/deploymentFailureRuntimeRepairs.js";
 import { detectComposerPlatformIssue, detectFrontendModuleNotFound, formatFrontendModuleNotFoundMessage, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import { deploymentRuntimeReview, prepareDeploymentRuntimeTools } from "../lib/deploymentRuntimeReview.js";
+import { processConfigWithoutManualStop, requestDeploymentManualStop } from "../lib/deploymentStopControl.js";
 import { audit } from "../lib/audit.js";
 import { githubApiErrorMessage, isGithubWebhookPermissionError } from "../lib/githubApiErrors.js";
 import { deploymentHasLaravelPublicIndex, detectDeploymentFiles, detectDeploymentSource, findDeploymentAppRoot } from "../lib/deploymentDetection.js";
@@ -3290,18 +3291,24 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
         }
         if (runtime.install) await addLog(deployment.id, "PREFLIGHT", "Approved runtime tools installed before lifecycle action", undefined, runtime.install as unknown as Prisma.InputJsonObject);
       }
+      const manualStop = action === "stop" ? await requestDeploymentManualStop(deployment.id) : null;
       const nextStatus = action === "stop" ? "STOPPED" : "DEPLOYING";
-      await prisma.deployment.update({
-        where: { id: deployment.id },
-        data: {
-          status: nextStatus,
-          healthStatus: action === "stop" ? "DOWN" : "UNKNOWN",
-          lastHealthCheckAt: action === "stop" ? new Date() : deployment.lastHealthCheckAt
-        }
-      });
+      if (action !== "stop") {
+        await prisma.deployment.update({
+          where: { id: deployment.id },
+          data: {
+            status: nextStatus,
+            healthStatus: "UNKNOWN",
+            lastHealthCheckAt: deployment.lastHealthCheckAt,
+            processConfig: processConfigWithoutManualStop(deployment.processConfig) as Prisma.InputJsonValue
+          }
+        });
+      }
       await addLog(deployment.id, "STARTING", `${action} requested in dry-run-safe mode`, undefined, { action });
-      const queue = await enqueueDeployAction(deployment.id, action);
-      return reply.code(202).send({ status: nextStatus, queue });
+      const queue = action === "stop"
+        ? await deployQueue.add(action, { deploymentId: deployment.id }, { priority: 1 }).then((job) => ({ queued: true, jobId: job.id })).catch(() => enqueueDeployAction(deployment.id, action))
+        : await enqueueDeployAction(deployment.id, action);
+      return reply.code(202).send({ status: nextStatus, queue, manualStop });
     });
   }
 

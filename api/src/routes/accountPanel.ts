@@ -18,6 +18,7 @@ import { githubApiErrorMessage, isGithubWebhookPermissionError } from "../lib/gi
 import { publishDomainDnsZone } from "../lib/domainDnsPublish.js";
 import { detectDeploymentFiles } from "../lib/deploymentDetection.js";
 import { deploymentRuntimeReview, prepareDeploymentRuntimeTools } from "../lib/deploymentRuntimeReview.js";
+import { processConfigWithoutManualStop, requestDeploymentManualStop } from "../lib/deploymentStopControl.js";
 import { boundDomainFromBinding, deploymentFallbackRootPath, deploymentIsRoutable, deploymentServerName, buildDeploymentNginxRequest, publishDeploymentProxyNginx } from "../lib/deploymentDomainSsl.js";
 import { prisma } from "../lib/prisma.js";
 import { resolvePublicA } from "../lib/publicDns.js";
@@ -3478,6 +3479,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
         });
       }
     }
+    const manualStop = params.action === "stop" ? await requestDeploymentManualStop(deployment.id) : null;
     const release = ["deploy", "redeploy"].includes(params.action)
       ? await prisma.deploymentRelease.create({
           data: {
@@ -3490,16 +3492,19 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
           }
         })
       : null;
-    await prisma.deployment.update({
-      where: { id: deployment.id },
-      data: {
-        status: params.action === "stop" ? "STOPPED" : "QUEUED",
-        healthStatus: params.action === "stop" ? "DOWN" : "UNKNOWN"
-      }
-    });
-    const queue = await deployQueue.add(params.action, { deploymentId: deployment.id, releaseId: release?.id });
+    if (params.action !== "stop") {
+      await prisma.deployment.update({
+        where: { id: deployment.id },
+        data: {
+          status: "QUEUED",
+          healthStatus: "UNKNOWN",
+          processConfig: processConfigWithoutManualStop(deployment.processConfig) as Prisma.InputJsonValue
+        }
+      });
+    }
+    const queue = await deployQueue.add(params.action, { deploymentId: deployment.id, releaseId: release?.id }, params.action === "stop" ? { priority: 1 } : undefined);
     await audit(request, { action: params.action === "stop" ? "STOP" : params.action === "restart" ? "RESTART" : "DEPLOY", resource: "deployment", resourceId: deployment.id, description: `Account queued ${params.action} for ${deployment.slug}` });
-    return reply.code(202).send({ queue: { queued: true, jobId: queue.id }, release });
+    return reply.code(202).send({ queue: { queued: true, jobId: queue.id }, release, manualStop });
   });
 
   app.get("/databases", async (request: any) => {
