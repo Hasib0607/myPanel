@@ -326,6 +326,8 @@ export async function withLiveDomainSsl<T extends { name: string; forceSsl: bool
     sslEnabled?: boolean;
     sslStatus?: string;
     sslExpiry?: Date | string | null;
+    dnsStatus?: string | null;
+    lastError?: string | null;
   }> : [];
   if (persistedHosts.length > 0 && persistedHosts.some((host) => host.sslStatus)) {
     const sslHosts = persistedHosts.map((host) => ({
@@ -335,7 +337,15 @@ export async function withLiveDomainSsl<T extends { name: string; forceSsl: bool
       sslEnabled: Boolean(host.sslEnabled && host.sslStatus === "VALID"),
       covered: Boolean(host.sslEnabled && host.sslStatus === "VALID"),
       expiry: host.sslEnabled && host.sslStatus === "VALID" ? host.sslExpiry ?? null : null,
-      sslStatus: host.sslStatus
+      sslStatus: host.sslStatus,
+      dnsStatus: host.dnsStatus ?? null,
+      message: host.lastError ?? (
+        host.sslStatus === "VALID"
+          ? "Live certificate matches this hostname."
+          : host.dnsStatus === "MISMATCH" || host.dnsStatus === "PENDING"
+            ? "Update DNS at the registrar or wait for propagation."
+            : "Issue or renew SSL for this hostname."
+      )
     }));
     const liveSslEnabled = sslHosts.length > 0 && sslHosts.every((host) => host.sslEnabled);
     return {

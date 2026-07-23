@@ -15,7 +15,7 @@ type DomainDetail = {
   sslExpiry: string | null;
   liveSslEnabled?: boolean;
   liveSslExpiry?: string | null;
-  sslHosts?: Array<{ host: string; sslEnabled?: boolean; covered?: boolean; expiry?: string | null }>;
+  sslHosts?: Array<{ host: string; sslEnabled?: boolean; covered?: boolean; expiry?: string | null; sslStatus?: string; dnsStatus?: string | null; message?: string }>;
   forceSsl: boolean;
   subdomains: Array<{ id: string; name: string; target: string; sslEnabled: boolean }>;
   dnsRecords: Array<{ id: string; type: string; name: string; value: string; ttl: number; priority: number | null }>;
@@ -57,12 +57,18 @@ export function DomainOverviewClient({ domainId }: { domainId: string }) {
           <div className="grid grid-cols-2 gap-3">
             {sslHosts.map((host) => {
               const covered = Boolean(host.sslEnabled ?? host.covered);
+              const pendingText = host.dnsStatus === "PENDING" || host.dnsStatus === "MISMATCH"
+                ? "DNS pending"
+                : host.sslStatus === "MISMATCH"
+                  ? "SSL mismatch"
+                  : data?.forceSsl ? "SSL pending" : "SSL off";
               return (
                 <div className="rounded-md border border-panel-line bg-white px-4 py-3 text-sm" key={host.host}>
                   <div className="font-semibold text-panel-ink">{host.host}</div>
                   <div className={`mt-1 text-xs font-semibold ${covered ? "text-emerald-700" : "text-amber-700"}`}>
-                    {covered ? "SSL valid" : data?.forceSsl ? "SSL pending" : "SSL off"}
+                    {covered ? "SSL valid" : pendingText}
                   </div>
+                  {!covered && host.message ? <div className="mt-1 text-xs text-panel-muted">{host.message}</div> : null}
                 </div>
               );
             })}

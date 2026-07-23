@@ -39,6 +39,7 @@ import {
 import { assertDomainUsesHostingNameServers, defaultRecords, domainNameserverReadiness, withLiveDomainSsl } from "./domains.js";
 import { renderZone } from "./dns.js";
 import { refreshDomainHostSsl, refreshSubdomainHostSsl, syncDomainHostRows, syncSubdomainHostRow } from "../lib/domainHosts.js";
+import { sslExpiryStatus, sslHostStatus } from "../lib/sslHostStatus.js";
 
 function accountId(request: any) {
   return request.user.accountId as string;
@@ -818,27 +819,6 @@ async function directorySizeBytes(root: string) {
   }
   await walk(root);
   return total;
-}
-
-function expiryStatus(expiry: Date | null) {
-  if (!expiry) return { state: "missing", daysRemaining: null, alert: false };
-  const daysRemaining = Math.ceil((expiry.getTime() - Date.now()) / 86_400_000);
-  return {
-    state: daysRemaining < 0 ? "expired" : daysRemaining < 14 ? "expiring" : "valid",
-    daysRemaining,
-    alert: daysRemaining < 14
-  };
-}
-
-function sslHostStatus(host: string, cert: { exists?: boolean; expiry?: string | null; names?: string[] } | null) {
-  const certificateMatches = Boolean(cert?.exists && certificateNamesCoverHost(host, cert.names ?? []));
-  const expiry = certificateMatches && cert?.expiry ? new Date(cert.expiry) : null;
-  return {
-    host,
-    sslEnabled: certificateMatches,
-    sslExpiry: expiry,
-    ...expiryStatus(expiry)
-  };
 }
 
 async function accountSslJobStatus(request: any, jobId: string) {
@@ -2423,7 +2403,13 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const servedMatches = Boolean(servedApex?.matches && servedWww?.matches);
     const certificateMatches = Boolean(cert?.exists && certificateNamesCoverServerName(`${domain.name} www.${domain.name}`, cert.names ?? []));
     const effectiveExpiry = domain.sslEnabled && certificateMatches && servedMatches && cert?.expiry ? new Date(cert.expiry) : null;
-    const hosts = [sslHostStatus(domain.name, servedApex?.matches ? cert : null), sslHostStatus(`www.${domain.name}`, servedWww?.matches ? cert : null)];
+    const hostnames = [domain.name, `www.${domain.name}`];
+    const persistedHosts = await prisma.domainHost.findMany({ where: { domainId: domain.id, hostname: { in: hostnames } }, select: { hostname: true, dnsStatus: true, lastError: true } });
+    const hostRows = new Map(persistedHosts.map((host) => [host.hostname, host]));
+    const hosts = [
+      sslHostStatus(domain.name, cert, servedApex, hostRows.get(domain.name)),
+      sslHostStatus(`www.${domain.name}`, cert, servedWww, hostRows.get(`www.${domain.name}`))
+    ];
     await refreshDomainHostSsl(domain, certificateMatches && servedMatches ? cert : null);
     return {
       domainId: domain.id,
@@ -2434,7 +2420,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       servedCertificate: { apex: servedApex, www: servedWww },
       forceSsl: domain.forceSsl,
       activeJobId: await activeAccountSslJobIdForResource({ domainId: domain.id }),
-      ...expiryStatus(effectiveExpiry)
+      ...sslExpiryStatus(effectiveExpiry)
     };
   });
 
@@ -2447,7 +2433,8 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const servedMatches = Boolean(served?.matches);
     const effectiveCert = certificateMatches && servedMatches ? cert : null;
     const expiry = effectiveCert?.expiry ? new Date(effectiveCert.expiry) : null;
-    const hosts = [sslHostStatus(target.fqdn, effectiveCert)];
+    const hostRow = await prisma.domainHost.findFirst({ where: { hostname: target.fqdn }, select: { dnsStatus: true, lastError: true } });
+    const hosts = [sslHostStatus(target.fqdn, cert, served, hostRow)];
     await refreshSubdomainHostSsl(target.subdomain, effectiveCert);
     return {
       subdomainId,
@@ -2458,7 +2445,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       servedCertificate: served,
       forceSsl: target.subdomain.sslEnabled,
       activeJobId: await activeAccountSslJobIdForResource({ subdomainId }),
-      ...expiryStatus(expiry)
+      ...sslExpiryStatus(expiry)
     };
   });
 
@@ -2544,7 +2531,13 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const servedMatches = Boolean(servedApex?.matches && servedWww?.matches);
     const certificateMatches = Boolean(cert?.exists && certificateNamesCoverServerName(`${domain.name} www.${domain.name}`, cert.names ?? []));
     const effectiveExpiry = domain.sslEnabled && certificateMatches && servedMatches && cert?.expiry ? new Date(cert.expiry) : null;
-    const hosts = [sslHostStatus(domain.name, servedApex?.matches ? cert : null), sslHostStatus(`www.${domain.name}`, servedWww?.matches ? cert : null)];
+    const hostnames = [domain.name, `www.${domain.name}`];
+    const persistedHosts = await prisma.domainHost.findMany({ where: { domainId: domain.id, hostname: { in: hostnames } }, select: { hostname: true, dnsStatus: true, lastError: true } });
+    const hostRows = new Map(persistedHosts.map((host) => [host.hostname, host]));
+    const hosts = [
+      sslHostStatus(domain.name, cert, servedApex, hostRows.get(domain.name)),
+      sslHostStatus(`www.${domain.name}`, cert, servedWww, hostRows.get(`www.${domain.name}`))
+    ];
     await refreshDomainHostSsl(domain, certificateMatches && servedMatches ? cert : null);
     return {
       domainId: domain.id,
@@ -2555,7 +2548,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
       servedCertificate: { apex: servedApex, www: servedWww },
       forceSsl: domain.forceSsl,
       activeJobId: await activeAccountSslJobIdForResource({ domainId: domain.id }),
-      ...expiryStatus(effectiveExpiry)
+      ...sslExpiryStatus(effectiveExpiry)
     };
   });
 

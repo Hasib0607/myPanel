@@ -23,6 +23,12 @@ type SslStatus = {
     sslEnabled: boolean;
     sslExpiry: string | null;
     state: "missing" | "expired" | "expiring" | "valid";
+    status?: string;
+    message?: string;
+    action?: string;
+    dnsStatus?: string | null;
+    servedSubject?: string | null;
+    servedIssuer?: string | null;
     daysRemaining: number | null;
     alert: boolean;
   }>;
@@ -156,6 +162,9 @@ export function SslClient({ domainId, subdomainId, domainApiBase = "/domains", s
     sslEnabled: Boolean(status?.sslEnabled),
     sslExpiry: status?.sslExpiry ?? null,
     state: status?.state ?? "missing",
+    status: status?.sslEnabled ? "VALID" : "CERT_MISSING",
+    message: status?.sslEnabled ? "Live certificate matches this hostname." : "No matching certificate.",
+    action: status?.forceSsl ? "Issue certificate after DNS is ready." : "Turn on Force HTTPS or issue a certificate.",
     daysRemaining: status?.daysRemaining ?? null,
     alert: Boolean(status?.alert)
   }];
@@ -241,15 +250,21 @@ export function SslClient({ domainId, subdomainId, domainApiBase = "/domains", s
             </div>
             <div className="divide-y divide-panel-line">
               {hostStatuses.map((host) => (
-                <div className="grid grid-cols-[1fr_auto_auto] items-center gap-3 px-4 py-3 text-sm" key={host.host}>
+                <div className="grid grid-cols-[1fr_auto_auto] items-start gap-3 px-4 py-3 text-sm" key={host.host}>
                   <div className="min-w-0">
                     <div className="truncate font-semibold text-panel-ink">{host.host}</div>
-                    <div className="text-xs text-panel-muted">{host.sslExpiry ? `Expires ${new Date(host.sslExpiry).toLocaleDateString()}` : "No matching certificate"}</div>
+                    <div className="text-xs text-panel-muted">{host.sslExpiry ? `Expires ${new Date(host.sslExpiry).toLocaleDateString()}` : host.message ?? "No matching certificate"}</div>
+                    {!host.sslEnabled ? (
+                      <div className="mt-1 text-xs text-amber-700">{host.action ?? "Check DNS, then issue or renew SSL."}</div>
+                    ) : null}
+                    {host.dnsStatus && host.dnsStatus !== "READY" ? (
+                      <div className="mt-1 text-xs text-panel-muted">DNS: {host.dnsStatus}</div>
+                    ) : null}
                   </div>
                   <span className={`rounded-md px-2 py-1 text-xs font-semibold ${host.sslEnabled ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
                     {host.sslEnabled ? "Valid" : "Pending"}
                   </span>
-                  <span className="text-xs uppercase text-panel-muted">{host.state}</span>
+                  <span className="text-xs uppercase text-panel-muted">{host.status ?? host.state}</span>
                 </div>
               ))}
             </div>

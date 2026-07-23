@@ -20,7 +20,7 @@ type Domain = {
   sslExpiry: string | null;
   liveSslEnabled?: boolean;
   liveSslExpiry?: string | null;
-  sslHosts?: Array<{ host: string; sslEnabled?: boolean; covered?: boolean; expiry?: string | null }>;
+  sslHosts?: Array<{ host: string; sslEnabled?: boolean; covered?: boolean; expiry?: string | null; sslStatus?: string; dnsStatus?: string | null; message?: string }>;
   forceSsl: boolean;
   hostingMode: DomainHostingMode;
   documentRoot: string;
@@ -132,6 +132,15 @@ function sslSummary(domain: Domain) {
   if (covered > 0) return `${covered}/${hosts.length} valid`;
   if (domain.forceSsl) return "pending";
   return "off";
+}
+
+function sslHostLabel(host: { host: string; sslEnabled?: boolean; covered?: boolean; sslStatus?: string; dnsStatus?: string | null }) {
+  const prefix = host.host.startsWith("www.") ? "www" : host.host.startsWith("*.") ? "wildcard" : "apex";
+  if (sslHostCovered(host)) return `${prefix} valid`;
+  if (host.dnsStatus === "PENDING" || host.dnsStatus === "MISMATCH") return `${prefix} dns`;
+  if (host.sslStatus === "MISMATCH") return `${prefix} mismatch`;
+  if (host.sslStatus === "EXPIRED") return `${prefix} expired`;
+  return `${prefix} pending`;
 }
 
 function subdomainSslLabel(subdomain: Domain["subdomains"][number]) {
@@ -788,9 +797,9 @@ export function DomainsClient({
                                 <span
                                   className={`rounded-md px-1.5 py-0.5 text-[11px] font-semibold ${covered ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}
                                   key={host.host}
-                                  title={host.host}
+                                  title={host.message ?? `${host.host} SSL status`}
                                 >
-                                  {host.host.startsWith("www.") ? "www" : "apex"} {covered ? "valid" : "pending"}
+                                  {sslHostLabel(host)}
                                 </span>
                               );
                             })}
