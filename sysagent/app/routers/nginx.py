@@ -211,7 +211,8 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
 
     probe_file: Path | None = None
     probe_expected = ""
-    if settings.allow_live_nginx:
+    should_probe_acme_route = not has_ssl
+    if settings.allow_live_nginx and should_probe_acme_route:
         probe_token = f"vps-panel-vhost-{secrets.token_hex(12)}"
         probe_expected = f"ok-{probe_token}"
         challenge_dir = root_path / ".well-known" / "acme-challenge"
