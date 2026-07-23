@@ -295,16 +295,29 @@ def _server_name_token_conflicts(claimed: str, requested: str) -> bool:
     return False
 
 
+def _server_name_tokens_conflict(claimed_tokens: list[str] | set[str], requested_tokens: list[str]) -> bool:
+    claimed_normalized = {token.strip().lower().rstrip(".") for token in claimed_tokens if token.strip()}
+    for requested_token in requested_tokens:
+        requested_parent = _wildcard_parent(requested_token)
+        for claimed_token in claimed_tokens:
+            claimed_normalized_token = claimed_token.strip().lower().rstrip(".")
+            if (
+                requested_parent
+                and claimed_normalized_token == f"www.{requested_parent}"
+                and requested_parent in claimed_normalized
+            ):
+                continue
+            if _server_name_token_conflicts(claimed_token, requested_token):
+                return True
+    return False
+
+
 def _config_has_server_name(path: Path, server_name: str) -> bool:
     """Return True if an nginx config file contains a server_name directive for server_name."""
     try:
         text = path.read_text(encoding="utf-8", errors="ignore")
         claimed = set(server_name_directive_tokens(text))
-        return any(
-            _server_name_token_conflicts(claimed_token, requested_token)
-            for requested_token in server_name_tokens(server_name)
-            for claimed_token in claimed
-        )
+        return _server_name_tokens_conflict(claimed, server_name_tokens(server_name))
     except OSError:
         return False
 
@@ -388,11 +401,7 @@ def _config_dump_conflict_files(
         claimed = server_name_directive_tokens(file_text)
         if not claimed:
             continue
-        if not any(
-            _server_name_token_conflicts(claimed_token, requested_token)
-            for requested_token in requested_tokens
-            for claimed_token in claimed
-        ):
+        if not _server_name_tokens_conflict(claimed, requested_tokens):
             continue
         if current_file not in matches:
             matches.append(current_file)

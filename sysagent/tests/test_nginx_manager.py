@@ -228,7 +228,7 @@ server {
             apex = root / "domain-ebitan.store.conf"
             deep_child = root / "domain-deep.fahpet.ebitan.store.conf"
             own = root / "deployment-wildcard.ebitan.store.conf"
-            apex.write_text("server { listen 443 ssl; server_name ebitan.store; }\n", encoding="utf-8")
+            apex.write_text("server { listen 443 ssl; server_name ebitan.store www.ebitan.store; }\n", encoding="utf-8")
             deep_child.write_text(
                 "server { listen 443 ssl; server_name deep.fahpet.ebitan.store; }\n",
                 encoding="utf-8",
