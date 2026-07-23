@@ -263,6 +263,11 @@ function activeDeploymentRootPath(deployment: { rootPath: string; processConfig?
     : deployment.rootPath;
 }
 
+function deploymentCanKeepSslProxy(deployment: { status?: string | null; port?: number | null } | null | undefined) {
+  if (!deployment) return false;
+  return (deployment.port ?? 0) > 0 && deployment.status !== "STOPPED" && deployment.status !== "FAILED";
+}
+
 async function republishSubdomainDeploymentBindings(subdomainId: string, certificate?: ReusableCertificate | null) {
   const bindings = await prisma.deploymentDomain.findMany({
     where: { subdomainId },
@@ -274,7 +279,7 @@ async function republishSubdomainDeploymentBindings(subdomainId: string, certifi
   });
   const results = [];
   for (const binding of bindings) {
-    if (!deploymentIsRoutable(binding.deployment)) continue;
+    if (!deploymentCanKeepSslProxy(binding.deployment)) continue;
     const domain = boundDomainFromBinding(binding);
     const serverName = deploymentServerName(domain);
     if (!domain || !serverName) continue;
@@ -304,7 +309,10 @@ async function hasRoutableSubdomainDeploymentBinding(subdomainId: string | null 
   const binding = await prisma.deploymentDomain.findFirst({
     where: {
       subdomainId,
-      deployment: { status: "RUNNING" }
+      deployment: {
+        port: { gt: 0 },
+        status: { notIn: ["STOPPED", "FAILED"] }
+      }
     },
     select: { id: true }
   });
