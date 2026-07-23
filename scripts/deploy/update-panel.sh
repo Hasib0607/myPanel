@@ -226,6 +226,11 @@ repair_panel_permissions() {
       needs_repair=true
     fi
   done
+  for path in "$APP_DIR/api/dist" "$APP_DIR/api/node_modules/.prisma" "$APP_DIR/api/node_modules/@prisma/client" "$APP_DIR/frontend/.next"; do
+    if [[ -d "$path" ]] && find "$path" ! -writable -print -quit 2>/dev/null | grep -q .; then
+      needs_repair=true
+    fi
+  done
 
   if [[ "$needs_repair" == "true" ]]; then
     log "panel checkout is not writable by $(id -un); attempting permission repair"
