@@ -168,7 +168,8 @@ export async function deploymentSslCertificatePathsWhenReady(domain: BoundDomain
 export async function verifiedSslPathsForServerName(serverName: string, lookupDomain?: string) {
   try {
     const lookup = lookupDomain || serverNameTokens(serverName)[0] || serverName;
-    const status = await sysagent.certificateFindReusable(lookup);
+    const certLookup = isWildcardHostname(lookup) ? certbotCertificateName(lookup) : lookup;
+    const status = await sysagent.certificateFindReusable(certLookup);
     if (!status.exists || !certificateNamesCoverServerName(serverName, status.names ?? [])) return {};
     return {
       sslCertificate: status.certificate,

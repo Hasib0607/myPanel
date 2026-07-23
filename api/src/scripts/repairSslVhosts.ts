@@ -17,7 +17,7 @@ import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
 import { currentVpsIp } from "../lib/serverIp.js";
 import { sysagent, type SysagentCommandResult } from "../lib/sysagent.js";
-import { isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
+import { certbotCertificateName, isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
 
 const domainRepairInclude = {
   account: { select: { homeRoot: true } },
@@ -80,7 +80,8 @@ function parseArgs() {
 
 async function staticSubdomainSslPaths(fqdn: string, wantsSsl: boolean) {
   if (!wantsSsl && !isWildcardHostname(fqdn)) return {};
-  const cert = await sysagent.certificateFindReusable(fqdn).catch(() => null);
+  const lookup = isWildcardHostname(fqdn) ? certbotCertificateName(fqdn) : fqdn;
+  const cert = await sysagent.certificateFindReusable(lookup).catch(() => null);
   if (!cert?.exists || !certificateNamesCoverHost(fqdn, cert.names ?? [])) return {};
   return { sslCertificate: cert.certificate, sslCertificateKey: cert.privateKey };
 }
