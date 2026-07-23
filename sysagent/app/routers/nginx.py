@@ -266,6 +266,14 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
         if result.get("returncode") == 0 and route_ownership_header_seen(output, body.name):
             return result
         loaded_conflicts = loaded_conflicting_config_files(body.name, body.serverName)
+        dump = run_command(["nginx", "-T"], allow_live=True)
+        dump_output = f"{dump.get('stdout') or ''}\n{dump.get('stderr') or ''}".lower()
+        own_header_loaded = route_ownership_config_seen(dump_output, body.name)
+        own_server_name_loaded = f"server_name {body.serverName.lower()};" in dump_output
+        dump_status = (
+            f" nginx -T route diagnostic: returncode={dump.get('returncode')}, "
+            f"ownHeaderLoaded={own_header_loaded}, ownServerNameLoaded={own_server_name_loaded}."
+        )
         conflict_hint = (
             f" Loaded conflicting nginx configs: {', '.join(loaded_conflicts)}."
             if loaded_conflicts
@@ -277,7 +285,7 @@ def write_static_vhost(body: StaticVhostRequest) -> dict:
             "stderr": (
                 f"Generated vhost {body.name!r} is not the active {scheme.upper()} route "
                 f"for {primary_host}:{port}; missing {ROUTE_OWNERSHIP_HEADER} response header."
-                f"{conflict_hint}"
+                f"{conflict_hint}{dump_status}"
             ),
         }
 

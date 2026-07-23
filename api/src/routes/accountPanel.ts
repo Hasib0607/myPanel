@@ -2493,13 +2493,19 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
   app.get("/domains/:domainId/ssl", async (request: any) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
+    const cert = await sysagent.certificateFindReusable(domain.name).catch(() => null);
+    const certificateMatches = Boolean(cert?.exists && certificateNamesCoverServerName(`${domain.name} www.${domain.name}`, cert.names ?? []));
+    const effectiveExpiry = domain.sslEnabled && certificateMatches && cert?.expiry ? new Date(cert.expiry) : null;
+    const hosts = [domain.name, `www.${domain.name}`].map((host) => sslHostStatus(host, cert));
     return {
       domainId: domain.id,
       domain: domain.name,
-      sslEnabled: domain.sslEnabled,
-      sslExpiry: domain.sslExpiry,
+      sslEnabled: domain.sslEnabled && certificateMatches,
+      sslExpiry: effectiveExpiry,
+      hosts,
       forceSsl: domain.forceSsl,
-      ...expiryStatus(domain.sslEnabled ? domain.sslExpiry : null)
+      activeJobId: await activeAccountSslJobIdForResource({ domainId: domain.id }),
+      ...expiryStatus(effectiveExpiry)
     };
   });
 
@@ -2507,17 +2513,22 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const { domainId, action } = z.object({ domainId: z.string(), action: z.enum(["issue", "renew"]) }).parse(request.params);
     const body = sslSchema.parse(request.body ?? {});
     const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
-    const account = await prisma.account.findUniqueOrThrow({ where: { id: accountId(request) } });
-    const webRoot = accountDomainWebRoot(account, domain);
+    const preflight = await accountSslPreflight(request, domain, body.includeWww);
     const job = await sslQueue.add(action, {
       domainId: domain.id,
       domain: domain.name,
       email: body.email ?? `admin@${domain.name}`,
-      webRoot,
-      includeWww: body.includeWww,
+      webRoot: preflight.webRoot,
+      includeWww: preflight.includeWww,
+      dnsChallenge: preflight.dnsChallenge ?? false,
+      parentDomain: preflight.parentDomain,
+      certName: preflight.certName,
       forceSsl: domain.forceSsl,
       source: "account"
     });
+    if (action === "issue") {
+      await prisma.domain.update({ where: { id: domain.id }, data: { sslEnabled: false, sslExpiry: null } });
+    }
     await audit(request, { action: "APPLY", resource: "ssl", resourceId: domain.id, description: `Account queued SSL ${action} for ${domain.name}` });
     return reply.code(202).send({ queued: true, jobId: job.id });
   });
