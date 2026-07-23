@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from app.command import run_command
 from app.config import settings
 from app.routers.dns import effective_dns_paths, safe_zone_path
-from app.nginx_manager import acme_root_for_server_name, letsencrypt_certificate_exists, run_live_step, safe_web_root
+from app.nginx_manager import acme_root_for_server_name, certificate_names_cover, letsencrypt_certificate_exists, run_live_step, safe_web_root
 
 router = APIRouter()
 LETSENCRYPT_LIVE_DIR = Path("/etc/letsencrypt/live")
@@ -172,18 +172,17 @@ def reusable_certificate_candidates(requested: str) -> list[dict]:
     if not LETSENCRYPT_LIVE_DIR.exists():
         return []
 
-    duplicate_pattern = re.compile(rf"^{re.escape(base)}-\d+$")
     candidates: list[dict] = []
     for item in LETSENCRYPT_LIVE_DIR.iterdir():
         if not item.is_dir():
             continue
         cert_name = item.name
         expiry = certificate_expiry(cert_name)
-        exists = letsencrypt_certificate_exists(cert_name)
+        exists = letsencrypt_certificate_exists(cert_name, require_name_match=False)
         if not exists:
             continue
         names = certificate_names(cert_name)
-        if cert_name != base and not duplicate_pattern.fullmatch(cert_name) and not certificate_names_cover(base, names):
+        if not certificate_names_cover(base, names):
             continue
         candidates.append({
             "domain": cert_name,
@@ -194,23 +193,6 @@ def reusable_certificate_candidates(requested: str) -> list[dict]:
             "privateKey": str(item / "privkey.pem"),
         })
     return sorted(candidates, key=lambda item: item.get("expiry") or "", reverse=True)
-
-
-def certificate_names_cover(requested: str, names: list[str]) -> bool:
-    requested = requested.lower().rstrip(".")
-    requested_labels = requested.split(".")
-    for name in names:
-        candidate = name.lower().rstrip(".")
-        if candidate == requested:
-            return True
-        if not candidate.startswith("*."):
-            continue
-        parent = candidate[2:]
-        parent_labels = parent.split(".")
-        if requested.endswith(f".{parent}") and len(requested_labels) == len(parent_labels) + 1:
-            return True
-    return False
-
 
 @router.get("/certificate-reusable/{domain}")
 def certificate_reusable(domain: str) -> dict:

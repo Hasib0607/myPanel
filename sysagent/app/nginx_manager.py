@@ -67,7 +67,33 @@ def certificate_name_for_server_name(server_name: str) -> str:
     return primary
 
 
-def letsencrypt_certificate_exists(domain: str) -> bool:
+def certificate_names_cover(requested: str, names: list[str]) -> bool:
+    requested = requested.lower().rstrip(".")
+    requested_labels = requested.split(".")
+    for name in names:
+        candidate = name.lower().rstrip(".")
+        if candidate == requested:
+            return True
+        if not candidate.startswith("*."):
+            continue
+        parent = candidate[2:]
+        parent_labels = parent.split(".")
+        if requested.endswith(f".{parent}") and len(requested_labels) == len(parent_labels) + 1:
+            return True
+    return False
+
+
+def certificate_dns_names(cert: Path) -> list[str]:
+    result = run_command(
+        ["openssl", "x509", "-in", str(cert), "-noout", "-ext", "subjectAltName"],
+        allow_live=DEPLOYMENT_COMMANDS_LIVE,
+    )
+    if result.get("returncode") != 0:
+        return []
+    return sorted({name.lower() for name in re.findall(r"DNS:([^,\s]+)", result.get("stdout") or "", re.IGNORECASE)})
+
+
+def letsencrypt_certificate_exists(domain: str, *, require_name_match: bool = True) -> bool:
     primary = certificate_name_for_server_name(domain)
     cert = Path(f"/etc/letsencrypt/live/{primary}/fullchain.pem")
     key = Path(f"/etc/letsencrypt/live/{primary}/privkey.pem")
@@ -77,7 +103,11 @@ def letsencrypt_certificate_exists(domain: str) -> bool:
         ["openssl", "x509", "-in", str(cert), "-noout"],
         allow_live=DEPLOYMENT_COMMANDS_LIVE,
     )
-    return verify.get("returncode") == 0
+    if verify.get("returncode") != 0:
+        return False
+    if not require_name_match:
+        return True
+    return certificate_names_cover(primary_server_name(domain), certificate_dns_names(cert))
 
 
 def safe_letsencrypt_path(path: str) -> Path:

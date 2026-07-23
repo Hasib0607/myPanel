@@ -1597,7 +1597,8 @@ function isSslProtocolPublicRouteIssue(result: unknown, warning: string | null |
   const route = result as { returncode?: number; stderr?: string; httpCode?: number };
   const text = `${warning ?? ""} ${route.stderr ?? ""}`;
   return route.returncode === 35
-    || /SSL handshake failed|invalid SSL response|ERR_SSL_PROTOCOL|SSL_PROTOCOL_ERROR/i.test(text);
+    || route.returncode === 60
+    || /SSL handshake failed|invalid SSL response|ERR_SSL_PROTOCOL|SSL_PROTOCOL_ERROR|no alternative certificate subject name matches|certificate subject name|curl:\s*\(60\)/i.test(text);
 }
 
 async function repairDeploymentSslAccess(
@@ -2203,7 +2204,23 @@ async function optionalPublicRouteWarning(
   } catch (error) {
     const firstMessage = error instanceof Error ? error.message : "Public route check failed";
     if (isMissingPublicStaticAssetsFailure(error)) throw error;
-    await writeLog(deploymentId, releaseId, "HEALTH_CHECK", `${label} failed; running Guardian public-route repair`, { warning: firstMessage }, "warn");
+    await writeLog(deploymentId, releaseId, "HEALTH_CHECK", `${label} failed; running public-route repair`, { warning: firstMessage }, "warn");
+
+    if (isSslProtocolPublicRouteIssue(publicRoute, firstMessage)) {
+      const sslRepairWarning = await repairDeploymentSslAccess(deploymentId, releaseId, { ...deployment, rootPath: appPath }, domain);
+      await guardianRepairSleep(2000);
+      const retryHttpsReady = await deploymentHttpsReady(domain);
+      publicRoute = await runStep(deploymentId, releaseId, "HEALTH_CHECK", `${label} retry after SSL/nginx repair`, () =>
+        sysagent.deploymentPublicRoute({ serverName: deploymentServerName(domain), rootPath: appPath, framework: deployment.framework, requireHttps: retryHttpsReady })
+      );
+      const warning = (await assertPublicRouteResult(publicRoute, label, deployment, appPath)) ?? sslRepairWarning;
+      if (!warning) {
+        await writeLog(deploymentId, releaseId, "HEALTH_CHECK", `${label} recovered after SSL/nginx repair`);
+        const staticAssetWarning = await validatePublicStaticAssets(deploymentId, releaseId, label, deployment, appPath, publicRoute, await deploymentHttpsReady(domain));
+        if (staticAssetWarning) return staticAssetWarning;
+      }
+      return warning;
+    }
 
     envVars = await ensureLaravelAppKey(deploymentId, releaseId, appPath, deployment.port, envVars);
     const repairedCharset = await autoRepairPostgresEncoding(deploymentId, releaseId, firstMessage, envVars).catch(() => null);
@@ -2260,6 +2277,9 @@ async function optionalPublicRouteWarning(
     if (isMissingPublicStaticAssetsFailure(error)) throw error;
     const message = error instanceof Error ? error.message : "Public route check failed";
     await writeLog(deploymentId, releaseId, "HEALTH_CHECK", `${label} warning`, { warning: message }, "warn");
+    if (isSslProtocolPublicRouteIssue(publicRoute, message)) {
+      return `${message}\n\nThe app passed localhost health, so deploy will continue. The public HTTPS route is serving a certificate that does not match ${domain.name}. Redeploy will keep HTTP active while SSL is reissued; check DNS A record, Cloudflare proxy mode, and the SSL job for ${domain.name}.`;
+    }
     if (nginxUpstreamFailure(publicRoute, message)) {
       await inspectAndRepairDeploymentNginxRoute(deploymentId, releaseId, { ...deployment, rootPath: appPath }, domain, message).catch((inspectError) =>
         writeLog(deploymentId, releaseId, "HEALTH_CHECK", "Public nginx route inspection failed", {

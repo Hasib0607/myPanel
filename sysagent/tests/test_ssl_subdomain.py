@@ -79,3 +79,31 @@ class CertbotIncludeWwwTests(unittest.TestCase):
         self.assertTrue(certificate_names_cover("fahpet.ebitan.store", ["fahpet.ebitan.store"]))
         self.assertFalse(certificate_names_cover("deep.fahpet.ebitan.store", ["*.ebitan.store"]))
         self.assertFalse(certificate_names_cover("ebitan.store", ["*.ebitan.store"]))
+
+    def test_reusable_certificate_rejects_matching_folder_with_wrong_san(self) -> None:
+        with TemporaryDirectory() as tmp, \
+             patch.object(ssl_router, "LETSENCRYPT_LIVE_DIR", Path(tmp)), \
+             patch.object(ssl_router, "letsencrypt_certificate_exists", return_value=True), \
+             patch.object(ssl_router, "certificate_expiry", return_value="2026-12-31T00:00:00+00:00"), \
+             patch.object(ssl_router, "certificate_names", return_value=["other-site.test"]):
+            cert_dir = Path(tmp) / "need4you.xyz"
+            cert_dir.mkdir()
+
+            result = ssl_router.certificate_reusable("need4you.xyz")
+
+        self.assertFalse(result["exists"])
+        self.assertEqual(result["candidates"], [])
+
+    def test_reusable_certificate_accepts_duplicate_folder_when_san_matches(self) -> None:
+        with TemporaryDirectory() as tmp, \
+             patch.object(ssl_router, "LETSENCRYPT_LIVE_DIR", Path(tmp)), \
+             patch.object(ssl_router, "letsencrypt_certificate_exists", return_value=True), \
+             patch.object(ssl_router, "certificate_expiry", return_value="2026-12-31T00:00:00+00:00"), \
+             patch.object(ssl_router, "certificate_names", return_value=["need4you.xyz"]):
+            cert_dir = Path(tmp) / "need4you.xyz-0001"
+            cert_dir.mkdir()
+
+            result = ssl_router.certificate_reusable("need4you.xyz")
+
+        self.assertTrue(result["exists"])
+        self.assertEqual(result["domain"], "need4you.xyz-0001")
