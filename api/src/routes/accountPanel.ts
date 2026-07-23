@@ -19,7 +19,7 @@ import { publishDomainDnsZone } from "../lib/domainDnsPublish.js";
 import { detectDeploymentFiles } from "../lib/deploymentDetection.js";
 import { deploymentRuntimeReview, prepareDeploymentRuntimeTools } from "../lib/deploymentRuntimeReview.js";
 import { processConfigWithoutManualStop, requestDeploymentManualStop } from "../lib/deploymentStopControl.js";
-import { boundDomainFromBinding, certificateNamesCoverHost, certificateNamesCoverServerName, deploymentFallbackRootPath, deploymentIsRoutable, deploymentServerName, deploymentSslCertificatePathsWhenReady, buildDeploymentNginxRequest, publishDeploymentProxyNginx } from "../lib/deploymentDomainSsl.js";
+import { boundDomainFromBinding, certificateNamesCoverHost, certificateNamesCoverServerName, deploymentFallbackRootPath, deploymentIsRoutable, deploymentServerName, deploymentSslCertificatePathsWhenReady, publishDeploymentProxyNginx } from "../lib/deploymentDomainSsl.js";
 import { prisma } from "../lib/prisma.js";
 import { resolvePublicA } from "../lib/publicDns.js";
 import { deleteSecret, getSecret, getSecretRecord, putSecret } from "../lib/secrets.js";
@@ -1239,8 +1239,7 @@ async function publishAccountDomainRoute(request: any, account: { id: string; ho
     ? await prisma.deployment.findFirst({ where: { id: domain.hostingDeploymentId, accountId: account.id } })
     : domain.deploymentBindings[0]?.deployment ?? domain.deployments[0] ?? null;
   const nginxResult = deployment && deploymentIsRoutable(deployment)
-    ? await sysagent.deploymentNginx(
-        buildDeploymentNginxRequest({
+    ? await publishDeploymentProxyNginx({
           deploymentId: deployment.id,
           fqdn: `${domain.name} www.${domain.name}`,
           upstreamPort: deployment.port,
@@ -1250,9 +1249,8 @@ async function publishAccountDomainRoute(request: any, account: { id: string; ho
           publicDirectory: deployment.publicDirectory,
           outputDirectory: deployment.outputDirectory,
           fallbackRootPath: accountDomainWebRoot(account, domain),
-          forceSsl: domain.forceSsl && domain.sslEnabled
+          forceHttps: domain.forceSsl
         })
-      )
     : domain.hostingMode === "REDIRECT"
       ? await sysagent.writeRedirectNginxVhost({
           name: `domain-${nginxResourceName(domain.name)}`,

@@ -6,7 +6,7 @@ import { Prisma } from "@prisma/client";
 import { env } from "../config/env.js";
 import { audit } from "../lib/audit.js";
 import { ensureDomainFileStructure, ensureSubdomainFileStructure, subdomainFolderName } from "../lib/domainFiles.js";
-import { buildDeploymentNginxRequest, certificateNamesCoverServerName, deploymentIsRoutable, deploymentServerName, deploymentSslCertificatePathsWhenReady, publishPublicHtmlNginxVhost } from "../lib/deploymentDomainSsl.js";
+import { certificateNamesCoverServerName, deploymentIsRoutable, deploymentServerName, deploymentSslCertificatePathsWhenReady, publishDeploymentProxyNginx, publishPublicHtmlNginxVhost } from "../lib/deploymentDomainSsl.js";
 import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
 import { sysagent } from "../lib/sysagent.js";
@@ -397,8 +397,7 @@ async function publishDomainHosting(domainId: string) {
           orderBy: { createdAt: "desc" }
         });
     if (deployment && deploymentIsRoutable(deployment)) {
-      nginxResult = await sysagent.deploymentNginx(
-        buildDeploymentNginxRequest({
+      nginxResult = await publishDeploymentProxyNginx({
           deploymentId: deployment.id,
           fqdn: `${domain.name} www.${domain.name}`,
           upstreamPort: deployment.port,
@@ -408,9 +407,8 @@ async function publishDomainHosting(domainId: string) {
           publicDirectory: deployment.publicDirectory,
           outputDirectory: deployment.outputDirectory,
           fallbackRootPath: path.join(env.FILE_MANAGER_ROOT, domain.name, normalizeDocumentRoot(domain.documentRoot)),
-          forceSsl: domain.forceSsl && domain.sslEnabled
-        })
-      );
+          forceHttps: domain.forceSsl
+        });
     } else {
       nginxResult = await publishPublicHtmlNginxVhost({
         id: domain.id,

@@ -416,6 +416,9 @@ export async function publishDeploymentProxyNginx(input: {
     reusableSslPaths.sslCertificateKey === input.sslCertificateKey
   );
   const httpsReady = Boolean(reusableSslPaths.sslCertificate && reusableSslPaths.sslCertificateKey);
+  if (input.requireSsl && input.forceHttps && !httpsReady) {
+    throw new Error(`No verified SSL certificate covers ${requestedServerName}.`);
+  }
   return sysagent.deploymentNginx(
     buildDeploymentNginxRequest({
       deploymentId: input.deploymentId,

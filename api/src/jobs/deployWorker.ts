@@ -4933,9 +4933,10 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     }
 
     if (domain && !backendOnlyLaravel) {
-      const serverName = deploymentServerName(domain);
-      const tlsSync = await syncDeploymentTlsWithCertificate(domain);
-      const activeDomain = tlsSync.domain ?? domain;
+      const includeWww = isWildcardHostname(domain.name) ? false : await wwwPointsToThisVps(domain);
+      const tlsSync = await syncDeploymentTlsWithCertificate({ ...domain, includeWww });
+      const activeDomain = { ...(tlsSync.domain ?? domain), includeWww };
+      const serverName = deploymentServerName(activeDomain);
       domain = activeDomain;
       const activeSslPaths = tlsSync.httpsReady ? await deploymentSslCertificatePathsWhenReady(activeDomain) : {};
       await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", "Finalize deployment proxy vhost", () =>
