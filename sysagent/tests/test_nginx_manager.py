@@ -25,12 +25,22 @@ fastapi.APIRouter = lambda *args, **kwargs: types.SimpleNamespace(
 sys.modules.setdefault("fastapi", fastapi)
 
 command = types.ModuleType("app.command")
+command.settings = types.SimpleNamespace(allow_live_system_commands=False, deployment_command_timeout_seconds=900)
 command.run_command = lambda *args, **kwargs: {"returncode": 0, "stdout": "", "stderr": "", "dryRun": False}
+command.run_install_plan = lambda *args, **kwargs: {"returncode": 0, "stdout": "", "stderr": "", "dryRun": False}
+command.deployment_resource_limits = lambda: None
+command.constrained_runtime_env = lambda env, limits=None: env
 sys.modules.setdefault("app.command", command)
 
 config = types.ModuleType("app.config")
 config.DEPLOYMENT_COMMANDS_LIVE = True
-config.settings = types.SimpleNamespace(allow_live_nginx=False, file_manager_root="/tmp")
+config.settings = types.SimpleNamespace(
+    allow_live_dns=False,
+    allow_live_nginx=False,
+    allow_live_ssl=False,
+    file_manager_root="/tmp",
+    ssl_certbot_timeout_seconds=900,
+)
 sys.modules.setdefault("app.config", config)
 
 from app.nginx_manager import (

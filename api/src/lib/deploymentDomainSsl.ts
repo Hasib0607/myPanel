@@ -6,7 +6,7 @@ import { env } from "../config/env.js";
 import path from "node:path";
 import { sysagent } from "./sysagent.js";
 import { subdomainFolderName } from "./domainFiles.js";
-import { certbotCertificateName, isWildcardHostname } from "./nginxNames.js";
+import { certificateLookupName, certbotCertificateName, isWildcardHostname, serverNameHasWildcard } from "./nginxNames.js";
 
 export type BoundDomain = {
   id: string;
@@ -152,7 +152,7 @@ export async function deploymentHttpsReady(domain: BoundDomain | null) {
   if (!domain?.name) return false;
   const serverName = deploymentServerName(domain) ?? domain.name;
   try {
-    const status = await sysagent.certificateFindReusable(domain.name);
+    const status = await sysagent.certificateFindReusable(certificateLookupName(domain.name));
     return Boolean(status.exists && certificateNamesCoverServerName(serverName, status.names ?? []));
   } catch {
     return false;
@@ -168,7 +168,7 @@ export async function deploymentSslCertificatePathsWhenReady(domain: BoundDomain
 export async function verifiedSslPathsForServerName(serverName: string, lookupDomain?: string) {
   try {
     const lookup = lookupDomain || serverNameTokens(serverName)[0] || serverName;
-    const certLookup = isWildcardHostname(lookup) ? certbotCertificateName(lookup) : lookup;
+    const certLookup = certificateLookupName(lookup);
     const status = await sysagent.certificateFindReusable(certLookup);
     if (!status.exists || !certificateNamesCoverServerName(serverName, status.names ?? [])) return {};
     return {
@@ -433,7 +433,10 @@ export async function publishDeploymentProxyNginx(input: {
     forceSsl: input.forceHttps,
     sslEnabled: input.forceHttps
   };
-  const reusableSslPaths = input.forceHttps ? await verifiedSslPathsForServerName(requestedServerName, bound.name) : {};
+  const shouldPreserveWildcardHttps = !input.forceHttps && serverNameHasWildcard(requestedServerName);
+  const reusableSslPaths = input.forceHttps || shouldPreserveWildcardHttps
+    ? await verifiedSslPathsForServerName(requestedServerName, bound.name)
+    : {};
   const explicitMatchesReusable = Boolean(
     input.sslCertificate &&
     input.sslCertificateKey &&
@@ -441,7 +444,8 @@ export async function publishDeploymentProxyNginx(input: {
     reusableSslPaths.sslCertificateKey === input.sslCertificateKey
   );
   const httpsReady = Boolean(reusableSslPaths.sslCertificate && reusableSslPaths.sslCertificateKey);
-  if (input.requireSsl && input.forceHttps && !httpsReady) {
+  const effectiveForceHttps = input.forceHttps || (shouldPreserveWildcardHttps && httpsReady);
+  if (input.requireSsl && effectiveForceHttps && !httpsReady) {
     throw new Error(`No verified SSL certificate covers ${requestedServerName}.`);
   }
   return sysagent.deploymentNginx(
@@ -455,7 +459,7 @@ export async function publishDeploymentProxyNginx(input: {
       publicDirectory: input.publicDirectory,
       outputDirectory: input.outputDirectory,
       fallbackRootPath: input.fallbackRootPath,
-      forceSsl: input.forceHttps && httpsReady,
+      forceSsl: effectiveForceHttps && httpsReady,
       requireSsl: input.requireSsl ?? false,
       ...(explicitMatchesReusable
         ? { sslCertificate: input.sslCertificate, sslCertificateKey: input.sslCertificateKey }

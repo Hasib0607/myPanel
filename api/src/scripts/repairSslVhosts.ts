@@ -17,7 +17,7 @@ import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
 import { currentVpsIp } from "../lib/serverIp.js";
 import { sysagent, type SysagentCommandResult } from "../lib/sysagent.js";
-import { certbotCertificateName, isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
+import { certificateLookupName, certbotCertificateName, isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
 
 const domainRepairInclude = {
   account: { select: { homeRoot: true } },
@@ -206,7 +206,7 @@ async function repairSubdomain(subdomain: RepairSubdomain, dryRun: boolean) {
   }
 
   assertPublish(`subdomain ${fqdn}`, result);
-  const cert = await sysagent.certificateFindReusable(fqdn).catch(() => null);
+  const cert = await sysagent.certificateFindReusable(certificateLookupName(fqdn)).catch(() => null);
   const host = await refreshSubdomainHostSsl(subdomain, httpsReady && cert?.exists ? cert : null);
   return { domain: fqdn, httpsReady, result, hosts: [host] };
 }

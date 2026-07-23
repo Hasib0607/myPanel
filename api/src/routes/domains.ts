@@ -314,6 +314,7 @@ async function domainNameserverPendingReason(domain: string, nameServers: Active
     await assertDomainUsesHostingNameServers(domain, nameServers);
     return null;
   } catch (error) {
+    if (env.REQUIRE_DOMAIN_NAMESERVER_MATCH) throw error;
     if (!env.ALLOW_PENDING_DOMAIN_NAMESERVER_MISMATCH) throw error;
     if (error && typeof error === "object" && "statusCode" in error && error.statusCode === 400) {
       return error instanceof Error ? error.message : "Domain nameservers are not pointing to this server yet.";

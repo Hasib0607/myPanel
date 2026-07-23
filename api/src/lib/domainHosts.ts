@@ -3,7 +3,7 @@ import { checkLetsEncryptCaa, resolvePublicA } from "./publicDns.js";
 import { currentVpsIp } from "./serverIp.js";
 import { sysagent } from "./sysagent.js";
 import { certificateNamesCoverHost } from "./deploymentDomainSsl.js";
-import { isWildcardHostname } from "./nginxNames.js";
+import { certificateLookupName, isWildcardHostname, wildcardProbeHostname } from "./nginxNames.js";
 
 type CertificateLike = {
   exists?: boolean;
@@ -117,7 +117,7 @@ export function subdomainSslHostCoverage(subdomain: SubdomainRef, certificate: C
 export async function refreshDomainHostSsl(domain: DomainRef, certificate?: CertificateLike | null) {
   await syncDomainHostRows(domain);
   const cert = certificate === undefined
-    ? await sysagent.certificateFindReusable(domain.name).catch(() => null)
+    ? await sysagent.certificateFindReusable(certificateLookupName(domain.name)).catch(() => null)
     : certificate;
   const coverage = sslHostCoverage(domain, cert);
   const now = new Date();
@@ -146,8 +146,9 @@ export async function refreshDomainHostSsl(domain: DomainRef, certificate?: Cert
 
 export async function refreshSubdomainHostSsl(subdomain: SubdomainRef, certificate?: CertificateLike | null) {
   await syncSubdomainHostRow(subdomain);
+  const hostname = subdomainHostName(subdomain);
   const cert = certificate === undefined
-    ? await sysagent.certificateFindReusable(subdomainHostName(subdomain)).catch(() => null)
+    ? await sysagent.certificateFindReusable(certificateLookupName(hostname)).catch(() => null)
     : certificate;
   const coverage = subdomainSslHostCoverage(subdomain, cert);
   const now = new Date();
@@ -212,15 +213,16 @@ export async function refreshDomainHostDns(domain: DomainRef, expectedIp?: strin
 export async function refreshSubdomainHostDns(subdomain: SubdomainRef, expectedIp?: string) {
   const row = await syncSubdomainHostRow(subdomain);
   const targetIp = expectedIp ?? await currentVpsIp();
+  const lookupHostname = isWildcardHostname(row.hostname) ? wildcardProbeHostname(row.hostname) : row.hostname;
   const now = new Date();
   let records: string[] = [];
   let status: "READY" | "PENDING" | "MISMATCH" = "PENDING";
   let error: string | null = null;
   try {
-    records = await resolvePublicA(row.hostname);
+    records = await resolvePublicA(lookupHostname);
     status = records.includes(targetIp) ? "READY" : "MISMATCH";
     if (status === "MISMATCH") {
-      error = `${row.hostname} resolves to ${records.join(", ") || "no A record"}, expected ${targetIp}.`;
+      error = `${lookupHostname} resolves to ${records.join(", ") || "no A record"}, expected ${targetIp}.`;
     }
     if (status === "READY" && subdomain.sslEnabled) {
       const caa = await checkLetsEncryptCaa(row.hostname, { wildcard: isWildcardHostname(row.hostname) });
@@ -242,5 +244,5 @@ export async function refreshSubdomainHostDns(subdomain: SubdomainRef, expectedI
       lastError: error
     }
   });
-  return { hostname: row.hostname, kind: "CUSTOM" as const, dnsStatus: status, records, expectedIp: targetIp, error };
+  return { hostname: row.hostname, lookupHostname, kind: "CUSTOM" as const, dnsStatus: status, records, expectedIp: targetIp, error };
 }

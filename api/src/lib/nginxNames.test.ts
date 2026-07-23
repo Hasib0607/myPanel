@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { certbotCertificateName, isWildcardHostname, nginxResourceName, serverNameHasWildcard } from "./nginxNames.js";
+import { certificateLookupName, certbotCertificateName, isWildcardHostname, nginxResourceName, serverNameHasWildcard, wildcardProbeHostname } from "./nginxNames.js";
 
 test("nginxResourceName maps wildcard hostnames to safe config names", () => {
   assert.equal(nginxResourceName("*.ecommercex.site"), "wildcard.ecommercex.site");
@@ -21,4 +21,14 @@ test("serverNameHasWildcard detects wildcard names in nginx server_name values",
 test("certbotCertificateName keeps wildcard certificate directories shell-safe", () => {
   assert.equal(certbotCertificateName("*.ecommercex.site"), "wildcard.ecommercex.site");
   assert.equal(certbotCertificateName("ecommercex.site www.ecommercex.site"), "ecommercex.site");
+});
+
+test("certificateLookupName maps wildcard hosts to the certbot lineage", () => {
+  assert.equal(certificateLookupName("*.ebitans.store"), "wildcard.ebitans.store");
+  assert.equal(certificateLookupName("need4home.xyz www.need4home.xyz"), "need4home.xyz");
+});
+
+test("wildcardProbeHostname uses a real child hostname for SNI checks", () => {
+  assert.equal(wildcardProbeHostname("*.ebitans.store"), "vps-panel-wildcard-probe.ebitans.store");
+  assert.equal(wildcardProbeHostname("need4home.xyz"), "need4home.xyz");
 });

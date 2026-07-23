@@ -24,6 +24,11 @@ class CertbotIncludeWwwTests(unittest.TestCase):
             return {"dryRun": False, "command": command, "stdout": "", "stderr": "", "returncode": 0}
 
         with TemporaryDirectory() as tmp, \
+             patch.object(ssl_router, "settings", type("Settings", (), {
+                 "allow_live_ssl": False,
+                 "allow_live_dns": False,
+                 "ssl_certbot_timeout_seconds": settings.ssl_certbot_timeout_seconds,
+             })()), \
              patch.object(ssl_router, "ensure_acme_webroot"), \
              patch.object(ssl_router, "safe_web_root", return_value=Path(tmp)), \
              patch.object(ssl_router, "run_command", side_effect=fake_run_command):
@@ -50,6 +55,11 @@ class CertbotIncludeWwwTests(unittest.TestCase):
             zone_path = Path(tmp) / "db.alfena.shop"
             zone_path.write_text("$TTL 60\n@ IN SOA ns1.alfena.shop. admin.alfena.shop. (2026060501 3600 900 604800 60)\n", encoding="utf-8")
             with patch.object(ssl_router, "effective_dns_paths", return_value=(Path(tmp), Path(tmp) / "named.conf.local", Path(tmp) / "named.conf.options")), \
+                 patch.object(ssl_router, "settings", type("Settings", (), {
+                     "allow_live_ssl": True,
+                     "allow_live_dns": True,
+                     "ssl_certbot_timeout_seconds": settings.ssl_certbot_timeout_seconds,
+                 })()), \
                  patch.object(ssl_router, "run_command", side_effect=fake_run_command):
                 ssl_router.issue_dns_certificate(DnsCertificateRequest(
                     domain="alfena.shop",

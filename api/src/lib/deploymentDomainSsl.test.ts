@@ -285,6 +285,86 @@ test("proxy publish maps literal wildcard hosts to the certbot wildcard lineage"
   }
 });
 
+test("proxy publish preserves wildcard HTTPS even when a fallback caller requests HTTP", async () => {
+  const { publishDeploymentProxyNginx } = await import("./deploymentDomainSsl.js");
+  const { sysagent } = await import("./sysagent.js");
+  const originalFindReusable = sysagent.certificateFindReusable;
+  const originalDeploymentNginx = sysagent.deploymentNginx;
+  const lookups: string[] = [];
+  let request: any = null;
+
+  sysagent.certificateFindReusable = async (domain: string) => {
+    lookups.push(domain);
+    return {
+      requested: domain,
+      domain: "wildcard.ebitans.store",
+      exists: true,
+      expiry: "2026-10-20T00:00:00.000Z",
+      names: ["*.ebitans.store"],
+      certificate: "/etc/letsencrypt/live/wildcard.ebitans.store/fullchain.pem",
+      privateKey: "/etc/letsencrypt/live/wildcard.ebitans.store/privkey.pem"
+    };
+  };
+  sysagent.deploymentNginx = async (body: unknown) => {
+    request = body;
+    const ok = { returncode: 0, stdout: "", stderr: "" };
+    return { write: ok, enable: ok, test: ok, reload: ok, configPath: "/etc/nginx/conf.d/domain-wildcard.ebitans.store.conf" };
+  };
+
+  try {
+    await publishDeploymentProxyNginx({
+      deploymentId: "dep_1",
+      fqdn: "*.ebitans.store",
+      upstreamPort: 10000,
+      rootPath: "/var/www/app",
+      framework: "NEXTJS",
+      fallbackRootPath: null,
+      forceHttps: false
+    });
+
+    assert.deepEqual(lookups, ["wildcard.ebitans.store"]);
+    assert.equal(request.forceSsl, true);
+    assert.equal(request.sslCertificate, "/etc/letsencrypt/live/wildcard.ebitans.store/fullchain.pem");
+  } finally {
+    sysagent.certificateFindReusable = originalFindReusable;
+    sysagent.deploymentNginx = originalDeploymentNginx;
+  }
+});
+
+test("wildcard deployment readiness uses the safe certbot lookup name", async () => {
+  const { deploymentHttpsReady } = await import("./deploymentDomainSsl.js");
+  const { sysagent } = await import("./sysagent.js");
+  const originalFindReusable = sysagent.certificateFindReusable;
+  const lookups: string[] = [];
+
+  sysagent.certificateFindReusable = async (domain: string) => {
+    lookups.push(domain);
+    return {
+      requested: domain,
+      domain: "wildcard.ebitans.store",
+      exists: true,
+      expiry: "2026-10-20T00:00:00.000Z",
+      names: ["*.ebitans.store"],
+      certificate: "/etc/letsencrypt/live/wildcard.ebitans.store/fullchain.pem",
+      privateKey: "/etc/letsencrypt/live/wildcard.ebitans.store/privkey.pem"
+    };
+  };
+
+  try {
+    const ready = await deploymentHttpsReady({
+      id: "subdomain:sub_1",
+      name: "*.ebitans.store",
+      forceSsl: true,
+      includeWww: false
+    });
+
+    assert.equal(ready, true);
+    assert.deepEqual(lookups, ["wildcard.ebitans.store"]);
+  } finally {
+    sysagent.certificateFindReusable = originalFindReusable;
+  }
+});
+
 test("wildcard certificate names cover one-level child hosts only", async () => {
   const { certificateNamesCoverHost } = await import("./deploymentDomainSsl.js");
   assert.equal(certificateNamesCoverHost("shop.example.com", ["*.example.com"]), true);

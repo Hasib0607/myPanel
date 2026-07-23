@@ -5,7 +5,7 @@ import { accountDomainWebRootPath, certificateNamesCoverHost, normalizeStoredDoc
 import { ensureSubdomainFileStructure } from "./domainFiles.js";
 import { managedDomainHostnames, refreshDomainHostDns, refreshDomainHostSsl, refreshSubdomainHostDns, refreshSubdomainHostSsl, subdomainHostName, syncDomainHostRows, syncSubdomainHostRow } from "./domainHosts.js";
 import { logger } from "./logger.js";
-import { isWildcardHostname } from "./nginxNames.js";
+import { certificateLookupName, certbotCertificateName, isWildcardHostname, wildcardProbeHostname } from "./nginxNames.js";
 import { prisma } from "./prisma.js";
 import { currentVpsIp } from "./serverIp.js";
 import { sysagent } from "./sysagent.js";
@@ -100,6 +100,7 @@ async function queueDomainRepair(
 
 async function queueSubdomainRepair(subdomain: { id: string; name: string; domain: { id: string; name: string; account?: { homeRoot: string | null } | null } }, reason: string) {
   const fqdn = subdomainHostName(subdomain);
+  const wildcard = isWildcardHostname(fqdn);
   const job = await sslQueue.add("issue", {
     subdomainId: subdomain.id,
     domain: fqdn,
@@ -108,6 +109,8 @@ async function queueSubdomainRepair(subdomain: { id: string; name: string; domai
     webRoot: await subdomainWebRoot(subdomain),
     includeWww: false,
     forceSsl: true,
+    dnsChallenge: wildcard || undefined,
+    certName: wildcard ? certbotCertificateName(fqdn) : undefined,
     source: "guardian-subdomain-host-sync",
     reason
   }, {
@@ -123,15 +126,17 @@ async function queueSubdomainRepair(subdomain: { id: string; name: string; domai
 async function servedHostFailures(hostnames: string[]) {
   const failures = [];
   for (const hostname of hostnames) {
-    const served = await sysagent.servedCertificate({ domain: hostname }).catch((error) => ({
+    const probeHostname = isWildcardHostname(hostname) ? wildcardProbeHostname(hostname) : hostname;
+    const served = await sysagent.servedCertificate({ domain: probeHostname }).catch((error) => ({
       exists: false,
       matches: false,
       names: [],
       error: error instanceof Error ? error.message : String(error)
     }));
-    if (!served.exists || !certificateNamesCoverHost(hostname, served.names ?? [])) {
+    if (!served.exists || !certificateNamesCoverHost(probeHostname, served.names ?? [])) {
       failures.push({
         host: hostname,
+        probeHost: probeHostname,
         reason: served.exists ? "served certificate SAN mismatch" : served.error ?? "served certificate missing",
         subject: (served as { subject?: string | null }).subject ?? null,
         issuer: (served as { issuer?: string | null }).issuer ?? null,
@@ -185,7 +190,7 @@ export async function runDomainHostSync(options: SyncOptions = {}) {
       const includeWww = !isWildcardHostname(domain.name);
       const desiredHosts = managedDomainHostnames(domain.name, includeWww);
       const desiredHostnames = desiredHosts.map((host) => host.hostname);
-      const cert = await sysagent.certificateFindReusable(domain.name).catch(() => null);
+      const cert = await sysagent.certificateFindReusable(certificateLookupName(domain.name)).catch(() => null);
       const fileCoveredHosts = desiredHostnames.filter((hostname) =>
         Boolean(cert?.exists && cert.expiry && certificateNamesCoverHost(hostname, cert.names ?? []))
       );
@@ -242,7 +247,7 @@ export async function runDomainHostSync(options: SyncOptions = {}) {
     try {
       await syncSubdomainHostRow(subdomain);
       const dnsResult = expectedIp ? await refreshSubdomainHostDns(subdomain, expectedIp) : null;
-      const cert = await sysagent.certificateFindReusable(fqdn).catch(() => null);
+      const cert = await sysagent.certificateFindReusable(certificateLookupName(fqdn)).catch(() => null);
       const fileMatches = Boolean(cert?.exists && cert.expiry && certificateNamesCoverHost(fqdn, cert.names ?? []));
       const servedFailures = fileMatches ? await servedHostFailures([fqdn]) : [];
       const matches = fileMatches && servedFailures.length === 0;

@@ -38,6 +38,9 @@ pydantic_settings.BaseSettings = BaseSettings
 pydantic_settings.SettingsConfigDict = lambda **kwargs: kwargs
 sys.modules.setdefault("pydantic_settings", pydantic_settings)
 
+if "app.command" in sys.modules and not hasattr(sys.modules["app.command"], "subprocess"):
+    del sys.modules["app.command"]
+
 from app.command import run_command
 from app.routers.deployments import HealthRequest, PortStatusRequest, _curl_public_route, _supervisor_process_mismatch, port_status
 

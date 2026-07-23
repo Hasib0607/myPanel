@@ -8,10 +8,11 @@ import { resolvePublicA } from "../lib/publicDns.js";
 import { currentVpsIp } from "../lib/serverIp.js";
 import { sysagent, type SysagentCommandResult } from "../lib/sysagent.js";
 import { subdomainFolderName } from "../lib/domainFiles.js";
-import { certbotCertificateName, isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
+import { certbotCertificateName, isWildcardHostname, nginxResourceName, wildcardProbeHostname } from "../lib/nginxNames.js";
 import {
   boundDomainFromBinding,
   accountDomainWebRootPath,
+  certificateNamesCoverHost,
   deploymentFallbackRootPath,
   deploymentIsRoutable,
   deploymentServerName,
@@ -98,8 +99,7 @@ type ReusableCertificateLookup = {
 async function reusableCertificateResult(certName: string, reason: string, requiredNames: string[]): Promise<ReusableCertificateLookup | null> {
   const status = await sysagent.certificateFindReusable(certName);
   if (!status.exists) return null;
-  const certificateNames = new Set((status.names ?? []).map((name) => name.toLowerCase()));
-  if (!requiredNames.every((name) => certificateNames.has(name.toLowerCase()))) return null;
+  if (!requiredNames.every((name) => certificateNamesCoverHost(name, status.names ?? []))) return null;
   return {
     certificate: status,
     result: {
@@ -447,13 +447,14 @@ async function collectServedCertificateFailures(hostnames: string[]) {
   const localFailures: string[] = [];
   const localConnectHost = await currentVpsIp().catch(() => env.VPS_IP);
   for (const hostname of hostnames) {
-    const served = await sysagent.servedCertificate({ domain: hostname });
+    const probeHostname = isWildcardHostname(hostname) ? wildcardProbeHostname(hostname) : hostname;
+    const served = await sysagent.servedCertificate({ domain: probeHostname });
     if (served.exists && served.matches) continue;
     const detail = served.exists
       ? `served certificate subject=${served.subject ?? "unknown"}, SAN=${served.names.join(", ") || "none"}, connectedIp=${served.connectedIp ?? "unknown"}`
       : `could not read served certificate${served.error ? `: ${served.error}` : ""}`;
-    failures.push(`${hostname}: ${detail}`);
-    const local = await sysagent.servedCertificate({ domain: hostname, connectHost: localConnectHost }).catch((error) => ({
+    failures.push(`${hostname}${probeHostname !== hostname ? ` via ${probeHostname}` : ""}: ${detail}`);
+    const local = await sysagent.servedCertificate({ domain: probeHostname, connectHost: localConnectHost }).catch((error) => ({
       exists: false,
       matches: false,
       names: [],
@@ -463,7 +464,7 @@ async function collectServedCertificateFailures(hostnames: string[]) {
       const localDetail = local.exists
         ? `local certificate subject=${(local as { subject?: string | null }).subject ?? "unknown"}, SAN=${local.names.join(", ") || "none"}`
         : `local certificate unavailable${local.error ? `: ${local.error}` : ""}`;
-      localFailures.push(`${hostname} via ${localConnectHost}: ${localDetail}`);
+      localFailures.push(`${hostname}${probeHostname !== hostname ? ` via ${probeHostname}` : ""} via ${localConnectHost}: ${localDetail}`);
     }
   }
   return { failures, localFailures };
@@ -623,9 +624,7 @@ export const sslWorker = new Worker(
       const vhost = shouldPublishDeploymentOnly
         ? { skipped: true, reason: "Subdomain is bound to a deployment; static HTTPS vhost was not published.", deploymentRoutes }
         : await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true, includeWww, job.data.webRoot, reusableCertificate);
-      if (!isWildcardHostname(job.data.domain)) {
-        await assertServedCertificateMatches(requiredNames, `domain-${nginxResourceName(job.data.domain)}`);
-      }
+      await assertServedCertificateMatches(requiredNames, `domain-${nginxResourceName(job.data.domain)}`);
       await markSslIssued(job, reusableCertificate);
 
       await redis.del("domain_list", `ssl_expiry:${job.data.domain}`);
@@ -673,9 +672,7 @@ export const sslWorker = new Worker(
       const vhost = shouldPublishDeploymentOnly
         ? { skipped: true, reason: "Subdomain is bound to a deployment; static HTTPS vhost was not published.", deploymentRoutes }
         : await writeHttpsVhost(job.data.domain, job.data.domainId, domain?.forceSsl ?? job.data.forceSsl ?? true, includeWww, job.data.webRoot, reusableCertificate);
-      if (!isWildcardHostname(job.data.domain)) {
-        await assertServedCertificateMatches(requiredNames, `domain-${nginxResourceName(job.data.domain)}`);
-      }
+      await assertServedCertificateMatches(requiredNames, `domain-${nginxResourceName(job.data.domain)}`);
       await markSslIssued(job, reusableCertificate);
 
       await redis.del("domain_list", `ssl_expiry:${job.data.domain}`);

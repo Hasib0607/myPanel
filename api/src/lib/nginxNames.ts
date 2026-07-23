@@ -13,3 +13,14 @@ export function serverNameHasWildcard(value: string) {
 export function certbotCertificateName(value: string) {
   return nginxResourceName(value.trim().split(/\s+/)[0] ?? value);
 }
+
+export function certificateLookupName(value: string) {
+  const first = value.trim().split(/\s+/)[0] ?? value;
+  return isWildcardHostname(first) ? certbotCertificateName(first) : first;
+}
+
+export function wildcardProbeHostname(value: string) {
+  const first = value.trim().split(/\s+/)[0] ?? value;
+  if (!isWildcardHostname(first)) return first;
+  return `vps-panel-wildcard-probe.${first.replace(/^\*\./, "")}`;
+}
