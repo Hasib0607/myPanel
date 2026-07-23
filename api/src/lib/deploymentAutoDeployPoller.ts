@@ -108,6 +108,17 @@ async function addPollLog(deploymentId: string, message: string, metadata: Prism
 }
 
 async function shouldQueueRemoteHead(deployment: PollableDeployment, remoteSha: string) {
+  const recentReleases = await prisma.deploymentRelease.findMany({
+    where: { deploymentId: deployment.id },
+    orderBy: { createdAt: "desc" },
+    take: 20,
+    select: { id: true, status: true, commitSha: true, createdAt: true }
+  });
+  const activeRelease = recentReleases.find((release) => activeReleaseStatuses.includes(release.status as any));
+  if (activeRelease) {
+    return { queue: false, reason: `release ${activeRelease.id} is already ${activeRelease.status.toLowerCase()}` };
+  }
+
   if (shaMatches(deployment.commitSha, remoteSha)) {
     if (deploymentNeedsRecoveryDeploy(deployment)) {
       return { queue: true, reason: `deployment records remote head but is ${deployment.status}/${deployment.healthStatus ?? "UNKNOWN"}; redeploying` };
@@ -119,16 +130,6 @@ async function shouldQueueRemoteHead(deployment: PollableDeployment, remoteSha: 
     return { queue: false, reason: `deployment is already ${deployment.status.toLowerCase()}` };
   }
 
-  const recentReleases = await prisma.deploymentRelease.findMany({
-    where: { deploymentId: deployment.id },
-    orderBy: { createdAt: "desc" },
-    take: 20,
-    select: { id: true, status: true, commitSha: true, createdAt: true }
-  });
-  const activeRelease = recentReleases.find((release) => activeReleaseStatuses.includes(release.status as any));
-  if (activeRelease) {
-    return { queue: false, reason: `release ${activeRelease.id} is already ${activeRelease.status.toLowerCase()}` };
-  }
   const alreadyReleased = recentReleases.find((release) => shaMatches(release.commitSha, remoteSha) && release.status === "SUCCEEDED");
   if (alreadyReleased) {
     if (deploymentNeedsRecoveryDeploy(deployment)) {

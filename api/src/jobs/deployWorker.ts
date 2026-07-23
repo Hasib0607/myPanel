@@ -4258,7 +4258,10 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
 
     const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, `${action} public website check`, { ...deployment, domain }, appPath, envVars, processManager, routeDomains);
     if (publicRouteWarning) {
-      throw new Error(`${action} public website check failed. ${publicRouteWarning}`);
+      await writeLog(deployment.id, releaseId, "HEALTH_CHECK", `${action} public website check warning; process remains running`, {
+        warning: publicRouteWarning,
+        appPath
+      }, "warn");
     }
 
     const healthStatus = publicRouteWarning || healthOutcome.degraded ? "DEGRADED" : "HEALTHY";
