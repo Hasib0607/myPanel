@@ -19,7 +19,7 @@ import { publishDomainDnsZone } from "../lib/domainDnsPublish.js";
 import { detectDeploymentFiles } from "../lib/deploymentDetection.js";
 import { deploymentRuntimeReview, prepareDeploymentRuntimeTools } from "../lib/deploymentRuntimeReview.js";
 import { processConfigWithoutManualStop, requestDeploymentManualStop } from "../lib/deploymentStopControl.js";
-import { boundDomainFromBinding, certificateNamesCoverHost, certificateNamesCoverServerName, deploymentFallbackRootPath, deploymentIsRoutable, deploymentServerName, buildDeploymentNginxRequest, publishDeploymentProxyNginx } from "../lib/deploymentDomainSsl.js";
+import { boundDomainFromBinding, certificateNamesCoverHost, certificateNamesCoverServerName, deploymentFallbackRootPath, deploymentIsRoutable, deploymentServerName, deploymentSslCertificatePathsWhenReady, buildDeploymentNginxRequest, publishDeploymentProxyNginx } from "../lib/deploymentDomainSsl.js";
 import { prisma } from "../lib/prisma.js";
 import { resolvePublicA } from "../lib/publicDns.js";
 import { deleteSecret, getSecret, getSecretRecord, putSecret } from "../lib/secrets.js";
@@ -829,6 +829,17 @@ function expiryStatus(expiry: Date | null) {
   };
 }
 
+function sslHostStatus(host: string, cert: { exists?: boolean; expiry?: string | null; names?: string[] } | null) {
+  const certificateMatches = Boolean(cert?.exists && certificateNamesCoverHost(host, cert.names ?? []));
+  const expiry = certificateMatches && cert?.expiry ? new Date(cert.expiry) : null;
+  return {
+    host,
+    sslEnabled: certificateMatches,
+    sslExpiry: expiry,
+    ...expiryStatus(expiry)
+  };
+}
+
 async function accountSslJobStatus(request: any, jobId: string) {
   const job = await sslQueue.getJob(jobId);
   if (!job) {
@@ -1248,18 +1259,25 @@ async function publishAccountDomainRoute(request: any, account: { id: string; ho
           serverName: `${domain.name} www.${domain.name}`,
           redirectUrl: normalizeRedirectUrl(domain.redirectUrl)
         })
-      : await sysagent.writeStaticNginxVhost({
+      : await (async () => {
+          const sslPaths = await deploymentSslCertificatePathsWhenReady({
+            id: domain.id,
+            name: domain.name,
+            forceSsl: domain.forceSsl,
+            sslEnabled: domain.sslEnabled,
+            documentRoot: domain.documentRoot,
+            account,
+            includeWww: true
+          });
+          const httpsReady = Boolean(sslPaths.sslCertificate && sslPaths.sslCertificateKey);
+          return sysagent.writeStaticNginxVhost({
           name: `domain-${nginxResourceName(domain.name)}`,
           serverName: `${domain.name} www.${domain.name}`,
           rootPath: accountDomainWebRoot(account, domain),
-          forceHttps: domain.forceSsl && domain.sslEnabled,
-          ...(domain.sslEnabled
-            ? {
-                sslCertificate: `/etc/letsencrypt/live/${domain.name}/fullchain.pem`,
-                sslCertificateKey: `/etc/letsencrypt/live/${domain.name}/privkey.pem`
-              }
-            : {})
-        });
+          forceHttps: domain.forceSsl && httpsReady,
+          ...sslPaths
+          });
+        })();
   await audit(request, { action: "APPLY", resource: "domain", resourceId: domain.id, description: `Account published DNS and website for ${domain.name}`, metadata: { dnsResult, nginxResult } as any });
   return { domain, dnsResult, nginxResult };
 }
@@ -2373,11 +2391,13 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const cert = await sysagent.certificateFindReusable(domain.name).catch(() => null);
     const certificateMatches = Boolean(cert?.exists && certificateNamesCoverServerName(`${domain.name} www.${domain.name}`, cert.names ?? []));
     const effectiveExpiry = domain.sslEnabled && certificateMatches && cert?.expiry ? new Date(cert.expiry) : null;
+    const hosts = [domain.name, `www.${domain.name}`].map((host) => sslHostStatus(host, cert));
     return {
       domainId: domain.id,
       domain: domain.name,
       sslEnabled: domain.sslEnabled && certificateMatches,
       sslExpiry: effectiveExpiry,
+      hosts,
       forceSsl: domain.forceSsl,
       activeJobId: await activeAccountSslJobIdForResource({ domainId: domain.id }),
       ...expiryStatus(effectiveExpiry)
@@ -2390,11 +2410,13 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const cert = await sysagent.certificateFindReusable(target.fqdn) as { exists?: boolean; expiry?: string | null; names?: string[] };
     const certificateMatches = Boolean(cert.exists && certificateNamesCoverHost(target.fqdn, cert.names ?? []));
     const expiry = certificateMatches && cert.expiry ? new Date(cert.expiry) : null;
+    const hosts = [sslHostStatus(target.fqdn, cert)];
     return {
       subdomainId,
       domain: target.fqdn,
       sslEnabled: target.subdomain.sslEnabled && certificateMatches,
       sslExpiry: expiry,
+      hosts,
       forceSsl: target.subdomain.sslEnabled,
       activeJobId: await activeAccountSslJobIdForResource({ subdomainId }),
       ...expiryStatus(expiry)

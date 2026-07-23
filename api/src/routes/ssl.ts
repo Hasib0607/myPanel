@@ -58,6 +58,17 @@ function expiryStatus(expiry: Date | null) {
   };
 }
 
+function sslHostStatus(host: string, cert: { exists?: boolean; expiry?: string | null; names?: string[] } | null) {
+  const certificateMatches = Boolean(cert?.exists && certificateNamesCoverHost(host, cert.names ?? []));
+  const expiry = certificateMatches && cert?.expiry ? new Date(cert.expiry) : null;
+  return {
+    host,
+    sslEnabled: certificateMatches,
+    sslExpiry: expiry,
+    ...expiryStatus(expiry)
+  };
+}
+
 async function sslJobStatus(jobId: string) {
   const job = await sslQueue.getJob(jobId);
   if (!job) {
@@ -403,11 +414,13 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
     const serverName = deploymentServerName({ name: domain.name, includeWww: true }) ?? domain.name;
     const certificateMatches = Boolean(cert?.exists && certificateNamesCoverServerName(serverName, cert.names ?? []));
     const effectiveExpiry = domain.sslEnabled && certificateMatches && cert?.expiry ? new Date(cert.expiry) : null;
+    const hosts = serverName.split(/\s+/).filter(Boolean).map((host) => sslHostStatus(host, cert));
     return {
       domainId: domain.id,
       domain: domain.name,
       sslEnabled: domain.sslEnabled && certificateMatches,
       sslExpiry: effectiveExpiry,
+      hosts,
       forceSsl: domain.forceSsl,
       activeJobId: await activeSslJobIdForResource({ domainId: domain.id }),
       ...expiryStatus(effectiveExpiry)
@@ -420,11 +433,13 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
     const cert = await sysagent.certificateFindReusable(target.fqdn);
     const certificateMatches = Boolean(cert.exists && certificateNamesCoverHost(target.fqdn, cert.names ?? []));
     const expiry = certificateMatches && cert.expiry ? new Date(cert.expiry) : null;
+    const hosts = [sslHostStatus(target.fqdn, cert)];
     return {
       subdomainId,
       domain: target.fqdn,
       sslEnabled: target.subdomain.sslEnabled && certificateMatches,
       sslExpiry: expiry,
+      hosts,
       forceSsl: target.subdomain.sslEnabled,
       activeJobId: await activeSslJobIdForResource({ subdomainId }),
       ...expiryStatus(expiry)

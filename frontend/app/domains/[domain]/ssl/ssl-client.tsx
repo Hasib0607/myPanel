@@ -18,6 +18,14 @@ type SslStatus = {
   domain: string;
   sslEnabled: boolean;
   sslExpiry: string | null;
+  hosts?: Array<{
+    host: string;
+    sslEnabled: boolean;
+    sslExpiry: string | null;
+    state: "missing" | "expired" | "expiring" | "valid";
+    daysRemaining: number | null;
+    alert: boolean;
+  }>;
   forceSsl: boolean;
   state: "missing" | "expired" | "expiring" | "valid";
   daysRemaining: number | null;
@@ -143,6 +151,14 @@ export function SslClient({ domainId, subdomainId, domainApiBase = "/domains", s
   const jobAgeSeconds = jobStatus.data ? Math.max(0, Math.round((Date.now() - jobStatus.data.timestamp) / 1000)) : 0;
   const sslDomainName = status?.domain ?? domain.data?.name ?? "Domain";
   const isWildcardDomain = sslDomainName.startsWith("*.");
+  const hostStatuses = status?.hosts?.length ? status.hosts : [{
+    host: sslDomainName,
+    sslEnabled: Boolean(status?.sslEnabled),
+    sslExpiry: status?.sslExpiry ?? null,
+    state: status?.state ?? "missing",
+    daysRemaining: status?.daysRemaining ?? null,
+    alert: Boolean(status?.alert)
+  }];
 
   return (
     <>
@@ -216,6 +232,26 @@ export function SslClient({ domainId, subdomainId, domainApiBase = "/domains", s
               <div className="flex items-center gap-2 text-panel-muted"><ShieldCheck size={16} /> Force HTTPS</div>
               <div className="mt-2 text-lg font-semibold">{status?.forceSsl ? "On" : "Off"}</div>
               <div className="mt-1 text-xs text-panel-muted">{status?.sslEnabled ? "Applied through Nginx vhost" : "Applies after certificate issue"}</div>
+            </div>
+          </div>
+
+          <div className="rounded-md border border-panel-line">
+            <div className="border-b border-panel-line bg-slate-50 px-4 py-3 text-sm font-semibold text-panel-ink">
+              Domain Certificates
+            </div>
+            <div className="divide-y divide-panel-line">
+              {hostStatuses.map((host) => (
+                <div className="grid grid-cols-[1fr_auto_auto] items-center gap-3 px-4 py-3 text-sm" key={host.host}>
+                  <div className="min-w-0">
+                    <div className="truncate font-semibold text-panel-ink">{host.host}</div>
+                    <div className="text-xs text-panel-muted">{host.sslExpiry ? `Expires ${new Date(host.sslExpiry).toLocaleDateString()}` : "No matching certificate"}</div>
+                  </div>
+                  <span className={`rounded-md px-2 py-1 text-xs font-semibold ${host.sslEnabled ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+                    {host.sslEnabled ? "Valid" : "Pending"}
+                  </span>
+                  <span className="text-xs uppercase text-panel-muted">{host.state}</span>
+                </div>
+              ))}
             </div>
           </div>
 

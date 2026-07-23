@@ -404,17 +404,21 @@ async function publishDomainHosting(domainId: string) {
     });
   } else {
     const documentRoot = normalizeDocumentRoot(domain.documentRoot);
+    const sslPaths = await deploymentSslCertificatePathsWhenReady({
+      id: domain.id,
+      name: domain.name,
+      forceSsl: domain.forceSsl,
+      sslEnabled: domain.sslEnabled,
+      documentRoot: domain.documentRoot,
+      includeWww: true
+    });
+    const httpsReady = Boolean(sslPaths.sslCertificate && sslPaths.sslCertificateKey);
     nginxResult = await sysagent.writeStaticNginxVhost({
       name: `domain-${domain.name}`,
       serverName: `${domain.name} www.${domain.name}`,
       rootPath: path.join(env.FILE_MANAGER_ROOT, domain.name, documentRoot),
-      forceHttps: domain.forceSsl && domain.sslEnabled,
-      ...(domain.sslEnabled
-        ? {
-            sslCertificate: `/etc/letsencrypt/live/${domain.name}/fullchain.pem`,
-            sslCertificateKey: `/etc/letsencrypt/live/${domain.name}/privkey.pem`
-          }
-        : {})
+      forceHttps: domain.forceSsl && httpsReady,
+      ...sslPaths
     });
   }
   const subdomainVhosts: Array<{ fqdn: string; result: unknown } | { fqdn: string; error: string }> = [];
