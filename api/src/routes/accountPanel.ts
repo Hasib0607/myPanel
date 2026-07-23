@@ -1107,18 +1107,25 @@ async function accountSslPreflight(request: any, domain: { id: string; name: str
   if (nginxFailure) {
     throw Object.assign(new Error(`Could not publish HTTP challenge vhost for ${domain.name}. ${nginxFailure}`), { statusCode: 400 });
   }
-  const preflight = await sysagent.sslPreflight({ domain: domain.name, webRoot, includeWww: effectiveIncludeWww });
+  let preflight = await sysagent.sslPreflight({ domain: domain.name, webRoot, includeWww: effectiveIncludeWww });
   const certbotFailure = failedCommand(preflight.certbot);
   if (certbotFailure) {
     throw Object.assign(new Error(`Certbot is not ready for ${domain.name}. ${certbotFailure}`), { statusCode: 400 });
   }
-  const failedCheck = preflightChallengeChecks(preflight).find(({ check }) => failedCommand(check));
+  let restartRecovery: unknown = null;
+  let failedCheck = preflightChallengeChecks(preflight).find(({ check }) => failedCommand(check));
+  if (failedCheck) {
+    const recovered = await recoverSslPreflightChallenge(domain.name, webRoot, effectiveIncludeWww);
+    restartRecovery = recovered.restart;
+    preflight = recovered.preflight;
+    failedCheck = preflightChallengeChecks(preflight).find(({ check }) => failedCommand(check));
+  }
   if (failedCheck) {
     const detail = failedCommand(failedCheck.check);
     const hint = failedCheck.scope === "local"
       ? "The local Nginx challenge vhost did not return the token. Check the generated vhost, document root, and account path permissions."
       : "The public challenge URL did not return the token. Keep port 80 open and confirm public DNS points to this VPS.";
-    throw Object.assign(new Error(`HTTP ACME challenge failed for ${domain.name}. ${hint}${detail ? ` ${detail}` : ""}`.trim()), { statusCode: 400 });
+    throw Object.assign(new Error(`HTTP ACME challenge failed for ${domain.name}. ${hint}${detail ? ` ${detail}` : ""}${restartRecoveryDetail(restartRecovery)}`.trim()), { statusCode: 400 });
   }
   return {
     webRoot,
@@ -1179,18 +1186,25 @@ async function accountSubdomainSslPreflight(request: any, subdomainId: string) {
   if (nginxFailure) {
     throw Object.assign(new Error(`Could not publish HTTP challenge vhost for ${target.fqdn}. ${nginxFailure}`), { statusCode: 400 });
   }
-  const preflight = await sysagent.sslPreflight({ domain: target.fqdn, webRoot: target.webRoot, includeWww: false });
+  let preflight = await sysagent.sslPreflight({ domain: target.fqdn, webRoot: target.webRoot, includeWww: false });
   const certbotFailure = failedCommand(preflight.certbot);
   if (certbotFailure) {
     throw Object.assign(new Error(`Certbot is not ready for ${target.fqdn}. ${certbotFailure}`), { statusCode: 400 });
   }
-  const failedCheck = preflightChallengeChecks(preflight).find(({ check }) => failedCommand(check));
+  let restartRecovery: unknown = null;
+  let failedCheck = preflightChallengeChecks(preflight).find(({ check }) => failedCommand(check));
+  if (failedCheck) {
+    const recovered = await recoverSslPreflightChallenge(target.fqdn, target.webRoot, false);
+    restartRecovery = recovered.restart;
+    preflight = recovered.preflight;
+    failedCheck = preflightChallengeChecks(preflight).find(({ check }) => failedCommand(check));
+  }
   if (failedCheck) {
     const detail = failedCommand(failedCheck.check);
     const hint = failedCheck.scope === "local"
       ? "The local Nginx challenge vhost did not return the token. Check the generated vhost, document root, and account path permissions."
       : "The public challenge URL did not return the token. Keep port 80 open and confirm public DNS points to this VPS.";
-    throw Object.assign(new Error(`HTTP ACME challenge failed for ${target.fqdn}. ${hint}${detail ? ` ${detail}` : ""}`.trim()), { statusCode: 400 });
+    throw Object.assign(new Error(`HTTP ACME challenge failed for ${target.fqdn}. ${hint}${detail ? ` ${detail}` : ""}${restartRecoveryDetail(restartRecovery)}`.trim()), { statusCode: 400 });
   }
 
   return {
@@ -1441,6 +1455,22 @@ function preflightChallengeChecks(preflight: { checks?: unknown[]; localChecks?:
     ...(preflight.localChecks ?? []).map((check) => ({ scope: "local" as const, check })),
     ...publicChecks.map((check) => ({ scope: "public" as const, check }))
   ];
+}
+
+function restartRecoveryDetail(result: unknown) {
+  const row = result as { restarted?: boolean; test?: { returncode?: number }; restart?: { returncode?: number } | null } | null;
+  if (!row) return "";
+  return ` Nginx restart recovery: restarted=${row.restarted ? "yes" : "no"}, nginxTest=${row.test?.returncode ?? "unknown"}, restart=${row.restart?.returncode ?? "skipped"}.`;
+}
+
+async function recoverSslPreflightChallenge(domainName: string, webRoot: string, includeWww: boolean) {
+  const restart = await sysagent.guardianRestartNginx().catch((error) => ({
+    restarted: false,
+    test: { returncode: 1, stderr: error instanceof Error ? error.message : String(error) },
+    restart: null
+  }));
+  const preflight = await sysagent.sslPreflight({ domain: domainName, webRoot, includeWww });
+  return { restart, preflight };
 }
 
 function assertLimit(current: number, limit: number | null | undefined, label: string) {

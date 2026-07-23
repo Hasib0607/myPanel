@@ -132,6 +132,12 @@ function commandFailureDetail(result: SysagentCommandResult) {
   return [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
 }
 
+function restartRecoveryDetail(result: unknown) {
+  const row = result as { restarted?: boolean; test?: SysagentCommandResult; restart?: SysagentCommandResult | null } | null;
+  if (!row) return "";
+  return ` Nginx restart recovery: restarted=${row.restarted ? "yes" : "no"}, nginxTest=${row.test?.returncode ?? "unknown"}, restart=${row.restart?.returncode ?? "skipped"}.`;
+}
+
 type PreflightChallengeCheck = {
   scope: "local" | "public";
   check: SysagentCommandResult;
@@ -225,20 +231,27 @@ async function runSslPreflight(domain: SslDomain, includeWww: boolean) {
   const dnsChecks = [apexCheck, ...(wwwCheck ? [wwwCheck] : [])];
   const webRoot = domainWebRoot(domain);
   const httpVhost = await publishDomainHttpVhost(domain.name, webRoot, effectiveIncludeWww);
-  const preflight = await sysagent.sslPreflight({ domain: domain.name, webRoot, includeWww: effectiveIncludeWww });
+  let preflight = await sysagent.sslPreflight({ domain: domain.name, webRoot, includeWww: effectiveIncludeWww });
 
   if (!commandSucceeded(preflight.certbot)) {
     const detail = commandFailureDetail(preflight.certbot);
     throw Object.assign(new Error(`Certbot is not ready. Install certbot and enable ALLOW_LIVE_SSL. ${detail}`.trim()), { statusCode: 400 });
   }
 
-  const failedCheck = preflightChallengeChecks(preflight).find(({ check }) => !commandSucceeded(check));
+  let restartRecovery: unknown = null;
+  let failedCheck = preflightChallengeChecks(preflight).find(({ check }) => !commandSucceeded(check));
+  if (failedCheck) {
+    const recovered = await recoverSslPreflightChallenge(domain.name, webRoot, effectiveIncludeWww);
+    restartRecovery = recovered.restart;
+    preflight = recovered.preflight;
+    failedCheck = preflightChallengeChecks(preflight).find(({ check }) => !commandSucceeded(check));
+  }
   if (failedCheck) {
     const detail = commandFailureDetail(failedCheck.check);
     const hint = failedCheck.scope === "local"
       ? "The local Nginx challenge vhost did not return the token. Check the generated vhost and document root."
       : "The public challenge URL did not return the token. Keep port 80 open and confirm public DNS points to this VPS.";
-    throw Object.assign(new Error(`HTTP ACME challenge failed for ${domain.name}. ${hint}${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
+    throw Object.assign(new Error(`HTTP ACME challenge failed for ${domain.name}. ${hint}${detail ? ` ${detail}` : ""}${restartRecoveryDetail(restartRecovery)}`), { statusCode: 400 });
   }
 
   return { dnsChecks, httpVhost, preflight, webRoot, includeWww: effectiveIncludeWww };
@@ -342,14 +355,21 @@ async function runSubdomainSslPreflight(subdomainId: string) {
   const httpVhost = deploymentBound
     ? { skipped: true, reason: "Subdomain is bound to a deployment; static HTTP challenge vhost was not published." }
     : await publishSubdomainHttpVhost(target);
-  const preflight = await sysagent.sslPreflight({ domain: target.fqdn, webRoot: target.webRoot, includeWww: false });
+  let preflight = await sysagent.sslPreflight({ domain: target.fqdn, webRoot: target.webRoot, includeWww: false });
 
   if (!commandSucceeded(preflight.certbot)) {
     const detail = commandFailureDetail(preflight.certbot);
     throw Object.assign(new Error(`Certbot is not ready. Install certbot and enable ALLOW_LIVE_SSL. ${detail}`.trim()), { statusCode: 400 });
   }
 
-  const failedCheck = preflightChallengeChecks(preflight).find(({ check }) => !commandSucceeded(check));
+  let restartRecovery: unknown = null;
+  let failedCheck = preflightChallengeChecks(preflight).find(({ check }) => !commandSucceeded(check));
+  if (failedCheck) {
+    const recovered = await recoverSslPreflightChallenge(target.fqdn, target.webRoot, false);
+    restartRecovery = recovered.restart;
+    preflight = recovered.preflight;
+    failedCheck = preflightChallengeChecks(preflight).find(({ check }) => !commandSucceeded(check));
+  }
   if (failedCheck) {
     const detail = commandFailureDetail(failedCheck.check);
     const hint = failedCheck.scope === "local"
@@ -357,7 +377,7 @@ async function runSubdomainSslPreflight(subdomainId: string) {
         ? "The deployment proxy vhost did not return the ACME token. Redeploy or run Deployment Doctor so the proxy route includes the ACME webroot location."
         : "The local Nginx challenge vhost did not return the token. Check the generated vhost and document root."
       : "Publish the subdomain first, keep port 80 open, and confirm public DNS points to this VPS.";
-    throw Object.assign(new Error(`HTTP ACME challenge failed for ${target.fqdn}. ${hint}${detail ? ` ${detail}` : ""}`), { statusCode: 400 });
+    throw Object.assign(new Error(`HTTP ACME challenge failed for ${target.fqdn}. ${hint}${detail ? ` ${detail}` : ""}${restartRecoveryDetail(restartRecovery)}`), { statusCode: 400 });
   }
 
   return { ...target, dnsChecks, httpVhost, preflight, includeWww: false, dnsChallenge: false, certName: certbotCertificateName(target.fqdn) };
@@ -369,6 +389,16 @@ function preflightChallengeChecks(preflight: { checks?: SysagentCommandResult[];
     ...(preflight.localChecks ?? []).map((check) => ({ scope: "local" as const, check })),
     ...publicChecks.map((check) => ({ scope: "public" as const, check }))
   ];
+}
+
+async function recoverSslPreflightChallenge(domainName: string, webRoot: string, includeWww: boolean) {
+  const restart = await sysagent.guardianRestartNginx().catch((error) => ({
+    restarted: false,
+    test: { returncode: 1, stderr: error instanceof Error ? error.message : String(error) } as SysagentCommandResult,
+    restart: null
+  }));
+  const preflight = await sysagent.sslPreflight({ domain: domainName, webRoot, includeWww });
+  return { restart, preflight };
 }
 
 export const sslRoutes: FastifyPluginAsync = async (app) => {

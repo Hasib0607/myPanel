@@ -334,12 +334,22 @@ function firstFailedPreflightChallenge(preflight: { checks?: SysagentCommandResu
 }
 
 async function assertHttpChallengeReachable(domainName: string, includeWww: boolean, webRoot: string) {
-  const preflight = await sysagent.sslPreflight({ domain: domainName, webRoot, includeWww });
+  let preflight = await sysagent.sslPreflight({ domain: domainName, webRoot, includeWww });
   assertLiveCommandSucceeded("Certbot readiness check", preflight.certbot);
-  const failed = firstFailedPreflightChallenge(preflight);
+  let restartResult: unknown = null;
+  let failed = firstFailedPreflightChallenge(preflight);
+  if (failed) {
+    restartResult = await sysagent.guardianRestartNginx().catch((error) => ({
+      restarted: false,
+      test: { returncode: 1, stderr: error instanceof Error ? error.message : String(error) },
+      restart: null
+    }));
+    preflight = await sysagent.sslPreflight({ domain: domainName, webRoot, includeWww });
+    failed = firstFailedPreflightChallenge(preflight);
+  }
   if (failed) {
     const detail = commandDetail(failed);
-    throw new Error(`SSL auto retry waiting for HTTP challenge route: ${domainName} returned an invalid ACME challenge response.${detail ? ` ${detail}` : ""}`);
+    throw new Error(`SSL auto retry waiting for HTTP challenge route: ${domainName} returned an invalid ACME challenge response.${detail ? ` ${detail}` : ""}${restartSummary(restartResult)}`);
   }
 }
 
