@@ -20,6 +20,27 @@ enum DomainHostingMode {
   REDIRECT
 }
 
+enum DomainHostKind {
+  APEX
+  WWW
+  CUSTOM
+}
+
+enum DomainHostDnsStatus {
+  UNKNOWN
+  PENDING
+  READY
+  MISMATCH
+}
+
+enum DomainHostSslStatus {
+  MISSING
+  PENDING
+  VALID
+  EXPIRED
+  MISMATCH
+}
+
 enum DnsRecordType {
   A
   AAAA
@@ -278,6 +299,7 @@ model Domain {
   updatedAt    DateTime      @updatedAt @map("updated_at")
   subdomains   Subdomain[]
   dnsRecords   DnsRecord[]
+  hosts        DomainHost[]
   mailAccounts MailAccount[]
   mailBounces  MailBounce[]
   deployments  Deployment[]
@@ -286,6 +308,28 @@ model Domain {
 
   @@index([name])
   @@map("domains")
+}
+
+model DomainHost {
+  id            String              @id @default(cuid())
+  domainId      String              @map("domain_id")
+  hostname      String
+  kind          DomainHostKind      @default(CUSTOM)
+  dnsStatus     DomainHostDnsStatus @default(UNKNOWN) @map("dns_status")
+  dnsRecords    Json                @default("[]") @map("dns_records")
+  sslStatus     DomainHostSslStatus @default(MISSING) @map("ssl_status")
+  sslEnabled    Boolean             @default(false) @map("ssl_enabled")
+  sslExpiry     DateTime?           @map("ssl_expiry")
+  lastCheckedAt DateTime?           @map("last_checked_at")
+  lastError     String?             @map("last_error")
+  createdAt     DateTime            @default(now()) @map("created_at")
+  updatedAt     DateTime            @updatedAt @map("updated_at")
+  domain        Domain              @relation(fields: [domainId], references: [id], onDelete: Cascade)
+
+  @@unique([domainId, hostname])
+  @@index([hostname])
+  @@index([dnsStatus, sslStatus])
+  @@map("domain_hosts")
 }
 
 model Account {

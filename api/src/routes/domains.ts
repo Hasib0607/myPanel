@@ -14,6 +14,7 @@ import { nginxResourceName } from "../lib/nginxNames.js";
 import { renderZone } from "./dns.js";
 import { currentVpsIp } from "../lib/serverIp.js";
 import { sslQueue } from "../jobs/queues.js";
+import { sslHostCoverage } from "../lib/domainHosts.js";
 
 export function normalizeDomainName(value: string) {
   return value
@@ -236,6 +237,32 @@ export async function assertDomainUsesHostingNameServers(domain: string, nameSer
   }
 }
 
+export async function domainNameserverReadiness(domain: string, nameServers: ActiveNameServer[]) {
+  const expected = nameServers.map((nameServer) => normalizeNameServer(nameServer.hostname)).filter(Boolean);
+  let actual: string[] = [];
+  let lookupError: string | null = null;
+  try {
+    actual = await resolvePublicNameServers(domain);
+  } catch (error) {
+    lookupError = error instanceof Error ? error.message : "No public nameservers found.";
+  }
+  const actualSet = new Set(actual);
+  const expectedPresent = expected.length > 0 && expected.every((nameServer) => actualSet.has(nameServer));
+  const vanityOk = await vanityNameserverGlueMatches(domain, nameServers).catch(() => false);
+  const expectedVanityPending = hasExpectedVanityNameServers(domain, nameServers);
+  const ok = !env.REQUIRE_DOMAIN_NAMESERVER_MATCH || expectedPresent || vanityOk || expectedVanityPending;
+  return {
+    domain,
+    ok,
+    status: ok ? "READY" : "PENDING",
+    expectedNameServers: expected,
+    currentNameServers: actual,
+    message: ok
+      ? `${domain} nameservers are ready for this hosting server.`
+      : `${nameserverMismatchMessage(domain, expected, actual)}${lookupError ? ` ${lookupError}` : ""}`
+  };
+}
+
 async function domainNameserverPendingReason(domain: string, nameServers: ActiveNameServer[]) {
   try {
     await assertDomainUsesHostingNameServers(domain, nameServers);
@@ -279,7 +306,8 @@ export function defaultRecords(domainId: string, domain: string, nameServers: Ac
 
 function domainInclude() {
   return {
-    _count: { select: { subdomains: true, dnsRecords: true, mailAccounts: true } }
+    _count: { select: { subdomains: true, dnsRecords: true, mailAccounts: true } },
+    hosts: { orderBy: [{ kind: "asc" as const }, { hostname: "asc" as const }] }
   };
 }
 
@@ -291,7 +319,31 @@ function clearDomainCaches(domainId?: string) {
 
 export async function withLiveDomainSsl<T extends { name: string; forceSsl: boolean; sslEnabled: boolean; sslExpiry?: Date | string | null }>(domain: T) {
   const serverName = deploymentServerName({ name: domain.name, includeWww: true }) ?? domain.name;
-  const hosts = serverName.split(/\s+/).filter(Boolean);
+  const persistedHosts = Array.isArray((domain as any).hosts) ? (domain as any).hosts as Array<{
+    hostname: string;
+    kind?: string;
+    sslEnabled?: boolean;
+    sslStatus?: string;
+    sslExpiry?: Date | string | null;
+  }> : [];
+  if (persistedHosts.length > 0 && persistedHosts.some((host) => host.sslStatus)) {
+    const sslHosts = persistedHosts.map((host) => ({
+      host: host.hostname,
+      hostname: host.hostname,
+      kind: host.kind,
+      sslEnabled: Boolean(host.sslEnabled && host.sslStatus === "VALID"),
+      covered: Boolean(host.sslEnabled && host.sslStatus === "VALID"),
+      expiry: host.sslEnabled && host.sslStatus === "VALID" ? host.sslExpiry ?? null : null,
+      sslStatus: host.sslStatus
+    }));
+    const liveSslEnabled = sslHosts.length > 0 && sslHosts.every((host) => host.sslEnabled);
+    return {
+      ...domain,
+      liveSslEnabled,
+      liveSslExpiry: liveSslEnabled ? sslHosts.find((host) => host.expiry)?.expiry ?? null : null,
+      sslHosts
+    };
+  }
   try {
     const cert = await Promise.race([
       sysagent.certificateFindReusable(domain.name),
@@ -299,15 +351,7 @@ export async function withLiveDomainSsl<T extends { name: string; forceSsl: bool
     ]);
     if (!cert) throw new Error("Live SSL lookup timed out");
     const liveSslEnabled = Boolean(cert.exists && certificateNamesCoverServerName(serverName, cert.names ?? []));
-    const sslHosts = hosts.map((host) => {
-      const covered = Boolean(cert.exists && certificateNamesCoverServerName(host, cert.names ?? []));
-      return {
-        host,
-        sslEnabled: covered,
-        covered,
-        expiry: covered ? cert.expiry : null
-      };
-    });
+    const sslHosts = sslHostCoverage(domain, cert);
     return {
       ...domain,
       liveSslEnabled,
@@ -315,11 +359,12 @@ export async function withLiveDomainSsl<T extends { name: string; forceSsl: bool
       sslHosts
     };
   } catch {
+    const sslHosts = sslHostCoverage(domain, null);
     return {
       ...domain,
       liveSslEnabled: false,
       liveSslExpiry: null,
-      sslHosts: hosts.map((host) => ({ host, sslEnabled: false, covered: false, expiry: null }))
+      sslHosts
     };
   }
 }
@@ -500,6 +545,13 @@ async function createDomainWithDefaults(input: CreateDomainInput, nameServers: A
       }
     });
     await tx.dnsRecord.createMany({ data: defaultRecords(created.id, created.name, nameServers, vpsIp), skipDuplicates: true });
+    await tx.domainHost.createMany({
+      data: [
+        { domainId: created.id, hostname: created.name, kind: "APEX" as const },
+        ...(created.name.split(".").filter(Boolean).length <= 2 && !created.name.startsWith("*.") ? [{ domainId: created.id, hostname: `www.${created.name}`, kind: "WWW" as const }] : [])
+      ],
+      skipDuplicates: true
+    });
     return tx.domain.findUniqueOrThrow({ where: { id: created.id }, include: domainInclude() });
   });
 }
@@ -683,6 +735,11 @@ async function createSubdomainShortcut(fqdnName: string) {
 export const domainRoutes: FastifyPluginAsync = async (app) => {
   app.addHook("preHandler", app.requireAuth);
 
+  app.get("/readiness", async (request) => {
+    const query = z.object({ name: domainNameSchema }).parse(request.query);
+    return domainNameserverReadiness(query.name, await getActiveNameServers());
+  });
+
   app.get("/", async (request) => {
     const query = z.object({
       search: z.string().optional(),
@@ -707,7 +764,8 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
         take: query.pageSize,
         include: {
           _count: { select: { subdomains: true, dnsRecords: true, mailAccounts: true } },
-          subdomains: { orderBy: { name: "asc" } }
+          subdomains: { orderBy: { name: "asc" } },
+          hosts: { orderBy: [{ kind: "asc" }, { hostname: "asc" }] }
         }
       }),
       prisma.domain.count({ where })
@@ -952,7 +1010,7 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
     const { domainId } = z.object({ domainId: z.string() }).parse(request.params);
     const domain = await prisma.domain.findUniqueOrThrow({
       where: { id: domainId },
-      include: { subdomains: true, dnsRecords: true, mailAccounts: true, deployments: true }
+      include: { subdomains: true, dnsRecords: true, mailAccounts: true, deployments: true, hosts: { orderBy: [{ kind: "asc" }, { hostname: "asc" }] } }
     });
     return withLiveDomainSsl(domain);
   });

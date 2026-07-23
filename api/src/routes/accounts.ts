@@ -174,6 +174,13 @@ export const accountRoutes: FastifyPluginAsync = async (app) => {
             }
           });
           await tx.dnsRecord.createMany({ data: defaultRecords(domain.id, domain.name, nameServers, vpsIp), skipDuplicates: true });
+          await tx.domainHost.createMany({
+            data: [
+              { domainId: domain.id, hostname: domain.name, kind: "APEX" as const },
+              ...(domain.name.split(".").filter(Boolean).length <= 2 ? [{ domainId: domain.id, hostname: `www.${domain.name}`, kind: "WWW" as const }] : [])
+            ],
+            skipDuplicates: true
+          });
           createdDomainId = domain.id;
         }
         return tx.account.findUniqueOrThrow({

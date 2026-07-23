@@ -18,6 +18,7 @@ import {
   publishDeploymentProxyNginx,
   publishPublicHtmlNginxVhost
 } from "../lib/deploymentDomainSsl.js";
+import { refreshDomainHostSsl, syncDomainHostRows } from "../lib/domainHosts.js";
 
 function assertLiveCommandSucceeded(action: string, result: SysagentCommandResult) {
   if (result.dryRun) {
@@ -237,6 +238,11 @@ async function markSslIssued(job: { data: { domain: string; domainId?: string | 
         forceSsl: domain?.forceSsl ?? job.data.forceSsl ?? true
       }
     });
+    await refreshDomainHostSsl({
+      id: job.data.domainId,
+      name: job.data.domain,
+      forceSsl: domain?.forceSsl ?? job.data.forceSsl ?? true
+    }, status);
   }
 }
 
@@ -409,6 +415,9 @@ export const sslWorker = new Worker(
 
     if (job.name === "issue") {
       const includeWww = job.data.includeWww ?? true;
+      if (job.data.domainId) {
+        await syncDomainHostRows({ id: job.data.domainId, name: job.data.domain }, { includeWww });
+      }
       const certName = job.data.certName ?? certbotCertificateName(job.data.domain);
       const requiredNames = [job.data.domain, ...(includeWww && !isWildcardHostname(job.data.domain) ? [`www.${job.data.domain}`] : [])];
       let reusableCertificate: ReusableCertificate | null = null;
@@ -490,6 +499,9 @@ export const sslWorker = new Worker(
     if (job.name === "renew") {
       const certName = job.data.certName ?? certbotCertificateName(job.data.domain);
       const includeWww = job.data.includeWww ?? true;
+      if (job.data.domainId) {
+        await syncDomainHostRows({ id: job.data.domainId, name: job.data.domain }, { includeWww });
+      }
       const requiredNames = [job.data.domain, ...(includeWww && !isWildcardHostname(job.data.domain) ? [`www.${job.data.domain}`] : [])];
       let reusableCertificate: ReusableCertificate | null = null;
       let result = isWildcardHostname(job.data.domain) || job.data.dnsChallenge

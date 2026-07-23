@@ -92,6 +92,15 @@ type BulkDomainActionResponse = {
   queueCounts?: Record<string, number>;
 };
 
+type DomainReadinessResponse = {
+  domain: string;
+  ok: boolean;
+  status: "READY" | "PENDING";
+  expectedNameServers: string[];
+  currentNameServers: string[];
+  message: string;
+};
+
 type SortColumn = "domain" | "status" | "dns" | "mailboxes" | "subdomains" | "hosting" | "ssl";
 type SortDirection = "asc" | "desc";
 
@@ -206,6 +215,11 @@ export function DomainsClient({
   const domains = useQuery({
     queryKey: ["domains", apiBase, search, page],
     queryFn: () => apiGet<DomainListResponse>(queryPath)
+  });
+  const newDomainReadiness = useQuery({
+    queryKey: ["domain-readiness", apiBase, normalizedNewDomain],
+    queryFn: () => apiGet<DomainReadinessResponse>(`${apiBase}/readiness?name=${encodeURIComponent(normalizedNewDomain)}`),
+    enabled: Boolean(normalizedNewDomain && validDomainInput(normalizedNewDomain) && !normalizedNewDomain.startsWith("*."))
   });
   const deployments = useQuery({
     queryKey: ["deployments", deploymentApiBase, "domain-hosting"],
@@ -470,6 +484,10 @@ export function DomainsClient({
       setError("Enter a valid root domain like example.com, or a wildcard subdomain like *.example.com.");
       return;
     }
+    if (!normalizedNewDomain.startsWith("*.") && newDomainReadiness.data && !newDomainReadiness.data.ok) {
+      setError(newDomainReadiness.data.message);
+      return;
+    }
     createDomain.mutate();
   }
 
@@ -514,7 +532,7 @@ export function DomainsClient({
         description={headerDescription}
         action={
           <div className="flex items-center gap-2">
-            <form className="flex items-center gap-2" onSubmit={submitNewDomain}>
+            <form className="relative flex items-center gap-2" onSubmit={submitNewDomain}>
               <input
                 className="h-10 w-64 rounded-md border border-panel-line px-3 text-sm"
                 onChange={(event) => setNewDomain(event.target.value)}
@@ -525,10 +543,42 @@ export function DomainsClient({
                 <input checked={forceSsl} onChange={(event) => setForceSsl(event.target.checked)} type="checkbox" />
                 Force SSL
               </label>
-              <button className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-4 text-sm font-semibold text-white disabled:opacity-60" disabled={createDomain.isPending} type="submit">
+              <button
+                className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-4 text-sm font-semibold text-white disabled:opacity-60"
+                disabled={createDomain.isPending || Boolean(newDomainReadiness.data && !newDomainReadiness.data.ok)}
+                type="submit"
+              >
                 <Plus size={16} />
                 {createDomain.isPending ? "Adding" : "Add"}
               </button>
+              {newDomainReadiness.data || newDomainReadiness.isFetching ? (
+                <div className="absolute right-0 top-12 z-20 w-[36rem] rounded-md border border-panel-line bg-white p-3 text-xs shadow-lg">
+                  {newDomainReadiness.isFetching ? (
+                    <div className="text-panel-muted">Checking nameservers...</div>
+                  ) : newDomainReadiness.data ? (
+                    <div className="space-y-2">
+                      <div className={`font-semibold ${newDomainReadiness.data.ok ? "text-emerald-700" : "text-amber-700"}`}>
+                        {newDomainReadiness.data.ok ? "Nameservers ready" : "Nameserver update required"}
+                      </div>
+                      <div className="grid gap-2 md:grid-cols-2">
+                        <div>
+                          <div className="text-panel-muted">Expected NS</div>
+                          <div className="mt-1 rounded-md bg-slate-50 p-2 font-mono text-[11px] text-panel-text">
+                            {newDomainReadiness.data.expectedNameServers.length ? newDomainReadiness.data.expectedNameServers.join(", ") : "No active nameservers configured"}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-panel-muted">Current NS</div>
+                          <div className="mt-1 rounded-md bg-slate-50 p-2 font-mono text-[11px] text-panel-text">
+                            {newDomainReadiness.data.currentNameServers.length ? newDomainReadiness.data.currentNameServers.join(", ") : "No public nameservers found"}
+                          </div>
+                        </div>
+                      </div>
+                      {!newDomainReadiness.data.ok ? <div className="text-panel-muted">{newDomainReadiness.data.message}</div> : null}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
             </form>
             {showBulkAdd ? <button
               className="flex h-10 items-center gap-2 rounded-md border border-panel-line bg-white px-4 text-sm font-semibold hover:bg-slate-50"

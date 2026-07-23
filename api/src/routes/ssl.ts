@@ -12,6 +12,7 @@ import { sysagent, type SysagentCommandResult } from "../lib/sysagent.js";
 import { certbotCertificateName, isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
 import { currentVpsIp } from "../lib/serverIp.js";
 import { certificateNamesCoverHost, certificateNamesCoverServerName, deploymentServerName } from "../lib/deploymentDomainSsl.js";
+import { refreshDomainHostSsl, syncDomainHostRows } from "../lib/domainHosts.js";
 
 const sslActionSchema = z.object({
   email: z.string().email().optional(),
@@ -410,14 +411,19 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
     const cert = await sysagent.certificateFindReusable(domain.name).catch(() => null);
     const serverName = deploymentServerName({ name: domain.name, includeWww: true }) ?? domain.name;
     const certificateMatches = Boolean(cert?.exists && certificateNamesCoverServerName(serverName, cert.names ?? []));
-    const effectiveExpiry = domain.sslEnabled && certificateMatches && cert?.expiry ? new Date(cert.expiry) : null;
-    const hosts = serverName.split(/\s+/).filter(Boolean).map((host) => sslHostStatus(host, cert));
+    const serverHosts = serverName.split(/\s+/).filter(Boolean);
+    const servedCertificates = await Promise.all(serverHosts.map((host) => sysagent.servedCertificate({ domain: host }).catch(() => null)));
+    const servedMatches = servedCertificates.every((served) => served?.matches);
+    const effectiveExpiry = domain.sslEnabled && certificateMatches && servedMatches && cert?.expiry ? new Date(cert.expiry) : null;
+    const hosts = serverHosts.map((host, index) => sslHostStatus(host, servedCertificates[index]?.matches ? cert : null));
+    if (cert) await refreshDomainHostSsl(domain, certificateMatches && servedMatches ? cert : null);
     return {
       domainId: domain.id,
       domain: domain.name,
       sslEnabled: domain.sslEnabled && certificateMatches,
       sslExpiry: effectiveExpiry,
       hosts,
+      servedCertificate: servedCertificates,
       forceSsl: domain.forceSsl,
       activeJobId: await activeSslJobIdForResource({ domainId: domain.id }),
       ...expiryStatus(effectiveExpiry)
@@ -466,6 +472,7 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
       select: { id: true, name: true, forceSsl: true, documentRoot: true, account: { select: { homeRoot: true } } }
     });
     const preflight = await runSslPreflight(domain, body.includeWww);
+    await syncDomainHostRows(domain, { includeWww: preflight.includeWww });
     const job = await sslQueue.add("issue", {
       domainId,
       domain: domain.name,
@@ -485,6 +492,7 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
         sslExpiry: null
       }
     });
+    await refreshDomainHostSsl({ ...domain, forceSsl: true }, null);
     await redis.del("domain_list", `ssl_expiry:${domain.name}`);
 
     return reply.code(202).send({ queued: true, jobId: job.id });
@@ -526,6 +534,7 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
       select: { id: true, name: true, forceSsl: true, documentRoot: true, account: { select: { homeRoot: true } } }
     });
     const preflight = await runSslPreflight(domain, body.includeWww);
+    await syncDomainHostRows(domain, { includeWww: preflight.includeWww });
     const job = await sslQueue.add("renew", {
       domainId,
       domain: domain.name,
@@ -583,6 +592,7 @@ export const sslRoutes: FastifyPluginAsync = async (app) => {
         sslExpiry: expiresAt
       }
     });
+    await refreshDomainHostSsl({ id: domain.id, name: domain.name, forceSsl: domain.forceSsl }, cert);
     await redis.del("domain_list", `ssl_expiry:${domain.name}`);
     return domain;
   });

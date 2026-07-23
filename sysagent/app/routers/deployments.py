@@ -2220,12 +2220,20 @@ def _nginx_route_ownership_probe(server_name: str, config_name: str, *, require_
         return result
     conflicts = loaded_conflicting_config_files(config_name, server_name)
     conflict_hint = f" Loaded conflicting nginx configs: {', '.join(conflicts)}." if conflicts else ""
+    dump = run_command(["nginx", "-T"], allow_live=True)
+    dump_output = f"{dump.get('stdout') or ''}\n{dump.get('stderr') or ''}".lower()
+    own_header_loaded = route_ownership_config_seen(dump_output, config_name)
+    own_server_name_loaded = f"server_name {server_name.lower()};" in dump_output
+    dump_status = (
+        f" nginx -T route diagnostic: returncode={dump.get('returncode')}, "
+        f"ownHeaderLoaded={own_header_loaded}, ownServerNameLoaded={own_server_name_loaded}."
+    )
     return {
         **result,
         "returncode": 1,
         "stderr": (
             f"Generated vhost {config_name!r} is not the active {scheme.upper()} route for {primary}; "
-            f"missing {ROUTE_OWNERSHIP_HEADER} response header.{conflict_hint}"
+            f"missing {ROUTE_OWNERSHIP_HEADER} response header.{conflict_hint}{dump_status}"
         ),
     }
 

@@ -36,8 +36,9 @@ import {
   queueGroupCommand,
   renderLaravelProcessCommand
 } from "../lib/laravelProcesses.js";
-import { assertDomainUsesHostingNameServers, defaultRecords, withLiveDomainSsl } from "./domains.js";
+import { assertDomainUsesHostingNameServers, defaultRecords, domainNameserverReadiness, withLiveDomainSsl } from "./domains.js";
 import { renderZone } from "./dns.js";
+import { refreshDomainHostSsl, syncDomainHostRows } from "../lib/domainHosts.js";
 
 function accountId(request: any) {
   return request.user.accountId as string;
@@ -1350,6 +1351,13 @@ async function createAndBindAccountDeploymentDomain(
         }
       });
       await tx.dnsRecord.createMany({ data: defaultRecords(createdDomain.id, createdDomain.name, nameServers, vpsIp), skipDuplicates: true });
+      await tx.domainHost.createMany({
+        data: [
+          { domainId: createdDomain.id, hostname: createdDomain.name, kind: "APEX" as const },
+          ...(createdDomain.name.split(".").filter(Boolean).length <= 2 && !createdDomain.name.startsWith("*.") ? [{ domainId: createdDomain.id, hostname: `www.${createdDomain.name}`, kind: "WWW" as const }] : [])
+        ],
+        skipDuplicates: true
+      });
       return tx.domain.findUniqueOrThrow({ where: { id: createdDomain.id }, include: domainInclude() });
     });
     created = true;
@@ -1465,7 +1473,8 @@ function assertLimit(current: number, limit: number | null | undefined, label: s
 function domainInclude() {
   return {
     _count: { select: { subdomains: true, dnsRecords: true, mailAccounts: true } },
-    subdomains: { orderBy: { name: "asc" as const } }
+    subdomains: { orderBy: { name: "asc" as const } },
+    hosts: { orderBy: [{ kind: "asc" as const }, { hostname: "asc" as const }] }
   };
 }
 
@@ -1861,6 +1870,11 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     return { items, total: groupedItems.length, page: query.page, pageSize: query.pageSize };
   });
 
+  app.get("/domains/readiness", async (request: any) => {
+    const query = z.object({ name: domainNameSchema }).parse(request.query);
+    return domainNameserverReadiness(query.name, await activeNameServers());
+  });
+
   app.post("/domains", async (request: any, reply) => {
     const body = createDomainSchema.parse(request.body);
     const account = await prisma.account.findUniqueOrThrow({
@@ -1912,6 +1926,13 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
           }
         });
         await tx.dnsRecord.createMany({ data: defaultRecords(created.id, created.name, nameServers, vpsIp), skipDuplicates: true });
+        await tx.domainHost.createMany({
+          data: [
+            { domainId: created.id, hostname: created.name, kind: "APEX" as const },
+            ...(created.name.split(".").filter(Boolean).length <= 2 && !created.name.startsWith("*.") ? [{ domainId: created.id, hostname: `www.${created.name}`, kind: "WWW" as const }] : [])
+          ],
+          skipDuplicates: true
+        });
         return tx.domain.findUniqueOrThrow({ where: { id: created.id }, include: domainInclude() });
       });
       const sslJob = env.ACCOUNT_DOMAIN_AUTO_SSL_ENABLED && body.autoSsl && body.forceSsl
@@ -1999,6 +2020,13 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
             }
           });
           await tx.dnsRecord.createMany({ data: defaultRecords(created.id, created.name, nameServers, vpsIp), skipDuplicates: true });
+          await tx.domainHost.createMany({
+            data: [
+              { domainId: created.id, hostname: created.name, kind: "APEX" as const },
+              ...(created.name.split(".").filter(Boolean).length <= 2 && !created.name.startsWith("*.") ? [{ domainId: created.id, hostname: `www.${created.name}`, kind: "WWW" as const }] : [])
+            ],
+            skipDuplicates: true
+          });
           return tx.domain.findUniqueOrThrow({ where: { id: created.id }, include: domainInclude() });
         });
         currentDomainCount += 1;
@@ -2394,6 +2422,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const certificateMatches = Boolean(cert?.exists && certificateNamesCoverServerName(`${domain.name} www.${domain.name}`, cert.names ?? []));
     const effectiveExpiry = domain.sslEnabled && certificateMatches && servedMatches && cert?.expiry ? new Date(cert.expiry) : null;
     const hosts = [sslHostStatus(domain.name, servedApex?.matches ? cert : null), sslHostStatus(`www.${domain.name}`, servedWww?.matches ? cert : null)];
+    await refreshDomainHostSsl(domain, certificateMatches && servedMatches ? cert : null);
     return {
       domainId: domain.id,
       domain: domain.name,
@@ -2453,6 +2482,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const body = sslSchema.parse(request.body ?? {});
     const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
     const preflight = await accountSslPreflight(request, domain, body.includeWww);
+    await syncDomainHostRows(domain, { includeWww: preflight.includeWww });
     const job = await sslQueue.add(action, {
       domainId: domain.id,
       domain: domain.name,
@@ -2467,6 +2497,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     });
     if (action === "issue") {
       await prisma.domain.update({ where: { id: domain.id }, data: { sslEnabled: false, sslExpiry: null } });
+      await refreshDomainHostSsl(domain, null);
     }
     await audit(request, { action: "APPLY", resource: "ssl", resourceId: domain.id, description: `Account queued SSL ${action} for ${domain.name}` });
     return reply.code(202).send({ queued: true, jobId: job.id });
@@ -2505,6 +2536,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const certificateMatches = Boolean(cert?.exists && certificateNamesCoverServerName(`${domain.name} www.${domain.name}`, cert.names ?? []));
     const effectiveExpiry = domain.sslEnabled && certificateMatches && servedMatches && cert?.expiry ? new Date(cert.expiry) : null;
     const hosts = [sslHostStatus(domain.name, servedApex?.matches ? cert : null), sslHostStatus(`www.${domain.name}`, servedWww?.matches ? cert : null)];
+    await refreshDomainHostSsl(domain, certificateMatches && servedMatches ? cert : null);
     return {
       domainId: domain.id,
       domain: domain.name,
@@ -2523,6 +2555,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const body = sslSchema.parse(request.body ?? {});
     const domain = await prisma.domain.findFirstOrThrow({ where: { id: domainId, accountId: accountId(request) } });
     const preflight = await accountSslPreflight(request, domain, body.includeWww);
+    await syncDomainHostRows(domain, { includeWww: preflight.includeWww });
     const job = await sslQueue.add(action, {
       domainId: domain.id,
       domain: domain.name,
@@ -2537,6 +2570,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     });
     if (action === "issue") {
       await prisma.domain.update({ where: { id: domain.id }, data: { sslEnabled: false, sslExpiry: null } });
+      await refreshDomainHostSsl(domain, null);
     }
     await audit(request, { action: "APPLY", resource: "ssl", resourceId: domain.id, description: `Account queued SSL ${action} for ${domain.name}` });
     return reply.code(202).send({ queued: true, jobId: job.id });
