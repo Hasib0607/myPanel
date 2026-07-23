@@ -19,6 +19,24 @@ test("subdomain bindings fall back to the file-manager subdomain root", async ()
   assert.equal(deploymentFallbackRootPath(bound)?.endsWith(path.join("example.com", "subdomains", "admin")), true);
 });
 
+test("account domain webroot strips imported account-relative document roots", async () => {
+  const { accountDomainWebRootPath } = await import("./deploymentDomainSsl.js");
+  const account = { homeRoot: "/var/www/accounts/ebitans" };
+
+  assert.equal(
+    accountDomainWebRootPath(account, { name: "ebitans.com", documentRoot: "accounts/ebitans/public_html" }),
+    "/var/www/accounts/ebitans/public_html"
+  );
+  assert.equal(
+    accountDomainWebRootPath(account, { name: "need4home.xyz", documentRoot: "public_html" }),
+    "/var/www/accounts/ebitans/need4home.xyz/public_html"
+  );
+  assert.equal(
+    accountDomainWebRootPath(account, { name: "need4home.xyz", documentRoot: "need4home.xyz/public_html" }),
+    "/var/www/accounts/ebitans/need4home.xyz/public_html"
+  );
+});
+
 test("only running deployments are routable through domain proxy vhosts", async () => {
   const { deploymentIsRoutable } = await import("./deploymentDomainSsl.js");
   assert.equal(deploymentIsRoutable({ status: "RUNNING" }), true);

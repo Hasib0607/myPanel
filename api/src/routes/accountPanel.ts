@@ -19,7 +19,7 @@ import { publishDomainDnsZone } from "../lib/domainDnsPublish.js";
 import { detectDeploymentFiles } from "../lib/deploymentDetection.js";
 import { deploymentRuntimeReview, prepareDeploymentRuntimeTools } from "../lib/deploymentRuntimeReview.js";
 import { processConfigWithoutManualStop, requestDeploymentManualStop } from "../lib/deploymentStopControl.js";
-import { boundDomainFromBinding, certificateNamesCoverHost, certificateNamesCoverServerName, deploymentFallbackRootPath, deploymentIsRoutable, deploymentServerName, deploymentSslCertificatePathsWhenReady, publishDeploymentProxyNginx } from "../lib/deploymentDomainSsl.js";
+import { accountDomainWebRootPath, boundDomainFromBinding, certificateNamesCoverHost, certificateNamesCoverServerName, deploymentFallbackRootPath, deploymentIsRoutable, deploymentServerName, deploymentSslCertificatePathsWhenReady, publishDeploymentProxyNginx } from "../lib/deploymentDomainSsl.js";
 import { prisma } from "../lib/prisma.js";
 import { resolvePublicA } from "../lib/publicDns.js";
 import { deleteSecret, getSecret, getSecretRecord, putSecret } from "../lib/secrets.js";
@@ -1470,12 +1470,8 @@ function normalizeDocumentRoot(value?: string | null) {
 }
 
 function accountDomainWebRoot(account: { homeRoot: string }, domain: { name: string; documentRoot?: string | null }) {
-  const documentRoot = normalizeDocumentRoot(domain.documentRoot);
-  const normalizedName = normalizeDomainName(domain.name);
-  if (documentRoot === normalizedName || documentRoot.startsWith(`${normalizedName}/`)) {
-    return path.join(account.homeRoot, documentRoot);
-  }
-  return path.join(account.homeRoot, normalizedName, documentRoot);
+  normalizeDocumentRoot(domain.documentRoot);
+  return accountDomainWebRootPath(account, domain);
 }
 
 function normalizeRedirectUrl(value?: string | null) {

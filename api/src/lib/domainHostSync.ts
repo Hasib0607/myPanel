@@ -1,7 +1,7 @@
 import path from "node:path";
 import { env } from "../config/env.js";
 import { sslQueue } from "../jobs/queues.js";
-import { certificateNamesCoverHost } from "./deploymentDomainSsl.js";
+import { accountDomainWebRootPath, certificateNamesCoverHost, normalizeStoredDocumentRoot } from "./deploymentDomainSsl.js";
 import { ensureSubdomainFileStructure } from "./domainFiles.js";
 import { managedDomainHostnames, refreshDomainHostDns, refreshDomainHostSsl, refreshSubdomainHostDns, refreshSubdomainHostSsl, subdomainHostName, syncDomainHostRows, syncSubdomainHostRow } from "./domainHosts.js";
 import { logger } from "./logger.js";
@@ -19,9 +19,9 @@ type SyncOptions = {
 
 function domainWebRoot(domain: { name: string; documentRoot: string; account?: { homeRoot: string | null } | null }) {
   if (domain.account?.homeRoot) {
-    return path.join(domain.account.homeRoot, domain.name, domain.documentRoot || "public_html");
+    return accountDomainWebRootPath({ homeRoot: domain.account.homeRoot }, domain);
   }
-  return path.join(env.FILE_MANAGER_ROOT, domain.name, domain.documentRoot || "public_html");
+  return path.join(env.FILE_MANAGER_ROOT, domain.name, normalizeStoredDocumentRoot(domain.documentRoot));
 }
 
 async function subdomainWebRoot(subdomain: { name: string; domain: { name: string; account?: { homeRoot: string | null } | null } }) {

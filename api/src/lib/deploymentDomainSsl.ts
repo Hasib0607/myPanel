@@ -20,21 +20,45 @@ export type BoundDomain = {
   account?: { homeRoot?: string | null } | null;
 };
 
-function normalizeDocumentRoot(value?: string | null) {
+export function normalizeStoredDocumentRoot(value?: string | null) {
   return (value || "public_html").replace(/^\/+|\/+$/g, "") || "public_html";
 }
 
 function publicHtmlRootPath(domainName: string, documentRoot?: string | null) {
-  return path.join(env.FILE_MANAGER_ROOT, domainName, normalizeDocumentRoot(documentRoot));
+  return path.join(env.FILE_MANAGER_ROOT, domainName, normalizeStoredDocumentRoot(documentRoot));
+}
+
+function accountRelativeDocumentRoot(documentRoot: string, homeRoot: string) {
+  const accountName = path.basename(homeRoot.replace(/\/+$/, ""));
+  const accountPrefix = `accounts/${accountName}/`;
+  if (documentRoot === `accounts/${accountName}`) return "public_html";
+  if (documentRoot.startsWith(accountPrefix)) return documentRoot.slice(accountPrefix.length) || "public_html";
+  if (documentRoot === accountName) return "public_html";
+  if (documentRoot.startsWith(`${accountName}/`)) return documentRoot.slice(accountName.length + 1) || "public_html";
+  return null;
+}
+
+export function accountDomainWebRootPath(account: { homeRoot: string }, domain: { name: string; documentRoot?: string | null }) {
+  const rawRoot = domain.documentRoot?.trim() || "public_html";
+  if (path.isAbsolute(rawRoot)) {
+    const normalizedHome = path.resolve(account.homeRoot);
+    const normalizedRoot = path.resolve(rawRoot);
+    if (normalizedRoot === normalizedHome || normalizedRoot.startsWith(`${normalizedHome}${path.sep}`)) return normalizedRoot;
+    return path.join(account.homeRoot, normalizeStoredDocumentRoot(domain.name), "public_html");
+  }
+  const documentRoot = normalizeStoredDocumentRoot(rawRoot);
+  const accountRelative = accountRelativeDocumentRoot(documentRoot, account.homeRoot);
+  if (accountRelative) return path.join(account.homeRoot, accountRelative);
+  const normalizedName = normalizeStoredDocumentRoot(domain.name);
+  if (documentRoot === normalizedName || documentRoot.startsWith(`${normalizedName}/`)) {
+    return path.join(account.homeRoot, documentRoot);
+  }
+  return path.join(account.homeRoot, normalizedName, documentRoot);
 }
 
 function accountPublicRootPath(domain: { name: string; documentRoot?: string | null; account?: { homeRoot?: string | null } | null }) {
   if (domain.account?.homeRoot) {
-    const documentRoot = normalizeDocumentRoot(domain.documentRoot);
-    if (documentRoot === domain.name || documentRoot.startsWith(`${domain.name}/`)) {
-      return path.join(domain.account.homeRoot, documentRoot);
-    }
-    return path.join(domain.account.homeRoot, domain.name, documentRoot);
+    return accountDomainWebRootPath({ homeRoot: domain.account.homeRoot }, domain);
   }
   return publicHtmlRootPath(domain.name, domain.documentRoot);
 }

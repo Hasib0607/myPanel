@@ -11,10 +11,12 @@ import { subdomainFolderName } from "../lib/domainFiles.js";
 import { certbotCertificateName, isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
 import {
   boundDomainFromBinding,
+  accountDomainWebRootPath,
   deploymentFallbackRootPath,
   deploymentIsRoutable,
   deploymentServerName,
   findDeploymentProxyTarget,
+  normalizeStoredDocumentRoot,
   publishDeploymentProxyNginx,
   publishPublicHtmlNginxVhost
 } from "../lib/deploymentDomainSsl.js";
@@ -151,6 +153,7 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
     ? await prisma.domain.findUnique({
         where: { id: domainId },
         include: {
+          account: { select: { homeRoot: true } },
           deployments: { orderBy: { createdAt: "desc" }, take: 1 },
           deploymentBindings: { include: { deployment: true }, orderBy: [{ role: "asc" }, { createdAt: "asc" }] }
         }
@@ -204,10 +207,13 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
       ...certificatePaths(domainName, certificate)
     });
   } else {
+    const fallbackRootPath = domain?.account?.homeRoot
+      ? accountDomainWebRootPath({ homeRoot: domain.account.homeRoot }, domain)
+      : `${env.FILE_MANAGER_ROOT}/${domainName}/${normalizeStoredDocumentRoot(domain?.documentRoot)}`;
     result = await sysagent.writeStaticNginxVhost({
       name: `domain-${nginxResourceName(domainName)}`,
       serverName: sslServerName(domainName, includeWww),
-      rootPath: webRoot ?? `${env.FILE_MANAGER_ROOT}/${domainName}/${domain?.documentRoot || "public_html"}`,
+      rootPath: webRoot ?? fallbackRootPath,
       forceHttps,
       requireSsl: true,
       ...certificatePaths(domainName, certificate)
