@@ -2202,15 +2202,14 @@ def _nginx_route_ownership_probe(server_name: str, config_name: str, *, require_
         "curl",
         "-sS",
         "-i",
+        "--http1.1",
         *(["-k"] if require_https else []),
-        "--resolve",
-        f"{primary}:{port}:127.0.0.1",
+        "--connect-to",
+        f"{primary}:{port}:127.0.0.1:{port}",
         "--max-time",
         "10",
         "--noproxy",
         "*",
-        "-H",
-        f"Host: {primary}",
         f"{scheme}://{primary}/",
     ]
     result = run_command(command, allow_live=True)
