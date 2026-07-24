@@ -707,17 +707,24 @@ def reset_runtime_logs(log_dir: Path) -> None:
     make_panel_owned(log_dir)
 
 
-def directory_size_bytes(root_path: str) -> int:
+def directory_size_bytes(root_path: str, *, max_seconds: float = 2.0, max_files: int = 20000) -> int:
     root = Path(root_path).resolve()
     info = path_info(str(root))
     if not info["allowed"] or not root.exists():
         return 0
+    deadline = time.monotonic() + max_seconds
     total = 0
+    scanned = 0
     for current, dirs, files in os.walk(root):
-        dirs[:] = [name for name in dirs if name not in {".git"}]
+        if time.monotonic() > deadline or scanned >= max_files:
+            break
+        dirs[:] = [name for name in dirs if name not in {".git", ".next/cache", "node_modules/.cache"}]
         for filename in files:
+            if time.monotonic() > deadline or scanned >= max_files:
+                break
             try:
                 total += (Path(current) / filename).stat().st_size
+                scanned += 1
             except OSError:
                 continue
     return total
@@ -1004,7 +1011,7 @@ def nginx_log_candidates(deployment_id: str, server_names: list[str]) -> tuple[l
     return candidates, hosts
 
 
-def read_recent_log_text(path: Path, max_bytes: int = 50 * 1024 * 1024) -> str:
+def read_recent_log_text(path: Path, max_bytes: int = 5 * 1024 * 1024) -> str:
     try:
         with path.open("rb") as handle:
             handle.seek(0, os.SEEK_END)
@@ -1028,12 +1035,22 @@ def deployment_traffic_metrics(deployment_id: str, server_names: list[str]) -> d
     path_counts: dict[str, int] = {}
     bot_counts: dict[str, int] = {}
     bad_bot_patterns = re.compile(r"bot|crawler|spider|scrapy|python-requests|curl|wget|semrush|ahrefs|mj12|bytespider|petalbot|headless", re.IGNORECASE)
+    deadline = time.monotonic() + 3.0
+    scanned_sources = 0
+    truncated = False
     for path, require_host_match in candidates:
+        if time.monotonic() > deadline or scanned_sources >= 20:
+            truncated = True
+            break
         if path in seen or not path.is_file():
             continue
         seen.add(path)
+        scanned_sources += 1
         source_requests = 0
         for line in read_recent_log_text(path).splitlines():
+            if time.monotonic() > deadline:
+                truncated = True
+                break
             if require_host_match and (not hosts or not any(host in line.lower() for host in hosts)):
                 continue
             parsed = parse_nginx_traffic_line(line, cutoff)
@@ -1070,7 +1087,7 @@ def deployment_traffic_metrics(deployment_id: str, server_names: list[str]) -> d
         "botSuspects": bot_suspects,
         "sources": sources,
         "windowHours": 24,
-        "note": None if sources else "No matching Nginx traffic was found for this project's domains in the last 24h.",
+        "note": "Traffic scan was capped to keep deployment overview responsive." if truncated else (None if sources else "No matching Nginx traffic was found for this project's domains in the last 24h."),
     }
 
 
