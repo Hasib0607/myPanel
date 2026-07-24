@@ -289,9 +289,6 @@ def _one_label_child_of(host: str, parent: str) -> bool:
 def _server_name_token_conflicts(claimed: str, requested: str) -> bool:
     if _server_name_token_matches(claimed, requested):
         return True
-    requested_parent = _wildcard_parent(requested)
-    if requested_parent:
-        return _one_label_child_of(claimed, requested_parent)
     return False
 
 

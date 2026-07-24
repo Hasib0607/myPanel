@@ -218,18 +218,18 @@ server {
             self.assertTrue(stale.exists())
             self.assertTrue(own.exists())
 
-    def test_wildcard_domain_removes_exact_child_shadow_config(self) -> None:
+    def test_wildcard_domain_keeps_exact_child_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            stale = root / "domain-fahpet.ebitan.store.conf"
+            exact_child = root / "domain-unknown.ecommercex.store.conf"
             own = root / "deployment-wildcard.ebitan.store.conf"
-            stale.write_text("server { listen 443 ssl; server_name fahpet.ebitan.store; }\n", encoding="utf-8")
+            exact_child.write_text("server { listen 443 ssl; server_name unknown.ecommercex.store; }\n", encoding="utf-8")
             own.write_text("server { listen 443 ssl; server_name *.ebitan.store; }\n", encoding="utf-8")
 
             removed = remove_conflicting_configs("deployment-wildcard.ebitan.store", "*.ebitan.store", tmp)
 
-            self.assertEqual(removed, ["domain-fahpet.ebitan.store.conf"])
-            self.assertFalse(stale.exists())
+            self.assertEqual(removed, [])
+            self.assertTrue(exact_child.exists())
             self.assertTrue(own.exists())
 
     def test_wildcard_domain_keeps_apex_and_deep_child_configs(self) -> None:
