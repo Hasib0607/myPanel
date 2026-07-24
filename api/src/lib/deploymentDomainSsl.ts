@@ -6,7 +6,13 @@ import { env } from "../config/env.js";
 import path from "node:path";
 import { sysagent } from "./sysagent.js";
 import { subdomainFolderName } from "./domainFiles.js";
-import { certificateLookupName, certbotCertificateName, isWildcardHostname, serverNameHasWildcard } from "./nginxNames.js";
+import {
+  certificateLookupName,
+  certbotCertificateName,
+  isWildcardHostname,
+  nginxResourceName,
+  serverNameHasWildcard
+} from "./nginxNames.js";
 
 export type BoundDomain = {
   id: string;
@@ -185,10 +191,6 @@ export function deploymentFallbackRootPath(domain: BoundDomain | null) {
   return domain.publicRootPath ?? accountPublicRootPath(domain);
 }
 
-function nginxResourceName(prefix: string, name: string) {
-  return `${prefix}-${name.replace(/[^a-zA-Z0-9_.-]/g, "-")}`;
-}
-
 export async function publishPublicHtmlNginxVhost(domain: BoundDomain | null) {
   const serverName = deploymentServerName(domain);
   const rootPath = deploymentFallbackRootPath(domain);
@@ -196,7 +198,7 @@ export async function publishPublicHtmlNginxVhost(domain: BoundDomain | null) {
   const sslPaths = await deploymentSslCertificatePathsWhenReady(domain);
   const httpsReady = Boolean(sslPaths.sslCertificate && sslPaths.sslCertificateKey);
   return sysagent.writeStaticNginxVhost({
-    name: nginxResourceName("domain", domain.name),
+    name: `domain-${nginxResourceName(domain.name)}`,
     serverName,
     rootPath,
     forceHttps: Boolean(domain.forceSsl && httpsReady),

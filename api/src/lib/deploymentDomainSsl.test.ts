@@ -57,6 +57,54 @@ test("wildcard deployment certificates use the safe certbot lineage name", async
   assert.equal(paths.sslCertificateKey, "/etc/letsencrypt/live/wildcard.ebitans.store/privkey.pem");
 });
 
+test("public html publish uses the safe wildcard nginx resource name", async () => {
+  const { publishPublicHtmlNginxVhost } = await import("./deploymentDomainSsl.js");
+  const { sysagent } = await import("./sysagent.js");
+  const originalFindReusable = sysagent.certificateFindReusable;
+  const originalWriteStatic = sysagent.writeStaticNginxVhost;
+  let request: any = null;
+
+  sysagent.certificateFindReusable = async () => ({
+    requested: "wildcard.ecommercex.store",
+    domain: "wildcard.ecommercex.store",
+    exists: true,
+    expiry: "2026-10-20T00:00:00.000Z",
+    names: ["*.ecommercex.store"],
+    certificate: "/etc/letsencrypt/live/wildcard.ecommercex.store/fullchain.pem",
+    privateKey: "/etc/letsencrypt/live/wildcard.ecommercex.store/privkey.pem"
+  });
+  sysagent.writeStaticNginxVhost = async (body: unknown) => {
+    request = body;
+    const ok = { returncode: 0, stdout: "", stderr: "" };
+    return {
+      write: ok,
+      enable: ok,
+      test: ok,
+      reload: ok,
+      configPath: "/etc/nginx/conf.d/domain-wildcard.ecommercex.store.conf",
+      rootPath: "/var/www/accounts/ecommercex/deployments/ecommercex-frontend-next/public"
+    };
+  };
+
+  try {
+    await publishPublicHtmlNginxVhost({
+      id: "dom_1",
+      name: "*.ecommercex.store",
+      forceSsl: true,
+      sslEnabled: true,
+      publicRootPath: "/var/www/accounts/ecommercex/deployments/ecommercex-frontend-next/public",
+      includeWww: false
+    });
+
+    assert.equal(request.name, "domain-wildcard.ecommercex.store");
+    assert.notEqual(request.name, "domain--.ecommercex.store");
+    assert.equal(request.serverName, "*.ecommercex.store");
+  } finally {
+    sysagent.certificateFindReusable = originalFindReusable;
+    sysagent.writeStaticNginxVhost = originalWriteStatic;
+  }
+});
+
 test("subdomain deployments reuse matching wildcard certificate paths", async () => {
   const { deploymentSslCertificatePathsWhenReady } = await import("./deploymentDomainSsl.js");
   const { sysagent } = await import("./sysagent.js");

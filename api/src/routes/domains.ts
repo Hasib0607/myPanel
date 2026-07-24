@@ -534,7 +534,7 @@ async function publishDomainHosting(domainId: string) {
   } else if (domain.hostingMode === "REDIRECT") {
     if (!domain.redirectUrl) throw Object.assign(new Error("Set a redirect URL before publishing redirect hosting."), { statusCode: 400 });
     nginxResult = await sysagent.writeRedirectNginxVhost({
-      name: `domain-${domain.name}`,
+      name: `domain-${nginxResourceName(domain.name)}`,
       serverName: `${domain.name} www.${domain.name}`,
       redirectUrl: normalizeRedirectUrl(domain.redirectUrl)
     });
@@ -550,7 +550,7 @@ async function publishDomainHosting(domainId: string) {
     });
     const httpsReady = Boolean(sslPaths.sslCertificate && sslPaths.sslCertificateKey);
     nginxResult = await sysagent.writeStaticNginxVhost({
-      name: `domain-${domain.name}`,
+      name: `domain-${nginxResourceName(domain.name)}`,
       serverName: `${domain.name} www.${domain.name}`,
       rootPath: path.join(env.FILE_MANAGER_ROOT, domain.name, documentRoot),
       forceHttps: domain.forceSsl && httpsReady,
