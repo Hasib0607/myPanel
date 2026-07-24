@@ -1,11 +1,20 @@
 import path from "node:path";
+import type { DeploymentFramework } from "@prisma/client";
 import { env } from "../config/env.js";
 import { sslQueue } from "../jobs/queues.js";
-import { accountDomainWebRootPath, certificateNamesCoverHost, normalizeStoredDocumentRoot } from "./deploymentDomainSsl.js";
+import {
+  accountDomainWebRootPath,
+  boundDomainFromBinding,
+  certificateNamesCoverHost,
+  deploymentFallbackRootPath,
+  deploymentServerName,
+  normalizeStoredDocumentRoot,
+  publishDeploymentProxyNginx
+} from "./deploymentDomainSsl.js";
 import { ensureSubdomainFileStructure } from "./domainFiles.js";
 import { managedDomainHostnames, refreshDomainHostDns, refreshDomainHostSsl, refreshSubdomainHostDns, refreshSubdomainHostSsl, subdomainHostName, syncDomainHostRows, syncSubdomainHostRow } from "./domainHosts.js";
 import { logger } from "./logger.js";
-import { certificateLookupName, certbotCertificateName, isWildcardHostname, wildcardProbeHostname } from "./nginxNames.js";
+import { certificateLookupName, certbotCertificateName, isWildcardHostname, nginxResourceName, wildcardProbeHostname } from "./nginxNames.js";
 import { prisma } from "./prisma.js";
 import { currentVpsIp } from "./serverIp.js";
 import { sysagent } from "./sysagent.js";
@@ -123,6 +132,90 @@ async function queueSubdomainRepair(subdomain: { id: string; name: string; domai
   return { type: "subdomain" as const, domain: fqdn, jobId: job.id, reason };
 }
 
+function deploymentAppPath(deployment: { rootPath: string; rootDirectory?: string | null }) {
+  const rootDirectory = (deployment.rootDirectory || ".").replace(/^\/+|\/+$/g, "");
+  return rootDirectory && rootDirectory !== "." ? path.join(deployment.rootPath, rootDirectory) : deployment.rootPath;
+}
+
+function deploymentCanServeRoute(deployment: { status?: string | null; port?: number | null } | null | undefined) {
+  return Boolean(deployment?.port && deployment.status !== "STOPPED" && deployment.status !== "FAILED");
+}
+
+async function repairSubdomainRouteWithExistingCertificate(
+  subdomain: {
+    id: string;
+    name: string;
+    sslEnabled: boolean;
+    target?: string | null;
+    domainId: string;
+    domain: { id: string; name: string; account?: { homeRoot: string | null } | null };
+    deploymentBindings?: Array<{
+      deployment: {
+        id: string;
+        status?: string | null;
+        port: number | null;
+        rootPath: string;
+        rootDirectory?: string | null;
+        framework: DeploymentFramework;
+        startCommand?: string | null;
+        publicDirectory?: string | null;
+        outputDirectory?: string | null;
+      };
+      domain?: null;
+      subdomain?: {
+        id: string;
+        name: string;
+        sslEnabled: boolean;
+        domainId: string;
+        domain: { name: string; account?: { homeRoot?: string | null } | null };
+      } | null;
+    }>;
+  },
+  sslPaths: { sslCertificate: string; sslCertificateKey: string }
+) {
+  const fqdn = subdomainHostName(subdomain);
+  const binding = (subdomain.deploymentBindings ?? []).find((row) => deploymentCanServeRoute(row.deployment));
+  if (binding) {
+    const bound = boundDomainFromBinding({
+      ...binding,
+      subdomain: binding.subdomain ?? {
+        id: subdomain.id,
+        name: subdomain.name,
+        sslEnabled: subdomain.sslEnabled,
+        domainId: subdomain.domainId,
+        domain: subdomain.domain
+      }
+    });
+    const serverName = deploymentServerName(bound) ?? fqdn;
+    return publishDeploymentProxyNginx({
+      deploymentId: binding.deployment.id,
+      fqdn: serverName,
+      upstreamPort: binding.deployment.port!,
+      rootPath: deploymentAppPath(binding.deployment),
+      framework: binding.deployment.framework,
+      startCommand: binding.deployment.startCommand,
+      publicDirectory: binding.deployment.publicDirectory,
+      outputDirectory: binding.deployment.outputDirectory,
+      fallbackRootPath: deploymentFallbackRootPath(bound),
+      forceHttps: true,
+      requireSsl: false,
+      ...sslPaths
+    });
+  }
+
+  const vpsIp = await currentVpsIp().catch(() => env.VPS_IP);
+  const targetIsLocal = subdomain.target === env.VPS_IP || subdomain.target === vpsIp || subdomain.target === subdomain.domain.name || subdomain.target === fqdn;
+  if (!targetIsLocal) return null;
+  const scaffold = await ensureSubdomainFileStructure(subdomain.domain.name, subdomain.name);
+  return sysagent.writeStaticNginxVhost({
+    name: `domain-${nginxResourceName(fqdn)}`,
+    serverName: fqdn,
+    rootPath: path.join(env.FILE_MANAGER_ROOT, scaffold.relativeRoot),
+    forceHttps: true,
+    ...sslPaths
+  });
+}
+
 async function servedHostFailures(hostnames: string[]) {
   const failures = [];
   for (const hostname of hostnames) {
@@ -175,7 +268,15 @@ export async function runDomainHostSync(options: SyncOptions = {}) {
     ...(subdomainParentFilter ? { where: { domain: { name: { in: subdomainParentFilter } } } } : {}),
     orderBy: { id: "asc" },
     take: limit,
-    include: { domain: { select: { id: true, name: true, account: { select: { homeRoot: true } } } } }
+    include: {
+      domain: { select: { id: true, name: true, account: { select: { homeRoot: true } } } },
+      deploymentBindings: {
+        include: {
+          deployment: true,
+          subdomain: { include: { domain: true } }
+        }
+      }
+    }
   });
 
   const updated = [];
@@ -257,6 +358,30 @@ export async function runDomainHostSync(options: SyncOptions = {}) {
       } else {
         const reason = !cert?.exists ? "certificate missing" : !fileMatches ? "certificate SAN mismatch" : "served certificate mismatch";
         const dnsReady = hostDnsReady(fqdn, dnsResult ? [dnsResult] : null, includeDns);
+        if (queueRepair && reason === "served certificate mismatch" && dnsReady && cert?.certificate && cert.privateKey) {
+          const routeRepair = await repairSubdomainRouteWithExistingCertificate(subdomain, {
+            sslCertificate: cert.certificate,
+            sslCertificateKey: cert.privateKey
+          }).catch((error) => ({
+            error: error instanceof Error ? error.message : String(error)
+          }));
+          const afterRepairFailures = await servedHostFailures([fqdn]);
+          if (afterRepairFailures.length === 0) {
+            const repairedHost = await refreshSubdomainHostSsl(subdomain, cert);
+            updated.push({ type: "subdomain", domain: fqdn, hosts: [repairedHost], repairedRoute: true, routeRepair });
+            continue;
+          }
+          stale.push({
+            type: "subdomain",
+            domain: fqdn,
+            reason,
+            action: repairAction(reason),
+            servedFailures: afterRepairFailures,
+            dnsReady,
+            routeRepair
+          });
+          continue;
+        }
         stale.push({ type: "subdomain", domain: fqdn, reason, action: repairAction(reason), servedFailures, dnsReady });
         if (queueRepair && wantsSsl && dnsReady) repairQueued.push(await queueSubdomainRepair(subdomain, reason));
       }

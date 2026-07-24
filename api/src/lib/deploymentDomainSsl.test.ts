@@ -497,6 +497,23 @@ test("exact subdomain deployment binding still matches only itself", async () =>
   assert.equal(subdomainBindingMatchesFqdn(exact, "a9.ecommercex.store"), false);
 });
 
+test("exact subdomain deployment binding wins over wildcard binding", async () => {
+  const { selectSubdomainBindingForFqdn } = await import("./deploymentDomainSsl.js");
+  const wildcard = {
+    id: "wildcard",
+    deployment: { id: "frontend", status: "RUNNING" },
+    subdomain: { name: "*", domain: { name: "ecommercex.store" } }
+  };
+  const admin = {
+    id: "admin",
+    deployment: { id: "admin-react", status: "RUNNING" },
+    subdomain: { name: "admin", domain: { name: "ecommercex.store" } }
+  };
+
+  assert.equal(selectSubdomainBindingForFqdn([wildcard, admin], "admin.ecommercex.store")?.id, "admin");
+  assert.equal(selectSubdomainBindingForFqdn([admin, wildcard], "g2.ecommercex.store")?.id, "wildcard");
+});
+
 test("Next.js proxy requests always preserve the public Host", async () => {
   const { buildDeploymentNginxRequest } = await import("./deploymentDomainSsl.js");
   const request = buildDeploymentNginxRequest({

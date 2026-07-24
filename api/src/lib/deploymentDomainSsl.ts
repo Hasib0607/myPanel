@@ -311,9 +311,7 @@ export async function findDeploymentProxyTarget(fqdn: string) {
       subdomain: { include: { domain: true } }
     }
   });
-  const subdomainHit = subdomainBindings.find(
-    (binding) => binding.subdomain && subdomainBindingMatchesFqdn(binding.subdomain, normalizedFqdn)
-  );
+  const subdomainHit = selectSubdomainBindingForFqdn(subdomainBindings, normalizedFqdn);
   if (subdomainHit?.deployment) {
     if (!deploymentIsRoutable(subdomainHit.deployment)) return null;
     return {
@@ -352,6 +350,18 @@ export async function findDeploymentProxyTarget(fqdn: string) {
   if (!deployment) return null;
   if (!deploymentIsRoutable(deployment)) return null;
   return { deployment, domain, subdomainId: null as string | null, includeWww: true };
+}
+
+export function selectSubdomainBindingForFqdn<T extends {
+  deployment?: { status?: string | null } | null;
+  subdomain?: { name: string; domain: { name: string } } | null;
+}>(bindings: T[], fqdn: string) {
+  const matches = bindings.filter((binding) =>
+    binding.subdomain && subdomainBindingMatchesFqdn(binding.subdomain, fqdn)
+  );
+  const exact = matches.find((binding) => binding.subdomain?.name.toLowerCase() !== "*");
+  if (exact) return exact;
+  return matches.find((binding) => binding.subdomain?.name.toLowerCase() === "*") ?? null;
 }
 
 export function subdomainBindingMatchesFqdn(
