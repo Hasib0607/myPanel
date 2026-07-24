@@ -52,6 +52,7 @@ from app.nginx_manager import (
     acme_location,
     certificate_name_for_server_name,
     certificate_names_cover_server_name,
+    ensure_server_names_hash_config,
     make_web_root_readable,
     nginx_listen_directives,
     probe_host_for_server_name,
@@ -173,6 +174,30 @@ class NginxManagerTests(unittest.TestCase):
         self.assertTrue(server_name_has_wildcard("*.ebitans.store"))
         self.assertTrue(server_name_has_wildcard("shop.ebitans.store *.ebitans.store"))
         self.assertFalse(server_name_has_wildcard("shop.ebitans.store www.shop.ebitans.store"))
+
+    def test_server_names_hash_tuning_is_written_when_conf_d_is_loaded(self) -> None:
+        previous_allow_live = nginx_manager.settings.allow_live_nginx
+        previous_hash_config = nginx_manager.SERVER_NAMES_HASH_CONFIG
+        previous_run_live_step = nginx_manager.run_live_step
+        previous_nginx_loads_directory = nginx_manager._nginx_loads_directory
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                target = Path(tmp) / "00-vps-panel-server-names-hash.conf"
+                nginx_manager.settings.allow_live_nginx = True
+                nginx_manager.SERVER_NAMES_HASH_CONFIG = target
+                nginx_manager._nginx_loads_directory = lambda directory: directory == target.parent
+                nginx_manager.run_live_step = lambda _label, fn: fn()
+
+                ensure_server_names_hash_config()
+
+                text = target.read_text(encoding="utf-8")
+                self.assertIn("server_names_hash_bucket_size 128;", text)
+                self.assertIn("server_names_hash_max_size 8192;", text)
+        finally:
+            nginx_manager.settings.allow_live_nginx = previous_allow_live
+            nginx_manager.SERVER_NAMES_HASH_CONFIG = previous_hash_config
+            nginx_manager.run_live_step = previous_run_live_step
+            nginx_manager._nginx_loads_directory = previous_nginx_loads_directory
 
     def test_detects_wildcard_server_name_directive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

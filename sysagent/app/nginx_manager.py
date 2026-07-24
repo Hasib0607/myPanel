@@ -17,6 +17,13 @@ MANAGED_CONFIG_PREFIXES = ("domain-", "deployment-")
 PROTECTED_CONFIG_NAMES = {"default", "vps-panel", "panel", "vps_panel"}
 STRICTLY_PROTECTED_CONFIG_NAMES = {"vps-panel", "panel", "vps_panel"}
 ROUTE_OWNERSHIP_HEADER = "X-VPS-Panel-Route"
+SERVER_NAMES_HASH_CONFIG = Path("/etc/nginx/conf.d/00-vps-panel-server-names-hash.conf")
+SERVER_NAMES_HASH_CONFIG_TEXT = (
+    "# Managed by VPS Panel. Keeps exact server_name routes reliable when many\n"
+    "# customer domains and wildcard vhosts are installed.\n"
+    "server_names_hash_bucket_size 128;\n"
+    "server_names_hash_max_size 8192;\n"
+)
 
 
 def assert_managed_config_name(name: str) -> None:
@@ -345,6 +352,21 @@ def _nginx_loads_both_site_directories(sites_available: str, sites_enabled: str)
     return _nginx_loads_directory(available) and _nginx_loads_directory(enabled)
 
 
+def ensure_server_names_hash_config() -> None:
+    if not settings.allow_live_nginx:
+        return
+    conf_dir = SERVER_NAMES_HASH_CONFIG.parent
+    if not _nginx_loads_directory(conf_dir):
+        return
+    try:
+        current = SERVER_NAMES_HASH_CONFIG.read_text(encoding="utf-8")
+    except OSError:
+        current = ""
+    if current == SERVER_NAMES_HASH_CONFIG_TEXT:
+        return
+    run_live_step("write nginx server_name hash tuning", lambda: SERVER_NAMES_HASH_CONFIG.write_text(SERVER_NAMES_HASH_CONFIG_TEXT, encoding="utf-8"))
+
+
 def _config_dump_sections(text: str) -> list[tuple[str, str]]:
     sections: list[tuple[str, list[str]]] = []
     current_file = ""
@@ -632,6 +654,7 @@ def publish_nginx_config(
 
     run_live_step("prepare config directory", lambda: available.parent.mkdir(parents=True, exist_ok=True))
     run_live_step("prepare enabled directory", lambda: enabled.parent.mkdir(parents=True, exist_ok=True))
+    ensure_server_names_hash_config()
 
     if server_name:
         own_paths = {
