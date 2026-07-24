@@ -5038,54 +5038,28 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
     if (domain && !backendOnlyLaravel && routeDomains.length > 1) {
       const primaryName = domain.name.toLowerCase();
       const secondaryRouteDomains = routeDomains.filter((routeDomain) => routeDomain.name.toLowerCase() !== primaryName);
-      const refreshed = [];
-      for (const routeDomain of secondaryRouteDomains) {
-        try {
-          const tlsSync = await syncDeploymentTlsWithCertificate(routeDomain);
-          const activeRouteDomain = tlsSync.domain ?? routeDomain;
-          const includeWww = isWildcardHostname(activeRouteDomain.name) ? false : await wwwPointsToThisVps(activeRouteDomain);
-          const serverName = deploymentServerName({ ...activeRouteDomain, includeWww }) ?? activeRouteDomain.name;
-          const activeSslPaths = tlsSync.httpsReady ? await deploymentSslCertificatePathsWhenReady({ ...activeRouteDomain, includeWww }) : {};
-          await runStep(deployment.id, releaseId, "CONFIGURING_PROXY", `Refresh secondary proxy vhost for ${activeRouteDomain.name}`, () =>
-            publishDeploymentProxyNginx({
-              deploymentId: deployment.id,
-              fqdn: serverName,
-              upstreamPort: deployment.port,
-              rootPath: appPath,
-              framework: deployment.framework,
-              startCommand: deployment.startCommand,
-              publicDirectory: deployment.publicDirectory,
-              outputDirectory: deployment.outputDirectory,
-              fallbackRootPath: deploymentFallbackRootPath(activeRouteDomain),
-              forceHttps: tlsSync.httpsReady,
-              ...activeSslPaths
-            })
-          );
-          if (!tlsSync.httpsReady && deploymentWantsSsl(activeRouteDomain)) {
-            await ensureAcmeWebroot(activeRouteDomain);
-            const sslJob = await sslQueue.add("issue", deploymentSslQueuePayload(activeRouteDomain, "deployment-secondary-refresh", includeWww));
-            sslDeploymentWarning = sslDeploymentWarning ?? `SSL is pending for one or more secondary domains; deployment stayed live over HTTP where needed.`;
-            refreshed.push({ domain: activeRouteDomain.name, httpsReady: false, sslQueued: true, jobId: sslJob.id });
-          } else {
-            refreshed.push({ domain: activeRouteDomain.name, httpsReady: tlsSync.httpsReady, sslQueued: false });
-          }
-        } catch (error) {
-          const warning = error instanceof Error ? error.message : String(error);
-          sslDeploymentWarning = sslDeploymentWarning ?? `Secondary domain proxy refresh warning: ${warning}`;
-          await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", `Secondary proxy refresh warning for ${routeDomain.name}`, {
-            warning
-          }, "warn");
-        }
-      }
-      if (refreshed.length > 0) {
-        await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "Secondary domain proxy refresh completed", { refreshed });
-      }
+      await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "Secondary domain proxy refresh deferred", {
+        primaryDomain: domain.name,
+        deferredCount: secondaryRouteDomains.length,
+        deferredDomains: secondaryRouteDomains.slice(0, 25).map((routeDomain) => routeDomain.name),
+        omittedDomains: Math.max(0, secondaryRouteDomains.length - 25),
+        reason: "Secondary deployment domains share the same managed upstream port. Refreshing every vhost and SSL binding inline can turn a small deploy into a long maintenance pass; Guardian/domain-host sync will repair stale secondary SSL routes asynchronously."
+      }, "warn");
     }
 
     if (!backendOnlyLaravel && routeDomains.length > 0) {
-      const hostSync = await refreshDeploymentDomainHostState(deployment.id, releaseId, routeDomains);
+      const hostSyncDomains = domain ? [domain] : routeDomains.slice(0, 1);
+      const hostSync = await refreshDeploymentDomainHostState(deployment.id, releaseId, hostSyncDomains);
       if (hostSync?.stale.length || hostSync?.errors.length) {
         sslDeploymentWarning = sslDeploymentWarning ?? "One or more deployment domains need SSL/DNS repair; HTTP routes stayed active and repair was queued where DNS is ready.";
+      }
+      const deferredHostSyncCount = Math.max(0, routeDomains.length - hostSyncDomains.length);
+      if (deferredHostSyncCount > 0) {
+        await writeLog(deployment.id, releaseId, "CONFIGURING_PROXY", "Secondary domain host SSL state sync deferred", {
+          checkedNow: hostSyncDomains.map((routeDomain) => routeDomain.name),
+          deferredCount: deferredHostSyncCount,
+          reason: "Deploy only validates the active primary route inline. Full multi-domain SSL/DNS reconciliation runs through Guardian so deployments are not blocked by every secondary customer domain."
+        }, "warn");
       }
     }
 
