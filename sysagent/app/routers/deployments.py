@@ -41,10 +41,12 @@ from app.platform import runtime_tool_install_plan
 from app.nginx_paths import nginx_sites_available, nginx_sites_enabled
 from app.nginx_manager import (
     ROUTE_OWNERSHIP_HEADER,
+    _config_dump_sections,
     acme_location,
     certificate_file_covers_server_name,
     letsencrypt_certificate_exists,
     loaded_conflicting_config_files,
+    nginx_config_dump,
     nginx_listen_directives,
     publish_nginx_config,
     probe_host_for_server_name,
@@ -2204,6 +2206,9 @@ def _nginx_route_ownership_probe(server_name: str, config_name: str, *, require_
             and f"server_name {server_name.lower()};" in output_lower
             and route_ownership_config_seen(output, config_name)
         ):
+            exact_child_check = _wildcard_exact_child_route_probe(server_name, config_name, require_https=require_https)
+            if exact_child_check.get("returncode") != 0:
+                return exact_child_check
             return result
         return {
             **result,
@@ -2253,6 +2258,97 @@ def _nginx_route_ownership_probe(server_name: str, config_name: str, *, require_
             f"missing {ROUTE_OWNERSHIP_HEADER} response header.{conflict_hint}{dump_status}"
         ),
     }
+
+
+def _wildcard_parent_from_server_name(server_name: str) -> str | None:
+    for token in server_name_tokens(server_name):
+        normalized = token.strip().lower().rstrip(".")
+        if normalized.startswith("*.") and len(normalized) > 2:
+            return normalized[2:]
+    return None
+
+
+def _one_label_child_of_parent(hostname: str, parent: str) -> bool:
+    host = hostname.strip().lower().rstrip(".")
+    parent = parent.strip().lower().rstrip(".")
+    suffix = f".{parent}"
+    if not host.endswith(suffix):
+        return False
+    left = host[: -len(suffix)]
+    return bool(left) and left != "*" and "." not in left
+
+
+def _wildcard_exact_child_route_probe(server_name: str, config_name: str, *, require_https: bool) -> dict:
+    parent = _wildcard_parent_from_server_name(server_name)
+    if not parent:
+        return {"returncode": 0, "stdout": "", "stderr": ""}
+
+    text, dump = nginx_config_dump()
+    checks: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    wildcard_filename = f"{config_name}.conf"
+    for file_path, file_text in _config_dump_sections(text):
+        if Path(file_path).name == wildcard_filename:
+            continue
+        if ROUTE_OWNERSHIP_HEADER not in file_text:
+            continue
+        for block_text in _server_blocks(file_text) or [file_text]:
+            route_headers = re.findall(rf'{ROUTE_OWNERSHIP_HEADER}\s+"([^"]+)"', block_text, re.IGNORECASE)
+            if not route_headers:
+                continue
+            expected_route = route_headers[0]
+            for name in server_name_directive_tokens(block_text):
+                normalized = name.strip().lower().rstrip(".")
+                if "*" in normalized or not _one_label_child_of_parent(normalized, parent):
+                    continue
+                key = (normalized, expected_route)
+                if key in seen:
+                    continue
+                seen.add(key)
+                checks.append(key)
+                if len(checks) >= 50:
+                    break
+            if len(checks) >= 50:
+                break
+        if len(checks) >= 50:
+            break
+
+    failures: list[str] = []
+    scheme = "https" if require_https else "http"
+    port = "443" if require_https else "80"
+    for hostname, expected_route in checks:
+        command = [
+            "curl",
+            "-sS",
+            "-i",
+            "--http1.1",
+            *(["-k"] if require_https else []),
+            "--connect-to",
+            f"{hostname}:{port}:127.0.0.1:{port}",
+            "--max-time",
+            "10",
+            "--noproxy",
+            "*",
+            f"{scheme}://{hostname}/",
+        ]
+        result = run_command(command, allow_live=True)
+        output = f"{result.get('stdout') or ''}\n{result.get('stderr') or ''}"
+        if result.get("returncode") == 0 and route_ownership_header_seen(output, expected_route):
+            continue
+        failures.append(f"{hostname} expected {expected_route}")
+        if len(failures) >= 5:
+            break
+
+    if failures:
+        return {
+            **dump,
+            "returncode": 1,
+            "stderr": (
+                f"Wildcard vhost {config_name!r} is active, but exact child route(s) are being shadowed: "
+                f"{', '.join(failures)}. Restart Nginx to clear stale workers and preserve exact managed vhosts."
+            ),
+        }
+    return {"returncode": 0, "stdout": "", "stderr": ""}
 
 
 def _deployment_nginx_post_reload_check(server_name: str, config_name: str, public_root: str, framework: str | None, *, require_https: bool) -> dict:
