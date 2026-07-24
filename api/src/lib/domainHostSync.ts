@@ -4,6 +4,7 @@ import { env } from "../config/env.js";
 import { sslQueue } from "../jobs/queues.js";
 import {
   accountDomainWebRootPath,
+  certificateLookupCandidates,
   boundDomainFromBinding,
   certificateNamesCoverHost,
   deploymentFallbackRootPath,
@@ -348,7 +349,12 @@ export async function runDomainHostSync(options: SyncOptions = {}) {
     try {
       await syncSubdomainHostRow(subdomain);
       const dnsResult = expectedIp ? await refreshSubdomainHostDns(subdomain, expectedIp) : null;
-      const cert = await sysagent.certificateFindReusable(certificateLookupName(fqdn)).catch(() => null);
+      const certCandidates = await Promise.all(
+        certificateLookupCandidates(fqdn).map((lookup) => sysagent.certificateFindReusable(lookup).catch(() => null))
+      );
+      const cert = certCandidates.find((row) =>
+        Boolean(row?.exists && row.expiry && certificateNamesCoverHost(fqdn, row.names ?? []))
+      ) ?? null;
       const fileMatches = Boolean(cert?.exists && cert.expiry && certificateNamesCoverHost(fqdn, cert.names ?? []));
       const servedFailures = fileMatches ? await servedHostFailures([fqdn]) : [];
       const matches = fileMatches && servedFailures.length === 0;

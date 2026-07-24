@@ -154,12 +154,29 @@ export function deploymentSslCertificatePaths(domain: BoundDomain | null) {
   };
 }
 
+export function certificateLookupCandidates(hostname: string) {
+  const normalized = hostname.trim().toLowerCase().replace(/\.$/, "");
+  const candidates = new Set<string>();
+  if (normalized) candidates.add(certificateLookupName(normalized));
+  if (normalized && !isWildcardHostname(normalized)) {
+    const labels = normalized.split(".").filter(Boolean);
+    if (labels.length > 2) {
+      candidates.add(certbotCertificateName(`*.${labels.slice(1).join(".")}`));
+    }
+  }
+  return [...candidates];
+}
+
 export async function deploymentHttpsReady(domain: BoundDomain | null) {
   if (!domain?.name) return false;
   const serverName = deploymentServerName(domain) ?? domain.name;
   try {
-    const status = await sysagent.certificateFindReusable(certificateLookupName(domain.name));
-    return Boolean(status.exists && certificateNamesCoverServerName(serverName, status.names ?? []));
+    const candidates = certificateLookupCandidates(domain.name);
+    const statuses = await Promise.all(candidates.map((lookup) => sysagent.certificateFindReusable(lookup).catch(() => null)));
+    const status = statuses.find((row) =>
+      Boolean(row?.exists && certificateNamesCoverServerName(serverName, row.names ?? []))
+    );
+    return Boolean(status?.exists && certificateNamesCoverServerName(serverName, status.names ?? []));
   } catch {
     return false;
   }
@@ -174,13 +191,15 @@ export async function deploymentSslCertificatePathsWhenReady(domain: BoundDomain
 export async function verifiedSslPathsForServerName(serverName: string, lookupDomain?: string) {
   try {
     const lookup = lookupDomain || serverNameTokens(serverName)[0] || serverName;
-    const certLookup = certificateLookupName(lookup);
-    const status = await sysagent.certificateFindReusable(certLookup);
-    if (!status.exists || !certificateNamesCoverServerName(serverName, status.names ?? [])) return {};
-    return {
-      sslCertificate: status.certificate,
-      sslCertificateKey: status.privateKey
-    };
+    for (const certLookup of certificateLookupCandidates(lookup)) {
+      const status = await sysagent.certificateFindReusable(certLookup);
+      if (!status.exists || !certificateNamesCoverServerName(serverName, status.names ?? [])) continue;
+      return {
+        sslCertificate: status.certificate,
+        sslCertificateKey: status.privateKey
+      };
+    }
+    return {};
   } catch {
     return {};
   }

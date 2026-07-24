@@ -5,6 +5,7 @@ import { runDomainHostSync } from "../lib/domainHostSync.js";
 import { ensureSubdomainFileStructure } from "../lib/domainFiles.js";
 import {
   boundDomainFromBinding,
+  certificateLookupCandidates,
   certificateNamesCoverHost,
   deploymentFallbackRootPath,
   deploymentServerName,
@@ -17,7 +18,7 @@ import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
 import { currentVpsIp } from "../lib/serverIp.js";
 import { sysagent, type SysagentCommandResult } from "../lib/sysagent.js";
-import { certificateLookupName, certbotCertificateName, isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
+import { certificateLookupName, isWildcardHostname, nginxResourceName } from "../lib/nginxNames.js";
 
 const domainRepairInclude = {
   account: { select: { homeRoot: true } },
@@ -80,10 +81,12 @@ function parseArgs() {
 
 async function staticSubdomainSslPaths(fqdn: string, wantsSsl: boolean) {
   if (!wantsSsl && !isWildcardHostname(fqdn)) return {};
-  const lookup = isWildcardHostname(fqdn) ? certbotCertificateName(fqdn) : fqdn;
-  const cert = await sysagent.certificateFindReusable(lookup).catch(() => null);
-  if (!cert?.exists || !certificateNamesCoverHost(fqdn, cert.names ?? [])) return {};
-  return { sslCertificate: cert.certificate, sslCertificateKey: cert.privateKey };
+  for (const lookup of certificateLookupCandidates(fqdn)) {
+    const cert = await sysagent.certificateFindReusable(lookup).catch(() => null);
+    if (!cert?.exists || !certificateNamesCoverHost(fqdn, cert.names ?? [])) continue;
+    return { sslCertificate: cert.certificate, sslCertificateKey: cert.privateKey };
+  }
+  return {};
 }
 
 function deploymentCanBeRepairedAsProxy(deployment: { status?: string | null; port?: number | null } | null | undefined) {
