@@ -1655,6 +1655,10 @@ function accountDeploymentServerNames(deployment: { domain?: { name: string; inc
   return [...names];
 }
 
+function accountDeploymentMetricsServerNames(deployment: { domain?: { name: string; includeWww?: boolean } | null; domainBindings?: Array<{ domain?: { name: string; includeWww?: boolean } | null; subdomain?: { name: string; domain?: { name: string } | null } | null }> }) {
+  return accountDeploymentServerNames(deployment).slice(0, 50);
+}
+
 function accountPrimaryDeploymentServerName(deployment: { domain?: { name: string; includeWww?: boolean } | null; domainBindings?: Array<{ role?: string; domain?: { name: string; includeWww?: boolean } | null; subdomain?: { name: string; domain?: { name: string } | null } | null }> }) {
   const primary = deployment.domainBindings?.find((binding) => binding.role === "primary") ?? deployment.domainBindings?.[0];
   if (primary?.subdomain?.domain?.name) return accountDeploymentServerName({ name: `${primary.subdomain.name}.${primary.subdomain.domain.name}`, includeWww: false });
@@ -3199,7 +3203,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
         logDir: accountDeploymentLogDir(deployment.slug),
         dbType: deployment.dbType,
         dbName: deployment.dbName,
-        serverNames: accountDeploymentServerNames(deployment),
+        serverNames: accountDeploymentMetricsServerNames(deployment),
         logLines: 300
       }).catch((error) => ({
         ok: false,

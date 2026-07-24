@@ -993,6 +993,10 @@ function deploymentServerNames(deployment: Awaited<ReturnType<typeof findDeploym
   return [...names];
 }
 
+function deploymentMetricsServerNames(deployment: Awaited<ReturnType<typeof findDeployment>>) {
+  return deploymentServerNames(deployment).slice(0, 50);
+}
+
 function commandFailed(value: unknown) {
   const result = value as { degraded?: boolean; dryRun?: boolean; returncode?: number };
   return Boolean(result?.degraded || result?.dryRun || (typeof result?.returncode === "number" && result.returncode !== 0));
@@ -2816,7 +2820,7 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
         logDir: deploymentLogDir(deployment.slug),
         dbType: deployment.dbType,
         dbName: deployment.dbName,
-        serverNames: deploymentServerNames(deployment),
+        serverNames: deploymentMetricsServerNames(deployment),
         logLines: 300
       }).catch((error) => ({
         ok: false,

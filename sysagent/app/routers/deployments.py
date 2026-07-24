@@ -241,7 +241,7 @@ class DeploymentMetricsRequest(BaseModel):
     logDir: str | None = None
     dbType: str | None = None
     dbName: str | None = None
-    serverNames: list[str] = Field(default_factory=list, max_length=50)
+    serverNames: list[str] = Field(default_factory=list, max_length=200)
     logLines: int = Field(default=300, ge=1, le=2000)
     processOnly: bool = False
 
