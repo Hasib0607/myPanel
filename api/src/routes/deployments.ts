@@ -266,11 +266,8 @@ async function syncDeploymentStatusFromMetrics(deployment: { id: string; framewo
   const processCount = Number(data?.process?.processCount ?? 0);
   if (data?.ok === true && processCount > 0) return;
 
-  await prisma.deployment.update({
-    where: { id: deployment.id },
-    data: { status: "FAILED", healthStatus: "DOWN", lastHealthCheckAt: new Date() }
-  });
-  await addLog(deployment.id, "HEALTH_CHECK", "Marked deployment down because no live runtime process was found", undefined, {
+  await addLog(deployment.id, "HEALTH_CHECK", "Metrics snapshot found no live runtime process; deployment status was not changed", undefined, {
+    statusMutationSkipped: true,
     processManager,
     processCount,
     metricsOk: data?.ok ?? null

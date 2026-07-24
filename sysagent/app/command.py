@@ -137,6 +137,9 @@ def run_command(command: Sequence[str], cwd: str | None = None, env: dict[str, s
             "XDG_CONFIG_HOME": xdg_config_home,
             **(env or {}),
         }
+        if command and command[0] == "pm2" and not command_env.get("PM2_HOME"):
+            panel_pm2_home = Path("/tmp/vps-panel-home/.pm2")
+            command_env["PM2_HOME"] = str(panel_pm2_home if panel_pm2_home.exists() else Path(home) / ".pm2")
         command_env = constrained_runtime_env(command_env, resource_limits)
         effective_command, isolation = limited_command(command, resource_limits)
         # start_new_session=True isolates the child process in its own process group
