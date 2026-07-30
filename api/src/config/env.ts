@@ -16,6 +16,7 @@ const envSchema = z.object({
   DEPLOYMENT_RESERVED_PORTS: z.string().default("22,25,53,80,110,143,443,465,587,993,995,3000,3010,3138,4000,5000,5432,6379,8453"),
   DEPLOYMENT_LOG_ROOT: z.string().default("/var/log/vps-panel/deployments"),
   DEPLOY_WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(10).default(1),
+  DEPLOY_RELEASE_ARTIFACTS_KEEP: z.coerce.number().int().min(1).max(20).default(1),
   DEPLOY_SYSTEM_RESERVE_MB: z.coerce.number().int().min(512).default(4096),
   DEPLOY_MIN_APP_RESERVE_MB: z.coerce.number().int().min(512).default(8192),
   DEPLOY_APP_RESERVE_MULTIPLIER: z.coerce.number().min(1).default(2),

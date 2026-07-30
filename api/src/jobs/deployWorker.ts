@@ -341,6 +341,80 @@ async function activateDeploymentArtifact(deployment: DeploymentWithWorkerRelati
   });
 }
 
+function artifactPathIsInsideReleaseRoot(artifactPath: string, releaseRoot: string) {
+  const relative = path.relative(path.resolve(releaseRoot), path.resolve(artifactPath));
+  return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+async function removeReleaseArtifactPath(artifactPath: string | null | undefined, deploymentRootPath: string) {
+  if (!artifactPath) return false;
+  const releaseRoot = path.join(deploymentRootPath, ".panel-releases");
+  if (!artifactPathIsInsideReleaseRoot(artifactPath, releaseRoot)) return false;
+  await fs.rm(artifactPath, { recursive: true, force: true });
+  return true;
+}
+
+async function pruneDeploymentReleaseArtifacts(
+  deploymentId: string,
+  releaseId: string | undefined,
+  deploymentRootPath: string,
+  activeArtifactPath: string | null | undefined
+) {
+  const releaseRoot = path.join(deploymentRootPath, ".panel-releases");
+  let entries: Array<{ path: string; mtimeMs: number }> = [];
+  try {
+    const dirents = await fs.readdir(releaseRoot, { withFileTypes: true });
+    entries = await Promise.all(dirents
+      .filter((dirent) => dirent.isDirectory())
+      .map(async (dirent) => {
+        const fullPath = path.join(releaseRoot, dirent.name);
+        const stat = await fs.stat(fullPath).catch(() => null);
+        return { path: fullPath, mtimeMs: stat?.mtimeMs ?? 0 };
+      }));
+  } catch {
+    return { removed: [], kept: [], skipped: true };
+  }
+
+  entries.sort((left, right) => right.mtimeMs - left.mtimeMs || right.path.localeCompare(left.path));
+  const keep = new Set<string>();
+  if (activeArtifactPath && artifactPathIsInsideReleaseRoot(activeArtifactPath, releaseRoot)) {
+    keep.add(path.resolve(activeArtifactPath));
+  }
+  for (const entry of entries.slice(0, env.DEPLOY_RELEASE_ARTIFACTS_KEEP)) {
+    keep.add(path.resolve(entry.path));
+  }
+
+  const removed: string[] = [];
+  const kept: string[] = [];
+  for (const entry of entries) {
+    const resolved = path.resolve(entry.path);
+    if (keep.has(resolved)) {
+      kept.push(entry.path);
+      continue;
+    }
+    await fs.rm(entry.path, { recursive: true, force: true });
+    removed.push(entry.path);
+  }
+
+  if (removed.length > 0) {
+    await prisma.deploymentRelease.updateMany({
+      where: {
+        deploymentId,
+        artifactPath: { in: removed }
+      },
+      data: { artifactPath: null }
+    });
+    await writeLog(deploymentId, releaseId, "SUCCEEDED", "Pruned old release artifact folders", {
+      keepLatest: env.DEPLOY_RELEASE_ARTIFACTS_KEEP,
+      kept,
+      removed,
+      note: "Release history is kept, but old artifact folders are removed to prevent disk growth. Rollback can still rebuild from git commit when available."
+    });
+  }
+
+  return { removed, kept, skipped: false };
+}
+
 function laravelWorkerConfig(value: unknown) {
   const raw = value && typeof value === "object" ? value as Record<string, any> : {};
   const enabled = Boolean(raw.enabled);
@@ -5110,6 +5184,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         ...(completedRelease?.commitSha ? { commitSha: completedRelease.commitSha } : {})
       }
     });
+    await pruneDeploymentReleaseArtifacts(deployment.id, releaseId, deployment.rootPath, deploymentArtifactRootPath(deployment));
     await writeLog(deployment.id, releaseId, action === "rollback" ? "ROLLBACK" : "SUCCEEDED", `${action} completed`, { dryRun: false, publicRouteWarning, sslDeploymentWarning });
     return { dryRun: false, completed: true, status: "RUNNING", healthStatus, publicRouteWarning, sslDeploymentWarning };
   } catch (error) {
@@ -5126,7 +5201,17 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       return { dryRun: false, completed: false, cancelled: true, status: "STOPPED", healthStatus: "DOWN" };
     }
     await markRelease(releaseId, "FAILED", startedAt);
+    const removedFailedArtifact = await removeReleaseArtifactPath(artifactRootPath, deployment.rootPath).catch(() => false);
     await writeLog(deployment.id, releaseId, "FAILED", `${action} failed`, { error: message }, "error");
+    if (removedFailedArtifact && releaseId) {
+      await prisma.deploymentRelease.updateMany({
+        where: { id: releaseId, deploymentId: deployment.id },
+        data: { artifactPath: null }
+      });
+      await writeLog(deployment.id, releaseId, "FAILED", "Removed failed isolated release artifact folder", {
+        artifactRootPath
+      }, "warn");
+    }
     if (action !== "rollback") {
       const previousRelease = await prisma.deploymentRelease.findFirst({
         where: {
