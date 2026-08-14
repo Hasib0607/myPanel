@@ -7,6 +7,7 @@ import websocket from "@fastify/websocket";
 import Fastify from "fastify";
 import { ZodError } from "zod";
 import { env } from "./config/env.js";
+import { enforceDeviceFingerprint } from "./lib/deviceFingerprint.js";
 import { fileUploadChunkBodyLimitBytes } from "./lib/fileUploadLimits.js";
 import { csrfCookieName, csrfHeaderName, validCsrfPair } from "./lib/csrf.js";
 import { prisma } from "./lib/prisma.js";
@@ -84,6 +85,7 @@ export function buildApp() {
   app.decorate("requireAuth", async (request: any, reply: any) => {
     try {
       await request.jwtVerify();
+      if (enforceDeviceFingerprint(request, reply)) return;
       if (request.user?.role !== "superadmin") {
         return reply.code(403).send({ error: "Superadmin access required" });
       }
@@ -97,6 +99,7 @@ export function buildApp() {
       const token = bearerToken(request.headers.authorization) ?? request.cookies.account_session;
       if (!token) return reply.code(401).send({ error: "Unauthorized" });
       request.user = app.jwt.verify(token);
+      if (!bearerToken(request.headers.authorization) && enforceDeviceFingerprint(request, reply)) return;
       if (request.user?.role !== "account" || !request.user?.accountId) {
         return reply.code(403).send({ error: "Account access required" });
       }
@@ -114,6 +117,7 @@ export function buildApp() {
       const token = bearerToken(request.headers.authorization) ?? request.cookies.mail_session;
       if (!token) return reply.code(401).send({ error: "Unauthorized" });
       request.user = app.jwt.verify(token);
+      if (!bearerToken(request.headers.authorization) && enforceDeviceFingerprint(request, reply)) return;
       if (request.user?.role !== "mail" || !request.user?.mailAccountId) {
         return reply.code(403).send({ error: "Mailbox access required" });
       }

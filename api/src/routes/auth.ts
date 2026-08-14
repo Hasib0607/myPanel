@@ -5,17 +5,20 @@ import { env } from "../config/env.js";
 import { audit } from "../lib/audit.js";
 import { createCsrfToken, csrfCookieName } from "../lib/csrf.js";
 import { decryptSecret } from "../lib/crypto.js";
+import { deviceFingerprintMatches, enforceDeviceFingerprint, requestDeviceFingerprintDigest } from "../lib/deviceFingerprint.js";
 import { prisma } from "../lib/prisma.js";
 import { verify } from "otplib";
 
 const loginSchema = z.object({
   username: z.string().min(1),
-  password: z.string().min(1)
+  password: z.string().min(1),
+  deviceFingerprint: z.string().min(8).max(512).optional()
 });
 
 const twoFactorLoginSchema = z.object({
   challengeToken: z.string().min(20),
-  token: z.string().regex(/^\d{6}$/)
+  token: z.string().regex(/^\d{6}$/),
+  deviceFingerprint: z.string().min(8).max(512).optional()
 });
 
 export const authRoutes: FastifyPluginAsync = async (app) => {
@@ -56,6 +59,11 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     return csrfToken;
   }
 
+  function sessionPayload(request: FastifyRequest, payload: Record<string, unknown>, explicitFingerprint?: unknown) {
+    const dfp = requestDeviceFingerprintDigest(request, explicitFingerprint);
+    return dfp ? { ...payload, dfp } : payload;
+  }
+
   app.get("/csrf", async (request, reply) => ({ token: setCsrfCookie(request, reply) }));
 
   app.post("/login", { config: { rateLimit: { max: 5, timeWindow: "15 minutes" } } }, async (request, reply) => {
@@ -75,14 +83,15 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
     const security = await prisma.superadminSecurity.findUnique({ where: { id: "superadmin" } });
     if (security?.totpEnabled) {
+      const payload = sessionPayload(request, { sub: env.SUPERADMIN_USERNAME, role: "superadmin", mfa: "pending" }, body.deviceFingerprint);
       const challengeToken = app.jwt.sign(
-        { sub: env.SUPERADMIN_USERNAME, role: "superadmin", mfa: "pending" },
+        payload,
         { expiresIn: 300 }
       );
       return { requiresTwoFactor: true, challengeToken };
     }
 
-    const token = app.jwt.sign({ sub: env.SUPERADMIN_USERNAME, role: "superadmin" }, { expiresIn: env.JWT_EXPIRY });
+    const token = app.jwt.sign(sessionPayload(request, { sub: env.SUPERADMIN_USERNAME, role: "superadmin" }, body.deviceFingerprint), { expiresIn: env.JWT_EXPIRY });
     reply.clearCookie("account_session", { path: "/" });
     reply.setCookie("panel_session", token, authCookieOptions(request, env.JWT_EXPIRY));
     setCsrfCookie(request, reply);
@@ -108,7 +117,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       return reply.code(401).send({ error: "Invalid account credentials" });
     }
 
-    const token = app.jwt.sign({ sub: account.username, role: "account", accountId: account.id }, { expiresIn: env.JWT_EXPIRY });
+    const token = app.jwt.sign(sessionPayload(request, { sub: account.username, role: "account", accountId: account.id }, body.deviceFingerprint), { expiresIn: env.JWT_EXPIRY });
     reply.clearCookie("panel_session", { path: "/" });
     reply.setCookie("account_session", token, authCookieOptions(request, env.JWT_EXPIRY));
     setCsrfCookie(request, reply);
@@ -146,7 +155,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     }
 
     const email = `${mailbox.username}@${mailbox.domain.name}`;
-    const token = app.jwt.sign({ sub: email, role: "mail", mailAccountId: mailbox.id }, { expiresIn: env.JWT_EXPIRY });
+    const token = app.jwt.sign(sessionPayload(request, { sub: email, role: "mail", mailAccountId: mailbox.id }, body.deviceFingerprint), { expiresIn: env.JWT_EXPIRY });
     reply.clearCookie("panel_session", { path: "/" });
     reply.clearCookie("account_session", { path: "/" });
     reply.setCookie("mail_session", token, authCookieOptions(request, env.JWT_EXPIRY));
@@ -168,7 +177,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       return reply.code(403).send({ error: "Account is suspended or unavailable" });
     }
 
-    const token = app.jwt.sign({ sub: account.username, role: "account", accountId: account.id }, { expiresIn: env.JWT_EXPIRY });
+    const token = app.jwt.sign(sessionPayload(request, { sub: account.username, role: "account", accountId: account.id }), { expiresIn: env.JWT_EXPIRY });
     reply.setCookie("account_session", token, authCookieOptions(request, env.JWT_EXPIRY));
     setCsrfCookie(request, reply);
     await audit(request, {
@@ -193,6 +202,10 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
     if (challenge.sub !== env.SUPERADMIN_USERNAME || challenge.mfa !== "pending") {
       return reply.code(401).send({ error: "Invalid challenge" });
+    }
+    const requestFingerprint = requestDeviceFingerprintDigest(request, body.deviceFingerprint);
+    if (challenge.dfp && !deviceFingerprintMatches(challenge.dfp, requestFingerprint)) {
+      return reply.code(401).send({ error: "Device verification failed. Please log in again from this browser." });
     }
 
     const security = await prisma.superadminSecurity.findUnique({ where: { id: "superadmin" } });
@@ -225,7 +238,15 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       data: { lastTotpAt: new Date() }
     });
 
-    const token = app.jwt.sign({ sub: env.SUPERADMIN_USERNAME, role: "superadmin", mfa: "verified" }, { expiresIn: env.JWT_EXPIRY });
+    const token = app.jwt.sign(
+      {
+        sub: env.SUPERADMIN_USERNAME,
+        role: "superadmin",
+        mfa: "verified",
+        ...(challenge.dfp ? { dfp: challenge.dfp } : requestFingerprint ? { dfp: requestFingerprint } : {})
+      },
+      { expiresIn: env.JWT_EXPIRY }
+    );
     reply.clearCookie("account_session", { path: "/" });
     reply.setCookie("panel_session", token, authCookieOptions(request, env.JWT_EXPIRY));
     setCsrfCookie(request, reply);
@@ -249,11 +270,13 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
   app.get("/me", async (request: any, reply) => {
     try {
       await request.jwtVerify();
+      if (enforceDeviceFingerprint(request, reply)) return;
     } catch {
       const token = request.cookies.account_session ?? request.cookies.mail_session;
       if (!token) return reply.code(401).send({ error: "Unauthorized" });
       try {
         request.user = app.jwt.verify(token);
+        if (enforceDeviceFingerprint(request, reply)) return;
       } catch {
         return reply.code(401).send({ error: "Unauthorized" });
       }

@@ -29,6 +29,34 @@ function resolveApiBase() {
 
 export const apiBase = resolveApiBase();
 
+const deviceFingerprintStorageKey = "vps_panel_device_fingerprint";
+const deviceFingerprintHeaderName = "x-device-fingerprint";
+
+function randomDeviceFingerprint() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function deviceFingerprintHeaders(): Record<string, string> {
+  if (typeof window === "undefined") return {};
+
+  let fingerprint = window.localStorage.getItem(deviceFingerprintStorageKey);
+  if (!fingerprint) {
+    fingerprint = randomDeviceFingerprint();
+    window.localStorage.setItem(deviceFingerprintStorageKey, fingerprint);
+  }
+
+  return { [deviceFingerprintHeaderName]: fingerprint };
+}
+
 function apiUrl(path: string) {
   return `${apiBase}${path.startsWith("/") ? path : `/${path}`}`;
 }
@@ -99,7 +127,8 @@ async function csrfHeader(): Promise<Record<string, string>> {
     try {
       response = await fetch(url, {
         credentials: "include",
-        cache: "no-store"
+        cache: "no-store",
+        headers: deviceFingerprintHeaders()
       });
     } catch {
       throw new Error(`Could not reach API at ${url}. Check Nginx /api/v1 proxy and API service.`);
@@ -115,6 +144,7 @@ async function csrfHeader(): Promise<Record<string, string>> {
 
 async function jsonRequestInit(method: "POST" | "PATCH" | "PUT", body?: unknown): Promise<RequestInit> {
   const headers: Record<string, string> = {
+    ...deviceFingerprintHeaders(),
     ...(await csrfHeader())
   };
 
@@ -136,6 +166,7 @@ async function uploadRequestInit(body: BodyInit, contentType: string, headers?: 
     credentials: "include",
     headers: {
       "content-type": contentType,
+      ...deviceFingerprintHeaders(),
       ...(await csrfHeader()),
       ...(headers ?? {})
     },
@@ -160,6 +191,7 @@ export async function apiDelete<T>(path: string): Promise<T> {
     method: "DELETE",
     credentials: "include",
     headers: {
+      ...deviceFingerprintHeaders(),
       ...(await csrfHeader())
     }
   });
@@ -171,6 +203,7 @@ export async function apiDeleteBody<T>(path: string, body: unknown): Promise<T> 
     credentials: "include",
     headers: {
       "content-type": "application/json",
+      ...deviceFingerprintHeaders(),
       ...(await csrfHeader())
     },
     body: JSON.stringify(body)
@@ -180,7 +213,8 @@ export async function apiDeleteBody<T>(path: string, body: unknown): Promise<T> 
 export async function apiGet<T>(path: string): Promise<T> {
   return fetchJson<T>(path, {
     credentials: "include",
-    cache: "no-store"
+    cache: "no-store",
+    headers: deviceFingerprintHeaders()
   });
 }
 
@@ -198,6 +232,7 @@ export async function apiUploadWithProgress<T>(
 ): Promise<T> {
   const url = apiUrl(path);
   const csrf = await csrfHeader();
+  const deviceHeaders = deviceFingerprintHeaders();
   return new Promise<T>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     const bodySize = body instanceof Blob ? body.size : 1;
@@ -205,7 +240,7 @@ export async function apiUploadWithProgress<T>(
     xhr.withCredentials = true;
     xhr.timeout = timeoutMs;
     xhr.setRequestHeader("content-type", contentType);
-    for (const [key, value] of Object.entries({ ...csrf, ...(headers ?? {}) })) {
+    for (const [key, value] of Object.entries({ ...deviceHeaders, ...csrf, ...(headers ?? {}) })) {
       xhr.setRequestHeader(key, value);
     }
     xhr.upload.onprogress = (event) => {
@@ -241,7 +276,8 @@ export async function apiGetText(path: string): Promise<string> {
   try {
     response = await fetch(url, {
       credentials: "include",
-      cache: "no-store"
+      cache: "no-store",
+      headers: deviceFingerprintHeaders()
     });
   } catch {
     throw new Error(`Could not reach API at ${url}. Check Nginx /api/v1 proxy and API service.`);
