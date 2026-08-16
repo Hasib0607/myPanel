@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Eye, EyeOff, Fingerprint, Github, KeyRound, RotateCcw, Save, Settings2, Trash2 } from "lucide-react";
-import { apiDelete, apiGet, apiPost, apiPut, createWebAuthnCredential, webAuthnUnavailableMessage, type WebAuthnCredentialCreationOptions } from "@/lib/api";
+import { apiDelete, apiGet, apiPost, apiPut, createWebAuthnCredential, configuredSecurePanelUrl, securePanelUrlFrom, webAuthnUnavailableMessage, type WebAuthnCredentialCreationOptions } from "@/lib/api";
 
 type SettingsResponse = {
   username: string;
@@ -66,6 +66,11 @@ export function SettingsClient() {
   }, []);
 
   const visibleEntries = useMemo(() => settings.data?.entries ?? [], [settings.data]);
+  const securePanelUrl = useMemo(() => {
+    const configured = configuredSecurePanelUrl("/settings");
+    if (configured) return configured;
+    return securePanelUrlFrom(settings.data?.entries.find((entry) => entry.key === "FRONTEND_URL")?.value, "/settings");
+  }, [settings.data?.entries]);
 
   const changePassword = useMutation({
     mutationFn: () => apiPost("/settings/password", {
@@ -127,7 +132,7 @@ export function SettingsClient() {
   });
 
   const passwordInvalid = password.newPassword.length < 10 || password.newPassword !== password.confirmPassword || !password.currentPassword;
-  const deviceRegistrationDisabled = !trustedDevice.currentPassword || registerDeviceLogin.isPending;
+  const deviceRegistrationDisabled = !trustedDevice.currentPassword || registerDeviceLogin.isPending || Boolean(biometricUnavailable);
 
   return (
     <section className="space-y-5 p-6">
@@ -173,7 +178,16 @@ export function SettingsClient() {
             <div className="space-y-3 p-4">
               <Field label="Device label" value={trustedDevice.label} onChange={(label) => setTrustedDevice({ ...trustedDevice, label })} />
               <Field label="Current password" type="password" value={trustedDevice.currentPassword} onChange={(currentPassword) => setTrustedDevice({ ...trustedDevice, currentPassword })} />
-              {biometricUnavailable ? <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">{biometricUnavailable}</div> : null}
+              {biometricUnavailable ? (
+                <div className="space-y-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  <div>{biometricUnavailable}</div>
+                  {securePanelUrl ? (
+                    <a className="inline-flex font-semibold text-amber-900 underline" href={securePanelUrl}>
+                      Open secure panel URL
+                    </a>
+                  ) : null}
+                </div>
+              ) : null}
               <button
                 className="flex h-10 w-full items-center justify-center gap-2 rounded-md bg-panel-accent text-sm font-semibold text-white disabled:opacity-60"
                 disabled={deviceRegistrationDisabled}

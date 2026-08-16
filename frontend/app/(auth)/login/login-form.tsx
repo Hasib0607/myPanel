@@ -1,9 +1,9 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Fingerprint, ShieldCheck } from "lucide-react";
-import { apiPost, getWebAuthnCredential, webAuthnUnavailableMessage, type WebAuthnCredentialRequestOptions } from "@/lib/api";
+import { apiGet, apiPost, configuredSecurePanelUrl, getWebAuthnCredential, securePanelUrlFrom, webAuthnUnavailableMessage, type WebAuthnCredentialRequestOptions } from "@/lib/api";
 
 type LoginResponse = {
   ok?: boolean;
@@ -16,6 +16,10 @@ type WebAuthnLoginOptionsResponse = {
   publicKey: WebAuthnCredentialRequestOptions;
 };
 
+type PublicConfigResponse = {
+  frontendUrl: string | null;
+};
+
 export function LoginForm() {
   const router = useRouter();
   const isAccountPortal = typeof window !== "undefined" && window.location.port === (process.env.NEXT_PUBLIC_CPANEL_LOGIN_PORT ?? "3138");
@@ -24,7 +28,18 @@ export function LoginForm() {
   const [totp, setTotp] = useState("");
   const [challengeToken, setChallengeToken] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [publicFrontendUrl, setPublicFrontendUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const securePanelUrl = useMemo(
+    () => configuredSecurePanelUrl("/login") ?? securePanelUrlFrom(publicFrontendUrl, "/login"),
+    [publicFrontendUrl]
+  );
+
+  useEffect(() => {
+    apiGet<PublicConfigResponse>("/auth/public-config")
+      .then((config) => setPublicFrontendUrl(config.frontendUrl))
+      .catch(() => setPublicFrontendUrl(null));
+  }, []);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -58,7 +73,7 @@ export function LoginForm() {
 
     try {
       const unavailable = webAuthnUnavailableMessage();
-      if (unavailable) throw new Error(unavailable);
+      if (unavailable) throw new Error(securePanelUrl ? `${unavailable} Open ${securePanelUrl}` : unavailable);
       const options = await apiPost<WebAuthnLoginOptionsResponse>("/auth/login/webauthn/options", { username });
       const credential = await getWebAuthnCredential(options.publicKey);
       await apiPost<LoginResponse>("/auth/login/webauthn/verify", {
@@ -110,6 +125,11 @@ export function LoginForm() {
       )}
 
       {error ? <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-panel-danger">{error}</div> : null}
+      {error && securePanelUrl && error.includes("requires HTTPS") ? (
+        <a className="mb-4 block rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-900 underline" href={securePanelUrl}>
+          Open secure panel URL
+        </a>
+      ) : null}
 
       <button className="h-10 w-full rounded-md bg-panel-accent px-4 text-sm font-semibold text-white disabled:opacity-60" disabled={loading} type="submit">
         {loading ? "Checking..." : challengeToken ? "Verify code" : "Sign in"}

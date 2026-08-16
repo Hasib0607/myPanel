@@ -121,6 +121,24 @@ export function webAuthnUnavailableMessage() {
   return null;
 }
 
+export function securePanelUrlFrom(value?: string | null, path = "/") {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:") return null;
+    url.pathname = path.startsWith("/") ? path : `/${path}`;
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+export function configuredSecurePanelUrl(path = "/") {
+  return securePanelUrlFrom(process.env.NEXT_PUBLIC_PANEL_SECURE_URL, path);
+}
+
 export async function createWebAuthnCredential(options: WebAuthnCredentialCreationOptions) {
   const unavailable = webAuthnUnavailableMessage();
   if (unavailable) throw new Error(unavailable);

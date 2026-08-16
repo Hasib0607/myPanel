@@ -128,6 +128,10 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
   app.get("/csrf", async (request, reply) => ({ token: setCsrfCookie(request, reply) }));
 
+  app.get("/public-config", async () => ({
+    frontendUrl: env.FRONTEND_URL.startsWith("https://") ? env.FRONTEND_URL : null
+  }));
+
   app.post("/login", { config: { rateLimit: { max: 5, timeWindow: "15 minutes" } } }, async (request, reply) => {
     const body = loginSchema.parse(request.body);
     const usernameMatches = body.username === env.SUPERADMIN_USERNAME;
