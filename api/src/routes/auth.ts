@@ -74,6 +74,21 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     return createHash("sha256").update(secret).digest("hex");
   }
 
+  function trustedDeviceCookieMatches(request: FastifyRequest, deviceId: string, fingerprintHash: string) {
+    const token = request.cookies.panel_trusted_device;
+    if (!token) return false;
+    try {
+      const payload = app.jwt.verify(token) as {
+        trustedDeviceId?: string;
+        fingerprintHash?: string;
+        role?: string;
+      };
+      return payload.role === "superadmin" && payload.trustedDeviceId === deviceId && payload.fingerprintHash === fingerprintHash;
+    } catch {
+      return false;
+    }
+  }
+
   app.get("/csrf", async (request, reply) => ({ token: setCsrfCookie(request, reply) }));
 
   app.post("/login", { config: { rateLimit: { max: 5, timeWindow: "15 minutes" } } }, async (request, reply) => {
@@ -135,7 +150,9 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       }
     });
 
-    if (!device || device.revokedAt || device.secretHash !== hashDeviceSecret(body.deviceSecret)) {
+    const secretMatches = Boolean(device && !device.revokedAt && device.secretHash === hashDeviceSecret(body.deviceSecret));
+    const cookieMatches = Boolean(device && !device.revokedAt && trustedDeviceCookieMatches(request, device.id, fingerprintHash));
+    if (!device || device.revokedAt || (!secretMatches && !cookieMatches)) {
       await audit(request, {
         action: "LOGIN",
         resource: "auth",

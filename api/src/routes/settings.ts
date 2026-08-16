@@ -2,7 +2,7 @@ import bcrypt from "bcrypt";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { FastifyPluginAsync, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { env } from "../config/env.js";
 import { audit } from "../lib/audit.js";
@@ -151,6 +151,30 @@ function defaultDeviceLabel(request: FastifyRequest) {
   return "Registered device";
 }
 
+function requestUsesHttps(request: FastifyRequest) {
+  const forwardedProto = String(request.headers["x-forwarded-proto"] ?? "")
+    .split(",")[0]
+    .trim()
+    .toLowerCase();
+  if (forwardedProto) return forwardedProto === "https";
+  return request.protocol === "https" || Boolean((request.raw.socket as any).encrypted);
+}
+
+function trustedDeviceCookieOptions(request: FastifyRequest) {
+  return {
+    httpOnly: true,
+    secure: requestUsesHttps(request),
+    sameSite: "strict" as const,
+    path: "/",
+    maxAge: 60 * 60 * 24 * 90
+  };
+}
+
+function setTrustedDeviceCookie(app: FastifyInstance, request: FastifyRequest, reply: FastifyReply, deviceId: string, fingerprintHash: string) {
+  const token = app.jwt.sign({ trustedDeviceId: deviceId, fingerprintHash, role: "superadmin" }, { expiresIn: "90d" });
+  reply.setCookie("panel_trusted_device", token, trustedDeviceCookieOptions(request));
+}
+
 export const settingsRoutes: FastifyPluginAsync = async (app) => {
   app.addHook("preHandler", app.requireAuth);
 
@@ -198,9 +222,13 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
       },
       orderBy: [{ lastUsedAt: "desc" }, { createdAt: "desc" }]
     });
+    const currentDevice = devices.find((device) => device.fingerprintHash === fingerprintHash);
+    if (currentDevice) {
+      setTrustedDeviceCookie(app, request, reply, currentDevice.id, fingerprintHash);
+    }
 
     return {
-      currentDeviceRegistered: devices.some((device) => device.fingerprintHash === fingerprintHash),
+      currentDeviceRegistered: Boolean(currentDevice),
       devices: devices.map((device) => ({
         id: device.id,
         label: device.label,
@@ -251,6 +279,7 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
       description: "Registered trusted device login for superadmin"
     });
 
+    setTrustedDeviceCookie(app, request, reply, device.id, fingerprintHash);
     return { ok: true, id: device.id };
   });
 
