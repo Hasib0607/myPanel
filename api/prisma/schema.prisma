@@ -731,6 +731,10 @@ model TrustedLoginDevice {
   role            String    @default("superadmin")
   fingerprintHash String    @map("fingerprint_hash")
   secretHash      String    @map("secret_hash")
+  webauthnCredentialId String?   @unique @map("webauthn_credential_id")
+  webauthnPublicKey    String?   @map("webauthn_public_key")
+  webauthnSignCount    Int       @default(0) @map("webauthn_sign_count")
+  webauthnRegisteredAt DateTime? @map("webauthn_registered_at")
   label           String?
   userAgent       String?   @map("user_agent")
   lastUsedAt      DateTime? @map("last_used_at")

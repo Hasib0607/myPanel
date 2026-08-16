@@ -8,6 +8,7 @@ import { createCsrfToken, csrfCookieName } from "../lib/csrf.js";
 import { decryptSecret } from "../lib/crypto.js";
 import { deviceFingerprintMatches, enforceDeviceFingerprint, requestDeviceFingerprintDigest, requestDeviceFingerprintStableDigest } from "../lib/deviceFingerprint.js";
 import { prisma } from "../lib/prisma.js";
+import { verifyAuthenticationResponse, webauthnChallenge, webauthnChallengeTtlSeconds, webauthnOrigin, webauthnRpId } from "../lib/webauthn.js";
 import { verify } from "otplib";
 
 const loginSchema = z.object({
@@ -25,6 +26,26 @@ const twoFactorLoginSchema = z.object({
 const trustedDeviceLoginSchema = z.object({
   username: z.string().min(1),
   deviceSecret: z.string().min(32).max(256)
+});
+
+const webauthnLoginOptionsSchema = z.object({
+  username: z.string().min(1)
+});
+
+const webauthnLoginVerifySchema = z.object({
+  username: z.string().min(1),
+  challengeToken: z.string().min(20),
+  credential: z.object({
+    id: z.string().min(1),
+    rawId: z.string().min(1),
+    response: z.object({
+      authenticatorData: z.string().min(1),
+      clientDataJSON: z.string().min(1),
+      signature: z.string().min(1),
+      userHandle: z.string().nullable().optional()
+    }),
+    type: z.literal("public-key")
+  })
 });
 
 export const authRoutes: FastifyPluginAsync = async (app) => {
@@ -86,6 +107,22 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       return payload.role === "superadmin" && payload.trustedDeviceId === deviceId && payload.fingerprintHash === fingerprintHash;
     } catch {
       return false;
+    }
+  }
+
+  function parseChallengeToken(token: string) {
+    try {
+      return app.jwt.verify(token) as {
+        purpose?: string;
+        role?: string;
+        username?: string;
+        challenge?: string;
+        rpId?: string;
+        origin?: string;
+        fingerprintHash?: string;
+      };
+    } catch {
+      return null;
     }
   }
 
@@ -182,6 +219,142 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       action: "LOGIN",
       resource: "auth",
       description: "Superadmin logged in with trusted device",
+      metadata: { trustedDeviceId: device.id }
+    });
+
+    return { ok: true };
+  });
+
+  app.post("/login/webauthn/options", { config: { rateLimit: { max: 12, timeWindow: "15 minutes" } } }, async (request, reply) => {
+    const body = webauthnLoginOptionsSchema.parse(request.body);
+    if (body.username !== env.SUPERADMIN_USERNAME) {
+      await audit(request, {
+        action: "LOGIN",
+        resource: "auth",
+        description: "Failed biometric login options",
+        metadata: { username: body.username, success: false, reason: "username" }
+      });
+      return reply.code(401).send({ error: "This device is not registered for biometric login." });
+    }
+
+    const fingerprintHash = requestDeviceFingerprintStableDigest(request);
+    if (!fingerprintHash) return reply.code(401).send({ error: "This browser is not registered for biometric login." });
+
+    const device = await prisma.trustedLoginDevice.findUnique({
+      where: {
+        role_username_fingerprintHash: {
+          role: "superadmin",
+          username: env.SUPERADMIN_USERNAME,
+          fingerprintHash
+        }
+      }
+    });
+
+    if (!device || device.revokedAt || !device.webauthnCredentialId || !device.webauthnPublicKey) {
+      return reply.code(401).send({ error: "This device is not registered for biometric login. Register or update it from Settings first." });
+    }
+
+    const rpId = webauthnRpId(request);
+    const origin = webauthnOrigin(request);
+    const challenge = webauthnChallenge();
+    const challengeToken = app.jwt.sign(
+      {
+        purpose: "trusted-device-login",
+        role: "superadmin",
+        username: env.SUPERADMIN_USERNAME,
+        fingerprintHash,
+        challenge,
+        rpId,
+        origin
+      },
+      { expiresIn: webauthnChallengeTtlSeconds }
+    );
+
+    return {
+      challengeToken,
+      publicKey: {
+        challenge,
+        timeout: 60000,
+        rpId,
+        userVerification: "required",
+        allowCredentials: [{ id: device.webauthnCredentialId, type: "public-key" }]
+      }
+    };
+  });
+
+  app.post("/login/webauthn/verify", { config: { rateLimit: { max: 12, timeWindow: "15 minutes" } } }, async (request, reply) => {
+    const body = webauthnLoginVerifySchema.parse(request.body);
+    const payload = parseChallengeToken(body.challengeToken);
+    if (
+      body.username !== env.SUPERADMIN_USERNAME ||
+      !payload ||
+      payload.purpose !== "trusted-device-login" ||
+      payload.role !== "superadmin" ||
+      payload.username !== env.SUPERADMIN_USERNAME ||
+      !payload.challenge ||
+      !payload.rpId ||
+      !payload.origin ||
+      !payload.fingerprintHash
+    ) {
+      return reply.code(401).send({ error: "Biometric login expired. Please try again." });
+    }
+
+    const fingerprintHash = requestDeviceFingerprintStableDigest(request);
+    if (!fingerprintHash || fingerprintHash !== payload.fingerprintHash) {
+      return reply.code(401).send({ error: "Device verification failed. Please try again from the same browser." });
+    }
+
+    const device = await prisma.trustedLoginDevice.findUnique({
+      where: {
+        role_username_fingerprintHash: {
+          role: "superadmin",
+          username: env.SUPERADMIN_USERNAME,
+          fingerprintHash
+        }
+      }
+    });
+    if (!device || device.revokedAt || !device.webauthnCredentialId || !device.webauthnPublicKey || body.credential.rawId !== device.webauthnCredentialId) {
+      return reply.code(401).send({ error: "This device is not registered for biometric login." });
+    }
+
+    let result;
+    try {
+      result = verifyAuthenticationResponse({
+        authenticatorData: body.credential.response.authenticatorData,
+        clientDataJSON: body.credential.response.clientDataJSON,
+        credentialId: body.credential.rawId,
+        signature: body.credential.response.signature,
+        publicKey: device.webauthnPublicKey,
+        challenge: payload.challenge,
+        origin: payload.origin,
+        rpId: payload.rpId
+      });
+    } catch (error) {
+      await audit(request, {
+        action: "LOGIN",
+        resource: "auth",
+        description: "Failed biometric trusted device login",
+        metadata: { username: body.username, success: false, reason: error instanceof Error ? error.message : "verification" }
+      });
+      return reply.code(401).send({ error: error instanceof Error ? error.message : "Biometric login failed" });
+    }
+
+    await prisma.trustedLoginDevice.update({
+      where: { id: device.id },
+      data: {
+        lastUsedAt: new Date(),
+        webauthnSignCount: result.signCount
+      }
+    });
+
+    const token = app.jwt.sign(sessionPayload(request, { sub: env.SUPERADMIN_USERNAME, role: "superadmin", deviceLogin: true, mfa: "biometric" }), { expiresIn: env.JWT_EXPIRY });
+    reply.clearCookie("account_session", { path: "/" });
+    reply.setCookie("panel_session", token, authCookieOptions(request, env.JWT_EXPIRY));
+    setCsrfCookie(request, reply);
+    await audit(request, {
+      action: "LOGIN",
+      resource: "auth",
+      description: "Superadmin logged in with biometric trusted device",
       metadata: { trustedDeviceId: device.id }
     });
 

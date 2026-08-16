@@ -72,6 +72,93 @@ export function hasDeviceLoginSecret() {
   return Boolean(window.localStorage.getItem(deviceLoginSecretStorageKey));
 }
 
+function base64UrlToBuffer(value: string) {
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes.buffer;
+}
+
+function bufferToBase64Url(value: ArrayBuffer) {
+  const bytes = new Uint8Array(value);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+export type WebAuthnCredentialCreationOptions = {
+  challenge: string;
+  rp: { name: string; id: string };
+  user: { id: string; name: string; displayName: string };
+  pubKeyCredParams: PublicKeyCredentialParameters[];
+  timeout?: number;
+  authenticatorSelection?: AuthenticatorSelectionCriteria;
+  attestation?: AttestationConveyancePreference;
+  excludeCredentials?: Array<{ id: string; type: "public-key" }>;
+};
+
+export type WebAuthnCredentialRequestOptions = {
+  challenge: string;
+  timeout?: number;
+  rpId?: string;
+  userVerification?: UserVerificationRequirement;
+  allowCredentials?: Array<{ id: string; type: "public-key" }>;
+};
+
+export function webAuthnSupported() {
+  return typeof window !== "undefined" && typeof window.PublicKeyCredential !== "undefined" && Boolean(navigator.credentials);
+}
+
+export async function createWebAuthnCredential(options: WebAuthnCredentialCreationOptions) {
+  if (!webAuthnSupported()) throw new Error("This browser does not support biometric login.");
+  const credential = await navigator.credentials.create({
+    publicKey: {
+      ...options,
+      challenge: base64UrlToBuffer(options.challenge),
+      user: { ...options.user, id: base64UrlToBuffer(options.user.id) },
+      excludeCredentials: options.excludeCredentials?.map((item) => ({ ...item, id: base64UrlToBuffer(item.id) }))
+    }
+  });
+  if (!(credential instanceof PublicKeyCredential) || !(credential.response instanceof AuthenticatorAttestationResponse)) {
+    throw new Error("Biometric registration was cancelled.");
+  }
+  return {
+    id: credential.id,
+    rawId: bufferToBase64Url(credential.rawId),
+    type: credential.type,
+    response: {
+      attestationObject: bufferToBase64Url(credential.response.attestationObject),
+      clientDataJSON: bufferToBase64Url(credential.response.clientDataJSON)
+    }
+  };
+}
+
+export async function getWebAuthnCredential(options: WebAuthnCredentialRequestOptions) {
+  if (!webAuthnSupported()) throw new Error("This browser does not support biometric login.");
+  const credential = await navigator.credentials.get({
+    publicKey: {
+      ...options,
+      challenge: base64UrlToBuffer(options.challenge),
+      allowCredentials: options.allowCredentials?.map((item) => ({ ...item, id: base64UrlToBuffer(item.id) }))
+    }
+  });
+  if (!(credential instanceof PublicKeyCredential) || !(credential.response instanceof AuthenticatorAssertionResponse)) {
+    throw new Error("Biometric login was cancelled.");
+  }
+  return {
+    id: credential.id,
+    rawId: bufferToBase64Url(credential.rawId),
+    type: credential.type,
+    response: {
+      authenticatorData: bufferToBase64Url(credential.response.authenticatorData),
+      clientDataJSON: bufferToBase64Url(credential.response.clientDataJSON),
+      signature: bufferToBase64Url(credential.response.signature),
+      userHandle: credential.response.userHandle ? bufferToBase64Url(credential.response.userHandle) : null
+    }
+  };
+}
+
 function deviceFingerprintHeaders(): Record<string, string> {
   if (typeof window === "undefined") return {};
 

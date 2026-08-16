@@ -8,6 +8,7 @@ import { env } from "../config/env.js";
 import { audit } from "../lib/audit.js";
 import { requestDeviceFingerprintStableDigest } from "../lib/deviceFingerprint.js";
 import { prisma } from "../lib/prisma.js";
+import { base64UrlEncode, verifyRegistrationResponse, webauthnChallenge, webauthnChallengeTtlSeconds, webauthnOrigin, webauthnRpId } from "../lib/webauthn.js";
 
 const passwordSchema = z.object({
   currentPassword: z.string().min(1),
@@ -24,7 +25,26 @@ const envUpdateSchema = z.object({
 const deviceLoginSchema = z.object({
   currentPassword: z.string().min(1),
   label: z.string().trim().min(1).max(80).optional(),
-  deviceSecret: z.string().min(32).max(256)
+  deviceSecret: z.string().min(32).max(256).optional()
+});
+
+const deviceLoginOptionsSchema = z.object({
+  currentPassword: z.string().min(1),
+  label: z.string().trim().min(1).max(80).optional()
+});
+
+const deviceLoginVerifySchema = z.object({
+  challengeToken: z.string().min(20),
+  deviceSecret: z.string().min(32).max(256).optional(),
+  credential: z.object({
+    id: z.string().min(1),
+    rawId: z.string().min(1),
+    response: z.object({
+      attestationObject: z.string().min(1),
+      clientDataJSON: z.string().min(1)
+    }),
+    type: z.literal("public-key")
+  })
 });
 
 const trustedDeviceParamsSchema = z.object({
@@ -175,6 +195,23 @@ function setTrustedDeviceCookie(app: FastifyInstance, request: FastifyRequest, r
   reply.setCookie("panel_trusted_device", token, trustedDeviceCookieOptions(request));
 }
 
+function parseChallengeToken(app: FastifyInstance, token: string) {
+  try {
+    return app.jwt.verify(token) as {
+      purpose?: string;
+      role?: string;
+      username?: string;
+      challenge?: string;
+      rpId?: string;
+      origin?: string;
+      fingerprintHash?: string;
+      label?: string;
+    };
+  } catch {
+    return null;
+  }
+}
+
 export const settingsRoutes: FastifyPluginAsync = async (app) => {
   app.addHook("preHandler", app.requireAuth);
 
@@ -233,11 +270,142 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
         id: device.id,
         label: device.label,
         userAgent: device.userAgent,
+        biometricRegistered: Boolean(device.webauthnCredentialId && device.webauthnPublicKey),
         createdAt: device.createdAt,
         lastUsedAt: device.lastUsedAt,
         current: device.fingerprintHash === fingerprintHash
       }))
     };
+  });
+
+  app.post("/device-login/options", async (request, reply) => {
+    const body = deviceLoginOptionsSchema.parse(request.body);
+    const passwordMatches = await bcrypt.compare(body.currentPassword, env.SUPERADMIN_PASSWORD_HASH);
+    if (!passwordMatches) return reply.code(401).send({ error: "Current password is incorrect" });
+
+    const fingerprintHash = requestDeviceFingerprintStableDigest(request);
+    if (!fingerprintHash) return reply.code(400).send({ error: "This browser does not support device registration." });
+
+    const rpId = webauthnRpId(request);
+    const origin = webauthnOrigin(request);
+    const challenge = webauthnChallenge();
+    const userId = base64UrlEncode(Buffer.from(`superadmin:${env.SUPERADMIN_USERNAME}`));
+    const existingDevices = await prisma.trustedLoginDevice.findMany({
+      where: { role: "superadmin", username: env.SUPERADMIN_USERNAME, revokedAt: null, webauthnCredentialId: { not: null } },
+      select: { webauthnCredentialId: true }
+    });
+    const challengeToken = app.jwt.sign(
+      {
+        purpose: "trusted-device-registration",
+        role: "superadmin",
+        username: env.SUPERADMIN_USERNAME,
+        fingerprintHash,
+        challenge,
+        rpId,
+        origin,
+        label: body.label ?? defaultDeviceLabel(request)
+      },
+      { expiresIn: webauthnChallengeTtlSeconds }
+    );
+
+    return {
+      challengeToken,
+      publicKey: {
+        challenge,
+        rp: { name: "VPS Panel", id: rpId },
+        user: { id: userId, name: env.SUPERADMIN_USERNAME, displayName: env.SUPERADMIN_USERNAME },
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+        timeout: 60000,
+        authenticatorSelection: {
+          authenticatorAttachment: "platform",
+          residentKey: "preferred",
+          requireResidentKey: false,
+          userVerification: "required"
+        },
+        attestation: "none",
+        excludeCredentials: existingDevices
+          .map((device) => device.webauthnCredentialId)
+          .filter((id): id is string => Boolean(id))
+          .map((id) => ({ id, type: "public-key" }))
+      }
+    };
+  });
+
+  app.post("/device-login/verify", async (request, reply) => {
+    const body = deviceLoginVerifySchema.parse(request.body);
+    const payload = parseChallengeToken(app, body.challengeToken);
+    if (
+      !payload ||
+      payload.purpose !== "trusted-device-registration" ||
+      payload.role !== "superadmin" ||
+      payload.username !== env.SUPERADMIN_USERNAME ||
+      !payload.challenge ||
+      !payload.rpId ||
+      !payload.origin ||
+      !payload.fingerprintHash
+    ) {
+      return reply.code(401).send({ error: "Device registration expired. Please try again." });
+    }
+
+    const fingerprintHash = requestDeviceFingerprintStableDigest(request);
+    if (!fingerprintHash || fingerprintHash !== payload.fingerprintHash) {
+      return reply.code(401).send({ error: "Device changed during registration. Please try again from the same browser." });
+    }
+
+    let verified;
+    try {
+      verified = verifyRegistrationResponse({
+        attestationObject: body.credential.response.attestationObject,
+        clientDataJSON: body.credential.response.clientDataJSON,
+        challenge: payload.challenge,
+        origin: payload.origin,
+        rpId: payload.rpId
+      });
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : "Biometric registration failed" });
+    }
+
+    const device = await prisma.trustedLoginDevice.upsert({
+      where: {
+        role_username_fingerprintHash: {
+          role: "superadmin",
+          username: env.SUPERADMIN_USERNAME,
+          fingerprintHash
+        }
+      },
+      update: {
+        secretHash: hashDeviceSecret(body.deviceSecret ?? verified.credentialId),
+        label: payload.label ?? defaultDeviceLabel(request),
+        userAgent: safeUserAgent(request),
+        webauthnCredentialId: verified.credentialId,
+        webauthnPublicKey: verified.publicKey,
+        webauthnSignCount: verified.signCount,
+        webauthnRegisteredAt: new Date(),
+        revokedAt: null
+      },
+      create: {
+        role: "superadmin",
+        username: env.SUPERADMIN_USERNAME,
+        fingerprintHash,
+        secretHash: hashDeviceSecret(body.deviceSecret ?? verified.credentialId),
+        label: payload.label ?? defaultDeviceLabel(request),
+        userAgent: safeUserAgent(request),
+        webauthnCredentialId: verified.credentialId,
+        webauthnPublicKey: verified.publicKey,
+        webauthnSignCount: verified.signCount,
+        webauthnRegisteredAt: new Date()
+      }
+    });
+
+    await audit(request, {
+      action: "UPDATE",
+      resource: "trusted_login_device",
+      resourceId: device.id,
+      description: "Registered biometric trusted device login for superadmin"
+    });
+
+    setTrustedDeviceCookie(app, request, reply, device.id, fingerprintHash);
+    return { ok: true, id: device.id };
   });
 
   app.post("/device-login", async (request, reply) => {
@@ -257,7 +425,7 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
         }
       },
       update: {
-        secretHash: hashDeviceSecret(body.deviceSecret),
+        secretHash: hashDeviceSecret(body.deviceSecret ?? fingerprintHash),
         label: body.label ?? defaultDeviceLabel(request),
         userAgent: safeUserAgent(request),
         revokedAt: null
@@ -266,7 +434,7 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
         role: "superadmin",
         username: env.SUPERADMIN_USERNAME,
         fingerprintHash,
-        secretHash: hashDeviceSecret(body.deviceSecret),
+        secretHash: hashDeviceSecret(body.deviceSecret ?? fingerprintHash),
         label: body.label ?? defaultDeviceLabel(request),
         userAgent: safeUserAgent(request)
       }

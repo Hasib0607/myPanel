@@ -3,12 +3,17 @@
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Fingerprint, ShieldCheck } from "lucide-react";
-import { apiPost, getDeviceLoginSecret } from "@/lib/api";
+import { apiPost, getWebAuthnCredential, type WebAuthnCredentialRequestOptions } from "@/lib/api";
 
 type LoginResponse = {
   ok?: boolean;
   requiresTwoFactor?: boolean;
   challengeToken?: string;
+};
+
+type WebAuthnLoginOptionsResponse = {
+  challengeToken: string;
+  publicKey: WebAuthnCredentialRequestOptions;
 };
 
 export function LoginForm() {
@@ -52,14 +57,16 @@ export function LoginForm() {
     setLoading(true);
 
     try {
-      const response = await apiPost<LoginResponse>("/auth/login/device", { username, deviceSecret: getDeviceLoginSecret() });
-      if (response.requiresTwoFactor && response.challengeToken) {
-        setChallengeToken(response.challengeToken);
-        return;
-      }
+      const options = await apiPost<WebAuthnLoginOptionsResponse>("/auth/login/webauthn/options", { username });
+      const credential = await getWebAuthnCredential(options.publicKey);
+      await apiPost<LoginResponse>("/auth/login/webauthn/verify", {
+        username,
+        challengeToken: options.challengeToken,
+        credential
+      });
       router.replace("/dashboard");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Device login failed");
+      setError(err instanceof Error ? err.message : "Biometric login failed");
     } finally {
       setLoading(false);
     }

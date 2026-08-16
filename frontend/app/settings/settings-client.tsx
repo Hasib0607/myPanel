@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Eye, EyeOff, Fingerprint, Github, KeyRound, RotateCcw, Save, Settings2, Trash2 } from "lucide-react";
-import { apiDelete, apiGet, apiPost, apiPut, getDeviceLoginSecret } from "@/lib/api";
+import { apiDelete, apiGet, apiPost, apiPut, createWebAuthnCredential, type WebAuthnCredentialCreationOptions } from "@/lib/api";
 
 type SettingsResponse = {
   username: string;
@@ -26,8 +26,14 @@ type DeviceLoginResponse = {
     userAgent: string | null;
     createdAt: string;
     lastUsedAt: string | null;
+    biometricRegistered: boolean;
     current: boolean;
   }>;
+};
+
+type WebAuthnRegistrationOptionsResponse = {
+  challengeToken: string;
+  publicKey: WebAuthnCredentialCreationOptions;
 };
 
 export function SettingsClient() {
@@ -86,14 +92,20 @@ export function SettingsClient() {
   });
 
   const registerDeviceLogin = useMutation({
-    mutationFn: () => apiPost("/settings/device-login", {
-      currentPassword: trustedDevice.currentPassword,
-      label: trustedDevice.label.trim() || undefined,
-      deviceSecret: getDeviceLoginSecret()
-    }),
+    mutationFn: async () => {
+      const options = await apiPost<WebAuthnRegistrationOptionsResponse>("/settings/device-login/options", {
+        currentPassword: trustedDevice.currentPassword,
+        label: trustedDevice.label.trim() || undefined
+      });
+      const credential = await createWebAuthnCredential(options.publicKey);
+      return apiPost("/settings/device-login/verify", {
+        challengeToken: options.challengeToken,
+        credential
+      });
+    },
     onSuccess: async () => {
       setTrustedDevice({ currentPassword: "", label: "" });
-      setNotice("Device fingerprint login enabled for this browser.");
+      setNotice("Biometric login enabled for this browser.");
       await queryClient.invalidateQueries({ queryKey: ["settings-device-login"] });
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not register this device.")
@@ -142,9 +154,9 @@ export function SettingsClient() {
             <div className="flex items-center gap-3 border-b border-panel-line px-4 py-3">
               <span className="grid h-9 w-9 place-items-center rounded-md bg-slate-950 text-white"><Fingerprint size={17} /></span>
               <div>
-                <div className="text-sm font-semibold text-panel-ink">Device fingerprint login</div>
+                <div className="text-sm font-semibold text-panel-ink">Biometric device login</div>
                 <div className="text-xs text-panel-muted">
-                  {deviceLogin.data?.currentDeviceRegistered ? "This browser can sign in without password." : "Register this browser with your current password."}
+                  {deviceLogin.data?.currentDeviceRegistered ? "This browser can sign in with fingerprint or passkey." : "Register this browser with your current password."}
                 </div>
               </div>
             </div>
@@ -170,6 +182,7 @@ export function SettingsClient() {
                             {device.label ?? "Registered device"} {device.current ? <span className="text-xs text-panel-accent">Current</span> : null}
                           </div>
                           <div className="mt-1 truncate text-xs text-panel-muted">{device.userAgent ?? "Unknown browser"}</div>
+                          <div className="mt-1 text-xs text-panel-muted">{device.biometricRegistered ? "Biometric credential registered" : "Needs biometric update"}</div>
                           <div className="mt-1 text-xs text-panel-muted">
                             {device.lastUsedAt ? `Last used ${formatDateTime(device.lastUsedAt)}` : `Added ${formatDateTime(device.createdAt)}`}
                           </div>
