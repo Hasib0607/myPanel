@@ -2,8 +2,8 @@
 
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ShieldCheck } from "lucide-react";
-import { apiPost } from "@/lib/api";
+import { Fingerprint, ShieldCheck } from "lucide-react";
+import { apiPost, getDeviceLoginSecret } from "@/lib/api";
 
 type LoginResponse = {
   ok?: boolean;
@@ -42,6 +42,24 @@ export function LoginForm() {
       router.replace(isAccountPortal ? "/account" : "/dashboard");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function submitDeviceLogin() {
+    setError("");
+    setLoading(true);
+
+    try {
+      const response = await apiPost<LoginResponse>("/auth/login/device", { username, deviceSecret: getDeviceLoginSecret() });
+      if (response.requiresTwoFactor && response.challengeToken) {
+        setChallengeToken(response.challengeToken);
+        return;
+      }
+      router.replace("/dashboard");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Device login failed");
     } finally {
       setLoading(false);
     }
@@ -87,6 +105,16 @@ export function LoginForm() {
       <button className="h-10 w-full rounded-md bg-panel-accent px-4 text-sm font-semibold text-white disabled:opacity-60" disabled={loading} type="submit">
         {loading ? "Checking..." : challengeToken ? "Verify code" : "Sign in"}
       </button>
+      {!challengeToken && !isAccountPortal ? (
+        <button
+          className="mt-3 flex h-10 w-full items-center justify-center gap-2 rounded-md border border-panel-line px-4 text-sm font-semibold text-panel-ink hover:bg-slate-50 disabled:opacity-60"
+          disabled={loading}
+          onClick={submitDeviceLogin}
+          type="button"
+        >
+          <Fingerprint size={16} /> Use device fingerprint
+        </button>
+      ) : null}
     </form>
   );
 }

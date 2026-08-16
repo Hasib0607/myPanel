@@ -1,11 +1,12 @@
 import bcrypt from "bcrypt";
+import { createHash } from "node:crypto";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { env } from "../config/env.js";
 import { audit } from "../lib/audit.js";
 import { createCsrfToken, csrfCookieName } from "../lib/csrf.js";
 import { decryptSecret } from "../lib/crypto.js";
-import { deviceFingerprintMatches, enforceDeviceFingerprint, requestDeviceFingerprintDigest } from "../lib/deviceFingerprint.js";
+import { deviceFingerprintMatches, enforceDeviceFingerprint, requestDeviceFingerprintDigest, requestDeviceFingerprintStableDigest } from "../lib/deviceFingerprint.js";
 import { prisma } from "../lib/prisma.js";
 import { verify } from "otplib";
 
@@ -19,6 +20,11 @@ const twoFactorLoginSchema = z.object({
   challengeToken: z.string().min(20),
   token: z.string().regex(/^\d{6}$/),
   deviceFingerprint: z.string().min(8).max(512).optional()
+});
+
+const trustedDeviceLoginSchema = z.object({
+  username: z.string().min(1),
+  deviceSecret: z.string().min(32).max(256)
 });
 
 export const authRoutes: FastifyPluginAsync = async (app) => {
@@ -64,6 +70,10 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     return dfp ? { ...payload, dfp } : payload;
   }
 
+  function hashDeviceSecret(secret: string) {
+    return createHash("sha256").update(secret).digest("hex");
+  }
+
   app.get("/csrf", async (request, reply) => ({ token: setCsrfCookie(request, reply) }));
 
   app.post("/login", { config: { rateLimit: { max: 5, timeWindow: "15 minutes" } } }, async (request, reply) => {
@@ -96,6 +106,67 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     reply.setCookie("panel_session", token, authCookieOptions(request, env.JWT_EXPIRY));
     setCsrfCookie(request, reply);
     await audit(request, { action: "LOGIN", resource: "auth", description: "Superadmin logged in without 2FA" });
+
+    return { ok: true };
+  });
+
+  app.post("/login/device", { config: { rateLimit: { max: 12, timeWindow: "15 minutes" } } }, async (request, reply) => {
+    const body = trustedDeviceLoginSchema.parse(request.body);
+    if (body.username !== env.SUPERADMIN_USERNAME) {
+      await audit(request, {
+        action: "LOGIN",
+        resource: "auth",
+        description: "Failed trusted device login",
+        metadata: { username: body.username, success: false, reason: "username" }
+      });
+      return reply.code(401).send({ error: "This device is not registered for passwordless login." });
+    }
+
+    const fingerprintHash = requestDeviceFingerprintStableDigest(request);
+    if (!fingerprintHash) return reply.code(401).send({ error: "This browser is not registered for passwordless login." });
+
+    const device = await prisma.trustedLoginDevice.findUnique({
+      where: {
+        role_username_fingerprintHash: {
+          role: "superadmin",
+          username: env.SUPERADMIN_USERNAME,
+          fingerprintHash
+        }
+      }
+    });
+
+    if (!device || device.revokedAt || device.secretHash !== hashDeviceSecret(body.deviceSecret)) {
+      await audit(request, {
+        action: "LOGIN",
+        resource: "auth",
+        description: "Failed trusted device login",
+        metadata: { username: body.username, success: false, reason: "device" }
+      });
+      return reply.code(401).send({ error: "This device is not registered for passwordless login." });
+    }
+
+    await prisma.trustedLoginDevice.update({
+      where: { id: device.id },
+      data: { lastUsedAt: new Date() }
+    });
+
+    const security = await prisma.superadminSecurity.findUnique({ where: { id: "superadmin" } });
+    if (security?.totpEnabled) {
+      const payload = sessionPayload(request, { sub: env.SUPERADMIN_USERNAME, role: "superadmin", mfa: "pending", deviceLogin: true });
+      const challengeToken = app.jwt.sign(payload, { expiresIn: 300 });
+      return { requiresTwoFactor: true, challengeToken };
+    }
+
+    const token = app.jwt.sign(sessionPayload(request, { sub: env.SUPERADMIN_USERNAME, role: "superadmin", deviceLogin: true }), { expiresIn: env.JWT_EXPIRY });
+    reply.clearCookie("account_session", { path: "/" });
+    reply.setCookie("panel_session", token, authCookieOptions(request, env.JWT_EXPIRY));
+    setCsrfCookie(request, reply);
+    await audit(request, {
+      action: "LOGIN",
+      resource: "auth",
+      description: "Superadmin logged in with trusted device",
+      metadata: { trustedDeviceId: device.id }
+    });
 
     return { ok: true };
   });

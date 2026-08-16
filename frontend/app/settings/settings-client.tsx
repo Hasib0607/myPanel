@@ -3,8 +3,8 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Eye, EyeOff, Github, KeyRound, RotateCcw, Save, Settings2 } from "lucide-react";
-import { apiGet, apiPost, apiPut } from "@/lib/api";
+import { Eye, EyeOff, Fingerprint, Github, KeyRound, RotateCcw, Save, Settings2, Trash2 } from "lucide-react";
+import { apiDelete, apiGet, apiPost, apiPut, getDeviceLoginSecret } from "@/lib/api";
 
 type SettingsResponse = {
   username: string;
@@ -18,13 +18,30 @@ type EnvSaveResponse = {
   restartRequired: boolean;
 };
 
+type DeviceLoginResponse = {
+  currentDeviceRegistered: boolean;
+  devices: Array<{
+    id: string;
+    label: string | null;
+    userAgent: string | null;
+    createdAt: string;
+    lastUsedAt: string | null;
+    current: boolean;
+  }>;
+};
+
 export function SettingsClient() {
   const queryClient = useQueryClient();
   const settings = useQuery({
     queryKey: ["settings"],
     queryFn: () => apiGet<SettingsResponse>("/settings")
   });
+  const deviceLogin = useQuery({
+    queryKey: ["settings-device-login"],
+    queryFn: () => apiGet<DeviceLoginResponse>("/settings/device-login")
+  });
   const [password, setPassword] = useState({ currentPassword: "", newPassword: "", confirmPassword: "" });
+  const [trustedDevice, setTrustedDevice] = useState({ currentPassword: "", label: "" });
   const [envDraft, setEnvDraft] = useState<Record<string, string>>({});
   const [revealed, setRevealed] = useState<Record<string, boolean>>({});
   const [notice, setNotice] = useState("");
@@ -68,7 +85,31 @@ export function SettingsClient() {
     onError: (error) => setNotice(error instanceof Error ? error.message : "Could not save environment.")
   });
 
+  const registerDeviceLogin = useMutation({
+    mutationFn: () => apiPost("/settings/device-login", {
+      currentPassword: trustedDevice.currentPassword,
+      label: trustedDevice.label.trim() || undefined,
+      deviceSecret: getDeviceLoginSecret()
+    }),
+    onSuccess: async () => {
+      setTrustedDevice({ currentPassword: "", label: "" });
+      setNotice("Device fingerprint login enabled for this browser.");
+      await queryClient.invalidateQueries({ queryKey: ["settings-device-login"] });
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not register this device.")
+  });
+
+  const revokeDeviceLogin = useMutation({
+    mutationFn: (id: string) => apiDelete(`/settings/device-login/${id}`),
+    onSuccess: async () => {
+      setNotice("Trusted device removed.");
+      await queryClient.invalidateQueries({ queryKey: ["settings-device-login"] });
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "Could not remove trusted device.")
+  });
+
   const passwordInvalid = password.newPassword.length < 10 || password.newPassword !== password.confirmPassword || !password.currentPassword;
+  const deviceRegistrationDisabled = !trustedDevice.currentPassword || registerDeviceLogin.isPending;
 
   return (
     <section className="space-y-5 p-6">
@@ -94,6 +135,59 @@ export function SettingsClient() {
               >
                 <Save size={16} /> {changePassword.isPending ? "Saving..." : "Change password"}
               </button>
+            </div>
+          </div>
+
+          <div className="rounded-md border border-panel-line bg-white">
+            <div className="flex items-center gap-3 border-b border-panel-line px-4 py-3">
+              <span className="grid h-9 w-9 place-items-center rounded-md bg-slate-950 text-white"><Fingerprint size={17} /></span>
+              <div>
+                <div className="text-sm font-semibold text-panel-ink">Device fingerprint login</div>
+                <div className="text-xs text-panel-muted">
+                  {deviceLogin.data?.currentDeviceRegistered ? "This browser can sign in without password." : "Register this browser with your current password."}
+                </div>
+              </div>
+            </div>
+            <div className="space-y-3 p-4">
+              <Field label="Device label" value={trustedDevice.label} onChange={(label) => setTrustedDevice({ ...trustedDevice, label })} />
+              <Field label="Current password" type="password" value={trustedDevice.currentPassword} onChange={(currentPassword) => setTrustedDevice({ ...trustedDevice, currentPassword })} />
+              <button
+                className="flex h-10 w-full items-center justify-center gap-2 rounded-md bg-panel-accent text-sm font-semibold text-white disabled:opacity-60"
+                disabled={deviceRegistrationDisabled}
+                onClick={() => registerDeviceLogin.mutate()}
+                type="button"
+              >
+                <Fingerprint size={16} /> {registerDeviceLogin.isPending ? "Registering..." : deviceLogin.data?.currentDeviceRegistered ? "Update this device" : "Register this device"}
+              </button>
+
+              {deviceLogin.data?.devices.length ? (
+                <div className="space-y-2 pt-1">
+                  {deviceLogin.data.devices.map((device) => (
+                    <div className="rounded-md border border-panel-line p-3" key={device.id}>
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-semibold text-panel-ink">
+                            {device.label ?? "Registered device"} {device.current ? <span className="text-xs text-panel-accent">Current</span> : null}
+                          </div>
+                          <div className="mt-1 truncate text-xs text-panel-muted">{device.userAgent ?? "Unknown browser"}</div>
+                          <div className="mt-1 text-xs text-panel-muted">
+                            {device.lastUsedAt ? `Last used ${formatDateTime(device.lastUsedAt)}` : `Added ${formatDateTime(device.createdAt)}`}
+                          </div>
+                        </div>
+                        <button
+                          className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-red-200 text-panel-danger hover:bg-red-50 disabled:opacity-60"
+                          disabled={revokeDeviceLogin.isPending}
+                          onClick={() => revokeDeviceLogin.mutate(device.id)}
+                          title="Remove trusted device"
+                          type="button"
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
             </div>
           </div>
 
@@ -176,6 +270,14 @@ export function SettingsClient() {
       ) : null}
     </section>
   );
+}
+
+function formatDateTime(value: string) {
+  try {
+    return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+  } catch {
+    return value;
+  }
 }
 
 function Field({ label, value, onChange, type = "text" }: { label: string; value: string; onChange: (value: string) => void; type?: string }) {

@@ -30,6 +30,7 @@ function resolveApiBase() {
 export const apiBase = resolveApiBase();
 
 const deviceFingerprintStorageKey = "vps_panel_device_fingerprint";
+const deviceLoginSecretStorageKey = "vps_panel_device_login_secret";
 const deviceFingerprintHeaderName = "x-device-fingerprint";
 
 function randomDeviceFingerprint() {
@@ -43,6 +44,32 @@ function randomDeviceFingerprint() {
   }
 
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function randomDeviceLoginSecret() {
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    const bytes = crypto.getRandomValues(new Uint8Array(32));
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+
+  return `${randomDeviceFingerprint()}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+export function getDeviceLoginSecret() {
+  if (typeof window === "undefined") return "";
+
+  let secret = window.localStorage.getItem(deviceLoginSecretStorageKey);
+  if (!secret) {
+    secret = randomDeviceLoginSecret();
+    window.localStorage.setItem(deviceLoginSecretStorageKey, secret);
+  }
+
+  return secret;
+}
+
+export function hasDeviceLoginSecret() {
+  if (typeof window === "undefined") return false;
+  return Boolean(window.localStorage.getItem(deviceLoginSecretStorageKey));
 }
 
 function deviceFingerprintHeaders(): Record<string, string> {

@@ -23,6 +23,16 @@ export function requestDeviceFingerprintDigest(request: FastifyRequest, explicit
   return deviceFingerprintDigest(explicitFingerprint ?? request.headers[deviceFingerprintHeaderName], request.headers["user-agent"]);
 }
 
+export function deviceFingerprintStableDigest(fingerprint: unknown) {
+  const normalizedFingerprint = normalizeHeaderValue(fingerprint);
+  if (!normalizedFingerprint) return null;
+  return createHash("sha256").update(normalizedFingerprint).digest("hex");
+}
+
+export function requestDeviceFingerprintStableDigest(request: FastifyRequest, explicitFingerprint?: unknown) {
+  return deviceFingerprintStableDigest(explicitFingerprint ?? request.headers[deviceFingerprintHeaderName]);
+}
+
 export function deviceFingerprintMatches(expected: unknown, actual: string | null) {
   if (typeof expected !== "string" || !/^[a-f0-9]{64}$/i.test(expected) || !actual) return false;
   const expectedBuffer = Buffer.from(expected, "hex");

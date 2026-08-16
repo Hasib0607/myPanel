@@ -725,6 +725,24 @@ model Secret {
   @@map("secrets")
 }
 
+model TrustedLoginDevice {
+  id              String    @id @default(cuid())
+  username        String
+  role            String    @default("superadmin")
+  fingerprintHash String    @map("fingerprint_hash")
+  secretHash      String    @map("secret_hash")
+  label           String?
+  userAgent       String?   @map("user_agent")
+  lastUsedAt      DateTime? @map("last_used_at")
+  revokedAt       DateTime? @map("revoked_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  @@unique([role, username, fingerprintHash])
+  @@index([role, username, revokedAt])
+  @@map("trusted_login_devices")
+}
+
 model WhmMigration {
   id             String             @id @default(cuid())
   name           String

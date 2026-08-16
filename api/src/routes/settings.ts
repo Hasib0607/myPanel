@@ -1,10 +1,13 @@
 import bcrypt from "bcrypt";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { FastifyPluginAsync } from "fastify";
+import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { env } from "../config/env.js";
 import { audit } from "../lib/audit.js";
+import { requestDeviceFingerprintStableDigest } from "../lib/deviceFingerprint.js";
+import { prisma } from "../lib/prisma.js";
 
 const passwordSchema = z.object({
   currentPassword: z.string().min(1),
@@ -16,6 +19,16 @@ const envUpdateSchema = z.object({
     key: z.string().regex(/^[A-Z][A-Z0-9_]*$/),
     value: z.string().max(4000)
   })).max(80)
+});
+
+const deviceLoginSchema = z.object({
+  currentPassword: z.string().min(1),
+  label: z.string().trim().min(1).max(80).optional(),
+  deviceSecret: z.string().min(32).max(256)
+});
+
+const trustedDeviceParamsSchema = z.object({
+  id: z.string().min(1)
 });
 
 const secretKeys = new Set([
@@ -119,6 +132,25 @@ async function writeEnvUpdates(updates: Map<string, string>) {
   }
 }
 
+function hashDeviceSecret(secret: string) {
+  return createHash("sha256").update(secret).digest("hex");
+}
+
+function safeUserAgent(request: FastifyRequest) {
+  const userAgent = request.headers["user-agent"];
+  return typeof userAgent === "string" ? userAgent.slice(0, 512) : null;
+}
+
+function defaultDeviceLabel(request: FastifyRequest) {
+  const userAgent = safeUserAgent(request);
+  if (!userAgent) return "Registered device";
+  if (/Macintosh|Mac OS X/i.test(userAgent)) return "Mac browser";
+  if (/Windows/i.test(userAgent)) return "Windows browser";
+  if (/Android/i.test(userAgent)) return "Android browser";
+  if (/iPhone|iPad/i.test(userAgent)) return "iOS browser";
+  return "Registered device";
+}
+
 export const settingsRoutes: FastifyPluginAsync = async (app) => {
   app.addHook("preHandler", app.requireAuth);
 
@@ -149,6 +181,102 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
       action: "UPDATE",
       resource: "panel_settings",
       description: "Changed superadmin password"
+    });
+
+    return { ok: true };
+  });
+
+  app.get("/device-login", async (request, reply) => {
+    const fingerprintHash = requestDeviceFingerprintStableDigest(request);
+    if (!fingerprintHash) return reply.code(400).send({ error: "This browser does not support device registration." });
+
+    const devices = await prisma.trustedLoginDevice.findMany({
+      where: {
+        role: "superadmin",
+        username: env.SUPERADMIN_USERNAME,
+        revokedAt: null
+      },
+      orderBy: [{ lastUsedAt: "desc" }, { createdAt: "desc" }]
+    });
+
+    return {
+      currentDeviceRegistered: devices.some((device) => device.fingerprintHash === fingerprintHash),
+      devices: devices.map((device) => ({
+        id: device.id,
+        label: device.label,
+        userAgent: device.userAgent,
+        createdAt: device.createdAt,
+        lastUsedAt: device.lastUsedAt,
+        current: device.fingerprintHash === fingerprintHash
+      }))
+    };
+  });
+
+  app.post("/device-login", async (request, reply) => {
+    const body = deviceLoginSchema.parse(request.body);
+    const passwordMatches = await bcrypt.compare(body.currentPassword, env.SUPERADMIN_PASSWORD_HASH);
+    if (!passwordMatches) return reply.code(401).send({ error: "Current password is incorrect" });
+
+    const fingerprintHash = requestDeviceFingerprintStableDigest(request);
+    if (!fingerprintHash) return reply.code(400).send({ error: "This browser does not support device registration." });
+
+    const device = await prisma.trustedLoginDevice.upsert({
+      where: {
+        role_username_fingerprintHash: {
+          role: "superadmin",
+          username: env.SUPERADMIN_USERNAME,
+          fingerprintHash
+        }
+      },
+      update: {
+        secretHash: hashDeviceSecret(body.deviceSecret),
+        label: body.label ?? defaultDeviceLabel(request),
+        userAgent: safeUserAgent(request),
+        revokedAt: null
+      },
+      create: {
+        role: "superadmin",
+        username: env.SUPERADMIN_USERNAME,
+        fingerprintHash,
+        secretHash: hashDeviceSecret(body.deviceSecret),
+        label: body.label ?? defaultDeviceLabel(request),
+        userAgent: safeUserAgent(request)
+      }
+    });
+
+    await audit(request, {
+      action: "UPDATE",
+      resource: "trusted_login_device",
+      resourceId: device.id,
+      description: "Registered trusted device login for superadmin"
+    });
+
+    return { ok: true, id: device.id };
+  });
+
+  app.delete("/device-login/:id", async (request, reply) => {
+    const { id } = trustedDeviceParamsSchema.parse(request.params);
+    const device = await prisma.trustedLoginDevice.findFirst({
+      where: {
+        id,
+        role: "superadmin",
+        username: env.SUPERADMIN_USERNAME,
+        revokedAt: null
+      }
+    });
+
+    if (!device) return reply.code(404).send({ error: "Trusted device not found" });
+
+    await prisma.trustedLoginDevice.update({
+      where: { id: device.id },
+      data: { revokedAt: new Date() }
+    });
+
+    await audit(request, {
+      action: "DELETE",
+      resource: "trusted_login_device",
+      resourceId: device.id,
+      description: "Revoked trusted device login for superadmin"
     });
 
     return { ok: true };
