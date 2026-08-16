@@ -241,20 +241,22 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       return reply.code(401).send({ error: "This device is not registered for biometric login." });
     }
 
-    const fingerprintHash = requestDeviceFingerprintStableDigest(request);
-    if (!fingerprintHash) return reply.code(401).send({ error: "This browser is not registered for biometric login." });
-
-    const device = await prisma.trustedLoginDevice.findUnique({
+    const devices = await prisma.trustedLoginDevice.findMany({
       where: {
-        role_username_fingerprintHash: {
-          role: "superadmin",
-          username: env.SUPERADMIN_USERNAME,
-          fingerprintHash
-        }
-      }
+        role: "superadmin",
+        username: env.SUPERADMIN_USERNAME,
+        revokedAt: null,
+        webauthnCredentialId: { not: null },
+        webauthnPublicKey: { not: null }
+      },
+      select: { webauthnCredentialId: true }
     });
 
-    if (!device || device.revokedAt || !device.webauthnCredentialId || !device.webauthnPublicKey) {
+    const allowCredentials = devices
+      .map((device) => device.webauthnCredentialId)
+      .filter((credentialId): credentialId is string => Boolean(credentialId));
+
+    if (allowCredentials.length === 0) {
       return reply.code(401).send({ error: "This device has not been registered with a biometric/passkey yet. Sign in with password, then open Settings and update this device once." });
     }
 
@@ -266,7 +268,6 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         purpose: "trusted-device-login",
         role: "superadmin",
         username: env.SUPERADMIN_USERNAME,
-        fingerprintHash,
         challenge,
         rpId,
         origin
@@ -281,7 +282,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         timeout: 60000,
         rpId,
         userVerification: "required",
-        allowCredentials: [{ id: device.webauthnCredentialId, type: "public-key" }]
+        allowCredentials: allowCredentials.map((id) => ({ id, type: "public-key" as const }))
       }
     };
   });
@@ -297,27 +298,15 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       payload.username !== env.SUPERADMIN_USERNAME ||
       !payload.challenge ||
       !payload.rpId ||
-      !payload.origin ||
-      !payload.fingerprintHash
+      !payload.origin
     ) {
       return reply.code(401).send({ error: "Biometric login expired. Please try again." });
     }
 
-    const fingerprintHash = requestDeviceFingerprintStableDigest(request);
-    if (!fingerprintHash || fingerprintHash !== payload.fingerprintHash) {
-      return reply.code(401).send({ error: "Device verification failed. Please try again from the same browser." });
-    }
-
     const device = await prisma.trustedLoginDevice.findUnique({
-      where: {
-        role_username_fingerprintHash: {
-          role: "superadmin",
-          username: env.SUPERADMIN_USERNAME,
-          fingerprintHash
-        }
-      }
+      where: { webauthnCredentialId: body.credential.rawId }
     });
-    if (!device || device.revokedAt || !device.webauthnCredentialId || !device.webauthnPublicKey || body.credential.rawId !== device.webauthnCredentialId) {
+    if (!device || device.role !== "superadmin" || device.username !== env.SUPERADMIN_USERNAME || device.revokedAt || !device.webauthnCredentialId || !device.webauthnPublicKey) {
       return reply.code(401).send({ error: "This device is not registered for biometric login." });
     }
 
