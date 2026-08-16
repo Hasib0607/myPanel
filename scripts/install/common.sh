@@ -634,13 +634,16 @@ server {
 }
 
 server {
-    listen $PANEL_LOGIN_PORT$(if [[ "$PANEL_PUBLIC_SCHEME" == "https" && -n "$PANEL_DOMAIN" ]]; then printf " ssl"; fi);
+    listen $PANEL_LOGIN_PORT$(if [[ "$PANEL_PUBLIC_SCHEME" == "https" && -n "$PANEL_DOMAIN" ]]; then printf " ssl http2"; fi);
     server_name $PANEL_PUBLIC_HOST $VPS_IP;
 
     client_max_body_size 0;
 $(if [[ "$PANEL_PUBLIC_SCHEME" == "https" && -n "$PANEL_DOMAIN" ]]; then cat <<SSL
     ssl_certificate /etc/letsencrypt/live/$PANEL_DOMAIN/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/$PANEL_DOMAIN/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    error_page 497 https://\$host:\$server_port\$request_uri;
 SSL
 fi)
 
@@ -685,13 +688,16 @@ fi)
 }
 
 server {
-    listen $CPANEL_LOGIN_PORT$(if [[ "$PANEL_PUBLIC_SCHEME" == "https" && -n "$PANEL_DOMAIN" ]]; then printf " ssl"; fi);
+    listen $CPANEL_LOGIN_PORT$(if [[ "$PANEL_PUBLIC_SCHEME" == "https" && -n "$PANEL_DOMAIN" ]]; then printf " ssl http2"; fi);
     server_name $PANEL_PUBLIC_HOST $VPS_IP;
 
     client_max_body_size 0;
 $(if [[ "$PANEL_PUBLIC_SCHEME" == "https" && -n "$PANEL_DOMAIN" ]]; then cat <<SSL
     ssl_certificate /etc/letsencrypt/live/$PANEL_DOMAIN/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/$PANEL_DOMAIN/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    error_page 497 https://\$host:\$server_port\$request_uri;
 SSL
 fi)
 

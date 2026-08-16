@@ -11,6 +11,9 @@ PANEL_API_PORT="${PANEL_API_PORT:-4000}"
 PANEL_FRONTEND_PORT="${PANEL_FRONTEND_PORT:-3000}"
 VPS_IP="${VPS_IP:-$(hostname -I | awk '{print $1}')}"
 PANEL_SITE="${PANEL_SITE:-00-vps-panel}"
+PANEL_DOMAIN="${PANEL_DOMAIN:-}"
+PANEL_PUBLIC_SCHEME="${PANEL_PUBLIC_SCHEME:-http}"
+PANEL_PUBLIC_HOST="${PANEL_PUBLIC_HOST:-${PANEL_DOMAIN:-$VPS_IP}}"
 NGINX_SITES_AVAILABLE="${NGINX_SITES_AVAILABLE:-$(default_nginx_sites_available)}"
 NGINX_SITES_ENABLED="${NGINX_SITES_ENABLED:-$(default_nginx_sites_enabled)}"
 REDIS_SERVICE="${REDIS_SERVICE:-$(detect_redis_service)}"
@@ -33,13 +36,27 @@ cp -a "$NGINX_SITES_AVAILABLE" "$BACKUP_DIR/" 2>/dev/null || true
 cp -a "$NGINX_SITES_ENABLED" "$BACKUP_DIR/" 2>/dev/null || true
 
 log "Writing protected panel listener $PANEL_SITE"
+ssl_listen=""
+ssl_block=""
+if [[ "$PANEL_PUBLIC_SCHEME" == "https" && -n "$PANEL_DOMAIN" ]]; then
+  ssl_listen=" ssl http2"
+  ssl_block=$(cat <<SSL
+    ssl_certificate /etc/letsencrypt/live/$PANEL_DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$PANEL_DOMAIN/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    error_page 497 https://\$host:\$server_port\$request_uri;
+SSL
+)
+fi
 cat > "$NGINX_SITES_AVAILABLE/$PANEL_SITE" <<EOF
 # Protected panel listener. Domain/project publishing must never overwrite this file.
 server {
-    listen $PANEL_LOGIN_PORT;
-    server_name $VPS_IP _;
+    listen $PANEL_LOGIN_PORT$ssl_listen;
+    server_name $PANEL_PUBLIC_HOST $VPS_IP _;
 
     client_max_body_size 0;
+$ssl_block
 
     location = /health {
         proxy_pass http://127.0.0.1:$PANEL_API_PORT/health;

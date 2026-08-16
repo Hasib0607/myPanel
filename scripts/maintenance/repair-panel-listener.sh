@@ -183,10 +183,13 @@ rm -f "$NGINX_SITES_AVAILABLE/vps-panel" "$NGINX_SITES_AVAILABLE/vps-panel-2083"
 ssl_listen=""
 ssl_block=""
 if [[ "$PANEL_PUBLIC_SCHEME" == "https" && -n "$PANEL_DOMAIN" ]]; then
-  ssl_listen=" ssl"
+  ssl_listen=" ssl http2"
   ssl_block=$(cat <<SSL
     ssl_certificate /etc/letsencrypt/live/$PANEL_DOMAIN/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/$PANEL_DOMAIN/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    error_page 497 https://\$host:\$server_port\$request_uri;
 SSL
 )
 fi
