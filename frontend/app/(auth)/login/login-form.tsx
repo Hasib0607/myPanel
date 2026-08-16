@@ -3,7 +3,7 @@
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Fingerprint, ShieldCheck } from "lucide-react";
-import { apiPost, getWebAuthnCredential, type WebAuthnCredentialRequestOptions } from "@/lib/api";
+import { apiPost, getWebAuthnCredential, webAuthnUnavailableMessage, type WebAuthnCredentialRequestOptions } from "@/lib/api";
 
 type LoginResponse = {
   ok?: boolean;
@@ -57,6 +57,8 @@ export function LoginForm() {
     setLoading(true);
 
     try {
+      const unavailable = webAuthnUnavailableMessage();
+      if (unavailable) throw new Error(unavailable);
       const options = await apiPost<WebAuthnLoginOptionsResponse>("/auth/login/webauthn/options", { username });
       const credential = await getWebAuthnCredential(options.publicKey);
       await apiPost<LoginResponse>("/auth/login/webauthn/verify", {

@@ -110,8 +110,20 @@ export function webAuthnSupported() {
   return typeof window !== "undefined" && typeof window.PublicKeyCredential !== "undefined" && Boolean(navigator.credentials);
 }
 
+export function webAuthnUnavailableMessage() {
+  if (typeof window === "undefined") return "Biometric login is only available in a browser.";
+  if (!window.isSecureContext) {
+    return "Biometric login requires HTTPS. Open the panel from its secure domain, not the plain IP/Not Secure URL.";
+  }
+  if (typeof window.PublicKeyCredential === "undefined" || !navigator.credentials) {
+    return "This browser does not expose biometric/passkey login. Use Safari, Chrome, or Edge on a secure HTTPS panel URL.";
+  }
+  return null;
+}
+
 export async function createWebAuthnCredential(options: WebAuthnCredentialCreationOptions) {
-  if (!webAuthnSupported()) throw new Error("This browser does not support biometric login.");
+  const unavailable = webAuthnUnavailableMessage();
+  if (unavailable) throw new Error(unavailable);
   const credential = await navigator.credentials.create({
     publicKey: {
       ...options,
@@ -135,7 +147,8 @@ export async function createWebAuthnCredential(options: WebAuthnCredentialCreati
 }
 
 export async function getWebAuthnCredential(options: WebAuthnCredentialRequestOptions) {
-  if (!webAuthnSupported()) throw new Error("This browser does not support biometric login.");
+  const unavailable = webAuthnUnavailableMessage();
+  if (unavailable) throw new Error(unavailable);
   const credential = await navigator.credentials.get({
     publicKey: {
       ...options,

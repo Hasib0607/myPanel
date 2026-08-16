@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Eye, EyeOff, Fingerprint, Github, KeyRound, RotateCcw, Save, Settings2, Trash2 } from "lucide-react";
-import { apiDelete, apiGet, apiPost, apiPut, createWebAuthnCredential, type WebAuthnCredentialCreationOptions } from "@/lib/api";
+import { apiDelete, apiGet, apiPost, apiPut, createWebAuthnCredential, webAuthnUnavailableMessage, type WebAuthnCredentialCreationOptions } from "@/lib/api";
 
 type SettingsResponse = {
   username: string;
@@ -52,6 +52,7 @@ export function SettingsClient() {
   const [envDraft, setEnvDraft] = useState<Record<string, string>>({});
   const [revealed, setRevealed] = useState<Record<string, boolean>>({});
   const [notice, setNotice] = useState("");
+  const [biometricUnavailable, setBiometricUnavailable] = useState<string | null>(null);
 
   useEffect(() => {
     if (!settings.data) return;
@@ -59,6 +60,10 @@ export function SettingsClient() {
     for (const entry of settings.data.entries) next[entry.key] = entry.value;
     setEnvDraft(next);
   }, [settings.data]);
+
+  useEffect(() => {
+    setBiometricUnavailable(webAuthnUnavailableMessage());
+  }, []);
 
   const visibleEntries = useMemo(() => settings.data?.entries ?? [], [settings.data]);
 
@@ -168,6 +173,7 @@ export function SettingsClient() {
             <div className="space-y-3 p-4">
               <Field label="Device label" value={trustedDevice.label} onChange={(label) => setTrustedDevice({ ...trustedDevice, label })} />
               <Field label="Current password" type="password" value={trustedDevice.currentPassword} onChange={(currentPassword) => setTrustedDevice({ ...trustedDevice, currentPassword })} />
+              {biometricUnavailable ? <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">{biometricUnavailable}</div> : null}
               <button
                 className="flex h-10 w-full items-center justify-center gap-2 rounded-md bg-panel-accent text-sm font-semibold text-white disabled:opacity-60"
                 disabled={deviceRegistrationDisabled}
