@@ -20,6 +20,7 @@ type EnvSaveResponse = {
 
 type DeviceLoginResponse = {
   currentDeviceRegistered: boolean;
+  currentDeviceNeedsBiometricUpdate?: boolean;
   devices: Array<{
     id: string;
     label: string | null;
@@ -156,7 +157,11 @@ export function SettingsClient() {
               <div>
                 <div className="text-sm font-semibold text-panel-ink">Biometric device login</div>
                 <div className="text-xs text-panel-muted">
-                  {deviceLogin.data?.currentDeviceRegistered ? "This browser can sign in with fingerprint or passkey." : "Register this browser with your current password."}
+                  {deviceLogin.data?.currentDeviceRegistered
+                    ? "This browser can sign in with fingerprint or passkey."
+                    : deviceLogin.data?.currentDeviceNeedsBiometricUpdate
+                      ? "This browser has the old trusted-device record. Update it once to add biometric login."
+                      : "Register this browser with your current password."}
                 </div>
               </div>
             </div>
@@ -169,7 +174,7 @@ export function SettingsClient() {
                 onClick={() => registerDeviceLogin.mutate()}
                 type="button"
               >
-                <Fingerprint size={16} /> {registerDeviceLogin.isPending ? "Registering..." : deviceLogin.data?.currentDeviceRegistered ? "Update this device" : "Register this device"}
+                <Fingerprint size={16} /> {registerDeviceLogin.isPending ? "Registering..." : deviceLogin.data?.currentDeviceRegistered || deviceLogin.data?.currentDeviceNeedsBiometricUpdate ? "Update this device" : "Register this device"}
               </button>
 
               {deviceLogin.data?.devices.length ? (

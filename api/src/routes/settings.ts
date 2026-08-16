@@ -260,12 +260,14 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
       orderBy: [{ lastUsedAt: "desc" }, { createdAt: "desc" }]
     });
     const currentDevice = devices.find((device) => device.fingerprintHash === fingerprintHash);
+    const currentDeviceBiometricRegistered = Boolean(currentDevice?.webauthnCredentialId && currentDevice.webauthnPublicKey);
     if (currentDevice) {
       setTrustedDeviceCookie(app, request, reply, currentDevice.id, fingerprintHash);
     }
 
     return {
-      currentDeviceRegistered: Boolean(currentDevice),
+      currentDeviceRegistered: currentDeviceBiometricRegistered,
+      currentDeviceNeedsBiometricUpdate: Boolean(currentDevice && !currentDeviceBiometricRegistered),
       devices: devices.map((device) => ({
         id: device.id,
         label: device.label,

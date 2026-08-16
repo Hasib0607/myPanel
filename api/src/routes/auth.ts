@@ -251,7 +251,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     });
 
     if (!device || device.revokedAt || !device.webauthnCredentialId || !device.webauthnPublicKey) {
-      return reply.code(401).send({ error: "This device is not registered for biometric login. Register or update it from Settings first." });
+      return reply.code(401).send({ error: "This device has not been registered with a biometric/passkey yet. Sign in with password, then open Settings and update this device once." });
     }
 
     const rpId = webauthnRpId(request);
