@@ -29,11 +29,11 @@ const trustedDeviceLoginSchema = z.object({
 });
 
 const webauthnLoginOptionsSchema = z.object({
-  username: z.string().min(1)
+  username: z.string().min(1).optional()
 });
 
 const webauthnLoginVerifySchema = z.object({
-  username: z.string().min(1),
+  username: z.string().min(1).optional(),
   challengeToken: z.string().min(20),
   credential: z.object({
     id: z.string().min(1),
@@ -230,16 +230,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.post("/login/webauthn/options", { config: { rateLimit: { max: 12, timeWindow: "15 minutes" } } }, async (request, reply) => {
-    const body = webauthnLoginOptionsSchema.parse(request.body);
-    if (body.username !== env.SUPERADMIN_USERNAME) {
-      await audit(request, {
-        action: "LOGIN",
-        resource: "auth",
-        description: "Failed biometric login options",
-        metadata: { username: body.username, success: false, reason: "username" }
-      });
-      return reply.code(401).send({ error: "This device is not registered for biometric login." });
-    }
+    webauthnLoginOptionsSchema.parse(request.body);
 
     const devices = await prisma.trustedLoginDevice.findMany({
       where: {
@@ -291,7 +282,6 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     const body = webauthnLoginVerifySchema.parse(request.body);
     const payload = parseChallengeToken(body.challengeToken);
     if (
-      body.username !== env.SUPERADMIN_USERNAME ||
       !payload ||
       payload.purpose !== "trusted-device-login" ||
       payload.role !== "superadmin" ||
