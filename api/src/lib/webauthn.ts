@@ -28,11 +28,14 @@ export function webauthnRpId(request: FastifyRequest) {
 export function webauthnOrigin(request: FastifyRequest) {
   const origin = request.headers.origin;
   if (typeof origin === "string" && /^https?:\/\//i.test(origin)) return origin.replace(/\/$/, "");
+  const host = String(request.headers["x-forwarded-host"] ?? request.headers.host ?? "")
+    .split(",")[0]
+    .trim();
   const proto = String(request.headers["x-forwarded-proto"] ?? "")
     .split(",")[0]
     .trim()
     .toLowerCase() || (request.protocol === "https" || Boolean((request.raw.socket as any).encrypted) ? "https" : "http");
-  return `${proto}://${webauthnRpId(request)}`;
+  return `${proto}://${host || webauthnRpId(request)}`;
 }
 
 function readLength(buffer: Buffer, offset: number, additional: number): { length: number; offset: number } {
