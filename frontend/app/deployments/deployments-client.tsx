@@ -894,6 +894,7 @@ export function DeploymentsClient({
 
 function ProjectCard({ deployment, active, onSelect }: { deployment: Deployment; active: boolean; onSelect: () => void }) {
   const latest = deployment.releases?.[0];
+  const portDisplay = deploymentPortDisplay(deployment);
   const domains = deployment.domainBindings?.map((binding) => {
     const name = deploymentBindingName(binding);
     return name ? { id: binding.id, name } : null;
@@ -911,7 +912,7 @@ function ProjectCard({ deployment, active, onSelect }: { deployment: Deployment;
       </div>
       <div className="mt-4 grid grid-cols-3 gap-2 text-xs">
         <span className="rounded bg-slate-100 px-2 py-1 font-semibold">{deployment.framework}</span>
-        <span className="rounded bg-slate-100 px-2 py-1">:{deployment.port}</span>
+        <span className={`rounded px-2 py-1 ${portDisplay.className}`} title={portDisplay.title}>{portDisplay.label}</span>
         <span className="rounded bg-slate-100 px-2 py-1">{latest?.status ?? "No release"}</span>
       </div>
       <div className="mt-3 truncate text-xs text-panel-muted">
@@ -924,6 +925,50 @@ function ProjectCard({ deployment, active, onSelect }: { deployment: Deployment;
       </div>
     </div>
   );
+}
+
+function deploymentPortDisplay(deployment: Deployment) {
+  const runtime = deployment.runtimePort;
+  if (!runtime) {
+    return {
+      label: `:${deployment.port}`,
+      title: "Configured deployment port",
+      className: "bg-slate-100"
+    };
+  }
+  if (runtime.state === "matched") {
+    return {
+      label: `:${runtime.port ?? deployment.port}`,
+      title: "Live listener matches this deployment",
+      className: "bg-emerald-50 text-emerald-700"
+    };
+  }
+  if (runtime.state === "conflict") {
+    return {
+      label: `conflict :${runtime.configuredPort}`,
+      title: "This configured port is occupied by another live process",
+      className: "bg-red-50 text-panel-danger"
+    };
+  }
+  if (runtime.state === "idle") {
+    return {
+      label: `idle :${runtime.configuredPort}`,
+      title: "No live listener was found on the configured deployment port",
+      className: "bg-amber-50 text-panel-warn"
+    };
+  }
+  if (runtime.state === "not_applicable") {
+    return {
+      label: "static",
+      title: "This deployment does not use a managed runtime port",
+      className: "bg-slate-100"
+    };
+  }
+  return {
+    label: `? :${runtime.configuredPort}`,
+    title: runtime.error ?? "Could not verify the live listener for this port",
+    className: "bg-slate-100 text-panel-muted"
+  };
 }
 
 function deploymentBindingName(binding: DeploymentDomainBinding) {

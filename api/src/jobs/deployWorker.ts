@@ -660,12 +660,14 @@ async function ensureManagedDeploymentPort(deployment: DeploymentWithWorkerRelat
     }
 
     if (liveOwner) {
-      await writeLog(deployment.id, releaseId, "PREFLIGHT", `Deployment port ${currentPort} is already occupied by another live process`, {
+      await writeLog(deployment.id, releaseId, "PREFLIGHT", `Deployment port ${currentPort} is already occupied by another live process; searching for a free port`, {
         port: currentPort,
         owner: liveOwner,
-        hint: "Deployment ports are persistent. Free this port or stop the conflicting process instead of moving the deployment to a new port, otherwise existing domain vhosts can point at a stale upstream after restart."
-      }, "error");
-      throw new Error(`Deployment port ${currentPort} is already occupied by another live process. Stop the conflicting process or free the saved deployment port; the panel will not silently move this deployment to a different port.`);
+        hint: "A foreign live process is using the saved deployment port. The deploy will move this project to the next free managed port and refresh generated vhosts during the proxy step."
+      }, "warn");
+      blockedPorts.add(currentPort);
+      currentPort = await nextAvailableDeploymentPort(deployment.id, blockedPorts);
+      continue;
     }
 
     blockedPorts.add(currentPort);

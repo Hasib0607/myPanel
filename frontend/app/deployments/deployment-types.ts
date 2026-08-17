@@ -87,6 +87,14 @@ export type Deployment = {
   processConfig: Record<string, unknown>;
   healthUrl: string | null;
   port: number;
+  runtimePort?: {
+    configuredPort: number;
+    port: number | null;
+    state: "matched" | "conflict" | "idle" | "unknown" | "not_applicable";
+    cwdMatches?: boolean;
+    owner?: unknown;
+    error?: string;
+  };
   status: DeploymentStatus;
   healthStatus: DeploymentHealthStatus;
   lastHealthCheckAt: string | null;

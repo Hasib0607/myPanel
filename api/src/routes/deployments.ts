@@ -238,6 +238,50 @@ function serializeDeployment<T extends { domainBindings?: any[]; domainId?: stri
   };
 }
 
+async function deploymentRuntimePortStatus(deployment: {
+  id: string;
+  slug: string;
+  framework: DeploymentFramework;
+  processManager?: DeploymentProcessManager | null;
+  rootPath: string;
+  rootDirectory: string | null;
+  processConfig: unknown;
+  port: number;
+}) {
+  const processManager = deployment.processManager ?? defaultProcessManagerByFramework[deployment.framework];
+  if (deployment.framework === "STATIC" || processManager === "STATIC" || processManager === "NONE") {
+    return { configuredPort: deployment.port, port: null, state: "not_applicable" as const };
+  }
+  try {
+    const status = await sysagent.deploymentPortStatus({
+      rootPath: deploymentActiveAppPath(deployment),
+      port: deployment.port,
+      processName: deployment.slug,
+      processManager
+    });
+    const occupied = status.occupied === true || status.reusable === true;
+    const state = status.reusable
+      ? "matched"
+      : status.occupied
+        ? "conflict"
+        : "idle";
+    return {
+      configuredPort: deployment.port,
+      port: occupied ? deployment.port : null,
+      state,
+      cwdMatches: Boolean((status as { cwdMatches?: unknown }).cwdMatches),
+      owner: status.owner ?? null
+    };
+  } catch (error) {
+    return {
+      configuredPort: deployment.port,
+      port: null,
+      state: "unknown" as const,
+      error: error instanceof Error ? error.message : "Could not inspect live port"
+    };
+  }
+}
+
 async function ensureLegacyDeploymentDomainBindings(deployment: { id: string; domainBindings?: Array<{ domainId?: string | null }> }) {
   const existingDomainIds = new Set((deployment.domainBindings ?? []).map((binding) => binding.domainId).filter((id): id is string => Boolean(id)));
   const legacyDomains = await prisma.domain.findMany({
@@ -2021,7 +2065,11 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       }),
       prisma.deployment.count({ where })
     ]);
-    return { items: items.map(serializeDeployment), total, page: query.page, pageSize: query.pageSize };
+    const serializedItems = await Promise.all(items.map(async (item) => ({
+      ...serializeDeployment(item),
+      runtimePort: await deploymentRuntimePortStatus(item)
+    })));
+    return { items: serializedItems, total, page: query.page, pageSize: query.pageSize };
   });
 
   app.get("/ports/next", async () => ({ port: await nextAvailablePort() }));
