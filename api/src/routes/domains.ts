@@ -17,6 +17,7 @@ import { sslQueue } from "../jobs/queues.js";
 import { sslHostCoverage, syncSubdomainHostRow } from "../lib/domainHosts.js";
 import { checkLetsEncryptCaa, resolvePublicA } from "../lib/publicDns.js";
 import { publishDomainDnsZone } from "../lib/domainDnsPublish.js";
+import { configuredNameServerGroups, matchingNameServerGroup, nameServerAlternativesText } from "../lib/nameServerMatching.js";
 
 export function normalizeDomainName(value: string) {
   return value
@@ -90,8 +91,8 @@ function normalizeNameServer(value: string) {
   return value.trim().toLowerCase().replace(/\.$/, "");
 }
 
-function nameserverMismatchMessage(domain: string, expected: string[], actual: string[]) {
-  const expectedText = expected.length > 0 ? expected.join(", ") : "no active nameservers configured";
+function nameserverMismatchMessage(domain: string, expectedGroups: string[][], actual: string[]) {
+  const expectedText = nameServerAlternativesText(expectedGroups);
   const actualText = actual.length > 0 ? actual.join(", ") : "no public nameservers found";
   return `Before adding ${domain}, change its nameservers to this hosting nameserver: ${expectedText}. Current nameservers: ${actualText}.`;
 }
@@ -218,7 +219,8 @@ export async function assertDomainUsesHostingNameServers(domain: string, nameSer
   if (!env.REQUIRE_DOMAIN_NAMESERVER_MATCH) return;
 
   const expected = nameServers.map((nameServer) => normalizeNameServer(nameServer.hostname)).filter(Boolean);
-  if (expected.length === 0) {
+  const expectedGroups = configuredNameServerGroups(expected);
+  if (expectedGroups.length === 0) {
     throw Object.assign(new Error("Add at least one active hosting nameserver before adding domains."), { statusCode: 400 });
   }
 
@@ -229,18 +231,18 @@ export async function assertDomainUsesHostingNameServers(domain: string, nameSer
     if (await vanityNameserverGlueMatches(domain, nameServers)) return;
     if (hasExpectedVanityNameServers(domain, nameServers)) return;
     const detail = error instanceof Error ? ` ${error.message}` : "";
-    throw Object.assign(new Error(`${nameserverMismatchMessage(domain, expected, [])}${detail}`), { statusCode: 400 });
+    throw Object.assign(new Error(`${nameserverMismatchMessage(domain, expectedGroups, [])}${detail}`), { statusCode: 400 });
   }
 
-  const actualSet = new Set(actual);
-  const allExpectedPresent = expected.every((nameServer) => actualSet.has(nameServer));
-  if (!allExpectedPresent && !(await vanityNameserverGlueMatches(domain, nameServers))) {
-    throw Object.assign(new Error(nameserverMismatchMessage(domain, expected, actual)), { statusCode: 400 });
+  const matchedGroup = matchingNameServerGroup(expectedGroups, actual);
+  if (!matchedGroup && !(await vanityNameserverGlueMatches(domain, nameServers))) {
+    throw Object.assign(new Error(nameserverMismatchMessage(domain, expectedGroups, actual)), { statusCode: 400 });
   }
 }
 
 export async function domainNameserverReadiness(domain: string, nameServers: ActiveNameServer[]) {
   const expected = nameServers.map((nameServer) => normalizeNameServer(nameServer.hostname)).filter(Boolean);
+  const expectedGroups = configuredNameServerGroups(expected);
   const vpsIp = await currentVpsIp().catch(() => env.VPS_IP);
   let actual: string[] = [];
   let lookupError: string | null = null;
@@ -249,8 +251,7 @@ export async function domainNameserverReadiness(domain: string, nameServers: Act
   } catch (error) {
     lookupError = error instanceof Error ? error.message : "No public nameservers found.";
   }
-  const actualSet = new Set(actual);
-  const expectedPresent = expected.length > 0 && expected.every((nameServer) => actualSet.has(nameServer));
+  const expectedPresent = Boolean(matchingNameServerGroup(expectedGroups, actual));
   const vanityOk = await vanityNameserverGlueMatches(domain, nameServers).catch(() => false);
   const expectedVanityPending = hasExpectedVanityNameServers(domain, nameServers);
   const apexA = await resolvePublicA(domain).then((records) => ({
@@ -298,12 +299,13 @@ export async function domainNameserverReadiness(domain: string, nameServers: Act
     ok,
     status: ok ? "READY" : "PENDING",
     expectedNameServers: expected,
+    expectedNameServerGroups: expectedGroups,
     currentNameServers: actual,
     dns: { apex: apexA, www: wwwA, caa },
     message: ok
       ? `${domain} DNS is ready for this hosting server.`
       : [
-          !nsOk ? `${nameserverMismatchMessage(domain, expected, actual)}${lookupError ? ` ${lookupError}` : ""}` : null,
+          !nsOk ? `${nameserverMismatchMessage(domain, expectedGroups, actual)}${lookupError ? ` ${lookupError}` : ""}` : null,
           !apexA.ok ? apexA.message : null,
           !caa.allowed ? caa.message : null
         ].filter(Boolean).join(" ")
