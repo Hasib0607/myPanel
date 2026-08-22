@@ -11,11 +11,13 @@ const autoDeployPollIntervalMs = Number(process.env.GUARDIAN_AUTO_DEPLOY_POLL_IN
 const panelUpdatePollIntervalMs = Number(process.env.PANEL_UPDATE_POLL_INTERVAL_MS ?? 60_000);
 const sslRenewIntervalMs = Number(process.env.GUARDIAN_SSL_RENEW_INTERVAL_MS ?? 12 * 60 * 60_000);
 const domainHostSyncIntervalMs = Number(process.env.GUARDIAN_DOMAIN_HOST_SYNC_INTERVAL_MS ?? 30 * 60_000);
+const dnsZoneReconcileIntervalMs = Number(process.env.GUARDIAN_DNS_ZONE_RECONCILE_INTERVAL_MS ?? 10 * 60_000);
 const autoHealEnabled = process.env.GUARDIAN_AUTO_HEAL === "true";
 const autoDeployPollEnabled = process.env.GUARDIAN_AUTO_DEPLOY_POLL_ENABLED !== "false";
 const panelUpdatePollEnabled = process.env.PANEL_UPDATE_POLL_ENABLED !== "false";
 const sslRenewEnabled = process.env.GUARDIAN_SSL_RENEW_ENABLED !== "false";
 const domainHostSyncEnabled = process.env.GUARDIAN_DOMAIN_HOST_SYNC_ENABLED !== "false";
+const dnsZoneReconcileEnabled = process.env.GUARDIAN_DNS_ZONE_RECONCILE_ENABLED !== "false";
 
 async function scheduleGuardian() {
   try {
@@ -88,6 +90,14 @@ async function scheduleGuardian() {
         removeOnFail: 100
       });
     }
+    if (dnsZoneReconcileEnabled) {
+      await guardianQueue.add("dns-zone-reconcile", {}, {
+        jobId: "guardian-dns-zone-reconcile",
+        repeat: { every: dnsZoneReconcileIntervalMs },
+        removeOnComplete: 100,
+        removeOnFail: 500
+      });
+    }
     logger.info("guardian repeat job scheduled", {
       name,
       autoHealEnabled,
@@ -103,7 +113,9 @@ async function scheduleGuardian() {
       sslRenewEnabled,
       sslRenewIntervalMs,
       domainHostSyncEnabled,
-      domainHostSyncIntervalMs
+      domainHostSyncIntervalMs,
+      dnsZoneReconcileEnabled,
+      dnsZoneReconcileIntervalMs
     });
   } catch (error) {
     logger.warn("guardian repeat schedule failed", { error: error instanceof Error ? error.message : String(error) });

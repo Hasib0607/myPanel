@@ -10,6 +10,50 @@ export type SysagentCommandResult = {
   signal?: string;
 };
 
+export type DnsZoneApplyResult = {
+  write?: SysagentCommandResult;
+  zoneCheck?: SysagentCommandResult;
+  confCheck?: SysagentCommandResult;
+  reload?: SysagentCommandResult;
+  localCheck?: SysagentCommandResult;
+  zonePath?: string;
+  rolledBack?: boolean;
+};
+
+export type DnsZoneStatusResult = {
+  domain: string;
+  zonePath: string;
+  zoneFileExists: boolean;
+  declared: boolean;
+  loaded: boolean;
+  authoritative: boolean;
+  ok: boolean;
+  zonestatus: SysagentCommandResult;
+  localCheck: SysagentCommandResult;
+};
+
+function failedCommand(result: SysagentCommandResult | undefined) {
+  return typeof result?.returncode === "number" && result.returncode !== 0;
+}
+
+export function assertDnsZoneApplySucceeded(domain: string, result: DnsZoneApplyResult) {
+  if (result.write?.dryRun) return result;
+  const failedStep = [
+    ["zone validation", result.zoneCheck],
+    ["BIND configuration validation", result.confCheck],
+    ["BIND reload", result.reload],
+    ["local authoritative check", result.localCheck]
+  ].find(([, step]) => failedCommand(step as SysagentCommandResult | undefined));
+  const localAnswer = result.localCheck?.stdout?.trim();
+  if (!result.rolledBack && !failedStep && localAnswer) return result;
+
+  const [label, step] = failedStep ?? ["local authoritative check", result.localCheck];
+  const detail = (step as SysagentCommandResult | undefined)?.stderr?.trim()
+    || (step as SysagentCommandResult | undefined)?.stdout?.trim()
+    || (result.rolledBack ? "the live change was rolled back" : "the zone did not return an SOA record locally");
+  throw new Error(`DNS zone publish failed for ${domain} during ${label}: ${detail}`);
+}
+
 export type SysagentBackupCreateJob = {
   jobId: string;
   status: "RUNNING" | "SUCCEEDED" | "FAILED";
@@ -230,8 +274,12 @@ export const sysagent = {
     request<SysagentCommandResult & { webRoot?: string; challengeDir?: string }>("/ssl/ensure-acme-webroot", { method: "POST", body: JSON.stringify(body) }),
   killSslProcess: (body: { domain: string; certName?: string | null }) =>
     request<SysagentCommandResult & { domain?: string; certName?: string | null; pattern?: string }>("/ssl/kill", { method: "POST", body: JSON.stringify(body) }),
-  applyDnsZone: (body: unknown) =>
-    request("/dns/zone/apply", { method: "POST", body: JSON.stringify(body) }),
+  applyDnsZone: async (body: { domain: string; zone: string }) => {
+    const result = await request<DnsZoneApplyResult>("/dns/zone/apply", { method: "POST", body: JSON.stringify(body) });
+    return assertDnsZoneApplySucceeded(body.domain, result);
+  },
+  dnsZoneStatus: (domain: string) =>
+    request<DnsZoneStatusResult>(`/dns/zone/status/${encodeURIComponent(domain)}`),
   provisionDatabase: (body: unknown) =>
     request("/database/provision", { method: "POST", body: JSON.stringify(body) }),
   databaseOverview: () =>

@@ -23,6 +23,10 @@ class ZoneApplyRequest(BaseModel):
     namedConfOptions: str = "/etc/bind/named.conf.options"
 
 
+def validated_domain(domain: str) -> str:
+    return ZoneApplyRequest(domain=domain, zone="").domain
+
+
 def effective_dns_paths(body: ZoneApplyRequest) -> tuple[str, str, str]:
     if not is_rhel():
         return body.zoneDir, body.namedConfLocal, body.namedConfOptions
@@ -240,6 +244,31 @@ def reload_bind_zone(domain: str) -> dict:
 
 def local_zone_visible(domain: str) -> dict:
     return run_command(["dig", "@127.0.0.1", "+short", "SOA", domain], allow_live=settings.allow_live_dns, timeout=10)
+
+
+@router.get("/zone/status/{domain}")
+def zone_status(domain: str) -> dict:
+    domain = validated_domain(domain)
+    zone_dir, named_conf_local, _ = effective_dns_paths(ZoneApplyRequest(domain=domain, zone=""))
+    zone_path = safe_zone_path(zone_dir, domain)
+    conf_path = Path(named_conf_local).resolve()
+    declaration = f'zone "{domain}"'
+    declared = conf_path.exists() and declaration in conf_path.read_text(encoding="utf-8")
+    zonestatus = run_command(["rndc", "zonestatus", domain], allow_live=True, timeout=10)
+    local_check = run_command(["dig", "@127.0.0.1", "+short", "SOA", domain], allow_live=True, timeout=10)
+    loaded = command_ok(zonestatus) and "type:" in str(zonestatus.get("stdout", ""))
+    authoritative = command_has_output(local_check)
+    return {
+        "domain": domain,
+        "zonePath": str(zone_path),
+        "zoneFileExists": zone_path.is_file(),
+        "declared": declared,
+        "loaded": loaded,
+        "authoritative": authoritative,
+        "ok": zone_path.is_file() and declared and loaded and authoritative,
+        "zonestatus": zonestatus,
+        "localCheck": local_check,
+    }
 
 
 def restore_file(path: Path, backup_path: Path | None) -> dict:

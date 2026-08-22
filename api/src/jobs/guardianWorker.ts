@@ -21,6 +21,7 @@ import {
 } from "../lib/laravelProcesses.js";
 import { normalizeDeploymentResourcePolicy } from "../lib/deploymentResourcePolicy.js";
 import { runDomainHostSync } from "../lib/domainHostSync.js";
+import { reconcileManagedDnsZones } from "../lib/dnsZoneReconcile.js";
 
 const staleDeploymentMs = Number(process.env.GUARDIAN_STALE_DEPLOYMENT_MS ?? 6 * 60_000);
 const queuedReleaseRecoveryMs = Number(process.env.GUARDIAN_QUEUED_RELEASE_RECOVERY_MS ?? 90_000);
@@ -1317,6 +1318,9 @@ export const guardianWorker = new Worker(
     }
     if (job.name === "domain-host-sync") {
       return runDomainHostSync({ includeDns: true, queueRepair: true });
+    }
+    if (job.name === "dns-zone-reconcile") {
+      return reconcileManagedDnsZones();
     }
 
     const diagnosis = await sysagent.guardianDiagnosis() as GuardianDiagnosis;

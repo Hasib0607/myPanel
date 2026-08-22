@@ -2027,7 +2027,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
         description: `Account created domain ${domain.name}`,
         metadata: { autoSslQueued: Boolean(sslJob), sslJob, publishWarning } as any
       });
-      return reply.code(201).send({
+      return reply.code(publishWarning ? 202 : 201).send({
         ...domain,
         autoSslQueued: Boolean(sslJob),
         sslJob,

@@ -16,6 +16,7 @@ import { currentVpsIp } from "../lib/serverIp.js";
 import { sslQueue } from "../jobs/queues.js";
 import { sslHostCoverage, syncSubdomainHostRow } from "../lib/domainHosts.js";
 import { checkLetsEncryptCaa, resolvePublicA } from "../lib/publicDns.js";
+import { publishDomainDnsZone } from "../lib/domainDnsPublish.js";
 
 export function normalizeDomainName(value: string) {
   return value
@@ -493,8 +494,12 @@ async function publishDomainHosting(domainId: string) {
     }
   });
   const fileScaffold = await ensureDomainFileStructure(domain.name);
-  const zone = renderZone(domain.name, domain.dnsRecords);
-  const dnsResult = await sysagent.applyDnsZone({ domain: domain.name, zone });
+  const dnsResult = await publishDomainDnsZone(domain.id);
+  const refreshedDomain = await prisma.domain.findUniqueOrThrow({
+    where: { id: domain.id },
+    include: { dnsRecords: { orderBy: [{ type: "asc" }, { name: "asc" }] } }
+  });
+  const zone = renderZone(refreshedDomain.name, refreshedDomain.dnsRecords);
 
   let nginxResult;
   if (domain.hostingMode === "DEPLOYMENT_PROXY") {
@@ -872,9 +877,11 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
 
     const fileScaffold = await ensureDomainFileStructure(domain.name);
     let publishResult: Awaited<ReturnType<typeof publishDomainHosting>> | null = null;
+    let publishWarning: string | null = null;
     try {
       publishResult = await publishDomainHosting(domain.id);
     } catch (error) {
+      publishWarning = error instanceof Error ? error.message : "Domain DNS/hosting publish failed";
       app.log.warn({ error, domain: domain.name }, "domain hosting publish failed");
     }
 
@@ -884,9 +891,9 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
       resource: "domain",
       resourceId: domain.id,
       description: `Created domain ${domain.name}`,
-      metadata: JSON.parse(JSON.stringify({ fileScaffold, publish: publishResult })) as Prisma.InputJsonValue
+      metadata: JSON.parse(JSON.stringify({ fileScaffold, publish: publishResult, publishWarning })) as Prisma.InputJsonValue
     });
-    return reply.code(201).send(domain);
+    return reply.code(publishWarning ? 202 : 201).send({ ...domain, publishWarning });
   });
 
   app.post("/bulk", async (request, reply) => {
