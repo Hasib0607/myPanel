@@ -32,6 +32,7 @@ export const apiBase = resolveApiBase();
 const deviceFingerprintStorageKey = "vps_panel_device_fingerprint";
 const deviceLoginSecretStorageKey = "vps_panel_device_login_secret";
 const deviceFingerprintHeaderName = "x-device-fingerprint";
+const deviceFingerprintWebSocketProtocolPrefix = "vps-panel-device.";
 
 function randomDeviceFingerprint() {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -190,8 +191,8 @@ export async function getWebAuthnCredential(options: WebAuthnCredentialRequestOp
   };
 }
 
-function deviceFingerprintHeaders(): Record<string, string> {
-  if (typeof window === "undefined") return {};
+export function getDeviceFingerprint() {
+  if (typeof window === "undefined") return "";
 
   let fingerprint = window.localStorage.getItem(deviceFingerprintStorageKey);
   if (!fingerprint) {
@@ -199,7 +200,17 @@ function deviceFingerprintHeaders(): Record<string, string> {
     window.localStorage.setItem(deviceFingerprintStorageKey, fingerprint);
   }
 
-  return { [deviceFingerprintHeaderName]: fingerprint };
+  return fingerprint;
+}
+
+export function deviceFingerprintWebSocketProtocol() {
+  const fingerprint = getDeviceFingerprint();
+  return typeof fingerprint === "string" ? `${deviceFingerprintWebSocketProtocolPrefix}${fingerprint}` : "";
+}
+
+function deviceFingerprintHeaders(): Record<string, string> {
+  const fingerprint = getDeviceFingerprint();
+  return typeof fingerprint === "string" ? { [deviceFingerprintHeaderName]: fingerprint } : {};
 }
 
 function apiUrl(path: string) {

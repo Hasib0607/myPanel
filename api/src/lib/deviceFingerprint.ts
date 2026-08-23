@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import type { FastifyRequest } from "fastify";
 
 export const deviceFingerprintHeaderName = "x-device-fingerprint";
+export const deviceFingerprintWebSocketProtocolPrefix = "vps-panel-device.";
 
 function normalizeHeaderValue(value: unknown) {
   if (Array.isArray(value)) return normalizeHeaderValue(value[0]);
@@ -20,7 +21,25 @@ export function deviceFingerprintDigest(fingerprint: unknown, userAgent: unknown
 }
 
 export function requestDeviceFingerprintDigest(request: FastifyRequest, explicitFingerprint?: unknown) {
-  return deviceFingerprintDigest(explicitFingerprint ?? request.headers[deviceFingerprintHeaderName], request.headers["user-agent"]);
+  return deviceFingerprintDigest(
+    explicitFingerprint ?? request.headers[deviceFingerprintHeaderName] ?? requestWebSocketDeviceFingerprint(request),
+    request.headers["user-agent"]
+  );
+}
+
+export function requestWebSocketDeviceFingerprint(request: Pick<FastifyRequest, "headers">) {
+  if (normalizeHeaderValue(request.headers.upgrade).toLowerCase() !== "websocket") return null;
+
+  const protocols = normalizeHeaderValue(request.headers["sec-websocket-protocol"]);
+  for (const protocol of protocols.split(",")) {
+    const normalizedProtocol = protocol.trim();
+    if (!normalizedProtocol.startsWith(deviceFingerprintWebSocketProtocolPrefix)) continue;
+
+    const fingerprint = normalizedProtocol.slice(deviceFingerprintWebSocketProtocolPrefix.length);
+    return fingerprint.length >= 8 ? fingerprint : null;
+  }
+
+  return null;
 }
 
 export function deviceFingerprintStableDigest(fingerprint: unknown) {

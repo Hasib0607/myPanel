@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { deviceFingerprintDigest, deviceFingerprintMatches, deviceFingerprintStableDigest } from "./deviceFingerprint.js";
+import {
+  deviceFingerprintDigest,
+  deviceFingerprintMatches,
+  deviceFingerprintStableDigest,
+  requestDeviceFingerprintDigest,
+  requestWebSocketDeviceFingerprint
+} from "./deviceFingerprint.js";
 
 test("device fingerprint digest matches the same browser signal", () => {
   const digest = deviceFingerprintDigest("device-123", "Browser/1.0");
@@ -18,4 +24,29 @@ test("device fingerprint digest rejects missing or different browser signals", (
 test("stable device fingerprint digest ignores user agent for trusted device registration", () => {
   assert.equal(deviceFingerprintStableDigest("device-123"), deviceFingerprintStableDigest("device-123"));
   assert.notEqual(deviceFingerprintStableDigest("device-123"), deviceFingerprintStableDigest("device-456"));
+});
+
+test("websocket protocol carries the browser fingerprint without putting it in the URL", () => {
+  const request = {
+    headers: {
+      upgrade: "websocket",
+      "sec-websocket-protocol": "vps-panel-device.device-123",
+      "user-agent": "Browser/1.0"
+    }
+  } as any;
+
+  assert.equal(requestWebSocketDeviceFingerprint(request), "device-123");
+  assert.equal(requestDeviceFingerprintDigest(request), deviceFingerprintDigest("device-123", "Browser/1.0"));
+});
+
+test("websocket fingerprint protocol is ignored on normal HTTP requests", () => {
+  const request = {
+    headers: {
+      "sec-websocket-protocol": "vps-panel-device.device-123",
+      "user-agent": "Browser/1.0"
+    }
+  } as any;
+
+  assert.equal(requestWebSocketDeviceFingerprint(request), null);
+  assert.equal(requestDeviceFingerprintDigest(request), null);
 });

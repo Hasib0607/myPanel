@@ -4,7 +4,7 @@ import { useEffect, useRef } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { apiBase } from "@/lib/api";
+import { apiBase, deviceFingerprintWebSocketProtocol } from "@/lib/api";
 
 function wsUrl({ accountId, endpointPath }: { accountId?: string; endpointPath: string }): string {
   const base = apiBase.startsWith("/")
@@ -57,7 +57,8 @@ export function TerminalClient({ accountId, endpointPath = "/terminal/ws" }: { a
       ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
     };
 
-    const ws = new WebSocket(wsUrl({ accountId, endpointPath }));
+    const fingerprintProtocol = deviceFingerprintWebSocketProtocol();
+    const ws = new WebSocket(wsUrl({ accountId, endpointPath }), fingerprintProtocol ? [fingerprintProtocol] : []);
 
     ws.onopen = () => {
       fitAddon.fit();
