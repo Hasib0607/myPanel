@@ -1,3 +1,5 @@
+import { request as httpRequest, type IncomingMessage } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { env } from "../config/env.js";
 
 export type SysagentCommandResult = {
@@ -88,28 +90,57 @@ export type SysagentLargestFile = {
   deleteReason?: string | null;
 };
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  let response: Response;
-  try {
-    response = await fetch(`${env.SYSAGENT_URL}${path}`, {
-      ...init,
-      headers: {
-        "content-type": "application/json",
-        ...(init?.headers ?? {})
-      }
+const sysagentResponseTimeoutMs = 31 * 60 * 1000;
+
+export async function requestSysagentJson<T>(url: URL, init?: RequestInit, timeoutMs = sysagentResponseTimeoutMs): Promise<T> {
+  const rawBody = init?.body;
+  if (rawBody !== undefined && rawBody !== null && typeof rawBody !== "string" && !Buffer.isBuffer(rawBody) && !(rawBody instanceof Uint8Array)) {
+    throw new Error("sysagent request body must be a string or byte buffer");
+  }
+  const body = rawBody === undefined || rawBody === null ? null : Buffer.from(rawBody as string | Uint8Array);
+  const headers = new Headers(init?.headers);
+  if (!headers.has("content-type")) headers.set("content-type", "application/json");
+  if (body && !headers.has("content-length")) headers.set("content-length", String(body.byteLength));
+
+  return new Promise<T>((resolve, reject) => {
+    const transport = url.protocol === "https:" ? httpsRequest : httpRequest;
+    const request = transport(url, {
+      method: init?.method ?? "GET",
+      headers: Object.fromEntries(headers.entries())
+    }, (response: IncomingMessage) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+      response.on("error", reject);
+      response.on("end", () => {
+        const responseBody = Buffer.concat(chunks).toString("utf8");
+        const statusCode = response.statusCode ?? 0;
+        if (statusCode < 200 || statusCode >= 300) {
+          reject(new Error(`failed with ${statusCode}${responseBody ? `: ${responseBody}` : ""}`));
+          return;
+        }
+        try {
+          resolve(JSON.parse(responseBody) as T);
+        } catch (error) {
+          reject(new Error(`returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`));
+        }
+      });
     });
+
+    request.setTimeout(timeoutMs, () => request.destroy(new Error(`timed out after ${Math.ceil(timeoutMs / 1000)} seconds`)));
+    request.on("error", reject);
+    if (body) request.write(body);
+    request.end();
+  });
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  try {
+    return await requestSysagentJson<T>(new URL(path, `${env.SYSAGENT_URL.replace(/\/$/, "")}/`), init);
   } catch (error) {
     const cause = (error as any)?.cause;
     const detail = cause?.code ? `${cause.code}${cause.address ? ` ${cause.address}` : ""}${cause.port ? `:${cause.port}` : ""}` : error instanceof Error ? error.message : String(error);
     throw new Error(`sysagent ${path} request failed: ${detail}`);
   }
-
-  if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    throw new Error(`sysagent ${path} failed with ${response.status}${detail ? `: ${detail}` : ""}`);
-  }
-
-  return response.json() as Promise<T>;
 }
 
 export const sysagent = {

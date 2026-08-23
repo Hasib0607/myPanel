@@ -148,7 +148,7 @@ async function runDeploymentExclusive<T>(deploymentId: string, task: () => Promi
     if (deploymentLocks.get(deploymentId) === tracked) deploymentLocks.delete(deploymentId);
   });
   deploymentLocks.set(deploymentId, tracked);
-  return next;
+  return tracked as Promise<T>;
 }
 
 async function runHeavyBuildExclusive<T>(task: () => Promise<T>) {
@@ -160,7 +160,7 @@ async function runHeavyBuildExclusive<T>(task: () => Promise<T>) {
     if (heavyBuildLocks.get(key) === tracked) heavyBuildLocks.delete(key);
   });
   heavyBuildLocks.set(key, tracked);
-  return next;
+  return tracked as Promise<T>;
 }
 
 const defaultProcessManagerByFramework: Record<DeploymentFramework, DeploymentProcessManager> = {
@@ -1296,8 +1296,8 @@ async function markRelease(releaseId: string | undefined, status: "RUNNING" | "S
     data: {
       status,
       startedAt: startedAt ?? (status === "RUNNING" ? new Date() : undefined),
-      finishedAt: finished,
-      durationMs: finished && startedAt ? finished.getTime() - startedAt.getTime() : undefined
+      finishedAt: status === "RUNNING" ? null : finished,
+      durationMs: status === "RUNNING" ? null : finished && startedAt ? finished.getTime() - startedAt.getTime() : undefined
     }
   });
 }
