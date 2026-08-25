@@ -447,7 +447,7 @@ async function applyLaravelManagedProcesses(
 ) {
   const processConfig = deploymentProcessConfig(deployment.processConfig);
   const managed = inferredLaravelManagedProcesses(envVars, processConfig.laravelManagedProcesses);
-  const definitions = [
+  const definitions: Array<{ key: string; enabled: boolean; instances: number; command: string }> = [
     { key: "scheduler", ...managed.scheduler },
     { key: "horizon", ...managed.horizon },
     { key: "reverb", ...managed.reverb },
@@ -458,6 +458,29 @@ async function applyLaravelManagedProcesses(
       command: queueGroupCommand(group)
     }))
   ];
+
+  const pythonFollowupDirectory = path.join(appPath, "followup_bot");
+  const pythonFollowupWorker = path.join(pythonFollowupDirectory, "worker.py");
+  const pythonFollowupRequirements = path.join(pythonFollowupDirectory, "requirements.txt");
+  const hasPythonFollowup = await pathExists(pythonFollowupWorker)
+    && await pathExists(pythonFollowupRequirements);
+
+  if (hasPythonFollowup) {
+    if (action === "apply") {
+      await ensurePythonVenvRuntime(
+        deployment.id,
+        releaseId,
+        pythonFollowupDirectory,
+        ".venv/bin/python worker.py --sleep 30"
+      );
+    }
+    definitions.push({
+      key: "python-followup",
+      enabled: true,
+      instances: 1,
+      command: "followup_bot/.venv/bin/python followup_bot/worker.py --sleep 30"
+    });
+  }
 
   const status: Record<string, unknown> = {};
   const policy = normalizeDeploymentResourcePolicy(deployment.processConfig);

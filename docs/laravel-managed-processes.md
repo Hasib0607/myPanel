@@ -10,8 +10,16 @@ myPanel manages production Laravel background processes through Supervisor. Conf
 - Horizon: `php artisan horizon`
 - Reverb: `php artisan reverb:start --host=127.0.0.1`
 - Octane: replaces the main Laravel start command with `php artisan octane:start`
+- Repository Python follow-up sidecar: when a Laravel app contains both
+  `followup_bot/worker.py` and `followup_bot/requirements.txt`, myPanel prepares
+  its isolated virtualenv and runs one supervised `python-followup` process
+  automatically. No Laravel scheduler entry is required.
 
 Deploy and restart actions issue `php artisan queue:restart` and `php artisan horizon:terminate` before restarting managed processes. Failures from those graceful signals are logged as warnings and do not hide the actual deployment result.
+
+The Python follow-up sidecar is registered through the same managed Supervisor
+path as other Laravel processes. It is restarted on deploy/restart, writes to the
+deployment runtime logs, and is stopped with the parent deployment.
 
 ## Automatic detection
 
