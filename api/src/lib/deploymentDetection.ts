@@ -61,9 +61,9 @@ function packageRun(packageManager: DeploymentPackageManager, script: string) {
 }
 
 function packageInstall(packageManager: DeploymentPackageManager) {
-  if (packageManager === "PNPM") return "pnpm install";
-  if (packageManager === "YARN") return "yarn install";
-  return "npm install";
+  if (packageManager === "PNPM") return "pnpm install --prod=false";
+  if (packageManager === "YARN") return "yarn install --production=false";
+  return "npm install --include=dev --production=false";
 }
 
 function hasDependency(pkg: PackageJson, name: string) {
