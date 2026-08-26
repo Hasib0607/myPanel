@@ -42,6 +42,7 @@ import {
   renderLaravelProcessCommand
 } from "../lib/laravelProcesses.js";
 import { normalizeDeploymentResourcePolicy } from "../lib/deploymentResourcePolicy.js";
+import { calculateDeployMemoryBudget } from "../lib/deploymentResourceBudget.js";
 import { deploymentManualStopRequested } from "../lib/deploymentStopControl.js";
 import { sslQueue } from "./queues.js";
 import { runDomainHostSync } from "../lib/domainHostSync.js";
@@ -1213,13 +1214,18 @@ function calculateDeployResourceBudget(snapshot: any): DeployResourceBudget {
   const minDeployMemoryMb = Number(env.DEPLOY_MIN_MEMORY_MB || 3072);
   const maxDeployMemoryMb = Number(env.DEPLOY_MAX_MEMORY_MB || 12288);
   const freeCpuCores = Number(env.DEPLOY_FREE_CPU_CORES || 2);
-  const appReserveMb = Math.max(minAppReserveMb, Math.ceil(runningAppsMemoryMb * appReserveMultiplier));
-  const budgetByTotal = totalMemoryMb > 0 ? totalMemoryMb - appReserveMb - systemReserveMb : Number(defaults.memoryMaxMb || 4096);
-  const budgetByAvailable = availableMemoryMb > 0 ? availableMemoryMb - systemReserveMb : budgetByTotal;
-  const rawDeployMemoryMb = Math.min(budgetByTotal, budgetByAvailable);
-  const deployMemoryMb = rawDeployMemoryMb >= minDeployMemoryMb
-    ? clampNumber(Math.floor(rawDeployMemoryMb), minDeployMemoryMb, maxDeployMemoryMb)
-    : Math.max(1536, Math.floor(rawDeployMemoryMb || Number(defaults.memoryMaxMb || 4096)));
+  const memoryBudget = calculateDeployMemoryBudget({
+    totalMemoryMb,
+    availableMemoryMb,
+    runningAppsMemoryMb,
+    systemReserveMb,
+    minAppReserveMb,
+    appReserveMultiplier,
+    minDeployMemoryMb,
+    maxDeployMemoryMb,
+    fallbackMemoryMb: Number(defaults.memoryMaxMb || 4096)
+  });
+  const { appReserveMb, deployMemoryMb } = memoryBudget;
   const usableCpuCores = Math.max(1, cpuCount - freeCpuCores);
   const cpuQuotaPercent = clampNumber(usableCpuCores * 100, 100, Math.min(600, cpuCount * 100));
   const nodeHeapMb = Math.max(512, deployMemoryMb - 1536);
@@ -4421,7 +4427,9 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
   }
   const release = releaseId ? await prisma.deploymentRelease.findUnique({ where: { id: releaseId } }) : null;
   let artifactRootPath: string | null = null;
-  await resetBuildLogs(deployment.id);
+  if (action !== "rollback") {
+    await resetBuildLogs(deployment.id);
+  }
   await markRelease(releaseId, "RUNNING", startedAt);
   await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "DEPLOYING" } });
 
