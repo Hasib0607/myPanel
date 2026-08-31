@@ -52,6 +52,7 @@ from app.nginx_manager import (
     acme_location,
     certificate_name_for_server_name,
     certificate_names_cover_server_name,
+    ensure_sites_enabled_include_config,
     ensure_server_names_hash_config,
     make_web_root_readable,
     nginx_listen_directives,
@@ -196,6 +197,41 @@ class NginxManagerTests(unittest.TestCase):
         finally:
             nginx_manager.settings.allow_live_nginx = previous_allow_live
             nginx_manager.SERVER_NAMES_HASH_CONFIG = previous_hash_config
+            nginx_manager.run_live_step = previous_run_live_step
+            nginx_manager._nginx_loads_directory = previous_nginx_loads_directory
+
+    def test_sites_enabled_include_shim_is_restored_when_conf_d_is_loaded(self) -> None:
+        previous_allow_live = nginx_manager.settings.allow_live_nginx
+        previous_sites_enabled_dir = nginx_manager.SITES_ENABLED_DIR
+        previous_include_config = nginx_manager.SITES_ENABLED_INCLUDE_CONFIG
+        previous_include_text = nginx_manager.SITES_ENABLED_INCLUDE_CONFIG_TEXT
+        previous_run_live_step = nginx_manager.run_live_step
+        previous_nginx_loads_directory = nginx_manager._nginx_loads_directory
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                sites_enabled = root / "sites-enabled"
+                conf_dir = root / "conf.d"
+                sites_enabled.mkdir()
+                conf_dir.mkdir()
+                include_config = conf_dir / "00-sites-enabled.conf"
+                include_text = f"include {sites_enabled}/*;\n"
+
+                nginx_manager.settings.allow_live_nginx = True
+                nginx_manager.SITES_ENABLED_DIR = sites_enabled
+                nginx_manager.SITES_ENABLED_INCLUDE_CONFIG = include_config
+                nginx_manager.SITES_ENABLED_INCLUDE_CONFIG_TEXT = include_text
+                nginx_manager._nginx_loads_directory = lambda directory: directory == conf_dir
+                nginx_manager.run_live_step = lambda _label, fn: fn()
+
+                ensure_sites_enabled_include_config()
+
+                self.assertEqual(include_config.read_text(encoding="utf-8"), include_text)
+        finally:
+            nginx_manager.settings.allow_live_nginx = previous_allow_live
+            nginx_manager.SITES_ENABLED_DIR = previous_sites_enabled_dir
+            nginx_manager.SITES_ENABLED_INCLUDE_CONFIG = previous_include_config
+            nginx_manager.SITES_ENABLED_INCLUDE_CONFIG_TEXT = previous_include_text
             nginx_manager.run_live_step = previous_run_live_step
             nginx_manager._nginx_loads_directory = previous_nginx_loads_directory
 

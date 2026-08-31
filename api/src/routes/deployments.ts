@@ -37,6 +37,7 @@ import {
 } from "../lib/laravelProcesses.js";
 import { deploymentPriorityDefaults, normalizeDeploymentResourcePolicy } from "../lib/deploymentResourcePolicy.js";
 import { localRuntimeHealthUrl } from "../lib/deploymentHealthUrl.js";
+import { nextMiddlewareProxyIssue, nodeBuildTerminatedByMemorySignal } from "../lib/deploymentBuildFailures.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -1159,7 +1160,8 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
   if (composerPlatform?.missingExtensions.includes("gd")) return { message: "Composer is missing the PHP GD extension. Install/enable GD on the VPS, then redeploy.", repairAction: "request-approval", category: "php_extension_gd" };
   if (composerPlatform?.missingExtensions.includes("soap")) return { message: "Composer is missing the PHP SOAP extension. Install/enable SOAP on the VPS, then redeploy.", repairAction: "request-approval", category: "php_extension_soap" };
   if (lower.includes("composer") && (lower.includes("ext-") || lower.includes("requires php extension"))) return { message: "Composer is missing a required PHP extension. Install the extension on the VPS, then redeploy.", repairAction: "request-approval", category: "php_extension" };
-  if (lower.includes("\"middleware\" file convention is deprecated") || lower.includes("middleware-to-proxy")) return { message: "Next.js deprecated the middleware file convention for this app version. Guardian will convert middleware.* to proxy.* in the deployment workspace and retry the build.", repairAction: "redeploy", category: "next_middleware_to_proxy" };
+  if (nodeBuildTerminatedByMemorySignal(text)) return { message: "Server memory pressure terminated the build. Guardian will retry with a smaller Node heap and fewer build workers; add swap or increase the protected deploy budget only if the reduced-worker retry also fails.", repairAction: "set-node-memory", category: "memory" };
+  if (nextMiddlewareProxyIssue(text)) return { message: "Next.js deprecated the middleware file convention for this app version. Guardian will convert middleware.* to proxy.* in the deployment workspace and retry the build.", repairAction: "redeploy", category: "next_middleware_to_proxy" };
   if (lower.includes("next.js") && lower.includes("turbopack") && (lower.includes("exit code 1") || lower.includes("creating an optimized production build"))) return { message: "Next.js 16 uses Turbopack by default and this build failed before a useful compiler diagnostic was emitted. Guardian will retry the same build with the official --webpack fallback.", repairAction: "redeploy", category: "next_turbopack_fallback" };
   if (lower.includes("max-old-space-size=") && (lower.includes("exit code 143") || lower.includes("sigterm"))) return { message: "The build script sets a Node heap larger than the protected deploy budget. Guardian will cap inline and package.json NODE_OPTIONS to the dynamic budget, then retry with fewer Next workers.", repairAction: "set-node-memory", category: "node_inline_heap_budget" };
   if (nodePackageBinaryMissing(text)) {
@@ -1184,7 +1186,6 @@ function knownErrorHint(text: string): { message: string; repairAction: "set-nod
   if (lower.includes("cannot find module") || lower.includes("module_not_found")) return { message: "Missing package or wrong build output. Run dependency install, verify package.json, then redeploy.", repairAction: "redeploy", category: "missing_module" };
   if (lower.includes("pm2 process") && lower.includes("bound to port=") && lower.includes("expected")) return { message: "PM2 started with an app-provided PORT instead of the panel-assigned port. Guardian now forces the managed PORT during PM2 start; redeploy to rewrite the saved PM2 environment.", repairAction: "redeploy", category: "pm2_port_env_mismatch" };
   if (lower.includes("eaddrinuse") || lower.includes("address already in use")) return { message: "Port conflict. Let the doctor redeploy so the worker can move the app to a free managed port.", repairAction: "redeploy", category: "port_conflict" };
-  if (lower.includes("heap out of memory") || lower.includes("javascript heap out of memory") || lower.includes("sigkill") || lower.includes("sigterm") || lower.includes("exit code 143") || lower.includes("killed")) return { message: "Server memory pressure. Deployment Doctor will show the dynamic deploy budget; increase DEPLOY_MAX_MEMORY_MB or add swap if the protected budget is still too small.", repairAction: "set-node-memory", category: "memory" };
   if (lower.includes("dubious ownership") || lower.includes("source sync safe.directory") || lower.includes("safe.directory")) {
     return { message: "Git safe.directory failed inside the deployment runtime. Guardian/sysagent now injects a safe Git config for deployment and Composer commands; retry deploy.", repairAction: "redeploy", category: "git_safe_directory" };
   }

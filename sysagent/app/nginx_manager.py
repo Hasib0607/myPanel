@@ -24,6 +24,12 @@ SERVER_NAMES_HASH_CONFIG_TEXT = (
     "server_names_hash_bucket_size 128;\n"
     "server_names_hash_max_size 8192;\n"
 )
+SITES_ENABLED_DIR = Path("/etc/nginx/sites-enabled")
+SITES_ENABLED_INCLUDE_CONFIG = Path("/etc/nginx/conf.d/00-sites-enabled.conf")
+SITES_ENABLED_INCLUDE_CONFIG_TEXT = (
+    "# Panel-managed vhosts (Debian-compatible layout on AlmaLinux)\n"
+    "include /etc/nginx/sites-enabled/*;\n"
+)
 
 
 def assert_managed_config_name(name: str) -> None:
@@ -367,6 +373,27 @@ def ensure_server_names_hash_config() -> None:
     run_live_step("write nginx server_name hash tuning", lambda: SERVER_NAMES_HASH_CONFIG.write_text(SERVER_NAMES_HASH_CONFIG_TEXT, encoding="utf-8"))
 
 
+def ensure_sites_enabled_include_config() -> None:
+    """Keep AlmaLinux loading the protected panel listeners in sites-enabled."""
+    if not settings.allow_live_nginx or not SITES_ENABLED_DIR.is_dir():
+        return
+    if _nginx_loads_directory(SITES_ENABLED_DIR):
+        return
+    conf_dir = SITES_ENABLED_INCLUDE_CONFIG.parent
+    if not _nginx_loads_directory(conf_dir):
+        return
+    try:
+        current = SITES_ENABLED_INCLUDE_CONFIG.read_text(encoding="utf-8")
+    except OSError:
+        current = ""
+    if current == SITES_ENABLED_INCLUDE_CONFIG_TEXT:
+        return
+    run_live_step(
+        "write sites-enabled include shim",
+        lambda: SITES_ENABLED_INCLUDE_CONFIG.write_text(SITES_ENABLED_INCLUDE_CONFIG_TEXT, encoding="utf-8"),
+    )
+
+
 def _config_dump_sections(text: str) -> list[tuple[str, str]]:
     sections: list[tuple[str, list[str]]] = []
     current_file = ""
@@ -654,6 +681,7 @@ def publish_nginx_config(
 
     run_live_step("prepare config directory", lambda: available.parent.mkdir(parents=True, exist_ok=True))
     run_live_step("prepare enabled directory", lambda: enabled.parent.mkdir(parents=True, exist_ok=True))
+    ensure_sites_enabled_include_config()
     ensure_server_names_hash_config()
 
     if server_name:

@@ -372,9 +372,22 @@ export function detectDeploymentFiles(
   };
 }
 
+function isMobileNativePackage(pkg: PackageJson | null) {
+  return Boolean(pkg && (hasDependency(pkg, "react-native") || hasDependency(pkg, "expo")));
+}
+
 export async function detectDeploymentSource(rootPath: string, rootDirectory = "."): Promise<DeploymentDetection> {
-  const sourceRoot = path.resolve(rootPath, rootDirectory || ".");
-  const files = await fs.readdir(sourceRoot);
+  const nestedRoot = (rootDirectory || ".").replace(/^\/+|\/+$/g, "");
+  const sourceRoot = path.resolve(rootPath, nestedRoot && nestedRoot !== "." ? nestedRoot : ".");
+  let files: string[];
+  try {
+    files = await fs.readdir(sourceRoot);
+  } catch (error) {
+    if (nestedRoot && nestedRoot !== ".") {
+      return detectDeploymentSource(rootPath, ".");
+    }
+    throw error;
+  }
   const packageJson = await readTextIfExists(path.join(sourceRoot, "package.json"));
   const composerJson = await readTextIfExists(path.join(sourceRoot, "composer.json"));
   const detection = detectDeploymentFiles(files, packageJson, composerJson);
@@ -488,10 +501,15 @@ export async function findDeploymentAppRoot(
 ): Promise<DeploymentAppRootCandidate | null> {
   const candidates = await candidatePaths(rootPath, rootDirectory);
   const detected: DeploymentAppRootCandidate[] = [];
+  const resolvedRoot = path.resolve(rootPath);
   for (const candidate of candidates) {
     try {
       const detection = await detectDeploymentSource(candidate, ".");
       if (detection.confidence >= 0.75 || detection.detected !== "STATIC") {
+        const pkg = readPackageJson(await readTextIfExists(path.join(candidate, "package.json")));
+        if (isMobileNativePackage(pkg) && path.resolve(candidate) !== resolvedRoot) {
+          continue;
+        }
         detected.push({
           appPath: candidate,
           detection,
@@ -514,6 +532,10 @@ export async function findDeploymentAppRoot(
     const leftLaravelPublic = left.detection.detected === "LARAVEL" ? Number(left.hasLaravelPublicIndex) : 0;
     const rightLaravelPublic = right.detection.detected === "LARAVEL" ? Number(right.hasLaravelPublicIndex) : 0;
     if (leftLaravelPublic !== rightLaravelPublic) return rightLaravelPublic - leftLaravelPublic;
+
+    const leftDepth = path.relative(path.resolve(rootPath), left.appPath).split(path.sep).filter(Boolean).length;
+    const rightDepth = path.relative(path.resolve(rootPath), right.appPath).split(path.sep).filter(Boolean).length;
+    if (leftDepth !== rightDepth) return leftDepth - rightDepth;
 
     return right.detection.confidence - left.detection.confidence;
   });

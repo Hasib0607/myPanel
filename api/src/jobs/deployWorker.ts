@@ -43,6 +43,7 @@ import {
 } from "../lib/laravelProcesses.js";
 import { normalizeDeploymentResourcePolicy } from "../lib/deploymentResourcePolicy.js";
 import { calculateDeployMemoryBudget } from "../lib/deploymentResourceBudget.js";
+import { nextMiddlewareProxyRepairEligible, nodeBuildTerminatedByMemorySignal } from "../lib/deploymentBuildFailures.js";
 import { deploymentManualStopRequested } from "../lib/deploymentStopControl.js";
 import { sslQueue } from "./queues.js";
 import { runDomainHostSync } from "../lib/domainHostSync.js";
@@ -3368,6 +3369,27 @@ async function reconcileDeploymentRootDirectory(
   appPath: string,
   searchRootPath = deployment.rootPath
 ) {
+  const nestedRoot = (deployment.rootDirectory || ".").replace(/^\/+|\/+$/g, "");
+  if (nestedRoot && nestedRoot !== ".") {
+    try {
+      await fs.access(appPath);
+    } catch {
+      const reset = await prisma.deployment.update({
+        where: { id: deployment.id },
+        data: { rootDirectory: "." },
+        include: deploymentWorkerInclude
+      });
+      await writeLog(deployment.id, releaseId, "PREFLIGHT", "Reset missing nested deployment root directory", {
+        previousRootDirectory: nestedRoot,
+        previousAppPath: appPath,
+        rootDirectory: ".",
+        appPath: searchRootPath
+      }, "warn");
+      deployment = reset;
+      appPath = searchRootPath;
+    }
+  }
+
   const detected = await findDeploymentAppRoot(searchRootPath, deployment.rootDirectory, deployment.framework);
   if (!detected) {
     return { deployment, appPath };
@@ -3381,14 +3403,19 @@ async function reconcileDeploymentRootDirectory(
   }
 
   const relativeRootDirectory = path.relative(rootPath, detectedAppPath);
-  if (!relativeRootDirectory || relativeRootDirectory.startsWith("..") || path.isAbsolute(relativeRootDirectory)) {
+  if (relativeRootDirectory.startsWith("..") || path.isAbsolute(relativeRootDirectory)) {
+    return { deployment, appPath };
+  }
+
+  const nextRootDirectory = relativeRootDirectory || ".";
+  if (nextRootDirectory === (deployment.rootDirectory || ".")) {
     return { deployment, appPath };
   }
 
   const updated = await prisma.deployment.update({
     where: { id: deployment.id },
     data: {
-      rootDirectory: relativeRootDirectory,
+      rootDirectory: nextRootDirectory,
       publicDirectory: detected.detection.detected === "LARAVEL" ? deployment.publicDirectory || "public" : deployment.publicDirectory
     },
     include: deploymentWorkerInclude
@@ -3840,17 +3867,6 @@ function nodeDependencyRepairCommand(packageManager: DeploymentPackageManager | 
   if (packageManager === "PNPM") return "pnpm install --prod=false";
   if (packageManager === "YARN") return "yarn install --production=false";
   return "npm install --include=dev --production=false";
-}
-
-function nodeBuildTerminatedBySigterm(message: string) {
-  return /exit code 143|exit code -15|\bSIGTERM\b|terminated by SIGTERM/i.test(message);
-}
-
-function nextMiddlewareProxyIssue(text: string) {
-  const lower = text.toLowerCase();
-  return lower.includes("\"middleware\" file convention is deprecated")
-    || lower.includes("middleware-to-proxy")
-    || (lower.includes("please use \"proxy\"") && lower.includes("middleware"));
 }
 
 function nextTurbopackBuildFailure(text: string) {
@@ -4775,14 +4791,14 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           return true;
         } catch (retryError) {
           const retryDetail = retryError instanceof Error ? retryError.message : String(retryError);
-          if (nodeBuildTerminatedBySigterm(retryDetail)) {
-            return retryBuildAfterSigterm(retryDetail, `${context} webpack fallback`, webpackBuildCommand);
+          if (nodeBuildTerminatedByMemorySignal(retryDetail)) {
+            return retryBuildAfterMemorySignal(retryDetail, `${context} webpack fallback`, webpackBuildCommand);
           }
           throw retryError;
         }
       };
       const retryBuildAfterNextMiddlewareRepair = async (detail: string, context: string) => {
-        if (!nextMiddlewareProxyIssue(detail)) return false;
+        if (!nextMiddlewareProxyRepairEligible(detail)) return false;
         const repaired = await repairNextMiddlewareProxyConvention(appPath);
         await writeLog(deployment.id, releaseId, "BUILDING", "Repaired deprecated Next middleware convention", {
           context,
@@ -4800,14 +4816,14 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           if (await retryBuildWithWebpack(retryDetail, "after Next proxy repair")) {
             return true;
           }
-          if (nodeBuildTerminatedBySigterm(retryDetail)) {
-            return retryBuildAfterSigterm(retryDetail, "after Next proxy repair");
+          if (nodeBuildTerminatedByMemorySignal(retryDetail)) {
+            return retryBuildAfterMemorySignal(retryDetail, "after Next proxy repair");
           }
           throw retryError;
         }
         return true;
       };
-      const retryBuildAfterSigterm = async (detail: string, context: string, command = defaultBuildCommand) => {
+      const retryBuildAfterMemorySignal = async (detail: string, context: string, command = defaultBuildCommand) => {
         const startingWorkers = currentNextWorkers(envVars, deployBudget);
         const workerTargets = [...new Set([
           Math.max(1, Math.floor(startingWorkers / 2)),
@@ -4831,18 +4847,18 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
             nodeHeapMb: heapMb,
             command: commandWithManagedNodeHeap(command, heapMb)
           }, "warn");
-          const retryResult = await runBuild(`Build retry after SIGTERM with ${workers} worker${workers === 1 ? "" : "s"}`, command, heapMb);
+          const retryResult = await runBuild(`Build retry after memory pressure with ${workers} worker${workers === 1 ? "" : "s"}`, command, heapMb);
           try {
-            assertCommandTree(retryResult, `Build retry after SIGTERM with ${workers} worker${workers === 1 ? "" : "s"}`);
+            assertCommandTree(retryResult, `Build retry after memory pressure with ${workers} worker${workers === 1 ? "" : "s"}`);
             return true;
           } catch (retryError) {
             lastDetail = retryError instanceof Error ? retryError.message : String(retryError);
-            if (!nodeBuildTerminatedBySigterm(lastDetail)) {
+            if (!nodeBuildTerminatedByMemorySignal(lastDetail)) {
               throw retryError;
             }
           }
         }
-        throw new Error(`${lastDetail}\n\nNode build is still being terminated with SIGTERM/143 after the retry ladder. Deploy budget: ${deployBudget.summary.deployMemoryMb}MB memory, ${deployBudget.summary.cpuQuotaPercent}% CPU, Node heap ${deployBudget.summary.nodeHeapMb}MB, apps reserved ${deployBudget.summary.appReserveMb}MB, system reserved ${deployBudget.summary.systemReserveMb}MB. Increase DEPLOY_MAX_MEMORY_MB or add swap if running apps have enough reserve.`);
+        throw new Error(`${lastDetail}\n\nNode build is still being terminated by memory pressure after the reduced-worker retry ladder. Deploy budget: ${deployBudget.summary.deployMemoryMb}MB memory, ${deployBudget.summary.cpuQuotaPercent}% CPU, Node heap ${deployBudget.summary.nodeHeapMb}MB, apps reserved ${deployBudget.summary.appReserveMb}MB, system reserved ${deployBudget.summary.systemReserveMb}MB. Increase DEPLOY_MAX_MEMORY_MB or add swap if running apps have enough reserve.`);
       };
       let buildResult = await runBuild();
       try {
@@ -4854,14 +4870,14 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           ? deployment.packageManager
           : frontendAssets.hasPackageJson ? frontendAssets.packageManager : null;
         let buildRecovered = false;
-        if (nextMiddlewareProxyIssue(detail)) {
+        if (nodeBuildTerminatedByMemorySignal(detail) && repairPackageManager) {
+          buildRecovered = await retryBuildAfterMemorySignal(detail, "initial build");
+        }
+        if (!buildRecovered && nextMiddlewareProxyRepairEligible(detail)) {
           buildRecovered = await retryBuildAfterNextMiddlewareRepair(detail, "initial build");
         }
         if (!buildRecovered && nextTurbopackBuildFailure(detail)) {
           buildRecovered = await retryBuildWithWebpack(detail, "initial build");
-        }
-        if (nodeBuildTerminatedBySigterm(detail) && repairPackageManager) {
-          buildRecovered = await retryBuildAfterSigterm(detail, "initial build");
         }
         if (!buildRecovered && prismaDatabaseAuthFailure(detail)) {
           const repairedDatabaseEnv = await autoRepairDatabaseAccess(deployment, releaseId, appPath, detail, envVars).catch(() => null);
@@ -4898,14 +4914,14 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           } catch (retryError) {
             const retryDetail = retryError instanceof Error ? retryError.message : String(retryError);
             let dependencyRepairRecovered = false;
-            if (nextMiddlewareProxyIssue(retryDetail)) {
+            if (nodeBuildTerminatedByMemorySignal(retryDetail)) {
+              dependencyRepairRecovered = await retryBuildAfterMemorySignal(retryDetail, "dependency repair");
+            }
+            if (!dependencyRepairRecovered && nextMiddlewareProxyRepairEligible(retryDetail)) {
               dependencyRepairRecovered = await retryBuildAfterNextMiddlewareRepair(retryDetail, "dependency repair");
             }
             if (!dependencyRepairRecovered && nextTurbopackBuildFailure(retryDetail)) {
               dependencyRepairRecovered = await retryBuildWithWebpack(retryDetail, "dependency repair");
-            }
-            if (nodeBuildTerminatedBySigterm(retryDetail)) {
-              dependencyRepairRecovered = await retryBuildAfterSigterm(retryDetail, "dependency repair");
             }
             if (!dependencyRepairRecovered) {
               throw new Error(`${retryDetail}\n\nGuardian reinstalled Node dependencies with devDependencies because a local build binary was missing, but the build still failed.`);

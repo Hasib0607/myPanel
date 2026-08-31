@@ -190,6 +190,48 @@ test("findLaravelAppRoot follows public/index.php markers in repeated nested upl
   }
 });
 
+test("detectDeploymentSource falls back to repo root when nested directory is missing", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "deployment-detection-"));
+  try {
+    await fs.writeFile(path.join(root, "package.json"), JSON.stringify({
+      scripts: { build: "vite build", start: "node ./scripts/serve-production.mjs" },
+      dependencies: { react: "^19.0.0", vite: "^6.0.0" }
+    }));
+    await fs.writeFile(path.join(root, "vite.config.js"), "export default {}\n");
+
+    const detection = await detectDeploymentSource(root, "Admin_Mobile_App");
+    assert.equal(detection.detected, "NODEJS");
+    assert.equal(detection.rootPath, path.resolve(root));
+  } finally {
+    await fs.rm(root, { force: true, recursive: true });
+  }
+});
+
+test("findDeploymentAppRoot prefers the Vite web app over a nested Expo folder", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "deployment-detection-"));
+  try {
+    await fs.writeFile(path.join(root, "package.json"), JSON.stringify({
+      scripts: { build: "vite build", start: "node ./scripts/serve-production.mjs" },
+      dependencies: { react: "^19.0.0" },
+      devDependencies: { vite: "^6.0.0" }
+    }));
+    await fs.writeFile(path.join(root, "vite.config.js"), "export default {}\n");
+
+    const mobile = path.join(root, "Admin_Mobile_App");
+    await fs.mkdir(mobile, { recursive: true });
+    await fs.writeFile(path.join(mobile, "package.json"), JSON.stringify({
+      scripts: { start: "expo start", android: "expo start --android" },
+      dependencies: { expo: "~51.0.0", react: "18.2.0", "react-native": "0.74.5" }
+    }));
+
+    const detected = await findDeploymentAppRoot(root, ".", "NODEJS");
+    assert.equal(detected?.appPath, path.resolve(root));
+    assert.equal(detected?.detection.detected, "NODEJS");
+  } finally {
+    await fs.rm(root, { force: true, recursive: true });
+  }
+});
+
 test("findDeploymentAppRoot detects nested React and Node app folders", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "deployment-detection-"));
   try {
