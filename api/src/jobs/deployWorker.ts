@@ -356,6 +356,16 @@ async function removeReleaseArtifactPath(artifactPath: string | null | undefined
   return true;
 }
 
+async function releaseArtifactPathExists(artifactPath: string | null | undefined) {
+  if (!artifactPath) return false;
+  try {
+    await fs.access(artifactPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function pruneDeploymentReleaseArtifacts(
   deploymentId: string,
   releaseId: string | undefined,
@@ -4434,6 +4444,8 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
 async function processDeploy(action: string, deploymentId: string, releaseId: string | undefined): Promise<Record<string, unknown>> {
   const startedAt = new Date();
   let deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: deploymentWorkerInclude });
+  const initialDeploymentStatus = deployment.status;
+  const initialHealthStatus = deployment.healthStatus;
   if (deploymentManualStopRequested(deployment.processConfig)) {
     await cancelReleaseForManualStop(deployment.id, releaseId, startedAt);
     await writeLog(deployment.id, releaseId, "STARTING", "Deploy skipped because the deployment is manually stopped", {
@@ -4465,7 +4477,19 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         sysagent.ensureWebRuntimeOptimizations()
       );
     }
-    const rollbackArtifactPath = action === "rollback" && release?.artifactPath ? release.artifactPath : null;
+    let rollbackArtifactPath = action === "rollback" && release?.artifactPath ? release.artifactPath : null;
+    if (rollbackArtifactPath && !await releaseArtifactPathExists(rollbackArtifactPath)) {
+      await writeLog(deployment.id, releaseId, "ROLLBACK", "Rollback release artifact is missing; falling back to source rebuild when possible", {
+        artifactRootPath: rollbackArtifactPath,
+        commitSha: release?.commitSha ?? null
+      }, "warn");
+      await prisma.deploymentRelease.updateMany({
+        where: { id: releaseId, deploymentId: deployment.id },
+        data: { artifactPath: null }
+      });
+      rollbackArtifactPath = null;
+    }
+    const usingRollbackArtifact = Boolean(rollbackArtifactPath);
     const shouldUseAtomicArtifact = !rollbackArtifactPath && deploymentUsesAtomicArtifact(deployment);
     let workingRootPath = rollbackArtifactPath || (shouldUseAtomicArtifact ? deploymentReleaseRootPath(deployment, releaseId) : deployment.rootPath);
     artifactRootPath = workingRootPath !== deployment.rootPath ? workingRootPath : null;
@@ -4595,7 +4619,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       await ensurePythonVenvRuntime(deployment.id, releaseId, appPath, renderStartCommand(deployment));
     }
 
-    if (deployment.installCommand || deployment.packageManager) {
+    if ((deployment.installCommand || deployment.packageManager) && !usingRollbackArtifact) {
       await assertDeploymentNotManuallyStopped(deployment.id);
       await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "BUILDING" } });
       const installCommandText = deployment.framework === "PYTHON"
@@ -4649,9 +4673,13 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           throw new Error(`${retryDetail}\n\nComposer platform auto-repair was attempted but the dependency install still failed. Deployment Doctor has a pending repair target for the detected PHP platform issue.`);
         }
       }
+    } else if (usingRollbackArtifact) {
+      await writeLog(deployment.id, releaseId, "INSTALLING", "Dependency install skipped for rollback artifact", {
+        reason: "Rollback is reusing the previously built release artifact to avoid mutating or rebuilding the last good release."
+      });
     }
 
-    if (await deploymentRunsLaravel(deployment.framework, appPath)) {
+    if (await deploymentRunsLaravel(deployment.framework, appPath) && !usingRollbackArtifact) {
       envVars = await ensureLaravelAppKey(deployment.id, releaseId, appPath, deployment.port, envVars);
       envVars = await ensureLaravelDatabaseConnection(deployment, releaseId, appPath, deployment.port, envVars);
       const installedGoogleDriveSupport = await ensureLaravelGoogleDriveSupport(deployment.id, releaseId, appPath, envVars);
@@ -4751,7 +4779,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       await writeLog(deployment.id, releaseId, "MIGRATING", "Migration skipped for framework", { framework: deployment.framework });
     }
 
-    if (deployment.buildCommand) {
+    if (deployment.buildCommand && !usingRollbackArtifact) {
       await assertDeploymentNotManuallyStopped(deployment.id);
       const rawDefaultBuildCommand = renderDeploymentCommand(deployment.buildCommand, deployment.port);
       const defaultBuildCommand = commandWithManagedNodeHeap(rawDefaultBuildCommand, deployBudget.summary.nodeHeapMb);
@@ -4929,6 +4957,10 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           }
         }
       }
+    } else if (deployment.buildCommand && usingRollbackArtifact) {
+      await writeLog(deployment.id, releaseId, "BUILDING", "Build skipped for rollback artifact", {
+        reason: "Rollback is reusing the previously successful build output instead of running a new build under memory pressure."
+      }, "warn");
     }
 
     if (domain && await deploymentRunsLaravel(deployment.framework, appPath)) {
@@ -5250,7 +5282,9 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       return { dryRun: false, completed: false, cancelled: true, status: "STOPPED", healthStatus: "DOWN" };
     }
     await markRelease(releaseId, "FAILED", startedAt);
-    const removedFailedArtifact = await removeReleaseArtifactPath(artifactRootPath, deployment.rootPath).catch(() => false);
+    const removedFailedArtifact = action === "rollback"
+      ? false
+      : await removeReleaseArtifactPath(artifactRootPath, deployment.rootPath).catch(() => false);
     await writeLog(deployment.id, releaseId, "FAILED", `${action} failed`, { error: message }, "error");
     if (removedFailedArtifact && releaseId) {
       await prisma.deploymentRelease.updateMany({
@@ -5270,12 +5304,18 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         },
         orderBy: { createdAt: "desc" }
       });
-      const rollbackHasUsableSource = previousRelease && (!deployment.gitUrl || previousRelease.commitSha);
+      const previousReleaseHasArtifact = await releaseArtifactPathExists(previousRelease?.artifactPath);
+      const rollbackHasUsableSource = previousRelease && (
+        deploymentUsesAtomicArtifact(deployment)
+          ? previousReleaseHasArtifact
+          : (!deployment.gitUrl || previousRelease.commitSha)
+      );
       if (rollbackHasUsableSource) {
         await writeLog(deployment.id, releaseId, "ROLLBACK", "Auto rollback to last successful release started", {
           failedReleaseId: releaseId ?? null,
           rollbackReleaseId: previousRelease.id,
-          commitSha: previousRelease.commitSha
+          commitSha: previousRelease.commitSha,
+          artifactPath: previousRelease.artifactPath
         }, "warn");
         try {
           const rollback: Record<string, unknown> = await processDeploy("rollback", deployment.id, previousRelease.id);
@@ -5298,11 +5338,28 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           previousReleaseId: previousRelease?.id ?? null,
           previousReleaseStatus: previousRelease?.status ?? null,
           hasCommitSha: Boolean(previousRelease?.commitSha),
+          hasArtifactPath: Boolean(previousRelease?.artifactPath),
+          artifactPathExists: previousReleaseHasArtifact,
           gitUrl: Boolean(deployment.gitUrl)
         }, "warn");
       }
     }
-    await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "FAILED", healthStatus: "DOWN" } });
+    if (initialDeploymentStatus === "RUNNING") {
+      await prisma.deployment.update({
+        where: { id: deployment.id },
+        data: {
+          status: "RUNNING",
+          healthStatus: initialHealthStatus === "HEALTHY" ? "DEGRADED" : initialHealthStatus
+        }
+      });
+      await writeLog(deployment.id, releaseId, "FAILED", `${action} failed; preserved existing running release`, {
+        error: message,
+        previousStatus: initialDeploymentStatus,
+        previousHealthStatus: initialHealthStatus
+      }, "warn");
+    } else {
+      await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "FAILED", healthStatus: "DOWN" } });
+    }
     throw error;
   }
 }
