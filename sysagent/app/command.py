@@ -70,7 +70,12 @@ def systemd_scope_command(command: Sequence[str], limits: dict[str, Any] | None)
     io_weight = _limit_value(limits, "ioWeight")
     args = ["systemd-run", "--scope", "--quiet", "--collect"]
     if memory_mb:
-        args.extend(["-p", f"MemoryMax={memory_mb}M", "-p", "MemorySwapMax=0"])
+        # Keep the hard RAM cap so builds cannot steal memory from running
+        # customer apps, but do not disable swap inside the transient scope.
+        # Heavy Next.js builds can briefly exceed their resident-memory budget;
+        # when the host has swap, allowing cgroup swap prevents kernel SIGKILL
+        # without increasing the protected RAM budget.
+        args.extend(["-p", f"MemoryMax={memory_mb}M"])
     if cpu_quota:
         args.extend(["-p", f"CPUQuota={cpu_quota}%"])
     if tasks_max:
