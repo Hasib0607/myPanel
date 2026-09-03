@@ -36,7 +36,7 @@ import {
   queueGroupCommand,
   renderLaravelProcessCommand
 } from "../lib/laravelProcesses.js";
-import { assertDomainUsesHostingNameServers, defaultRecords, domainNameserverReadiness, withLiveDomainSsl } from "./domains.js";
+import { assertDomainUsesHostingNameServers, defaultRecords, domainNameserverReadiness, managedSubdomainReadiness, withLiveDomainSsl } from "./domains.js";
 import { renderZone } from "./dns.js";
 import { refreshDomainHostSsl, refreshSubdomainHostSsl, syncDomainHostRows, syncSubdomainHostRow } from "../lib/domainHosts.js";
 import { sslExpiryStatus, sslHostStatus } from "../lib/sslHostStatus.js";
@@ -1947,6 +1947,8 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
 
   app.get("/domains/readiness", async (request: any) => {
     const query = z.object({ name: domainNameSchema }).parse(request.query);
+    const managedParent = await findAccountManagedParentDomain(accountId(request), query.name);
+    if (managedParent) return managedSubdomainReadiness(query.name, managedParent);
     return domainNameserverReadiness(query.name, await activeNameServers());
   });
 

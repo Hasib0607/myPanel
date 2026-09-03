@@ -312,6 +312,24 @@ export async function domainNameserverReadiness(domain: string, nameServers: Act
   };
 }
 
+export function managedSubdomainReadiness(domain: string, managedParent: { parent: { id: string; name: string }; subdomainName: string }) {
+  return {
+    domain,
+    kind: "subdomain" as const,
+    ok: true,
+    status: "READY" as const,
+    expectedNameServers: [] as string[],
+    expectedNameServerGroups: [] as string[][],
+    currentNameServers: [] as string[],
+    managedParentDomain: {
+      id: managedParent.parent.id,
+      name: managedParent.parent.name
+    },
+    subdomainName: managedParent.subdomainName,
+    message: `${domain} will be added as a subdomain of ${managedParent.parent.name}; no registrar nameserver update is required.`
+  };
+}
+
 async function domainNameserverPendingReason(domain: string, nameServers: ActiveNameServer[]) {
   try {
     await assertDomainUsesHostingNameServers(domain, nameServers);
@@ -803,6 +821,8 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
 
   app.get("/readiness", async (request) => {
     const query = z.object({ name: domainNameSchema }).parse(request.query);
+    const managedParent = await findManagedParentDomain(query.name);
+    if (managedParent) return managedSubdomainReadiness(query.name, managedParent);
     return domainNameserverReadiness(query.name, await getActiveNameServers());
   });
 

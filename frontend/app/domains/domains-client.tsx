@@ -94,10 +94,13 @@ type BulkDomainActionResponse = {
 
 type DomainReadinessResponse = {
   domain: string;
+  kind?: "domain" | "subdomain";
   ok: boolean;
   status: "READY" | "PENDING";
   expectedNameServers: string[];
   currentNameServers: string[];
+  managedParentDomain?: Pick<Domain, "id" | "name">;
+  subdomainName?: string;
   dns?: {
     apex?: { host: string; expectedIp: string; records: string[]; ok: boolean; message: string };
     www?: { host: string; expectedIp: string; records: string[]; ok: boolean; message: string };
@@ -105,6 +108,16 @@ type DomainReadinessResponse = {
   };
   message: string;
 };
+
+type SubdomainShortcutResponse = {
+  kind: "subdomain";
+  name: string;
+  parentDomain: Pick<Domain, "id" | "name">;
+  subdomain: Domain["subdomains"][number];
+  publishWarning?: string;
+};
+
+type CreateDomainResponse = Domain | SubdomainShortcutResponse;
 
 type SortColumn = "domain" | "status" | "dns" | "mailboxes" | "subdomains" | "hosting" | "ssl";
 type SortDirection = "asc" | "desc";
@@ -127,6 +140,21 @@ function sslLabel(domain: Domain) {
 
 function sslHostCovered(host: { sslEnabled?: boolean; covered?: boolean }) {
   return Boolean(host.sslEnabled ?? host.covered);
+}
+
+function managedParentDomainForInput(input: string, domains: Domain[]) {
+  if (!input || input.startsWith("*.")) return null;
+  return domains
+    .filter((domain) => input !== domain.name && input.endsWith(`.${domain.name}`))
+    .sort((left, right) => right.name.length - left.name.length)[0] ?? null;
+}
+
+function subdomainNameForParent(input: string, parentName: string) {
+  return input.slice(0, -(parentName.length + 1));
+}
+
+function isSubdomainShortcutResponse(response: CreateDomainResponse): response is SubdomainShortcutResponse {
+  return "kind" in response && response.kind === "subdomain";
 }
 
 function sslSummary(domain: Domain) {
@@ -240,17 +268,22 @@ export function DomainsClient({
     queryKey: ["domains", apiBase, search, page],
     queryFn: () => apiGet<DomainListResponse>(queryPath)
   });
+  const visibleDomains = domains.data?.items ?? [];
+  const managedParentDomain = useMemo(
+    () => managedParentDomainForInput(normalizedNewDomain, visibleDomains),
+    [normalizedNewDomain, visibleDomains]
+  );
+  const managedSubdomainName = managedParentDomain ? subdomainNameForParent(normalizedNewDomain, managedParentDomain.name) : "";
   const newDomainReadiness = useQuery({
     queryKey: ["domain-readiness", apiBase, normalizedNewDomain],
     queryFn: () => apiGet<DomainReadinessResponse>(`${apiBase}/readiness?name=${encodeURIComponent(normalizedNewDomain)}`),
-    enabled: Boolean(normalizedNewDomain && validDomainInput(normalizedNewDomain) && !normalizedNewDomain.startsWith("*."))
+    enabled: Boolean(normalizedNewDomain && validDomainInput(normalizedNewDomain) && !normalizedNewDomain.startsWith("*.") && !managedParentDomain)
   });
   const deployments = useQuery({
     queryKey: ["deployments", deploymentApiBase, "domain-hosting"],
     queryFn: () => apiGet<DeploymentListResponse | Deployment[]>(`${deploymentApiBase}?page=1&pageSize=100`)
   });
   const deploymentItems = Array.isArray(deployments.data) ? deployments.data : deployments.data?.items ?? [];
-  const visibleDomains = domains.data?.items ?? [];
   const sortedVisibleDomains = useMemo(() => {
     if (!sort) return visibleDomains;
     const items = [...visibleDomains];
@@ -302,12 +335,14 @@ export function DomainsClient({
   const selectedCount = selectedDomainIds.length;
 
   const createDomain = useMutation({
-    mutationFn: () => apiPost<Domain>(apiBase, { name: normalizedNewDomain, forceSsl }),
-    onSuccess: async (domain) => {
+    mutationFn: () => apiPost<CreateDomainResponse>(apiBase, { name: normalizedNewDomain, forceSsl }),
+    onSuccess: async (response) => {
       setNewDomain("");
       setForceSsl(true);
       setError("");
-      setNotice(`${domain.name} added with default DNS records.`);
+      setNotice(isSubdomainShortcutResponse(response)
+        ? `Subdomain ${response.name} added under ${response.parentDomain.name}.${response.publishWarning ? ` ${response.publishWarning}` : ""}`
+        : `${response.name} added with default DNS records.`);
       setSearch("");
       setDraftSearch("");
       setPage(1);
@@ -508,7 +543,7 @@ export function DomainsClient({
       setError("Enter a valid root domain like example.com, or a wildcard subdomain like *.example.com.");
       return;
     }
-    if (!normalizedNewDomain.startsWith("*.") && newDomainReadiness.data && !newDomainReadiness.data.ok) {
+    if (!managedParentDomain && !normalizedNewDomain.startsWith("*.") && newDomainReadiness.data && !newDomainReadiness.data.ok) {
       setError(newDomainReadiness.data.message);
       return;
     }
@@ -569,15 +604,34 @@ export function DomainsClient({
               </label>
               <button
                 className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-4 text-sm font-semibold text-white disabled:opacity-60"
-                disabled={createDomain.isPending || Boolean(newDomainReadiness.data && !newDomainReadiness.data.ok)}
+                disabled={createDomain.isPending || Boolean(!managedParentDomain && newDomainReadiness.data && !newDomainReadiness.data.ok)}
                 type="submit"
               >
                 <Plus size={16} />
                 {createDomain.isPending ? "Adding" : "Add"}
               </button>
-              {newDomainReadiness.data || newDomainReadiness.isFetching ? (
+              {managedParentDomain || newDomainReadiness.data || newDomainReadiness.isFetching ? (
                 <div className="absolute right-0 top-12 z-20 w-[36rem] rounded-md border border-panel-line bg-white p-3 text-xs shadow-lg">
-                  {newDomainReadiness.isFetching ? (
+                  {managedParentDomain ? (
+                    <div className="space-y-2">
+                      <div className="font-semibold text-emerald-700">Managed subdomain ready</div>
+                      <div className="grid gap-2 md:grid-cols-2">
+                        <div className="rounded-md bg-emerald-50 p-2">
+                          <div className="font-semibold text-emerald-700">{normalizedNewDomain}</div>
+                          <div className="mt-1 text-panel-muted">
+                            This will be added as <span className="font-mono text-panel-text">{managedSubdomainName}</span> under{" "}
+                            <span className="font-mono text-panel-text">{managedParentDomain.name}</span>.
+                          </div>
+                        </div>
+                        <div className="rounded-md bg-slate-50 p-2">
+                          <div className="font-semibold text-panel-text">No registrar DNS update needed</div>
+                          <div className="mt-1 text-panel-muted">
+                            The panel will create the DNS record and hosting route inside the existing managed parent zone.
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ) : newDomainReadiness.isFetching ? (
                     <div className="text-panel-muted">Checking nameservers...</div>
                   ) : newDomainReadiness.data ? (
                     <div className="space-y-2">
