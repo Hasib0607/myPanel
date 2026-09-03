@@ -120,6 +120,14 @@ export function AccountsClient() {
       setNotice(error instanceof Error ? error.message : "Could not login as account.");
     }
   });
+  const loginTargetId = loginAsAccount.isPending ? loginAsAccount.variables?.id : null;
+  const handleLoginAsAccount = (account: Account) => {
+    if (account.status !== "ACTIVE") {
+      setNotice(`${account.username} is suspended or unavailable. Activate the account before logging in.`);
+      return;
+    }
+    loginAsAccount.mutate({ id: account.id, targetWindow: window.open("about:blank", "_blank") });
+  };
 
   const deleteAccount = useMutation({
     mutationFn: (id: string) => apiDelete(`/accounts/${id}?linkedResourceAction=unassign`),
@@ -199,6 +207,7 @@ export function AccountsClient() {
           </div>
         </div>
         <div>
+          {notice ? <div className="border-b border-panel-line bg-slate-50 px-4 py-3 text-sm text-slate-700">{notice}</div> : null}
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs text-panel-muted">
               <tr>
@@ -216,20 +225,22 @@ export function AccountsClient() {
                   <td className="px-4 py-3">
                     <div className="flex min-w-56 items-center gap-2">
                       <UserRound className="text-panel-muted" size={16} />
-                      <div className="min-w-0">
+                      <div className="min-w-0 flex-1">
                         <div className="flex min-w-0 items-center gap-2">
-                          <Link className="truncate font-semibold text-panel-accent hover:underline" href={`/accounts/${account.id}`}>{account.username}</Link>
+                          <Link className="block min-w-0 flex-1 rounded-sm outline-none hover:bg-slate-50 focus-visible:ring-2 focus-visible:ring-panel-accent/40" href={`/accounts/${account.id}`} title={`Open ${account.username} account`}>
+                            <span className="block truncate font-semibold text-panel-accent hover:underline">{account.username}</span>
+                            <span className="mt-1 block truncate font-mono text-xs text-panel-muted">{account.homeRoot}</span>
+                          </Link>
                           <button
                             className="shrink-0 rounded-md border border-panel-line p-1.5 text-panel-muted hover:bg-slate-50 hover:text-panel-accent disabled:cursor-not-allowed disabled:opacity-50"
-                            disabled={account.status !== "ACTIVE" || loginAsAccount.isPending}
-                            onClick={() => loginAsAccount.mutate({ id: account.id, targetWindow: window.open("about:blank", "_blank") })}
-                            title="Login as account in new tab"
+                            disabled={loginTargetId === account.id}
+                            onClick={() => handleLoginAsAccount(account)}
+                            title={account.status === "ACTIVE" ? "Login as account in new tab" : "Activate this account before logging in"}
                             type="button"
                           >
                             <LogIn size={13} />
                           </button>
                         </div>
-                        <div className="mt-1 truncate font-mono text-xs text-panel-muted">{account.homeRoot}</div>
                       </div>
                     </div>
                   </td>
