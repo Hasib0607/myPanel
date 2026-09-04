@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { appendFrontendModuleNotFoundHint, detectComposerPlatformIssue, detectFrontendModuleNotFound, envDrivenRuntimeExecutables, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "./deploymentRuntimeTools.js";
-import { frontendModuleNotFound, laravelPublicCwdMissing, nodePackageBinaryMissing, prismaDatabaseAuthFailure, pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded, supervisorStartStillStarting } from "./deploymentFailureRuntimeRepairs.js";
+import { deploymentEnvironmentConfigurationFailure, frontendModuleNotFound, laravelPublicCwdMissing, nodePackageBinaryMissing, permissionRepairNeeded, prismaDatabaseAuthFailure, pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded, supervisorStartStillStarting } from "./deploymentFailureRuntimeRepairs.js";
 
 test("composer PHP 8.1 requirement on PHP 8.0 queues PHP 8.2 runtime repair", () => {
   const targets = runtimeInstallTargetsForComposerPlatformIssue(`
@@ -318,6 +318,22 @@ test("failed deploy parser detects Supervisor spawn repair separately from tool 
 
   assert.equal(supervisorRepairNeeded(log), true);
   assert.deepEqual(runtimeTargetsForFailedDeploymentLog(log).map((target) => target.actionKey), ["install-supervisor"]);
+});
+
+test("failed deploy parser treats missing OpenAI credentials as app env configuration", () => {
+  const log = `
+    Process start failed with exit code 1: start: ecommercex-sales: ERROR (spawn error)
+    Runtime logs:
+    File "/var/www/deployments/ecommercex-sales/app.py", line 299, in <module>
+      client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    openai.OpenAIError: Missing credentials. Please pass an api_key, workload_identity, admin_api_key,
+    or set the OPENAI_API_KEY or OPENAI_ADMIN_KEY environment variable.
+  `;
+
+  assert.equal(deploymentEnvironmentConfigurationFailure(log), true);
+  assert.equal(supervisorRepairNeeded(log), false);
+  assert.equal(permissionRepairNeeded(log), false);
+  assert.deepEqual(runtimeTargetsForFailedDeploymentLog(log), []);
 });
 
 test("failed deploy parser detects transient Supervisor STARTING race", () => {

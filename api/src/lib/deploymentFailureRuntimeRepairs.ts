@@ -15,6 +15,7 @@ export function pythonRuntimeRepairNeeded(text: string) {
 }
 
 export function supervisorRepairNeeded(text: string) {
+  if (deploymentEnvironmentConfigurationFailure(text)) return false;
   const lower = text.toLowerCase();
   return (lower.includes("supervisor") || lower.includes("supervisorctl"))
     && (lower.includes("spawn error") || lower.includes("can't spawn") || lower.includes("cannot spawn") || lower.includes("backoff") || lower.includes("exited too quickly"));
@@ -42,6 +43,7 @@ export function frontendModuleNotFound(text: string) {
 }
 
 export function permissionRepairNeeded(text: string) {
+  if (deploymentEnvironmentConfigurationFailure(text)) return false;
   const lower = text.toLowerCase();
   return lower.includes("permission denied")
     || lower.includes("eacces")
@@ -76,10 +78,32 @@ export function prismaDatabaseAuthFailure(text: string) {
     && lower.includes("credentials");
 }
 
+export function deploymentEnvironmentConfigurationFailure(text: string) {
+  const lower = text.toLowerCase();
+  return (
+    (lower.includes("openai.openaierror") || lower.includes("missing credentials"))
+    && (
+      lower.includes("openai_api_key")
+      || lower.includes("openai_admin_key")
+      || lower.includes("api_key")
+      || lower.includes("environment variable")
+    )
+  ) || (
+    lower.includes("missing credentials")
+    && lower.includes("please pass an")
+    && lower.includes("environment variable")
+  );
+}
+
 export function runtimeTargetsForFailedDeploymentLog(text: string) {
   const lower = text.toLowerCase();
   const missingTools = new Set<string>();
   const targets: RuntimeInstallTarget[] = [];
+
+  if (deploymentEnvironmentConfigurationFailure(text)) {
+    return [];
+  }
+
   for (const match of text.matchAll(/Missing runtime tools(?:\s+on\s+the\s+server)?:\s*([^\n.]+)/ig)) {
     for (const item of match[1].split(",")) {
       const tool = item.trim().replace(/[`'"]/g, "");

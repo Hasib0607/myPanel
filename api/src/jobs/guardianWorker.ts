@@ -9,9 +9,9 @@ import { prisma } from "../lib/prisma.js";
 import { sysagent } from "../lib/sysagent.js";
 import { checkPanelRemoteUpdate } from "../lib/panelUpdateMonitor.js";
 import { runDeploymentAutoDeployPoll } from "../lib/deploymentAutoDeployPoller.js";
-import { deployQueue } from "./queues.js";
+import { deployQueue, sslQueue } from "./queues.js";
 import { requiredRuntimeExecutables, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
-import { laravelPublicCwdMissing, nginxProxyMissingDomainFailure, permissionRepairNeeded, prismaDatabaseAuthFailure, pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded } from "../lib/deploymentFailureRuntimeRepairs.js";
+import { deploymentEnvironmentConfigurationFailure, laravelPublicCwdMissing, nginxProxyMissingDomainFailure, permissionRepairNeeded, prismaDatabaseAuthFailure, pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded } from "../lib/deploymentFailureRuntimeRepairs.js";
 import path from "node:path";
 import { Redis as AppRedis } from "ioredis";
 import {
@@ -22,6 +22,7 @@ import {
 import { normalizeDeploymentResourcePolicy } from "../lib/deploymentResourcePolicy.js";
 import { runDomainHostSync } from "../lib/domainHostSync.js";
 import { reconcileManagedDnsZones } from "../lib/dnsZoneReconcile.js";
+import { certbotCertificateName, isWildcardHostname, wildcardProbeHostname } from "../lib/nginxNames.js";
 
 const staleDeploymentMs = Number(process.env.GUARDIAN_STALE_DEPLOYMENT_MS ?? 6 * 60_000);
 const queuedReleaseRecoveryMs = Number(process.env.GUARDIAN_QUEUED_RELEASE_RECOVERY_MS ?? 90_000);
@@ -29,6 +30,7 @@ const deployQueueScanLimit = Number(process.env.GUARDIAN_DEPLOY_QUEUE_SCAN_LIMIT
 const autoDeployRepairEnabled = process.env.GUARDIAN_AUTO_DEPLOY_REPAIR !== "false";
 const autoDeployCooldownMs = Number(process.env.GUARDIAN_AUTO_DEPLOY_COOLDOWN_MS ?? 30 * 60_000);
 const autoDeployMaxAttempts = Number(process.env.GUARDIAN_AUTO_DEPLOY_MAX_ATTEMPTS_PER_HOUR ?? 2);
+const sslRenewQueueDays = Number(process.env.GUARDIAN_SSL_RENEW_QUEUE_DAYS ?? 30);
 const laravelProductionKeys = ["APP_ENV", "APP_DEBUG", "LOG_LEVEL", "CACHE_DRIVER", "CACHE_STORE", "SESSION_DRIVER", "QUEUE_CONNECTION", "REDIS_CLIENT"] as const;
 
 function deploymentAppPath(rootPath: string, rootDirectory: string | null | undefined) {
@@ -338,18 +340,20 @@ async function guardianApplyFailureRepairs(
   const publicCwdMissing = laravelPublicCwdMissing(failureText);
   const proxyMissingDomain = nginxProxyMissingDomainFailure(failureText);
   const prismaDbAuthFailure = prismaDatabaseAuthFailure(failureText);
+  const envConfigFailure = deploymentEnvironmentConfigurationFailure(failureText);
 
   await prisma.deploymentLog.create({
     data: {
       deploymentId: deployment.id,
       step: "PREFLIGHT",
-      level: runtimeTargets.length || publicCwdMissing || proxyMissingDomain || supervisorRepairNeeded(failureText) || permissionRepairNeeded(failureText) || pythonRuntimeRepairNeeded(failureText) ? "warn" : "info",
+      level: runtimeTargets.length || publicCwdMissing || proxyMissingDomain || supervisorRepairNeeded(failureText) || permissionRepairNeeded(failureText) || pythonRuntimeRepairNeeded(failureText) || envConfigFailure ? "warn" : "info",
       message: "Guardian parsed failed deployment logs",
       metadata: {
         runtimeTargets: runtimeTargets.map((target) => target.actionKey),
         laravelPublicCwdMissing: publicCwdMissing,
         nginxProxyMissingDomain: proxyMissingDomain,
         prismaDatabaseAuthFailure: prismaDbAuthFailure,
+        environmentConfigurationFailure: envConfigFailure,
         supervisorRepair: supervisorRepairNeeded(failureText),
         permissionRepair: permissionRepairNeeded(failureText),
         pythonRuntimeRepair: pythonRuntimeRepairNeeded(failureText),
@@ -357,6 +361,22 @@ async function guardianApplyFailureRepairs(
       } as any
     }
   });
+
+  if (envConfigFailure) {
+    applied.push("deployment-env-missing:needs-project-env");
+    await prisma.deploymentLog.create({
+      data: {
+        deploymentId: deployment.id,
+        step: "PREFLIGHT",
+        level: "warn",
+        message: "Guardian detected missing deployment environment configuration",
+        metadata: {
+          action: "Add the missing project environment variable, then redeploy. Server runtime reinstall or permission repair will not fix this failure.",
+          evidence: failureText.slice(0, 4000)
+        } as any
+      }
+    });
+  }
 
   if (publicCwdMissing && deployment.framework === "LARAVEL") {
     const correctedRootPath = deploymentRootWithoutPublicSuffix(deployment.rootPath);
@@ -543,7 +563,7 @@ async function guardianApplyFailureRepairs(
     }
   }
 
-  return { identified: runtimeTargets.length > 0 || publicCwdMissing || proxyMissingDomain || prismaDbAuthFailure || supervisorRepairNeeded(failureText) || permissionRepairNeeded(failureText) || pythonRuntimeRepairNeeded(failureText), applied, approvalsCreated };
+  return { identified: runtimeTargets.length > 0 || publicCwdMissing || proxyMissingDomain || prismaDbAuthFailure || envConfigFailure || supervisorRepairNeeded(failureText) || permissionRepairNeeded(failureText) || pythonRuntimeRepairNeeded(failureText), applied, approvalsCreated };
 }
 
 async function queueGuardianDeployRepair(deployment: Awaited<ReturnType<typeof prisma.deployment.findMany>>[number], action: "restart" | "deploy", reason: string) {
@@ -1279,7 +1299,111 @@ async function runSslRenewWatch() {
   }
 
   const hostSync = await runDomainHostSync({ includeDns: true, queueRepair: true });
-  return { renew, ...hostSync };
+  const renewJobs = await queueManagedSslRenewJobs();
+  return { renew, renewJobs, ...hostSync };
+}
+
+function certificateNeedsPanelRenewal(expiry: string | null | undefined) {
+  if (!expiry) return true;
+  const expiresAt = new Date(expiry).getTime();
+  if (!Number.isFinite(expiresAt)) return true;
+  return expiresAt <= Date.now() + sslRenewQueueDays * 86_400_000;
+}
+
+async function servedCertificateNeedsRepair(hostnames: string[]) {
+  for (const hostname of hostnames) {
+    const probeHostname = isWildcardHostname(hostname) ? wildcardProbeHostname(hostname) : hostname;
+    const served = await sysagent.servedCertificate({ domain: probeHostname }).catch(() => null);
+    if (!served?.exists || !served.matches) return true;
+  }
+  return false;
+}
+
+async function queueManagedSslRenewJobs() {
+  const domains = await prisma.domain.findMany({
+    where: {
+      status: { not: "SUSPENDED" },
+      OR: [
+        { forceSsl: true },
+        { sslEnabled: true },
+        { hosts: { some: { sslStatus: { in: ["EXPIRED", "PENDING", "MISMATCH"] } } } }
+      ]
+    },
+    select: {
+      id: true,
+      name: true,
+      forceSsl: true,
+      sslEnabled: true,
+      sslExpiry: true,
+      subdomains: {
+        where: { sslEnabled: true },
+        select: { id: true, name: true }
+      }
+    }
+  });
+
+  const queued: Array<{ type: "domain" | "subdomain"; domain: string; jobId: string | number | undefined; reason: string }> = [];
+  const skipped: Array<{ type: "domain" | "subdomain"; domain: string; reason: string }> = [];
+
+  for (const domain of domains) {
+    if (domain.forceSsl || domain.sslEnabled) {
+      const certName = certbotCertificateName(domain.name);
+      const certificate = await sysagent.certificateFindReusable(certName).catch(() => null);
+      if (!certificate?.exists) {
+        skipped.push({ type: "domain", domain: domain.name, reason: "no reusable certificate found" });
+      } else {
+        const includeWww = !isWildcardHostname(domain.name) && certificate.names.includes(`www.${domain.name}`);
+        const due = certificateNeedsPanelRenewal(certificate.expiry ?? domain.sslExpiry?.toISOString());
+        const servedMismatch = await servedCertificateNeedsRepair([domain.name, ...(includeWww ? [`www.${domain.name}`] : [])]);
+        if (due || servedMismatch) {
+          const job = await sslQueue.add("renew", {
+            domainId: domain.id,
+            domain: domain.name,
+            includeWww,
+            certName: certificate.domain,
+            forceSsl: domain.forceSsl,
+            source: "guardian-ssl-renew-watch"
+          }, {
+            jobId: `guardian-renew-domain-${domain.id}-${Math.floor(Date.now() / (12 * 60 * 60_000))}`,
+            attempts: 1,
+            removeOnComplete: 100,
+            removeOnFail: 500
+          });
+          queued.push({ type: "domain", domain: domain.name, jobId: job.id, reason: due ? "certificate due/expired" : "served certificate mismatch" });
+        }
+      }
+    }
+
+    for (const subdomain of domain.subdomains) {
+      const fqdn = `${subdomain.name}.${domain.name}`;
+      const certName = certbotCertificateName(fqdn);
+      const certificate = await sysagent.certificateFindReusable(certName).catch(() => null);
+      if (!certificate?.exists) {
+        skipped.push({ type: "subdomain", domain: fqdn, reason: "no reusable certificate found" });
+        continue;
+      }
+      const due = certificateNeedsPanelRenewal(certificate.expiry);
+      const servedMismatch = await servedCertificateNeedsRepair([fqdn]);
+      if (!due && !servedMismatch) continue;
+      const job = await sslQueue.add("renew", {
+        domainId: null,
+        subdomainId: subdomain.id,
+        domain: fqdn,
+        includeWww: false,
+        certName: certificate.domain,
+        forceSsl: true,
+        source: "guardian-ssl-renew-watch"
+      }, {
+        jobId: `guardian-renew-subdomain-${subdomain.id}-${Math.floor(Date.now() / (12 * 60 * 60_000))}`,
+        attempts: 1,
+        removeOnComplete: 100,
+        removeOnFail: 500
+      });
+      queued.push({ type: "subdomain", domain: fqdn, jobId: job.id, reason: due ? "certificate due/expired" : "served certificate mismatch" });
+    }
+  }
+
+  return { checkedDomains: domains.length, queued, skipped };
 }
 
 export const guardianWorker = new Worker(
