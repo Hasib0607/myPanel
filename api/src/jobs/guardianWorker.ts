@@ -1294,13 +1294,18 @@ async function runDeploymentGuardWatch() {
 
 async function runSslRenewWatch() {
   const renew = await sysagent.renewAllCertificates() as { dryRun?: boolean; returncode?: number; stderr?: string; stdout?: string };
-  if (renew.dryRun || renew.returncode !== 0) {
-    throw new Error(`Certbot auto-renew failed${renew.returncode !== undefined ? ` with exit code ${renew.returncode}` : ""}: ${[renew.stderr, renew.stdout].filter(Boolean).join("\n").trim()}`);
-  }
-
   const hostSync = await runDomainHostSync({ includeDns: true, queueRepair: true });
   const renewJobs = await queueManagedSslRenewJobs();
-  return { renew, renewJobs, ...hostSync };
+  const renewAllFailed = Boolean(renew.dryRun || renew.returncode !== 0);
+  if (renewAllFailed) {
+    logger.warn("certbot renew-all failed during guardian SSL watch; targeted panel SSL renew checks still ran", {
+      returncode: renew.returncode,
+      dryRun: renew.dryRun,
+      detail: [renew.stderr, renew.stdout].filter(Boolean).join("\n").trim().slice(0, 4000),
+      queued: renewJobs.queued.length
+    });
+  }
+  return { renew, renewAllFailed, renewJobs, ...hostSync };
 }
 
 function certificateNeedsPanelRenewal(expiry: string | null | undefined) {
