@@ -91,6 +91,33 @@ function sslServerName(domainName: string, includeWww: boolean) {
   return includeWww ? `${domainName} www.${domainName}` : domainName;
 }
 
+function defaultSslEmail(domainName: string, parentDomain?: string | null) {
+  return `admin@${(parentDomain || domainName).replace(/^\*\./, "")}`;
+}
+
+async function managedRenewalWebRoot(domainName: string, domainId: string | null | undefined, subdomainId: string | null | undefined, webRoot: string | null | undefined) {
+  if (webRoot) return webRoot;
+  if (subdomainId) {
+    const subdomain = await prisma.subdomain.findUnique({
+      where: { id: subdomainId },
+      include: { domain: true }
+    });
+    if (subdomain) {
+      return `${env.FILE_MANAGER_ROOT}/${subdomain.domain.name}/subdomains/${subdomainFolderName(subdomain.name)}`;
+    }
+  }
+  const domain = domainId
+    ? await prisma.domain.findUnique({
+        where: { id: domainId },
+        include: { account: { select: { homeRoot: true } } }
+      })
+    : null;
+  if (domain?.account?.homeRoot) {
+    return accountDomainWebRootPath({ homeRoot: domain.account.homeRoot }, domain);
+  }
+  return `${env.FILE_MANAGER_ROOT}/${domainName}/${normalizeStoredDocumentRoot(domain?.documentRoot)}`;
+}
+
 type ReusableCertificateLookup = {
   result: SysagentCommandResult;
   certificate: ReusableCertificate;
@@ -639,6 +666,7 @@ export const sslWorker = new Worker(
       }
       const requiredNames = [job.data.domain, ...(includeWww && !isWildcardHostname(job.data.domain) ? [`www.${job.data.domain}`] : [])];
       let reusableCertificate: ReusableCertificate | null = null;
+      const renewalWebRoot = await managedRenewalWebRoot(job.data.domain, job.data.domainId, job.data.subdomainId, job.data.webRoot);
       let result = isWildcardHostname(job.data.domain) || job.data.dnsChallenge
         ? await sysagent.issueDnsCertificate({
             domain: job.data.domain,
@@ -647,7 +675,13 @@ export const sslWorker = new Worker(
             certName,
             propagationSeconds: 300
           })
-        : await sysagent.renewCertificate(certName);
+        : await sysagent.issueCertificate({
+            domain: job.data.domain,
+            email: job.data.email ?? defaultSslEmail(job.data.domain, job.data.parentDomain),
+            webRoot: renewalWebRoot,
+            includeWww,
+            certName
+          });
       if (letsEncryptExactSetRateLimited(result)) {
         const reusable = await reusableCertificateResult(certName, "Let's Encrypt exact-set rate limit hit during renew", requiredNames);
         if (reusable) {
