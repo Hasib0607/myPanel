@@ -647,6 +647,7 @@ def renew_certificate(domain: str) -> dict:
         "renew",
         "--cert-name",
         domain,
+        "--no-random-sleep-on-renew",
         "--deploy-hook",
         "systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true",
     ], allow_live=settings.allow_live_ssl, timeout=settings.ssl_certbot_timeout_seconds)
@@ -657,6 +658,7 @@ def renew_all_certificates() -> dict:
     return run_command([
         "certbot",
         "renew",
+        "--no-random-sleep-on-renew",
         "--deploy-hook",
         "systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true",
     ], allow_live=settings.allow_live_ssl, timeout=settings.ssl_certbot_timeout_seconds)

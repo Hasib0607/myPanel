@@ -787,7 +787,7 @@ EOF
     write_file /etc/cron.d/vps-panel-certbot-renew <<EOF
 SHELL=/bin/bash
 PATH=/sbin:/bin:/usr/sbin:/usr/bin
-17 3,15 * * * root certbot renew --quiet --deploy-hook "systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true"
+17 3,15 * * * root certbot renew --quiet --no-random-sleep-on-renew --deploy-hook "systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true"
 EOF
     chmod 0644 /etc/cron.d/vps-panel-certbot-renew
   fi
