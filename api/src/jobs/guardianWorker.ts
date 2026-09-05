@@ -1294,8 +1294,8 @@ async function runDeploymentGuardWatch() {
 
 async function runSslRenewWatch() {
   const renew = await sysagent.renewAllCertificates() as { dryRun?: boolean; returncode?: number; stderr?: string; stdout?: string };
-  const hostSync = await runDomainHostSync({ includeDns: true, queueRepair: true });
   const renewJobs = await queueManagedSslRenewJobs();
+  const hostSync = await runDomainHostSync({ includeDns: true, queueRepair: true });
   const renewAllFailed = Boolean(renew.dryRun || renew.returncode !== 0);
   if (renewAllFailed) {
     logger.warn("certbot renew-all failed during guardian SSL watch; targeted panel SSL renew checks still ran", {

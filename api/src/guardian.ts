@@ -16,6 +16,7 @@ const autoHealEnabled = process.env.GUARDIAN_AUTO_HEAL === "true";
 const autoDeployPollEnabled = process.env.GUARDIAN_AUTO_DEPLOY_POLL_ENABLED !== "false";
 const panelUpdatePollEnabled = process.env.PANEL_UPDATE_POLL_ENABLED !== "false";
 const sslRenewEnabled = process.env.GUARDIAN_SSL_RENEW_ENABLED !== "false";
+const sslRenewStartupEnabled = process.env.GUARDIAN_SSL_RENEW_STARTUP_ENABLED !== "false";
 const domainHostSyncEnabled = process.env.GUARDIAN_DOMAIN_HOST_SYNC_ENABLED !== "false";
 const dnsZoneReconcileEnabled = process.env.GUARDIAN_DNS_ZONE_RECONCILE_ENABLED !== "false";
 
@@ -81,6 +82,14 @@ async function scheduleGuardian() {
         removeOnComplete: 100,
         removeOnFail: 100
       });
+      if (sslRenewStartupEnabled) {
+        await guardianQueue.add("ssl-renew-watch", { source: "guardian-startup" }, {
+          jobId: `guardian-ssl-renew-watch-startup-${Math.floor(Date.now() / (60 * 60_000))}`,
+          delay: 60_000,
+          removeOnComplete: 100,
+          removeOnFail: 100
+        });
+      }
     }
     if (domainHostSyncEnabled) {
       await guardianQueue.add("domain-host-sync", {}, {
@@ -112,6 +121,7 @@ async function scheduleGuardian() {
       panelUpdatePollIntervalMs,
       sslRenewEnabled,
       sslRenewIntervalMs,
+      sslRenewStartupEnabled,
       domainHostSyncEnabled,
       domainHostSyncIntervalMs,
       dnsZoneReconcileEnabled,
