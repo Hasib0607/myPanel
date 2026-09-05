@@ -22,7 +22,7 @@ import {
 import { normalizeDeploymentResourcePolicy } from "../lib/deploymentResourcePolicy.js";
 import { runDomainHostSync } from "../lib/domainHostSync.js";
 import { sslRenewalEligibility } from "../lib/sslRenewalEligibility.js";
-import { certificateIsDue } from "../lib/sslRenewalPolicy.js";
+import { certificateIsDue, certificateIsUnexpired } from "../lib/sslRenewalPolicy.js";
 import { reconcileManagedDnsZones } from "../lib/dnsZoneReconcile.js";
 import { certbotCertificateName, isWildcardHostname, wildcardProbeHostname } from "../lib/nginxNames.js";
 
@@ -1308,7 +1308,7 @@ async function servedCertificateNeedsRepair(hostnames: string[]) {
   for (const hostname of hostnames) {
     const probeHostname = isWildcardHostname(hostname) ? wildcardProbeHostname(hostname) : hostname;
     const served = await sysagent.servedCertificate({ domain: probeHostname }).catch(() => null);
-    if (!served?.exists || !served.matches) return true;
+    if (!served?.exists || !served.matches || !certificateIsUnexpired(served.notAfter)) return true;
   }
   return false;
 }

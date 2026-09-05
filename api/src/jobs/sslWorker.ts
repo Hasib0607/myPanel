@@ -410,20 +410,20 @@ function firstFailedPreflightChallenge(preflight: { checks?: SysagentCommandResu
 async function assertHttpChallengeReachable(domainName: string, includeWww: boolean, webRoot: string) {
   let preflight = await sysagent.sslPreflight({ domain: domainName, webRoot, includeWww });
   assertLiveCommandSucceeded("Certbot readiness check", preflight.certbot);
-  let restartResult: unknown = null;
+  let reloadResult: unknown = null;
   let failed = firstFailedPreflightChallenge(preflight);
   if (failed) {
-    restartResult = await sysagent.guardianRestartNginx().catch((error) => ({
-      restarted: false,
+    reloadResult = await sysagent.guardianReloadNginx().catch((error) => ({
+      reloaded: false,
       test: { returncode: 1, stderr: error instanceof Error ? error.message : String(error) },
-      restart: null
+      reload: null
     }));
     preflight = await sysagent.sslPreflight({ domain: domainName, webRoot, includeWww });
     failed = firstFailedPreflightChallenge(preflight);
   }
   if (failed) {
     const detail = commandDetail(failed);
-    throw new Error(`SSL auto retry waiting for HTTP challenge route: ${domainName} returned an invalid ACME challenge response.${detail ? ` ${detail}` : ""}${restartSummary(restartResult)}`);
+    throw new Error(`SSL auto retry waiting for HTTP challenge route: ${domainName} returned an invalid ACME challenge response.${detail ? ` ${detail}` : ""}${reloadSummary(reloadResult)}`);
   }
 }
 
@@ -479,7 +479,7 @@ async function collectServedCertificateFailures(hostnames: string[]) {
   for (const hostname of hostnames) {
     const probeHostname = isWildcardHostname(hostname) ? wildcardProbeHostname(hostname) : hostname;
     const served = await sysagent.servedCertificate({ domain: probeHostname });
-    if (served.exists && served.matches) continue;
+    if (served.exists && served.matches && certificateIsUnexpired(served.notAfter)) continue;
     const detail = served.exists
       ? `served certificate subject=${served.subject ?? "unknown"}, SAN=${served.names.join(", ") || "none"}, connectedIp=${served.connectedIp ?? "unknown"}`
       : `could not read served certificate${served.error ? `: ${served.error}` : ""}`;
@@ -490,7 +490,7 @@ async function collectServedCertificateFailures(hostnames: string[]) {
       names: [],
       error: error instanceof Error ? error.message : String(error)
     }));
-    if (!local.exists || !local.matches) {
+    if (!local.exists || !local.matches || !certificateIsUnexpired((local as { notAfter?: string | null }).notAfter)) {
       const localDetail = local.exists
         ? `local certificate subject=${(local as { subject?: string | null }).subject ?? "unknown"}, SAN=${local.names.join(", ") || "none"}`
         : `local certificate unavailable${local.error ? `: ${local.error}` : ""}`;
@@ -500,24 +500,24 @@ async function collectServedCertificateFailures(hostnames: string[]) {
   return { failures, localFailures };
 }
 
-function restartSummary(result: unknown) {
-  const row = result as { restarted?: boolean; test?: SysagentCommandResult; restart?: SysagentCommandResult | null } | null;
+function reloadSummary(result: unknown) {
+  const row = result as { reloaded?: boolean; test?: SysagentCommandResult; reload?: SysagentCommandResult | null } | null;
   if (!row) return "";
   const testCode = row.test?.returncode ?? "unknown";
-  const restartCode = row.restart?.returncode ?? "skipped";
-  return ` Nginx restart recovery attempted: restarted=${row.restarted ? "yes" : "no"}, nginxTest=${testCode}, restart=${restartCode}.`;
+  const reloadCode = row.reload?.returncode ?? "skipped";
+  return ` Nginx reload recovery attempted: reloaded=${row.reloaded ? "yes" : "no"}, nginxTest=${testCode}, reload=${reloadCode}.`;
 }
 
 async function assertServedCertificateMatches(hostnames: string[], expectedRoute?: string | null) {
   let { failures, localFailures } = await collectServedCertificateFailures(hostnames);
-  let restartResult: unknown = null;
+  let reloadResult: unknown = null;
   if (failures.length) {
-    restartResult = await sysagent.guardianRestartNginx().catch((error) => ({
-      restarted: false,
+    reloadResult = await sysagent.guardianReloadNginx().catch((error) => ({
+      reloaded: false,
       test: { returncode: 1, stderr: error instanceof Error ? error.message : String(error) },
-      restart: null
+      reload: null
     }));
-    if ((restartResult as { restarted?: boolean } | null)?.restarted) {
+    if ((reloadResult as { reloaded?: boolean } | null)?.reloaded) {
       ({ failures, localFailures } = await collectServedCertificateFailures(hostnames));
     }
   }
@@ -531,7 +531,7 @@ async function assertServedCertificateMatches(hostnames: string[], expectedRoute
       + failures.join("; ")
       + (localFailures.length ? ` Local SNI check also failed: ${localFailures.join("; ")}.` : " Local SNI check passed, so the public listener/proxy path is serving a different vhost.")
       + summarizeNginxRouteBlocks(diagnosis)
-      + restartSummary(restartResult)
+      + reloadSummary(reloadResult)
       + ". Check duplicate/default 443 Nginx vhosts, SNI routing, Cloudflare/proxy mode, and public DNS."
     );
   }

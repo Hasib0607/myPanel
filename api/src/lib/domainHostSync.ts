@@ -20,6 +20,7 @@ import { prisma } from "./prisma.js";
 import { currentVpsIp } from "./serverIp.js";
 import { sysagent } from "./sysagent.js";
 import { sslRenewalEligibility } from "./sslRenewalEligibility.js";
+import { certificateIsUnexpired } from "./sslRenewalPolicy.js";
 
 type SyncOptions = {
   limit?: number;
@@ -230,14 +231,15 @@ async function servedHostFailures(hostnames: string[]) {
       names: [],
       error: error instanceof Error ? error.message : String(error)
     }));
-    if (!served.exists || !certificateNamesCoverHost(probeHostname, served.names ?? [])) {
+    const expiry = (served as { notAfter?: string | null }).notAfter;
+    if (!served.exists || !certificateNamesCoverHost(probeHostname, served.names ?? []) || !certificateIsUnexpired(expiry)) {
       failures.push({
         host: hostname,
         probeHost: probeHostname,
-        reason: served.exists ? "served certificate SAN mismatch" : served.error ?? "served certificate missing",
+        reason: served.exists ? (!certificateIsUnexpired(expiry) ? "served certificate expired" : "served certificate SAN mismatch") : served.error ?? "served certificate missing",
         subject: (served as { subject?: string | null }).subject ?? null,
         issuer: (served as { issuer?: string | null }).issuer ?? null,
-        expiry: (served as { expiry?: string | null }).expiry ?? null,
+        expiry: expiry ?? null,
         names: served.names ?? []
       });
     }
