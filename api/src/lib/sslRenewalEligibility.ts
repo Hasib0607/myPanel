@@ -28,7 +28,7 @@ export async function sslRenewalEligibility(domain: string) {
 export async function sslHttpRenewalEligibility(hostnames: string[]) {
   const ip = await currentVpsIp();
   for (const hostname of hostnames) {
-    const records = await resolvePublicA(hostname).catch(() => []);
+    const records: string[] = await resolvePublicA(hostname).catch(() => [] as string[]);
     if (!records.includes(ip)) return { eligible: false, reason: `${hostname} is not served by this VPS (${records.join(", ") || "no public A record"}); HTTP renewal skipped` };
   }
   return { eligible: true, reason: "HTTP challenge hostnames point to this VPS" };
