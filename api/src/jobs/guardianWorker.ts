@@ -21,6 +21,8 @@ import {
 } from "../lib/laravelProcesses.js";
 import { normalizeDeploymentResourcePolicy } from "../lib/deploymentResourcePolicy.js";
 import { runDomainHostSync } from "../lib/domainHostSync.js";
+import { sslRenewalEligibility } from "../lib/sslRenewalEligibility.js";
+import { certificateIsDue } from "../lib/sslRenewalPolicy.js";
 import { reconcileManagedDnsZones } from "../lib/dnsZoneReconcile.js";
 import { certbotCertificateName, isWildcardHostname, wildcardProbeHostname } from "../lib/nginxNames.js";
 
@@ -1293,26 +1295,13 @@ async function runDeploymentGuardWatch() {
 }
 
 async function runSslRenewWatch() {
-  const renew = await sysagent.renewAllCertificates() as { dryRun?: boolean; returncode?: number; stderr?: string; stdout?: string };
   const renewJobs = await queueManagedSslRenewJobs();
   const hostSync = await runDomainHostSync({ includeDns: true, queueRepair: true });
-  const renewAllFailed = Boolean(renew.dryRun || renew.returncode !== 0);
-  if (renewAllFailed) {
-    logger.warn("certbot renew-all failed during guardian SSL watch; targeted panel SSL renew checks still ran", {
-      returncode: renew.returncode,
-      dryRun: renew.dryRun,
-      detail: [renew.stderr, renew.stdout].filter(Boolean).join("\n").trim().slice(0, 4000),
-      queued: renewJobs.queued.length
-    });
-  }
-  return { renew, renewAllFailed, renewJobs, ...hostSync };
+  return { renewJobs, ...hostSync };
 }
 
 function certificateNeedsPanelRenewal(expiry: string | null | undefined) {
-  if (!expiry) return true;
-  const expiresAt = new Date(expiry).getTime();
-  if (!Number.isFinite(expiresAt)) return true;
-  return expiresAt <= Date.now() + sslRenewQueueDays * 86_400_000;
+  return certificateIsDue(expiry, sslRenewQueueDays);
 }
 
 async function servedCertificateNeedsRepair(hostnames: string[]) {
@@ -1340,8 +1329,9 @@ async function queueManagedSslRenewJobs() {
       forceSsl: true,
       sslEnabled: true,
       sslExpiry: true,
+      hosts: { select: { hostname: true, sslStatus: true } },
       subdomains: {
-        where: { sslEnabled: true },
+        where: { OR: [{ sslEnabled: true }, { hosts: { some: { sslStatus: { in: ["EXPIRED", "PENDING", "MISMATCH"] } } } }] },
         select: { id: true, name: true }
       }
     }
@@ -1350,22 +1340,25 @@ async function queueManagedSslRenewJobs() {
   const queued: Array<{ type: "domain" | "subdomain"; domain: string; jobId: string | number | undefined; reason: string }> = [];
   const skipped: Array<{ type: "domain" | "subdomain"; domain: string; reason: string }> = [];
 
-  for (const domain of domains) {
-    if (domain.forceSsl || domain.sslEnabled) {
+  async function queueDomain(domain: typeof domains[number]) {
+    const eligibility = await sslRenewalEligibility(domain.name).catch(() => ({ eligible: false, reason: "Nameserver lookup failed; renewal deferred" }));
+    if (!eligibility.eligible) {
+      skipped.push({ type: "domain", domain: domain.name, reason: eligibility.reason });
+      return;
+    }
+    if (domain.forceSsl || domain.sslEnabled || domain.hosts.some((host) => ["EXPIRED", "PENDING", "MISMATCH"].includes(host.sslStatus))) {
       const certName = certbotCertificateName(domain.name);
       const certificate = await sysagent.certificateFindReusable(certName).catch(() => null);
-      if (!certificate?.exists) {
-        skipped.push({ type: "domain", domain: domain.name, reason: "no reusable certificate found" });
-      } else {
-        const includeWww = !isWildcardHostname(domain.name) && certificate.names.includes(`www.${domain.name}`);
-        const due = certificateNeedsPanelRenewal(certificate.expiry ?? domain.sslExpiry?.toISOString());
+      {
+        const includeWww = !isWildcardHostname(domain.name) && (certificate?.names?.includes(`www.${domain.name}`) || domain.hosts.some((host) => host.hostname === `www.${domain.name}`));
+        const due = !certificate?.exists || certificateNeedsPanelRenewal(certificate.expiry ?? domain.sslExpiry?.toISOString());
         const servedMismatch = await servedCertificateNeedsRepair([domain.name, ...(includeWww ? [`www.${domain.name}`] : [])]);
         if (due || servedMismatch) {
           const job = await sslQueue.add("renew", {
             domainId: domain.id,
             domain: domain.name,
             includeWww,
-            certName: certificate.domain,
+            certName: certificate?.domain ?? certName,
             forceSsl: domain.forceSsl,
             source: "guardian-ssl-renew-watch"
           }, {
@@ -1383,11 +1376,7 @@ async function queueManagedSslRenewJobs() {
       const fqdn = `${subdomain.name}.${domain.name}`;
       const certName = certbotCertificateName(fqdn);
       const certificate = await sysagent.certificateFindReusable(certName).catch(() => null);
-      if (!certificate?.exists) {
-        skipped.push({ type: "subdomain", domain: fqdn, reason: "no reusable certificate found" });
-        continue;
-      }
-      const due = certificateNeedsPanelRenewal(certificate.expiry);
+      const due = !certificate?.exists || certificateNeedsPanelRenewal(certificate.expiry);
       const servedMismatch = await servedCertificateNeedsRepair([fqdn]);
       if (!due && !servedMismatch) continue;
       const job = await sslQueue.add("renew", {
@@ -1395,7 +1384,8 @@ async function queueManagedSslRenewJobs() {
         subdomainId: subdomain.id,
         domain: fqdn,
         includeWww: false,
-        certName: certificate.domain,
+        certName: certificate?.domain ?? certName,
+        parentDomain: domain.name,
         forceSsl: true,
         source: "guardian-ssl-renew-watch"
       }, {
@@ -1408,6 +1398,16 @@ async function queueManagedSslRenewJobs() {
     }
   }
 
+  // Bound public DNS work; a slow domain must not hold up every other renewal.
+  for (let offset = 0; offset < domains.length; offset += 4) {
+    await Promise.all(domains.slice(offset, offset + 4).map(async (domain) => {
+      try {
+        await queueDomain(domain);
+      } catch (error) {
+        skipped.push({ type: "domain", domain: domain.name, reason: error instanceof Error ? error.message : "Renewal check failed" });
+      }
+    }));
+  }
   return { checkedDomains: domains.length, queued, skipped };
 }
 

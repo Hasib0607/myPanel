@@ -1,4 +1,6 @@
 import { Worker } from "bullmq";
+import { sslRenewalEligibility } from "../lib/sslRenewalEligibility.js";
+import { certificateIsUnexpired } from "../lib/sslRenewalPolicy.js";
 import { redis } from "../lib/redis.js";
 import { sslQueue } from "./queues.js";
 import { logger } from "../lib/logger.js";
@@ -126,6 +128,7 @@ type ReusableCertificateLookup = {
 async function reusableCertificateResult(certName: string, reason: string, requiredNames: string[]): Promise<ReusableCertificateLookup | null> {
   const status = await sysagent.certificateFindReusable(certName);
   if (!status.exists) return null;
+  if (!certificateIsUnexpired(status.expiry)) return null;
   if (!requiredNames.every((name) => certificateNamesCoverHost(name, status.names ?? []))) return null;
   return {
     certificate: status,
@@ -576,6 +579,18 @@ export const sslWorker = new Worker(
   "ssl",
   async (job) => {
     logger.info("ssl job received", { id: job.id, name: job.name, data: job.data });
+    const source = String(job.data.source ?? "");
+    if (["issue", "renew"].includes(job.name) && (source.startsWith("guardian-") || ["account-auto-domain-ssl", "deployment", "deployment-repair"].includes(source))) {
+      const subdomain = job.data.subdomainId ? await prisma.subdomain.findUnique({
+        where: { id: job.data.subdomainId }, select: { domain: { select: { name: true } } }
+      }) : null;
+      const eligibility = await sslRenewalEligibility(subdomain?.domain.name ?? job.data.parentDomain ?? job.data.domain)
+        .catch(() => ({ eligible: false, reason: "Nameserver lookup failed; renewal deferred" }));
+      if (!eligibility.eligible) {
+        logger.info("Automatic SSL skipped", { domain: job.data.domain, reason: eligibility.reason });
+        return { skipped: true, reason: eligibility.reason };
+      }
+    }
 
     if (job.name === "issue") {
       const includeWww = job.data.includeWww ?? true;
@@ -659,14 +674,28 @@ export const sslWorker = new Worker(
     }
 
     if (job.name === "renew") {
-      const certName = job.data.certName ?? certbotCertificateName(job.data.domain);
+      let certName = job.data.certName ?? certbotCertificateName(job.data.domain);
       const includeWww = job.data.includeWww ?? true;
       if (job.data.domainId) {
         await syncDomainHostRows({ id: job.data.domainId, name: job.data.domain }, { includeWww });
       }
       const requiredNames = [job.data.domain, ...(includeWww && !isWildcardHostname(job.data.domain) ? [`www.${job.data.domain}`] : [])];
+      const existing = await sysagent.certificateFindReusable(certName);
+      if (existing.exists && existing.names.some((name) => !requiredNames.includes(name))) {
+        // Do not shrink a shared SAN/wildcard certificate used by other projects.
+        certName = `${certbotCertificateName(job.data.domain)}.panel`;
+      }
       let reusableCertificate: ReusableCertificate | null = null;
-      const renewalWebRoot = await managedRenewalWebRoot(job.data.domain, job.data.domainId, job.data.subdomainId, job.data.webRoot);
+      let renewalWebRoot = await managedRenewalWebRoot(job.data.domain, job.data.domainId, job.data.subdomainId, job.data.webRoot);
+      if (!isWildcardHostname(job.data.domain) && !job.data.dnsChallenge) {
+        await assertHttpSslDnsReady(job.data.domain, includeWww);
+        // Generated Nginx vhosts use a dedicated per-host ACME root, independent
+        // of the customer application's document root or deployment path.
+        const acme = await sysagent.ensureAcmeWebroot({ domain: job.data.domain });
+        assertLiveCommandSucceeded("ACME renewal webroot", acme);
+        if (!acme.webRoot) throw new Error("ACME renewal webroot was not returned");
+        renewalWebRoot = acme.webRoot;
+      }
       let result = isWildcardHostname(job.data.domain) || job.data.dnsChallenge
         ? await sysagent.issueDnsCertificate({
             domain: job.data.domain,

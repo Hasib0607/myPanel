@@ -770,27 +770,22 @@ configure_certbot_auto_renewal() {
 #!/usr/bin/env bash
 set -euo pipefail
 if command -v systemctl >/dev/null 2>&1; then
-  systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true
+  nginx -t && systemctl reload nginx
 fi
 EOF
   chmod 0755 /etc/letsencrypt/renewal-hooks/deploy/vps-panel-reload-nginx.sh
 
-  local enabled_timer=false
+  # All automatic renewals go through the panel's nameserver eligibility guard.
+  # Stop timers only, never interrupt an already-running certificate operation.
   for timer in certbot.timer certbot-renew.timer snap.certbot.renew.timer; do
-    if systemctl list-unit-files "$timer" >/dev/null 2>&1; then
-      systemctl enable --now "$timer" >/dev/null 2>&1 && enabled_timer=true && log "Enabled $timer" && break
-    fi
+    systemctl disable --now "$timer" >/dev/null 2>&1 || true
   done
-
-  if [[ "$enabled_timer" != "true" ]]; then
-    log "Certbot systemd timer not found; installing daily cron fallback"
-    write_file /etc/cron.d/vps-panel-certbot-renew <<EOF
+  write_file /etc/cron.d/vps-panel-certbot-renew <<EOF
 SHELL=/bin/bash
 PATH=/sbin:/bin:/usr/sbin:/usr/bin
-17 3,15 * * * root certbot renew --quiet --no-random-sleep-on-renew --deploy-hook "systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true"
+17 3,15 * * * $APP_USER cd "$APP_DIR/api" && /usr/bin/env node dist/scripts/queueSslRenewWatch.js
 EOF
-    chmod 0644 /etc/cron.d/vps-panel-certbot-renew
-  fi
+  chmod 0644 /etc/cron.d/vps-panel-certbot-renew
 }
 
 write_update_sudoers() {

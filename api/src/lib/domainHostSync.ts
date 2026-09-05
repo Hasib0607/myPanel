@@ -19,6 +19,7 @@ import { certificateLookupName, certbotCertificateName, isWildcardHostname, ngin
 import { prisma } from "./prisma.js";
 import { currentVpsIp } from "./serverIp.js";
 import { sysagent } from "./sysagent.js";
+import { sslRenewalEligibility } from "./sslRenewalEligibility.js";
 
 type SyncOptions = {
   limit?: number;
@@ -89,6 +90,7 @@ async function queueDomainRepair(
   includeWww: boolean
 ) {
   if (!domain.forceSsl) return null;
+  if (!(await sslRenewalEligibility(domain.name)).eligible) return null;
   const job = await sslQueue.add("issue", {
     domainId: domain.id,
     domain: domain.name,
@@ -109,6 +111,7 @@ async function queueDomainRepair(
 }
 
 async function queueSubdomainRepair(subdomain: { id: string; name: string; domain: { id: string; name: string; account?: { homeRoot: string | null } | null } }, reason: string) {
+  if (!(await sslRenewalEligibility(subdomain.domain.name)).eligible) return null;
   const fqdn = subdomainHostName(subdomain);
   const wildcard = isWildcardHostname(fqdn);
   const job = await sslQueue.add("issue", {
