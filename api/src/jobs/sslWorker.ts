@@ -174,7 +174,7 @@ async function writeHttpsVhost(domainName: string, domainId: string | null | und
       requireSsl: true,
       ...certificatePaths(domainName, certificate)
     });
-    assertLiveCommandSucceeded("Nginx certificate vhost test", result.test as SysagentCommandResult);
+    assertLiveCommandSucceeded("Nginx certificate vhost test", (result.test ?? result) as SysagentCommandResult);
     assertLiveCommandSucceeded("Nginx certificate vhost reload", result.reload as SysagentCommandResult);
     return result;
   }
@@ -327,7 +327,7 @@ async function republishSubdomainDeploymentBindings(subdomainId: string, certifi
       requireSsl: true,
       ...certificatePaths(domain.name, certificate)
     });
-    assertLiveCommandSucceeded("Nginx subdomain deployment SSL route test", result.test as SysagentCommandResult);
+    assertLiveCommandSucceeded("Nginx subdomain deployment SSL route test", (result.test ?? result) as SysagentCommandResult);
     assertLiveCommandSucceeded("Nginx subdomain deployment SSL route reload", result.reload as SysagentCommandResult);
     results.push({ deploymentId: binding.deployment.id, domain: domain.name, result });
   }

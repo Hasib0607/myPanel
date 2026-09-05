@@ -10,7 +10,8 @@ export async function sslRenewalEligibility(domain: string) {
   });
   const groups = configuredNameServerGroups(configured.map((row) => row.hostname));
   if (!groups.length) return { eligible: false, reason: "No active hosting nameservers configured" };
-  const lookup = await resolvePublicNameServers(name);
+  // Local BIND can still host an old zone after the registrar's delegation moves.
+  const lookup = await resolvePublicNameServers(name, { allowSystemFallback: false });
   const matched = matchingNameServerGroup(groups, lookup.nameServers);
   // A complete configured pair is sufficient, matching the domain onboarding policy.
   // Existing zones may also advertise older hosting aliases.

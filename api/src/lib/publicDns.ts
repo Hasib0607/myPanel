@@ -205,7 +205,7 @@ export type PublicNameServerLookup = {
   errors: string[];
 };
 
-export async function resolvePublicNameServers(domain: string): Promise<PublicNameServerLookup> {
+export async function resolvePublicNameServers(domain: string, options: { allowSystemFallback?: boolean } = {}): Promise<PublicNameServerLookup> {
   const errors: string[] = [];
 
   const resolverRecords = await resolveWithResolvers(
@@ -224,6 +224,7 @@ export async function resolvePublicNameServers(domain: string): Promise<PublicNa
 
   const dohRecords = await resolveWithDoh(domain, "NS", errors);
   if (dohRecords.length > 0) return { nameServers: dohRecords, errors };
+  if (options.allowSystemFallback === false) return { nameServers: [], errors };
 
   try {
     const records = await dns.resolveNs(domain);

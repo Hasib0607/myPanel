@@ -39,6 +39,7 @@ from app.laravel_fpm import (
 from app.deployment_health import backend_only_laravel_health, curl_health_probe
 from app.platform import runtime_tool_install_plan
 from app.nginx_paths import nginx_sites_available, nginx_sites_enabled
+from app.routers.nginx import _server_blocks
 from app.nginx_manager import (
     ROUTE_OWNERSHIP_HEADER,
     _config_dump_sections,
