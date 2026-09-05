@@ -21,7 +21,7 @@ import {
 } from "../lib/laravelProcesses.js";
 import { normalizeDeploymentResourcePolicy } from "../lib/deploymentResourcePolicy.js";
 import { runDomainHostSync } from "../lib/domainHostSync.js";
-import { sslRenewalEligibility } from "../lib/sslRenewalEligibility.js";
+import { sslRenewalEligibility, sslHttpRenewalEligibility } from "../lib/sslRenewalEligibility.js";
 import { certificateIsDue, certificateIsUnexpired } from "../lib/sslRenewalPolicy.js";
 import { reconcileManagedDnsZones } from "../lib/dnsZoneReconcile.js";
 import { certbotCertificateName, isWildcardHostname, wildcardProbeHostname } from "../lib/nginxNames.js";
@@ -1353,7 +1353,11 @@ async function queueManagedSslRenewJobs() {
         const includeWww = !isWildcardHostname(domain.name) && (certificate?.names?.includes(`www.${domain.name}`) || domain.hosts.some((host) => host.hostname === `www.${domain.name}`));
         const due = !certificate?.exists || certificateNeedsPanelRenewal(certificate.expiry ?? domain.sslExpiry?.toISOString());
         const servedMismatch = await servedCertificateNeedsRepair([domain.name, ...(includeWww ? [`www.${domain.name}`] : [])]);
-        if (due || servedMismatch) {
+        const httpEligibility = (due || servedMismatch) && !isWildcardHostname(domain.name)
+          ? await sslHttpRenewalEligibility([domain.name, ...(includeWww ? [`www.${domain.name}`] : [])])
+          : { eligible: true, reason: "DNS challenge" };
+        if (!httpEligibility.eligible) skipped.push({ type: "domain", domain: domain.name, reason: httpEligibility.reason });
+        if ((due || servedMismatch) && httpEligibility.eligible) {
           const job = await sslQueue.add("renew", {
             domainId: domain.id,
             domain: domain.name,

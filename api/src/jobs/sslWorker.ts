@@ -1,5 +1,5 @@
 import { Worker } from "bullmq";
-import { sslRenewalEligibility } from "../lib/sslRenewalEligibility.js";
+import { sslRenewalEligibility, sslHttpRenewalEligibility } from "../lib/sslRenewalEligibility.js";
 import { certificateIsUnexpired } from "../lib/sslRenewalPolicy.js";
 import { redis } from "../lib/redis.js";
 import { sslQueue } from "./queues.js";
@@ -589,6 +589,10 @@ export const sslWorker = new Worker(
       if (!eligibility.eligible) {
         logger.info("Automatic SSL skipped", { domain: job.data.domain, reason: eligibility.reason });
         return { skipped: true, reason: eligibility.reason };
+      }
+      if (!isWildcardHostname(job.data.domain) && !job.data.dnsChallenge) {
+        const httpEligibility = await sslHttpRenewalEligibility([job.data.domain, ...(job.data.includeWww ? [`www.${job.data.domain}`] : [])]);
+        if (!httpEligibility.eligible) return { skipped: true, reason: httpEligibility.reason };
       }
     }
 

@@ -1,5 +1,6 @@
 import { prisma } from "./prisma.js";
-import { resolvePublicNameServers } from "./publicDns.js";
+import { resolvePublicNameServers, resolvePublicA } from "./publicDns.js";
+import { currentVpsIp } from "./serverIp.js";
 import { configuredNameServerGroups, matchingNameServerGroup } from "./nameServerMatching.js";
 
 // Fail closed: DNS lookup failures must not trigger ACME attempts.
@@ -22,4 +23,13 @@ export async function sslRenewalEligibility(domain: string) {
       ? `Nameservers do not match hosting: ${lookup.nameServers.join(", ")}`
       : "Public nameservers unavailable; renewal deferred"
   };
+}
+
+export async function sslHttpRenewalEligibility(hostnames: string[]) {
+  const ip = await currentVpsIp();
+  for (const hostname of hostnames) {
+    const records = await resolvePublicA(hostname).catch(() => []);
+    if (!records.includes(ip)) return { eligible: false, reason: `${hostname} is not served by this VPS (${records.join(", ") || "no public A record"}); HTTP renewal skipped` };
+  }
+  return { eligible: true, reason: "HTTP challenge hostnames point to this VPS" };
 }
