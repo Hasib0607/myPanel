@@ -290,7 +290,7 @@ async function assertDeploymentNotManuallyStopped(deploymentId: string) {
     select: { status: true, processConfig: true }
   });
   if (!deployment) return;
-  if (deployment.status === "STOPPED" && deploymentManualStopRequested(deployment.processConfig)) {
+  if (deploymentManualStopRequested(deployment.processConfig)) {
     throw new ManualDeploymentStopError();
   }
 }
@@ -356,10 +356,19 @@ async function removeReleaseArtifactPath(artifactPath: string | null | undefined
   return true;
 }
 
-async function releaseArtifactPathExists(artifactPath: string | null | undefined) {
+async function releaseArtifactPathExists(
+  artifactPath: string | null | undefined,
+  framework?: DeploymentFramework,
+  rootDirectory = "."
+) {
   if (!artifactPath) return false;
   try {
     await fs.access(artifactPath);
+    if (framework === "NEXTJS" || framework === "NODEJS") {
+      const appPath = deploymentAppPath(artifactPath, rootDirectory);
+      await fs.access(path.join(appPath, "package.json"));
+      if (framework === "NEXTJS") await fs.access(path.join(appPath, ".next", "BUILD_ID"));
+    }
     return true;
   } catch {
     return false;
@@ -392,6 +401,24 @@ async function pruneDeploymentReleaseArtifacts(
   if (activeArtifactPath && artifactPathIsInsideReleaseRoot(activeArtifactPath, releaseRoot)) {
     keep.add(path.resolve(activeArtifactPath));
   }
+  const previousSuccessfulRelease = await prisma.deploymentRelease.findMany({
+    where: {
+      deploymentId,
+      status: { in: ["SUCCEEDED", "ROLLED_BACK"] },
+      artifactPath: { not: null }
+    },
+    orderBy: { createdAt: "desc" },
+    take: 20,
+    select: { artifactPath: true }
+  });
+  for (const release of previousSuccessfulRelease) {
+    if (!release.artifactPath || release.artifactPath === activeArtifactPath) continue;
+    if (artifactPathIsInsideReleaseRoot(release.artifactPath, releaseRoot)
+      && await fs.access(release.artifactPath).then(() => true).catch(() => false)) {
+      keep.add(path.resolve(release.artifactPath));
+      break;
+    }
+  }
   for (const entry of entries.slice(0, env.DEPLOY_RELEASE_ARTIFACTS_KEEP)) {
     keep.add(path.resolve(entry.path));
   }
@@ -404,8 +431,16 @@ async function pruneDeploymentReleaseArtifacts(
       kept.push(entry.path);
       continue;
     }
-    await fs.rm(entry.path, { recursive: true, force: true });
-    removed.push(entry.path);
+    try {
+      await fs.rm(entry.path, { recursive: true, force: true });
+      removed.push(entry.path);
+    } catch (error) {
+      kept.push(entry.path);
+      await writeLog(deploymentId, releaseId, "SUCCEEDED", "Could not prune old release artifact; keeping successful deployment active", {
+        artifactPath: entry.path,
+        error: error instanceof Error ? error.message : String(error)
+      }, "warn");
+    }
   }
 
   if (removed.length > 0) {
@@ -743,9 +778,9 @@ async function runStep<T>(deploymentId: string, releaseId: string | undefined, s
   }
 }
 
-function isSysagentConnectionRefused(error: unknown) {
+function isSysagentConnectionError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
-  return /sysagent .* request failed: .*ECONNREFUSED/i.test(message);
+  return /sysagent .* request failed: .*(?:ECONNREFUSED|ECONNRESET|socket hang up)/i.test(message);
 }
 
 function sudoNeedsPassword(error: unknown) {
@@ -813,10 +848,15 @@ async function runStepWithSysagentConnectionRepair<T>(
   try {
     return await runStep(deploymentId, releaseId, step, message, fn);
   } catch (error) {
-    if (!isSysagentConnectionRefused(error)) throw error;
+    if (!isSysagentConnectionError(error)) throw error;
     const reason = error instanceof Error ? error.message : String(error);
-    await repairSysagentConnectionForDeployment(deploymentId, releaseId, step, reason);
-    return runStep(deploymentId, releaseId, step, `${message} retry after sysagent restart`, fn);
+    try {
+      const ready = await waitForSysagentHealthy(40);
+      await writeLog(deploymentId, releaseId, step, "Sysagent connection recovered", { reason, attempt: ready.attempt }, "warn");
+    } catch {
+      await repairSysagentConnectionForDeployment(deploymentId, releaseId, step, reason);
+    }
+    return runStep(deploymentId, releaseId, step, `${message} retry after sysagent reconnect`, fn);
   }
 }
 
@@ -4244,6 +4284,11 @@ async function processLifecycleAction(action: string, deploymentId: string, rele
   let deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId }, include: deploymentWorkerInclude });
   const processAction = action === "redeploy" || action === "deploy" ? "start" : action;
 
+  if (processAction === "stop" && !deploymentManualStopRequested(deployment.processConfig)) {
+    await writeLog(deployment.id, releaseId, "STARTING", "Stale stop job skipped because deployment was resumed", {}, "warn");
+    return { status: deployment.status, healthStatus: deployment.healthStatus, skipped: true };
+  }
+
   try {
     await runStepWithSysagentConnectionRepair(deployment.id, releaseId, "PREFLIGHT", "Sysagent live command preflight", () =>
       assertSysagentLiveCommandsEnabled(deployment.id, releaseId)
@@ -4478,7 +4523,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       );
     }
     let rollbackArtifactPath = action === "rollback" && release?.artifactPath ? release.artifactPath : null;
-    if (rollbackArtifactPath && !await releaseArtifactPathExists(rollbackArtifactPath)) {
+    if (rollbackArtifactPath && !await releaseArtifactPathExists(rollbackArtifactPath, deployment.framework, deployment.rootDirectory)) {
       await writeLog(deployment.id, releaseId, "ROLLBACK", "Rollback release artifact is missing; falling back to source rebuild when possible", {
         artifactRootPath: rollbackArtifactPath,
         commitSha: release?.commitSha ?? null
@@ -4639,7 +4684,7 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
         }
       }
       const runDependencyInstall = () => runHeavyBuildExclusive(() =>
-        runStep(deployment.id, releaseId, "INSTALLING", "Dependency install", () =>
+        runStepWithSysagentConnectionRepair(deployment.id, releaseId, "INSTALLING", "Dependency install", () =>
           sysagent.deploymentInstall({
             rootPath: appPath,
             command: installCommandText,
@@ -4963,6 +5008,8 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       }, "warn");
     }
 
+    await assertDeploymentNotManuallyStopped(deployment.id);
+
     if (domain && await deploymentRunsLaravel(deployment.framework, appPath)) {
       await ensureLaravelPublicIndexForDomain(deployment.id, releaseId, appPath, domain);
     }
@@ -5241,15 +5288,18 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       "Health check"
     );
 
-    deployment = await activateDeploymentArtifact(deployment, releaseId, artifactRootPath);
     const publicRouteWarning = await optionalPublicRouteWarning(deployment.id, releaseId, "Public website check", { ...deployment, domain }, appPath, envVars, processManager, routeDomains);
     if (publicRouteWarning) {
+      if (/\bHTTP 5\d\d\b/i.test(publicRouteWarning)) {
+        throw new Error(`Public website check failed; rejecting release before activation: ${publicRouteWarning}`);
+      }
       await writeLog(deployment.id, releaseId, "HEALTH_CHECK", "Public website check warning; keeping latest release active", {
         warning: publicRouteWarning,
         appPath,
         artifactRootPath
       }, "warn");
     }
+    deployment = await activateDeploymentArtifact(deployment, releaseId, artifactRootPath);
     const completedRelease = releaseId
       ? await prisma.deploymentRelease.findUnique({ where: { id: releaseId }, select: { commitSha: true } })
       : null;
@@ -5296,21 +5346,26 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
       }, "warn");
     }
     if (action !== "rollback") {
-      const previousRelease = await prisma.deploymentRelease.findFirst({
+      const previousReleases = await prisma.deploymentRelease.findMany({
         where: {
           deploymentId: deployment.id,
-          status: { in: ["SUCCEEDED", "ROLLED_BACK", "RUNNING"] },
+          status: { in: ["SUCCEEDED", "ROLLED_BACK"] },
           ...(releaseId ? { id: { not: releaseId } } : {})
         },
-        orderBy: { createdAt: "desc" }
+        orderBy: { createdAt: "desc" },
+        take: 20
       });
-      const previousReleaseHasArtifact = await releaseArtifactPathExists(previousRelease?.artifactPath);
-      const rollbackHasUsableSource = previousRelease && (
-        deploymentUsesAtomicArtifact(deployment)
-          ? previousReleaseHasArtifact
-          : (!deployment.gitUrl || previousRelease.commitSha)
-      );
-      if (rollbackHasUsableSource) {
+      let previousRelease = null as (typeof previousReleases)[number] | null;
+      let previousReleaseHasArtifact = false;
+      for (const candidate of previousReleases) {
+        const artifactReady = await releaseArtifactPathExists(candidate.artifactPath, deployment.framework, deployment.rootDirectory);
+        if (deploymentUsesAtomicArtifact(deployment) ? artifactReady : (!deployment.gitUrl || Boolean(candidate.commitSha))) {
+          previousRelease = candidate;
+          previousReleaseHasArtifact = artifactReady;
+          break;
+        }
+      }
+      if (previousRelease) {
         await writeLog(deployment.id, releaseId, "ROLLBACK", "Auto rollback to last successful release started", {
           failedReleaseId: releaseId ?? null,
           rollbackReleaseId: previousRelease.id,
@@ -5333,12 +5388,13 @@ async function processDeploy(action: string, deploymentId: string, releaseId: st
           }, "error");
         }
       } else {
+        const newestPreviousRelease = previousReleases[0];
         await writeLog(deployment.id, releaseId, "ROLLBACK", "Auto rollback skipped; no previous usable release snapshot", {
           failedReleaseId: releaseId ?? null,
-          previousReleaseId: previousRelease?.id ?? null,
-          previousReleaseStatus: previousRelease?.status ?? null,
-          hasCommitSha: Boolean(previousRelease?.commitSha),
-          hasArtifactPath: Boolean(previousRelease?.artifactPath),
+          previousReleaseId: newestPreviousRelease?.id ?? null,
+          previousReleaseStatus: newestPreviousRelease?.status ?? null,
+          hasCommitSha: Boolean(newestPreviousRelease?.commitSha),
+          hasArtifactPath: Boolean(newestPreviousRelease?.artifactPath),
           artifactPathExists: previousReleaseHasArtifact,
           gitUrl: Boolean(deployment.gitUrl)
         }, "warn");
