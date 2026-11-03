@@ -3290,7 +3290,11 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
         processConfig: { port: deployment.port, processManager: deployment.processManager, startCommand: deployment.startCommand }
       }
     });
-    await prisma.deployment.update({ where: { id: deployment.id }, data: { status: "QUEUED" } });
+    await prisma.deployment.update({ where: { id: deployment.id }, data: {
+      status: "QUEUED",
+      healthStatus: "UNKNOWN",
+      processConfig: processConfigWithoutManualStop(deployment.processConfig) as Prisma.InputJsonValue
+    } });
     await addLog(deployment.id, "QUEUED", "Deployment queued", release.id);
     const queue = await enqueueDeployAction(deployment.id, "deploy", release.id);
     await audit(request, { action: "DEPLOY", resource: "deployment", resourceId: deployment.id, description: `Queued deploy for ${deployment.slug}`, metadata: { releaseId: release.id } });
@@ -3306,6 +3310,9 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
       return reply.code(409).send({ error: "Required server runtime tools need approval before redeploy.", runtimeReview: runtime.review, install: runtime.install });
     }
     if (runtime.install) await addLog(deployment.id, "PREFLIGHT", "Approved runtime tools installed before redeploy", undefined, runtime.install as unknown as Prisma.InputJsonObject);
+    await prisma.deployment.update({ where: { id: deployment.id }, data: {
+      processConfig: processConfigWithoutManualStop(deployment.processConfig) as Prisma.InputJsonValue
+    } });
     const queue = await enqueueDeployAction(deployment.id, "redeploy");
     return reply.code(202).send(queue);
   });
@@ -3313,6 +3320,9 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
   app.post("/:deploymentId/pull", async (request, reply) => {
     const { deploymentId } = z.object({ deploymentId: z.string() }).parse(request.params);
     const deployment = await findDeployment(deploymentId);
+    await prisma.deployment.update({ where: { id: deployment.id }, data: {
+      processConfig: processConfigWithoutManualStop(deployment.processConfig) as Prisma.InputJsonValue
+    } });
     const queue = await enqueueDeployAction(deployment.id, "pull");
     return reply.code(202).send(queue);
   });
@@ -3323,7 +3333,14 @@ export const deploymentRoutes: FastifyPluginAsync = async (app) => {
     const deployment = await findDeployment(deploymentId);
     const release = body.releaseId
       ? await prisma.deploymentRelease.findFirstOrThrow({ where: { id: body.releaseId, deploymentId: deployment.id } })
-      : await prisma.deploymentRelease.findFirstOrThrow({ where: { deploymentId: deployment.id, status: "SUCCEEDED" }, orderBy: { createdAt: "desc" } });
+      : await prisma.deploymentRelease.findFirstOrThrow({ where: {
+          deploymentId: deployment.id,
+          status: "SUCCEEDED",
+          ...(["NEXTJS", "NODEJS"].includes(deployment.framework) ? { artifactPath: { not: null } } : {})
+        }, orderBy: { createdAt: "desc" } });
+    await prisma.deployment.update({ where: { id: deployment.id }, data: {
+      processConfig: processConfigWithoutManualStop(deployment.processConfig) as Prisma.InputJsonValue
+    } });
     await addLog(deployment.id, "ROLLBACK", `Rollback requested to release ${release.id}`, release.id);
     const queue = await enqueueDeployAction(deployment.id, "rollback", release.id);
     return reply.code(202).send({ release, queue });

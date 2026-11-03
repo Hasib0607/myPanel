@@ -13,6 +13,7 @@ import { deployQueue, sslQueue } from "./queues.js";
 import { requiredRuntimeExecutables, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import { deploymentEnvironmentConfigurationFailure, laravelPublicCwdMissing, nginxProxyMissingDomainFailure, permissionRepairNeeded, prismaDatabaseAuthFailure, pythonRuntimeRepairNeeded, runtimeTargetsForFailedDeploymentLog, supervisorRepairNeeded } from "../lib/deploymentFailureRuntimeRepairs.js";
 import path from "node:path";
+import fs from "node:fs/promises";
 import { Redis as AppRedis } from "ioredis";
 import {
   laravelManagedProgramName,
@@ -20,6 +21,7 @@ import {
   queueGroupCommand
 } from "../lib/laravelProcesses.js";
 import { normalizeDeploymentResourcePolicy } from "../lib/deploymentResourcePolicy.js";
+import { deploymentManualStopRequested } from "../lib/deploymentStopControl.js";
 import { runDomainHostSync } from "../lib/domainHostSync.js";
 import { sslRenewalEligibility, sslHttpRenewalEligibility } from "../lib/sslRenewalEligibility.js";
 import { certificateIsDue, certificateIsUnexpired } from "../lib/sslRenewalPolicy.js";
@@ -568,7 +570,7 @@ async function guardianApplyFailureRepairs(
   return { identified: runtimeTargets.length > 0 || publicCwdMissing || proxyMissingDomain || prismaDbAuthFailure || envConfigFailure || supervisorRepairNeeded(failureText) || permissionRepairNeeded(failureText) || pythonRuntimeRepairNeeded(failureText), applied, approvalsCreated };
 }
 
-async function queueGuardianDeployRepair(deployment: Awaited<ReturnType<typeof prisma.deployment.findMany>>[number], action: "restart" | "deploy", reason: string) {
+async function queueGuardianDeployRepair(deployment: Awaited<ReturnType<typeof prisma.deployment.findMany>>[number], action: "restart" | "deploy" | "rollback", reason: string, rollbackReleaseId?: string) {
   if (!autoDeployRepairEnabled) return { queued: false, reason: "auto deploy repair disabled" };
 
   const pendingApproval = await hasPendingDoctorApproval(deployment.id);
@@ -593,6 +595,9 @@ async function queueGuardianDeployRepair(deployment: Awaited<ReturnType<typeof p
       }
     });
     releaseId = release.id;
+  } else if (action === "rollback") {
+    if (!rollbackReleaseId) return { queued: false, reason: "no usable rollback release" };
+    releaseId = rollbackReleaseId;
   }
 
   await prisma.deployment.update({
@@ -604,7 +609,7 @@ async function queueGuardianDeployRepair(deployment: Awaited<ReturnType<typeof p
       deploymentId: deployment.id,
       releaseId,
       step: "QUEUED",
-      message: action === "deploy" ? "Guardian queued auto redeploy" : "Guardian queued auto restart",
+      message: action === "deploy" ? "Guardian queued auto redeploy" : action === "rollback" ? "Guardian queued last working release rollback" : "Guardian queued auto restart",
       metadata: { reason, attempts: attempts + 1, cooldownMs: autoDeployCooldownMs } as any
     }
   });
@@ -806,16 +811,21 @@ async function runDeploymentWatch() {
       OR: [
         { status: "FAILED" },
         { healthStatus: { in: ["DOWN", "DEGRADED", "UNKNOWN"] } },
+        { status: "RUNNING", lastDeployAt: { gte: new Date(Date.now() - 30 * 60_000) } },
         { status: { in: ["DEPLOYING", "BUILDING", "QUEUED"] }, updatedAt: { lte: new Date(Date.now() - staleDeploymentMs) } }
       ]
     },
-    include: { env: true },
+    include: { env: true, domain: true },
     orderBy: { updatedAt: "desc" },
     take: 25
   });
   const results = [];
   for (const deployment of deployments) {
     try {
+      if (deploymentManualStopRequested(deployment.processConfig)) {
+        results.push({ deploymentId: deployment.id, skipped: "manual_stop" });
+        continue;
+      }
       const appPath = deploymentAppPath(deployment.rootPath, deployment.rootDirectory);
       const missingRuntimeTools = await missingDeploymentRuntimeTools(deployment);
       if (missingRuntimeTools.length) {
@@ -872,32 +882,37 @@ async function runDeploymentWatch() {
           };
         }
       }
+      let publicFailure: string | null = null;
+      if (healthy && deployment.domain && deployment.status === "RUNNING"
+        && (deployment.healthStatus === "DEGRADED" || (deployment.lastDeployAt && Date.now() - deployment.lastDeployAt.getTime() < 30 * 60_000))) {
+        const publicResult = await sysagent.deploymentPublicRoute({
+          serverName: deployment.domain.name,
+          rootPath: appPath,
+          framework: deployment.framework,
+          requireHttps: true
+        }) as { httpCode?: number; degraded?: boolean; stderr?: string };
+        if ((publicResult.httpCode ?? 0) >= 500 && (publicResult.httpCode ?? 0) <= 599) {
+          healthy = false;
+          publicFailure = `Public route returned HTTP ${publicResult.httpCode}: ${publicResult.stderr ?? ""}`;
+        }
+      }
       const openRelease = await prisma.deploymentRelease.findFirst({
         where: { deploymentId: deployment.id, status: { in: ["QUEUED", "RUNNING"] } },
         orderBy: { createdAt: "desc" }
       });
       const stalePending = ["DEPLOYING", "BUILDING", "QUEUED"].includes(deployment.status) && Date.now() - deployment.updatedAt.getTime() >= staleDeploymentMs;
+      const pendingDeployment = ["DEPLOYING", "BUILDING", "QUEUED"].includes(deployment.status) && !stalePending;
       const failedWithOpenRelease = deployment.status === "FAILED" && openRelease?.status === "RUNNING";
       const recoveredFailedDeployment = deployment.status === "FAILED" && healthy;
       await prisma.deployment.update({
         where: { id: deployment.id },
         data: {
-          status: healthy ? "RUNNING" : stalePending ? "FAILED" : deployment.status,
+          status: healthy && !pendingDeployment && !openRelease ? "RUNNING" : stalePending ? "FAILED" : deployment.status,
           healthStatus: healthy ? (result.degraded ? "DEGRADED" : "HEALTHY") : "DOWN",
           lastHealthCheckAt: new Date()
         }
       });
-      if (healthy && openRelease) {
-        const finishedAt = new Date();
-        await prisma.deploymentRelease.updateMany({
-          where: { id: openRelease.id, status: { not: "CANCELLED" } },
-          data: {
-            status: "SUCCEEDED",
-            finishedAt,
-            durationMs: Math.max(0, finishedAt.getTime() - (openRelease.startedAt ?? openRelease.createdAt).getTime())
-          }
-        });
-      } else if ((stalePending || failedWithOpenRelease) && openRelease) {
+      if ((stalePending || failedWithOpenRelease) && openRelease) {
         const finishedAt = new Date();
         await prisma.deploymentRelease.updateMany({
           where: { id: openRelease.id, status: { not: "CANCELLED" } },
@@ -907,20 +922,6 @@ async function runDeploymentWatch() {
             durationMs: Math.max(0, finishedAt.getTime() - (openRelease.startedAt ?? openRelease.createdAt).getTime())
           }
         });
-      } else if (recoveredFailedDeployment) {
-        const release = await prisma.deploymentRelease.findFirst({
-          where: { deploymentId: deployment.id, status: "FAILED" },
-          orderBy: { createdAt: "desc" }
-        });
-        if (release) {
-          await prisma.deploymentRelease.update({
-            where: { id: release.id },
-            data: {
-              status: "SUCCEEDED",
-              finishedAt: new Date()
-            }
-          });
-        }
       }
       await prisma.deploymentLog.create({
         data: {
@@ -934,14 +935,39 @@ async function runDeploymentWatch() {
             : stalePending
               ? "Scheduled deployment watch marked stale deployment as failed"
               : "Scheduled deployment watch failed",
-          metadata: { result, stalePending, failedWithOpenRelease, openReleaseId: openRelease?.id ?? null, recoveredFailedDeployment } as any
+          metadata: { result, publicFailure, stalePending, failedWithOpenRelease, openReleaseId: openRelease?.id ?? null, recoveredFailedDeployment } as any
         }
       });
       let autoRepair = null;
       if (!healthy) {
+        if (publicFailure) {
+          const activeArtifactPath = (deployment.processConfig as { activeArtifactPath?: string } | null)?.activeArtifactPath;
+          if (activeArtifactPath) {
+            await prisma.deploymentRelease.updateMany({
+              where: { deploymentId: deployment.id, artifactPath: activeArtifactPath, status: "SUCCEEDED" },
+              data: { status: "FAILED" }
+            });
+          }
+          const candidates = await prisma.deploymentRelease.findMany({
+            where: { deploymentId: deployment.id, status: { in: ["SUCCEEDED", "ROLLED_BACK"] }, artifactPath: { not: null } },
+            orderBy: { createdAt: "desc" }, take: 5
+          });
+          for (const candidate of candidates) {
+            if (!candidate.artifactPath || candidate.artifactPath === activeArtifactPath) continue;
+            const requiredArtifactFile = deployment.framework === "NEXTJS"
+              ? path.join(candidate.artifactPath, deployment.rootDirectory, ".next", "BUILD_ID")
+              : deployment.framework === "NODEJS"
+                ? path.join(candidate.artifactPath, deployment.rootDirectory, "package.json")
+                : candidate.artifactPath;
+            if (await fs.access(requiredArtifactFile).then(() => true).catch(() => false)) {
+              autoRepair = await queueGuardianDeployRepair(deployment, "rollback", publicFailure, candidate.id);
+              break;
+            }
+          }
+        }
         const shouldRedeploy = stalePending || (deployment.status === "FAILED" && !failedWithOpenRelease);
-        const shouldRestart = failedWithOpenRelease || (!shouldRedeploy && deployment.status === "RUNNING");
-        if (shouldRedeploy || shouldRestart) {
+        const shouldRestart = !publicFailure && (failedWithOpenRelease || (!shouldRedeploy && deployment.status === "RUNNING"));
+        if (!autoRepair && (shouldRedeploy || shouldRestart)) {
           if (shouldRedeploy && !deployment.startCommand?.trim() && deployment.framework !== "STATIC") {
             await guardianSyncRuntimeIfMissingStart(deployment);
           }
@@ -1475,5 +1501,5 @@ export const guardianWorker = new Worker(
 
     throw new Error(`Unknown guardian job: ${job.name}`);
   },
-  { connection: redis }
+  { connection: redis, concurrency: 2 }
 );
