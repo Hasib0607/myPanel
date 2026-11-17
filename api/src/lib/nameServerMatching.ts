@@ -25,6 +25,13 @@ export function matchingNameServerGroup(expectedGroups: string[][], actualHostna
   return expectedGroups.find((group) => group.length > 0 && group.every((hostname) => actual.has(normalizeNameServer(hostname)))) ?? null;
 }
 
+// Domain onboarding needs one observed hosting NS. A complete provider pair is
+// still required by callers that use matchingNameServerGroup (such as SSL checks).
+export function matchingHostingNameServer(expectedGroups: string[][], actualHostnames: string[]) {
+  const actual = new Set(actualHostnames.map(normalizeNameServer).filter(Boolean));
+  return expectedGroups.flat().map(normalizeNameServer).find((hostname) => actual.has(hostname)) ?? null;
+}
+
 export function nameServerAlternativesText(groups: string[][]) {
   if (groups.length === 0) return "no active nameservers configured";
   return groups.map((group) => group.join(", ")).join(" OR ");
