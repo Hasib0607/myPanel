@@ -19,6 +19,7 @@ import { publishDomainDnsZone } from "../lib/domainDnsPublish.js";
 import { detectDeploymentFiles } from "../lib/deploymentDetection.js";
 import { deploymentRuntimeReview, prepareDeploymentRuntimeTools } from "../lib/deploymentRuntimeReview.js";
 import { processConfigWithoutManualStop, requestDeploymentManualStop } from "../lib/deploymentStopControl.js";
+import { isLocalPortAvailable } from "../lib/localPortAvailability.js";
 import { accountDomainWebRootPath, boundDomainFromBinding, certificateNamesCoverHost, certificateNamesCoverServerName, deploymentFallbackRootPath, deploymentIsRoutable, deploymentServerName, deploymentSslCertificatePathsWhenReady, findDeploymentProxyTarget, publishDeploymentProxyNginx } from "../lib/deploymentDomainSsl.js";
 import { prisma } from "../lib/prisma.js";
 import { resolvePublicA } from "../lib/publicDns.js";
@@ -784,14 +785,23 @@ async function applyAccountDeploymentCron(deployment: Awaited<ReturnType<typeof 
   return result;
 }
 
+function reservedAccountDeploymentPorts() {
+  const reserved = new Set((process.env.DEPLOYMENT_RESERVED_PORTS ?? "").split(",").map(Number).filter(Number.isInteger));
+  reserved.add(env.PANEL_PORT);
+  reserved.add(Number(env.PANEL_LOGIN_PORT ?? 8453));
+  reserved.add(Number(env.CPANEL_LOGIN_PORT ?? 3138));
+  return reserved;
+}
+
 async function nextDeploymentPort() {
   const deployments = await prisma.deployment.findMany({
     where: { port: { gte: deploymentPortStart, lte: deploymentPortEnd } },
     select: { port: true }
   });
   const used = new Set(deployments.map((deployment) => deployment.port));
+  const reserved = reservedAccountDeploymentPorts();
   for (let port = deploymentPortStart; port <= deploymentPortEnd; port += 1) {
-    if (!used.has(port)) return port;
+    if (!used.has(port) && !reserved.has(port) && await isLocalPortAvailable(port)) return port;
   }
   throw Object.assign(new Error(`No available deployment ports in ${deploymentPortStart}-${deploymentPortEnd}`), { statusCode: 409 });
 }
@@ -2840,6 +2850,13 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
     const slug = await uniqueDeploymentSlug(body.slug || body.name);
     const rootPath = accountDeploymentRootPath(account, body.rootPath, slug);
     await fs.mkdir(rootPath, { recursive: true });
+    const port = body.port ?? await nextDeploymentPort();
+    if (body.port !== undefined) {
+      const owner = await prisma.deployment.findFirst({ where: { port }, select: { id: true } });
+      if (port < deploymentPortStart || port > deploymentPortEnd || reservedAccountDeploymentPorts().has(port) || owner || !(await isLocalPortAvailable(port))) {
+        throw Object.assign(new Error(`Deployment port ${port} is already in use or outside the managed range`), { statusCode: 409 });
+      }
+    }
     const deployment = await prisma.deployment.create({
       data: {
         accountId: account.id,
@@ -2867,7 +2884,7 @@ export const accountPanelRoutes: FastifyPluginAsync = async (app) => {
         dbName: body.dbName ?? null,
         dbUser: body.dbUser ?? null,
         processManager: defaultProcessManagerByFramework[body.framework],
-        port: body.port ?? await nextDeploymentPort(),
+        port,
         autoDeployEnabled: body.autoDeployEnabled,
         status: "STOPPED",
         env: {
