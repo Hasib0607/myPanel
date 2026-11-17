@@ -17,7 +17,8 @@ import { sslQueue } from "../jobs/queues.js";
 import { sslHostCoverage, syncSubdomainHostRow } from "../lib/domainHosts.js";
 import { checkLetsEncryptCaa, resolvePublicA } from "../lib/publicDns.js";
 import { publishDomainDnsZone } from "../lib/domainDnsPublish.js";
-import { configuredNameServerGroups, matchingNameServerGroup, nameServerAlternativesText } from "../lib/nameServerMatching.js";
+import { configuredNameServerGroups, matchingHostingNameServer, nameServerAlternativesText } from "../lib/nameServerMatching.js";
+import { resolveParentNameServers } from "../lib/parentNameServers.js";
 
 export function normalizeDomainName(value: string) {
   return value
@@ -94,7 +95,7 @@ function normalizeNameServer(value: string) {
 function nameserverMismatchMessage(domain: string, expectedGroups: string[][], actual: string[]) {
   const expectedText = nameServerAlternativesText(expectedGroups);
   const actualText = actual.length > 0 ? actual.join(", ") : "no public nameservers found";
-  return `Before adding ${domain}, change its nameservers to this hosting nameserver: ${expectedText}. Current nameservers: ${actualText}.`;
+  return `Before adding ${domain}, point at least one nameserver to this hosting server: ${expectedText}. Observed nameservers: ${actualText}.`;
 }
 
 type DnsJsonAnswer = {
@@ -107,8 +108,14 @@ type DnsJsonResponse = {
   Answer?: DnsJsonAnswer[];
 };
 
-async function resolveNameServersWithDoh(domain: string, errors: string[]) {
+function includesExpectedNameServer(records: string[], expected: string[]) {
+  const expectedSet = new Set(expected);
+  return records.some((record) => expectedSet.has(record));
+}
+
+async function resolveNameServersWithDoh(domain: string, errors: string[], expected: string[]) {
   const urls = env.DOMAIN_NAMESERVER_DOH_URLS.split(",").map((url) => url.trim()).filter(Boolean);
+  const observed = new Set<string>();
 
   for (const baseUrl of urls) {
     try {
@@ -123,14 +130,15 @@ async function resolveNameServersWithDoh(domain: string, errors: string[]) {
       const records = (body.Answer ?? [])
         .filter((answer) => answer.type === 2 && answer.data)
         .map((answer) => normalizeNameServer(answer.data ?? ""));
-      if (records.length > 0) return records.sort();
+      records.forEach((record) => observed.add(record));
+      if (includesExpectedNameServer(records, expected)) return records.sort();
       errors.push(`${baseUrl}: status ${body.Status ?? response.status}`);
     } catch (error) {
       errors.push(`${baseUrl}: ${error instanceof Error ? error.message : "lookup failed"}`);
     }
   }
 
-  return [];
+  return [...observed].sort();
 }
 
 async function resolvePublicAddress(hostname: string, recordType: "A" | "AAAA") {
@@ -183,35 +191,43 @@ function hasExpectedVanityNameServers(domain: string, nameServers: ActiveNameSer
   return vanityNameServers.length > 0 && vanityNameServers.length === nameServers.length;
 }
 
-async function resolvePublicNameServers(domain: string) {
+async function resolvePublicNameServers(domain: string, expected: string[] = []) {
   const resolvers = env.DOMAIN_NAMESERVER_RESOLVERS.split(",").map((resolver) => resolver.trim()).filter(Boolean);
   const errors: string[] = [];
+  const observed = new Set<string>();
+
+  // The parent delegation is visible before our authoritative zone exists.
+  // Recursive resolvers can SERVFAIL until the domain is added to this panel.
+  const parentRecords = await resolveParentNameServers(domain);
+  parentRecords.forEach((record) => observed.add(record));
+  if (includesExpectedNameServer(parentRecords, expected)) return parentRecords;
 
   for (const resolverAddress of resolvers) {
     const resolver = new dns.Resolver();
     resolver.setServers([resolverAddress]);
     try {
       const records = await resolver.resolveNs(domain);
-      if (records.length > 0) {
-        return records.map((nameServer) => normalizeNameServer(nameServer)).sort();
-      }
+      const normalized = records.map(normalizeNameServer);
+      normalized.forEach((record) => observed.add(record));
+      if (includesExpectedNameServer(normalized, expected)) return normalized.sort();
     } catch (error) {
       errors.push(`${resolverAddress}: ${error instanceof Error ? error.message : "lookup failed"}`);
     }
   }
 
-  const dohRecords = await resolveNameServersWithDoh(domain, errors);
-  if (dohRecords.length > 0) return dohRecords;
+  const dohRecords = await resolveNameServersWithDoh(domain, errors, expected);
+  dohRecords.forEach((record) => observed.add(record));
+  if (includesExpectedNameServer(dohRecords, expected)) return dohRecords;
 
   try {
     const records = await dns.resolveNs(domain);
-    if (records.length > 0) {
-      return records.map((nameServer) => normalizeNameServer(nameServer)).sort();
-    }
+    const normalized = records.map(normalizeNameServer);
+    normalized.forEach((record) => observed.add(record));
   } catch (error) {
     errors.push(`system: ${error instanceof Error ? error.message : "lookup failed"}`);
   }
 
+  if (observed.size > 0) return [...observed].sort();
   throw Object.assign(new Error(`No public nameservers found. Resolver checks: ${errors.join("; ") || "none"}`), { statusCode: 400 });
 }
 
@@ -226,7 +242,7 @@ export async function assertDomainUsesHostingNameServers(domain: string, nameSer
 
   let actual: string[];
   try {
-    actual = await resolvePublicNameServers(domain);
+    actual = await resolvePublicNameServers(domain, expected);
   } catch (error) {
     if (await vanityNameserverGlueMatches(domain, nameServers)) return;
     if (hasExpectedVanityNameServers(domain, nameServers)) return;
@@ -234,8 +250,8 @@ export async function assertDomainUsesHostingNameServers(domain: string, nameSer
     throw Object.assign(new Error(`${nameserverMismatchMessage(domain, expectedGroups, [])}${detail}`), { statusCode: 400 });
   }
 
-  const matchedGroup = matchingNameServerGroup(expectedGroups, actual);
-  if (!matchedGroup && !(await vanityNameserverGlueMatches(domain, nameServers))) {
+  const matchedNameServer = matchingHostingNameServer(expectedGroups, actual);
+  if (!matchedNameServer && !(await vanityNameserverGlueMatches(domain, nameServers))) {
     throw Object.assign(new Error(nameserverMismatchMessage(domain, expectedGroups, actual)), { statusCode: 400 });
   }
 }
@@ -247,11 +263,11 @@ export async function domainNameserverReadiness(domain: string, nameServers: Act
   let actual: string[] = [];
   let lookupError: string | null = null;
   try {
-    actual = await resolvePublicNameServers(domain);
+    actual = await resolvePublicNameServers(domain, expected);
   } catch (error) {
     lookupError = error instanceof Error ? error.message : "No public nameservers found.";
   }
-  const expectedPresent = Boolean(matchingNameServerGroup(expectedGroups, actual));
+  const expectedPresent = Boolean(matchingHostingNameServer(expectedGroups, actual));
   const vanityOk = await vanityNameserverGlueMatches(domain, nameServers).catch(() => false);
   const expectedVanityPending = hasExpectedVanityNameServers(domain, nameServers);
   const apexA = await resolvePublicA(domain).then((records) => ({
@@ -293,7 +309,9 @@ export async function domainNameserverReadiness(domain: string, nameServers: Act
     message: error instanceof Error ? error.message : "CAA lookup failed."
   }));
   const nsOk = !env.REQUIRE_DOMAIN_NAMESERVER_MATCH || expectedPresent || vanityOk || expectedVanityPending;
-  const ok = nsOk && apexA.ok && caa.allowed;
+  // A and CAA are useful diagnostics, but the panel publishes those records
+  // only after the domain is added. They must not block domain onboarding.
+  const ok = nsOk;
   return {
     domain,
     ok,
@@ -303,11 +321,9 @@ export async function domainNameserverReadiness(domain: string, nameServers: Act
     currentNameServers: actual,
     dns: { apex: apexA, www: wwwA, caa },
     message: ok
-      ? `${domain} DNS is ready for this hosting server.`
+      ? `${domain} has a hosting nameserver. A and CAA records can be checked after connection.`
       : [
-          !nsOk ? `${nameserverMismatchMessage(domain, expectedGroups, actual)}${lookupError ? ` ${lookupError}` : ""}` : null,
-          !apexA.ok ? apexA.message : null,
-          !caa.allowed ? caa.message : null
+          !nsOk ? `${nameserverMismatchMessage(domain, expectedGroups, actual)}${lookupError ? ` ${lookupError}` : ""}` : null
         ].filter(Boolean).join(" ")
   };
 }
