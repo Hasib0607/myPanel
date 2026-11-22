@@ -12,6 +12,7 @@ import { laravelPublicCwdMissing, nginxProxyMissingDomainFailure, nodePackageBin
 import { detectComposerPlatformIssue, detectFrontendModuleNotFound, formatFrontendModuleNotFoundMessage, isComposerPlatformCheckInconclusive, requiredRuntimeExecutables, runtimeInstallTargetsForComposerPlatformIssue, runtimeInstallTargetsForMissingExecutables } from "../lib/deploymentRuntimeTools.js";
 import { deploymentRuntimeReview, prepareDeploymentRuntimeTools } from "../lib/deploymentRuntimeReview.js";
 import { processConfigWithoutManualStop, requestDeploymentManualStop } from "../lib/deploymentStopControl.js";
+import { isLocalPortAvailable } from "../lib/localPortAvailability.js";
 import { audit } from "../lib/audit.js";
 import { githubApiErrorMessage, isGithubWebhookPermissionError } from "../lib/githubApiErrors.js";
 import { deploymentHasLaravelPublicIndex, detectDeploymentFiles, detectDeploymentSource, findDeploymentAppRoot } from "../lib/deploymentDetection.js";
@@ -591,6 +592,15 @@ async function assertDeploymentPortAvailable(port: number, existingDeploymentId?
     Object.assign(error, { statusCode: 409 });
     throw error;
   }
+
+  const existing = existingDeploymentId
+    ? await prisma.deployment.findUnique({ where: { id: existingDeploymentId }, select: { port: true } })
+    : null;
+  if (existing?.port !== port && !(await isLocalPortAvailable(port))) {
+    const error = new Error(`Deployment port ${port} is already occupied by a running service`);
+    Object.assign(error, { statusCode: 409 });
+    throw error;
+  }
 }
 
 async function nextAvailablePort() {
@@ -599,7 +609,7 @@ async function nextAvailablePort() {
   const reserved = reservedDeploymentPorts();
   const { start, end } = deploymentPortRange();
   for (let port = start; port <= end; port += 1) {
-    if (!used.has(port) && !reserved.has(port)) return port;
+    if (!used.has(port) && !reserved.has(port) && await isLocalPortAvailable(port)) return port;
   }
   throw new Error(`No available deployment ports in ${start}-${end}`);
 }

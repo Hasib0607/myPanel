@@ -636,7 +636,7 @@ export function DomainsClient({
                   ) : newDomainReadiness.data ? (
                     <div className="space-y-2">
                       <div className={`font-semibold ${newDomainReadiness.data.ok ? "text-emerald-700" : "text-amber-700"}`}>
-                        {newDomainReadiness.data.ok ? "DNS ready" : "DNS update required"}
+                        {newDomainReadiness.data.ok ? "Nameserver found — domain can be added" : "Nameserver update required"}
                       </div>
                       <div className="grid gap-2 md:grid-cols-2">
                         <div>
@@ -652,6 +652,9 @@ export function DomainsClient({
                           </div>
                         </div>
                       </div>
+                      {newDomainReadiness.data.dns ? (
+                        <div className="text-panel-muted">A, www, and CAA checks are informational until the domain is connected.</div>
+                      ) : null}
                       {newDomainReadiness.data.dns ? (
                         <div className="grid gap-2 md:grid-cols-3">
                           {[newDomainReadiness.data.dns.apex, newDomainReadiness.data.dns.www].filter(Boolean).map((check) => (

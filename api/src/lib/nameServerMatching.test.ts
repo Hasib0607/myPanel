@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { configuredNameServerGroups, matchingNameServerGroup, nameServerAlternativesText } from "./nameServerMatching.js";
+import { configuredNameServerGroups, matchingHostingNameServer, matchingNameServerGroup, nameServerAlternativesText } from "./nameServerMatching.js";
 
 const groups = configuredNameServerGroups([
   "ns1.ebitans.com",
@@ -24,6 +24,12 @@ test("accepts any complete configured nameserver group", () => {
 test("rejects incomplete or mixed nameserver groups", () => {
   assert.equal(matchingNameServerGroup(groups, ["ns1.ebitans.com"]), null);
   assert.equal(matchingNameServerGroup(groups, ["ns1.ebitans.com", "ns2.ecommercex.store"]), null);
+});
+
+test("domain onboarding accepts one observed hosting nameserver", () => {
+  assert.equal(matchingHostingNameServer(groups, ["NS1.EBITANS.COM."]), "ns1.ebitans.com");
+  assert.equal(matchingHostingNameServer(groups, ["ns2.ecommercex.store"]), "ns2.ecommercex.store");
+  assert.equal(matchingHostingNameServer(groups, ["ns1.unrelated.test"]), null);
 });
 
 test("formats configured groups as alternatives", () => {
