@@ -177,7 +177,7 @@ export function FileEditorClient({ initialPath, apiBase = "/files" }: { initialP
 
   return (
     <section className="flex h-screen min-h-0 flex-col bg-panel-bg">
-      <div className="flex min-h-[81px] flex-wrap items-center justify-between gap-3 border-b border-panel-line bg-white px-8 py-4">
+      <div className="flex min-h-[70px] flex-wrap items-center justify-between gap-3 border-b border-panel-line bg-white px-4 py-3 sm:px-6 sm:py-4 lg:px-8">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <button
@@ -189,38 +189,38 @@ export function FileEditorClient({ initialPath, apiBase = "/files" }: { initialP
               <ArrowLeft size={16} />
             </button>
             <div className="min-w-0">
-              <h1 className="truncate text-2xl font-semibold text-panel-text">{file?.name ?? "File Editor"}</h1>
-              <p className="mt-1 truncate text-sm text-panel-muted">{filePath || "Select a file from File Manager"}</p>
+              <h1 className="truncate text-xl sm:text-2xl font-semibold text-panel-text">{file?.name ?? "File Editor"}</h1>
+              <p className="mt-0.5 truncate text-xs sm:text-sm text-panel-muted">{filePath || "Select a file from File Manager"}</p>
             </div>
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {lastResult ? <span className="rounded-md bg-slate-100 px-3 py-2 text-sm text-slate-700">{lastResult}</span> : null}
-          {dirty ? <span className="rounded-md bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800">Unsaved</span> : <span className="flex items-center gap-1 rounded-md bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700"><Check size={14} /> Saved</span>}
-          <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50" disabled={readFile.isFetching} onClick={() => readFile.refetch()} type="button">
-            <RefreshCw size={15} /> Reload
+          {lastResult ? <span className="rounded-md bg-slate-100 px-3 py-2 text-xs sm:text-sm text-slate-700">{lastResult}</span> : null}
+          {dirty ? <span className="rounded-md bg-amber-50 px-2.5 py-1.5 text-xs sm:text-sm font-medium text-amber-800">Unsaved</span> : <span className="flex items-center gap-1 rounded-md bg-emerald-50 px-2.5 py-1.5 text-xs sm:text-sm font-medium text-emerald-700"><Check size={14} /> Saved</span>}
+          <button className="flex h-9 items-center gap-1.5 sm:gap-2 rounded-md border border-panel-line px-2.5 sm:px-3 text-xs sm:text-sm hover:bg-slate-50" disabled={readFile.isFetching} onClick={() => readFile.refetch()} type="button">
+            <RefreshCw size={14} /> Reload
           </button>
-          <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50" onClick={formatContent} type="button">
-            <Code2 size={15} /> Format
+          <button className="flex h-9 items-center gap-1.5 sm:gap-2 rounded-md border border-panel-line px-2.5 sm:px-3 text-xs sm:text-sm hover:bg-slate-50" onClick={formatContent} type="button">
+            <Code2 size={14} /> Format
           </button>
-          <button className="flex h-9 items-center gap-2 rounded-md bg-panel-accent px-4 text-sm font-semibold text-white disabled:opacity-60" disabled={!dirty || saveFile.isPending || !filePath} onClick={() => saveFile.mutate()} type="button">
-            <Save size={15} /> Save
+          <button className="flex h-9 items-center gap-1.5 sm:gap-2 rounded-md bg-panel-accent px-3 sm:px-4 text-xs sm:text-sm font-semibold text-white disabled:opacity-60" disabled={!dirty || saveFile.isPending || !filePath} onClick={() => saveFile.mutate()} type="button">
+            <Save size={14} /> Save
           </button>
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-3 border-b border-panel-line bg-white px-8 py-3">
-        <label className="flex items-center gap-2 text-sm"><input checked={wordWrap} onChange={(event) => setWordWrap(event.target.checked)} type="checkbox" /> Wrap</label>
-        <label className="flex items-center gap-2 text-sm"><input checked={minimap} onChange={(event) => setMinimap(event.target.checked)} type="checkbox" /> Minimap</label>
-        <select className="h-9 rounded-md border border-panel-line px-2 text-sm" onChange={(event) => setTheme(event.target.value as "vs" | "vs-dark")} value={theme}>
+      <div className="flex flex-wrap items-center gap-2 sm:gap-3 border-b border-panel-line bg-white px-4 py-2.5 sm:px-6 sm:py-3 lg:px-8">
+        <label className="flex items-center gap-1.5 text-xs sm:text-sm"><input checked={wordWrap} onChange={(event) => setWordWrap(event.target.checked)} type="checkbox" /> Wrap</label>
+        <label className="flex items-center gap-1.5 text-xs sm:text-sm"><input checked={minimap} onChange={(event) => setMinimap(event.target.checked)} type="checkbox" /> Minimap</label>
+        <select className="h-8 sm:h-9 rounded-md border border-panel-line px-2 text-xs sm:text-sm" onChange={(event) => setTheme(event.target.value as "vs" | "vs-dark")} value={theme}>
           <option value="vs">Light</option>
           <option value="vs-dark">Dark</option>
         </select>
-        <input className="h-9 w-20 rounded-md border border-panel-line px-2 text-sm" max={24} min={11} onChange={(event) => setFontSize(Number(event.target.value))} type="number" value={fontSize} />
-        {file ? <span className="text-sm text-panel-muted">Mode {file.permissions} · {language}</span> : null}
+        <input className="h-8 sm:h-9 w-16 sm:w-20 rounded-md border border-panel-line px-2 text-xs sm:text-sm" max={24} min={11} onChange={(event) => setFontSize(Number(event.target.value))} type="number" value={fontSize} />
+        {file ? <span className="text-xs sm:text-sm text-panel-muted">Mode {file.permissions} · {language}</span> : null}
       </div>
 
-      <div className="min-h-0 flex-1 p-6">
+      <div className="min-h-0 flex-1 p-3 sm:p-4 lg:p-6">
         {!filePath ? (
           <div className="flex h-full items-center justify-center rounded-md border border-dashed border-panel-line bg-white text-panel-muted">No file selected.</div>
         ) : readFile.isError ? (

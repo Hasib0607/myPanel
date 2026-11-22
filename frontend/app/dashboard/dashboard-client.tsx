@@ -301,7 +301,7 @@ export function DashboardClient() {
           </button>
         }
       />
-      <section className="space-y-6 p-8">
+      <section className="space-y-6 p-4 sm:p-6 lg:p-8">
         {dashboard.isError ? (
           <div className="flex items-center gap-3 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-panel-danger">
             <AlertTriangle size={18} />
@@ -309,20 +309,21 @@ export function DashboardClient() {
           </div>
         ) : null}
 
-        <div className="grid grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
           <StatCard label="Domains" value={data?.counts.domains ?? "..."} />
           <StatCard label="Mailboxes" value={data?.counts.mailboxes ?? "..."} />
           <StatCard label="Deployments" value={data?.counts.deployments ?? "..."} />
           <StatCard label="Name Servers" value={data?.counts.nameServers ?? "..."} tone="warn" />
         </div>
 
-        <div className="grid grid-cols-[1fr_380px] gap-6">
+        <div className="grid grid-cols-1 xl:grid-cols-[1fr_380px] gap-6">
           <div className="space-y-6">
           <div className="rounded-md border border-panel-line bg-white">
             <div className="flex items-center justify-between border-b border-panel-line px-4 py-3">
               <div className="text-sm font-semibold">Service Health</div>
               <div className="text-xs text-panel-muted">{data ? `Updated ${new Date(data.generatedAt).toLocaleTimeString()}` : "Loading..."}</div>
             </div>
+            <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-left text-xs uppercase text-panel-muted">
                 <tr>
@@ -362,11 +363,12 @@ export function DashboardClient() {
                 ))}
               </tbody>
             </table>
+            </div>
             {serviceNotice ? <div className="border-t border-panel-line px-4 py-3 text-xs text-panel-muted">{serviceNotice}</div> : null}
           </div>
 
           <div className="rounded-md border border-panel-line bg-white p-4">
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
                 <div className="text-sm font-semibold">Top Resource Projects</div>
                 <div className="mt-1 text-xs text-panel-muted">
@@ -390,17 +392,17 @@ export function DashboardClient() {
                 </button>
               </div>
             </div>
-            <div className="mt-4 grid grid-cols-3 gap-3">
+            <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               {(topResourceUsers.data?.items ?? []).map((project, index) => (
                 <ResourceUserCard key={project.id} project={project} rank={index + 1} />
               ))}
               {topResourceUsers.isError ? (
-                <div className="col-span-3 rounded-md border border-red-200 bg-red-50 p-5 text-sm text-panel-danger">
+                <div className="col-span-full rounded-md border border-red-200 bg-red-50 p-5 text-sm text-panel-danger">
                   {topResourceUsers.error instanceof Error ? topResourceUsers.error.message : "Top resource projects could not be loaded."}
                 </div>
               ) : null}
               {topResourceUsers.data && topResourceUsers.data.items.length === 0 ? (
-                <div className="col-span-3 rounded-md border border-dashed border-panel-line p-5 text-sm text-panel-muted">No running project resource metrics available right now.</div>
+                <div className="col-span-full rounded-md border border-dashed border-panel-line p-5 text-sm text-panel-muted">No running project resource metrics available right now.</div>
               ) : null}
               {topResourceUsers.isLoading ? (
                 [1, 2, 3].map((item) => (
@@ -418,7 +420,7 @@ export function DashboardClient() {
 
           <div className="space-y-6">
             <div className="rounded-md border border-panel-line bg-white p-4">
-              <div className="flex items-center justify-between gap-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
                   <div className="flex items-center gap-2 text-sm font-semibold">
                     <Terminal size={16} />
@@ -426,7 +428,7 @@ export function DashboardClient() {
                   </div>
                   <div className="mt-1 text-xs text-panel-muted">Git push auto pull, build, migration, and service restart status.</div>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <button
                     className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60"
                     disabled={rebuildPanel.isPending || panelUpdate.data?.status.state === "queued" || panelUpdate.data?.status.state === "running"}

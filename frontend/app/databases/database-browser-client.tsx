@@ -136,6 +136,7 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
   const [limit, setLimit] = useState(100);
   const [tableSearch, setTableSearch] = useState("");
   const [columnSearch, setColumnSearch] = useState("");
+  const [tableListOpen, setTableListOpen] = useState(false);
   const [rowSearch, setRowSearch] = useState("");
   const [rowSearchColumns, setRowSearchColumns] = useState<string[]>([]);
   const [columnPickerSearch, setColumnPickerSearch] = useState("");
@@ -308,25 +309,30 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
 
   return (
     <div className="min-h-screen bg-slate-50">
-      <div className="border-b border-panel-line bg-white px-6 py-4">
-        <div className="flex items-center justify-between gap-4">
+      <div className="border-b border-panel-line bg-white px-4 py-4 sm:px-6 lg:px-8">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="min-w-0">
-            <Link className="mb-3 inline-flex items-center gap-2 text-sm font-medium text-panel-muted hover:text-panel-ink" href={backHref}>
+            <Link className="mb-2 sm:mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-panel-muted hover:text-panel-ink" href={backHref}>
               <ChevronLeft size={16} /> Databases
             </Link>
             <div className="flex items-center gap-3">
               <Database size={24} />
               <div className="min-w-0">
-                <h1 className="truncate text-2xl font-semibold text-panel-ink">{database}</h1>
-                <div className="text-sm text-panel-muted">{engine === "MYSQL" ? "MySQL / MariaDB" : "PostgreSQL"} database browser</div>
+                <h1 className="truncate text-xl sm:text-2xl font-semibold text-panel-ink">{database}</h1>
+                <div className="text-xs sm:text-sm text-panel-muted">{engine === "MYSQL" ? "MySQL / MariaDB" : "PostgreSQL"} database browser</div>
               </div>
             </div>
           </div>
-          <button className="inline-flex h-10 items-center gap-2 rounded-md border border-panel-line bg-white px-3 text-sm font-semibold hover:bg-slate-50" onClick={refreshTable} type="button">
-            <RefreshCw size={16} /> Refresh
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button className="md:hidden inline-flex h-10 items-center gap-1.5 rounded-md border border-panel-line bg-white px-3 text-xs sm:text-sm font-semibold hover:bg-slate-50" onClick={() => setTableListOpen((curr) => !curr)} type="button">
+              <Table2 size={15} /> {selectedTable ? selectedTable : "Tables"}
+            </button>
+            <button className="inline-flex h-10 items-center gap-2 rounded-md border border-panel-line bg-white px-3 text-sm font-semibold hover:bg-slate-50" onClick={refreshTable} type="button">
+              <RefreshCw size={16} /> Refresh
+            </button>
+          </div>
         </div>
-        <div className="mt-4 flex flex-wrap gap-2 text-sm text-panel-muted">
+        <div className="mt-4 flex flex-wrap gap-2 text-xs sm:text-sm text-panel-muted">
           <span className="rounded-md bg-slate-100 px-3 py-1">{compactNumber(databaseInfo?.tableCount ?? tables.data?.tables.length ?? 0)} tables</span>
           <span className="rounded-md bg-slate-100 px-3 py-1">{compactNumber(databaseInfo?.rowCount ?? 0)} rows</span>
           <span className="rounded-md bg-slate-100 px-3 py-1">{humanBytes(databaseInfo?.sizeBytes ?? 0)}</span>
@@ -334,8 +340,8 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
         </div>
       </div>
 
-      <div className="grid grid-cols-[280px_1fr]">
-        <aside className="min-h-[calc(100vh-150px)] border-r border-panel-line bg-white">
+      <div className="grid grid-cols-1 md:grid-cols-[260px_1fr] xl:grid-cols-[280px_1fr]">
+        <aside className={`min-h-0 md:min-h-[calc(100vh-150px)] border-b md:border-b-0 md:border-r border-panel-line bg-white ${tableListOpen ? "block" : "hidden md:block"}`}>
           <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Tables</div>
           <div className="border-b border-panel-line px-3 py-2">
             <label className="relative block">
@@ -369,6 +375,7 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
                   setOffset(0);
                   setEditing(null);
                   setCreating(false);
+                  setTableListOpen(false);
                 }}
                 type="button"
               >
@@ -384,7 +391,7 @@ export function DatabaseBrowserClient({ apiBase = "/databases", engine, database
           </div>
         </aside>
 
-        <main className="min-w-0 p-5">
+        <main className="min-w-0 p-3 sm:p-5">
           {notice ? (
             <div className={`mb-4 rounded-md border px-4 py-3 text-sm ${notice.tone === "error" ? "border-red-200 bg-red-50 text-red-700" : "border-emerald-200 bg-emerald-50 text-emerald-700"}`}>
               {notice.text}

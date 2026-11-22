@@ -86,7 +86,7 @@ class RemoteDeleteRequest(BaseModel):
 
 class RemotePruneRequest(BaseModel):
     remote_target: str = Field(alias="remoteTarget")
-    keep_last: int = Field(default=2, ge=1, le=500, alias="keepLast")
+    keep_last: int = Field(default=2, ge=0, le=500, alias="keepLast")
     google_drive: dict[str, Any] | None = Field(default=None, alias="googleDrive")
 
     model_config = {"populate_by_name": True}

@@ -113,10 +113,10 @@ export function WhmMigrationClient() {
   });
 
   return (
-    <section className="space-y-6 p-8">
-      <header className="flex items-start justify-between gap-4">
+    <section className="space-y-6 p-4 sm:p-6 lg:p-8">
+      <header className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-semibold tracking-normal text-panel-ink">WHM Migration</h1>
+          <h1 className="text-2xl sm:text-3xl font-semibold tracking-normal text-panel-ink">WHM Migration</h1>
           <p className="mt-1 text-sm text-panel-muted">Read-only discovery, import mapping, migration tasks, cutover, and rollback.</p>
         </div>
         <button className="rounded-md border border-panel-line p-2 hover:bg-white" onClick={() => refresh()} type="button" title="Refresh">
@@ -124,7 +124,7 @@ export function WhmMigrationClient() {
         </button>
       </header>
 
-      <div className="grid grid-cols-[360px_1fr] gap-6">
+      <div className="grid grid-cols-1 xl:grid-cols-[360px_1fr] gap-6">
         <div className="space-y-6">
           <div className="rounded-md border border-panel-line bg-white">
             <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Connect WHM</div>

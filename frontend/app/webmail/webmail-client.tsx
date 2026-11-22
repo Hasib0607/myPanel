@@ -140,12 +140,12 @@ export function WebmailClient() {
 
   return (
     <main className="min-h-screen bg-[#eef3f8]">
-      <header className="flex items-center justify-between border-b border-panel-line bg-white px-6 py-4">
+      <header className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-panel-line bg-white px-4 sm:px-6 py-3 sm:py-4">
         <div>
           <h1 className="text-xl font-semibold text-panel-text">Webmail</h1>
           <p className="text-sm text-panel-muted">{me.data?.email ?? "Loading mailbox..."}</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button className="flex h-10 items-center gap-2 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50 disabled:opacity-60" disabled={isRefreshing} onClick={() => refreshMailbox()} type="button">
             <RefreshCw className={isRefreshing ? "animate-spin" : ""} size={16} />
             {isRefreshing ? "Refreshing" : "Refresh"}
@@ -157,14 +157,14 @@ export function WebmailClient() {
         </div>
       </header>
 
-      <section className="space-y-4 p-6">
+      <section className="space-y-4 p-4 sm:p-6">
         {error || me.isError || messages.isError ? (
           <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-panel-danger">
             {error || (me.error instanceof Error ? me.error.message : "") || (messages.error instanceof Error ? messages.error.message : "Could not load mailbox")}
           </div>
         ) : null}
 
-        <div className="grid min-h-[680px] grid-cols-[240px_minmax(320px,0.9fr)_minmax(420px,1.4fr)] overflow-hidden rounded-md border border-panel-line bg-white">
+        <div className="grid min-h-[620px] grid-cols-1 lg:grid-cols-[220px_1fr] xl:grid-cols-[240px_minmax(300px,0.9fr)_minmax(400px,1.4fr)] overflow-hidden rounded-md border border-panel-line bg-white">
           <aside className="border-r border-panel-line p-4">
             <button className="mb-4 flex h-10 w-full items-center justify-center gap-2 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white" onClick={() => setComposeOpen(true)} type="button">
               <Mail size={16} />
@@ -195,7 +195,7 @@ export function WebmailClient() {
             </div>
           </aside>
 
-          <div className="border-r border-panel-line">
+          <div className={`border-r border-panel-line ${selectedMessage && !composeOpen ? "hidden xl:block" : "block"}`}>
             <form className="flex gap-2 border-b border-panel-line p-3" onSubmit={submitSearch}>
               <div className="relative min-w-0 flex-1">
                 <Search className="absolute left-3 top-3 text-panel-muted" size={16} />
@@ -225,7 +225,7 @@ export function WebmailClient() {
             </div>
           </div>
 
-          <section className="min-w-0 p-5">
+          <section className={`min-w-0 p-4 sm:p-5 ${!selectedMessage && !composeOpen ? "hidden xl:block" : "block"}`}>
             {composeOpen ? (
               <form className="space-y-4" onSubmit={submitCompose}>
                 <div className="flex items-center justify-between">
@@ -243,7 +243,10 @@ export function WebmailClient() {
               </form>
             ) : selectedMessage ? (
               <article>
-                <div className="mb-4 flex items-start justify-between gap-4 border-b border-panel-line pb-4">
+                <button className="mb-3 inline-flex items-center gap-1.5 text-xs font-semibold text-panel-accent hover:underline xl:hidden" onClick={() => setSelectedMessageId("")} type="button">
+                  ← Back to message list
+                </button>
+                <div className="mb-4 flex flex-col sm:flex-row sm:items-start justify-between gap-4 border-b border-panel-line pb-4">
                   <div className="min-w-0">
                     <h2 className="truncate text-xl font-semibold">{selectedMessage.subject}</h2>
                     <div className="mt-2 text-sm text-panel-muted">From {selectedMessage.fromAddress}</div>

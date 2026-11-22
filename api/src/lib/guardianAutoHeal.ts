@@ -207,10 +207,9 @@ export async function runGuardianAutoHeal(diagnosis: GuardianDiagnosis) {
     }));
   }
 
-  if ((diagnosis.logs?.nginxErrors ?? 0) > 0 || (diagnosis.logs?.badHttpResponses ?? 0) > 10) {
-    const incident = (diagnosis.incidents ?? []).find((item) => item.category === "nginx");
-    actions.push(await guardedAction("reload-nginx", "nginx", incident ? incidentFor(records, incident) : null, async () => sysagent.guardianReloadNginx()));
-  }
+  // Recent HTTP errors do not imply that Nginx needs a configuration reload.
+  // The diagnosis already records an incident for these logs; reloading here
+  // can repeatedly disrupt TLS while leaving the underlying error untouched.
 
   for (const item of diagnosis.security?.suspiciousIps ?? []) {
     if (autoBlockMode !== "auto" || item.recommendation !== "auto-block" || isAllowed(item.ip)) continue;

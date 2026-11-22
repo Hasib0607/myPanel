@@ -263,7 +263,7 @@ export function DatabasesClient({ apiBase = "/databases" }: DatabasesClientProps
   }
 
   return (
-    <div className="space-y-5 p-6">
+    <div className="space-y-5 p-4 sm:p-6 lg:p-8">
       <input accept=".sql,.txt,.dump" className="hidden" onChange={handleRowImportSelection} ref={rowImportInputRef} type="file" />
       {notice ? (
         <div className={`rounded-md border p-3 text-sm ${notice.tone === "error" ? "border-red-200 bg-red-50 text-red-700" : "border-emerald-200 bg-emerald-50 text-emerald-700"}`}>
@@ -271,13 +271,13 @@ export function DatabasesClient({ apiBase = "/databases" }: DatabasesClientProps
         </div>
       ) : null}
 
-      <div className="grid grid-cols-[1fr_380px] gap-5">
+      <div className="grid grid-cols-1 xl:grid-cols-[1fr_380px] gap-5">
         <div className="space-y-5">
           {engines.map((engine) => {
             const item = engineMap.get(engine);
             return (
               <section className="rounded-md border border-panel-line bg-white" key={engine}>
-                <div className="flex items-center justify-between border-b border-panel-line p-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-panel-line p-4">
                   <div className="flex items-center gap-2">
                     <Database size={18} />
                     <div>
@@ -290,8 +290,8 @@ export function DatabasesClient({ apiBase = "/databases" }: DatabasesClientProps
                   </button>
                 </div>
 
-                <div className="grid grid-cols-2 gap-0">
-                  <div className="border-r border-panel-line">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-0">
+                  <div className="border-b md:border-b-0 md:border-r border-panel-line">
                     <div className="border-b border-panel-line px-4 py-2 text-xs font-semibold uppercase text-panel-muted">Databases</div>
                     {(item?.databases ?? []).map((database) => (
                       <div className="flex items-center justify-between gap-3 border-b border-panel-line px-4 py-3 last:border-b-0" key={database.name}>

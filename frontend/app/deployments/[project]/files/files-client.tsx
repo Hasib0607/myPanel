@@ -19,7 +19,7 @@ export function DeploymentFilesClient({ project }: { project: string }) {
   return (
     <>
       <ProjectTabs active="files" project={project} />
-      <section className="space-y-5 p-8">
+      <section className="space-y-5 p-4 sm:p-6 lg:p-8">
         {deployment && relativePath ? (
           <div className="overflow-hidden rounded-md border border-panel-line bg-white">
             <FileManagerClient

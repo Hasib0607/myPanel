@@ -42,10 +42,27 @@ if "app.command" in sys.modules and not hasattr(sys.modules["app.command"], "sub
     del sys.modules["app.command"]
 
 from app.command import run_command
-from app.routers.deployments import HealthRequest, PortStatusRequest, _curl_public_route, _supervisor_process_mismatch, port_status
+from app.routers.deployments import HealthRequest, PortStatusRequest, _curl_public_route, _pm2_process_mismatch, _supervisor_process_mismatch, matching_legacy_pm2_process, port_status
 
 
 class DeploymentLiveCommandTests(unittest.TestCase):
+    def test_legacy_pm2_handoff_matches_only_same_deployment_and_port(self) -> None:
+        root = "/var/www/accounts/demo/deployments/app"
+        processes = [
+            {"name": "app", "pm2_env": {"pm_cwd": "/var/www/accounts/other/deployments/app", "args": ["-p", "10012"]}},
+            {"name": "app", "pm2_env": {"pm_cwd": f"{root}/.panel-releases/release-1", "args": ["-p", "10013"]}},
+            {"name": "app", "pm2_env": {"pm_cwd": f"{root}/.panel-releases/release-1", "args": ["-p", "10012"]}},
+        ]
+        self.assertIs(matching_legacy_pm2_process(processes, "app", 10012, root), processes[2])
+        self.assertIsNone(matching_legacy_pm2_process(processes, "other", 10012, root))
+
+    def test_pm2_health_accepts_release_artifact_cwd(self) -> None:
+        root = "/var/www/accounts/demo/deployments/app"
+        body = HealthRequest(deploymentId="dep_1", rootPath=root, port=10012, processName="app", processManager="PM2")
+        process = {"pm2_env": {"status": "online", "PORT": "10012", "pm_cwd": f"{root}/.panel-releases/release-1"}}
+        with mock.patch("app.routers.deployments._pm2_process", return_value=process):
+            self.assertIsNone(_pm2_process_mismatch(body))
+
     def test_allow_live_true_runs_even_when_global_live_disabled(self) -> None:
         with mock.patch("app.command.settings") as settings:
             settings.allow_live_system_commands = False

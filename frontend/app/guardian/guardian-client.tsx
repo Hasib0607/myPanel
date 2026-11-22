@@ -521,7 +521,7 @@ export function GuardianClient() {
           </div>
         }
       />
-      <section className="space-y-6 p-8">
+      <section className="space-y-6 p-4 sm:p-6 lg:p-8">
         {autoHealResult ? (
           <div className="rounded-md border border-panel-line bg-white px-4 py-3 text-sm text-slate-700">{autoHealResult}</div>
         ) : null}
@@ -539,7 +539,7 @@ export function GuardianClient() {
           </div>
         ) : null}
 
-        <div className="grid grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
           <div className="rounded-md border border-panel-line bg-white p-4">
             <div className="text-xs text-panel-muted">Guardian Mode</div>
             <div className="mt-1 text-2xl font-semibold">Read-only</div>
@@ -559,7 +559,7 @@ export function GuardianClient() {
         </div>
 
         {resources ? (
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4">
             <Meter detail={`load ${resources.loadAverage.map((item) => item.toFixed(2)).join(" / ")}`} icon={RadioTower} label="CPU" value={resources.cpuPercent} />
             <Meter detail={`${formatBytes(resources.memory.used)} of ${formatBytes(resources.memory.total)}`} icon={MemoryStick} label="Memory" value={resources.memory.percent} />
             <Meter detail={`${formatBytes(resources.disk.free)} free`} icon={HardDrive} label="Disk" value={resources.disk.percent} />
@@ -577,7 +577,8 @@ export function GuardianClient() {
               <button className="rounded-md border border-red-200 px-3 py-2 text-xs font-semibold text-panel-danger hover:bg-red-50 disabled:opacity-50" disabled={priorityBusy !== null} onClick={() => runLowPriorityAction("stop")} type="button">Stop P3</button>
             </div>
           </div>
-          <div className="divide-y divide-panel-line">
+          <div className="overflow-x-auto">
+          <div className="min-w-[620px] divide-y divide-panel-line">
             {(resourceUsers.data?.items ?? []).slice(0, 8).map((item) => (
               <div className="grid grid-cols-[1fr_130px_110px_90px_90px] items-center gap-3 px-4 py-3 text-sm" key={item.id}>
                 <div className="min-w-0">
@@ -601,6 +602,7 @@ export function GuardianClient() {
             ))}
             {resourceUsers.data && resourceUsers.data.items.length === 0 ? <div className="p-4 text-sm text-panel-muted">No running projects found.</div> : null}
           </div>
+          </div>
         </div>
 
         {overview.data?.performanceGuard ? (
@@ -614,7 +616,7 @@ export function GuardianClient() {
                 {overview.data.performanceGuard.status}
               </span>
             </div>
-            <div className="grid grid-cols-4 gap-3 border-b border-panel-line px-4 py-3 text-sm">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 border-b border-panel-line px-4 py-3 text-sm">
               <div><span className="text-panel-muted">Running</span><br /><span className="font-semibold">{overview.data.performanceGuard.counts.runningDeployments}</span></div>
               <div><span className="text-panel-muted">Domains</span><br /><span className="font-semibold">{overview.data.performanceGuard.counts.domains}</span></div>
               <div><span className="text-panel-muted">Mode</span><br /><span className="font-semibold">{overview.data.performanceGuard.mode}</span></div>

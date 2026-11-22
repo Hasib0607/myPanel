@@ -78,7 +78,7 @@ export function DeploymentOverviewClient({ project }: { project: string }) {
   return (
     <>
       <ProjectTabs active="overview" project={project} />
-      <section className="space-y-6 p-8">
+      <section className="space-y-6 p-4 sm:p-6 lg:p-8">
         {notice ? <ResultNotice message={notice} ok={!/failed|error|attention/i.test(notice)} /> : null}
         {deployment ? (
           <>
@@ -241,11 +241,11 @@ export function DeploymentOverviewClient({ project }: { project: string }) {
               </div>
             ) : null}
 
-            <div className="grid grid-cols-[minmax(0,1fr)_360px] gap-6">
+            <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_360px] gap-6">
               <div className="space-y-6">
                 <div className="rounded-md border border-panel-line bg-white">
                   <div className="border-b border-panel-line p-4 text-sm font-semibold">Build Pipeline</div>
-                  <div className="grid grid-cols-2 gap-3 p-4 text-sm">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-4 text-sm">
                     <Command label="Install" value={deployment.installCommand} />
                     <Command label="Build" value={deployment.buildCommand} />
                     <Command label="Start" value={deployment.startCommand} />
@@ -262,19 +262,21 @@ export function DeploymentOverviewClient({ project }: { project: string }) {
                     <div className="text-sm font-semibold">Latest Releases</div>
                     <Link className="text-sm font-medium text-panel-accent" href={`/deployments/${project}/logs`}>View logs</Link>
                   </div>
-                  <div className="divide-y divide-panel-line">
-                    {(deployment.releases ?? []).slice(0, 6).map((release) => (
-                      <div className="grid grid-cols-[160px_1fr_100px_160px] items-center gap-3 px-4 py-3 text-sm" key={release.id}>
-                        {statusBadge(release.status)}
-                        <div className="min-w-0">
-                          <div className="truncate font-mono text-xs">{release.commitSha ?? release.id}</div>
-                          <div className="mt-1 truncate text-xs text-panel-muted">{release.sourcePath ?? deployment.rootPath}</div>
+                  <div className="overflow-x-auto">
+                    <div className="divide-y divide-panel-line min-w-[500px]">
+                      {(deployment.releases ?? []).slice(0, 6).map((release) => (
+                        <div className="grid grid-cols-[160px_1fr_100px_160px] items-center gap-3 px-4 py-3 text-sm" key={release.id}>
+                          {statusBadge(release.status)}
+                          <div className="min-w-0">
+                            <div className="truncate font-mono text-xs">{release.commitSha ?? release.id}</div>
+                            <div className="mt-1 truncate text-xs text-panel-muted">{release.sourcePath ?? deployment.rootPath}</div>
+                          </div>
+                          <div className="text-xs text-panel-muted">{formatDuration(release.durationMs)}</div>
+                          <div className="text-xs text-panel-muted">{formatDate(release.createdAt)}</div>
                         </div>
-                        <div className="text-xs text-panel-muted">{formatDuration(release.durationMs)}</div>
-                        <div className="text-xs text-panel-muted">{formatDate(release.createdAt)}</div>
-                      </div>
-                    ))}
-                    {(deployment.releases ?? []).length === 0 ? <div className="p-4 text-sm text-panel-muted">No release history yet.</div> : null}
+                      ))}
+                      {(deployment.releases ?? []).length === 0 ? <div className="p-4 text-sm text-panel-muted">No release history yet.</div> : null}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -312,7 +314,7 @@ function ResourceOverview({ metrics, loading }: { metrics?: DeploymentMetrics; l
   const process = metrics?.process;
   const traffic = metrics?.traffic;
   return (
-    <div className="grid gap-3 lg:grid-cols-4">
+    <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3">
       <UsageCard icon={<MemoryStick size={17} />} label="RAM" value={loading && !metrics ? "Loading..." : formatBytes(process?.memoryBytes ?? 0)} detail={`${process?.processCount ?? 0} processes`} />
       <UsageCard icon={<Cpu size={17} />} label="CPU" value={`${(process?.cpuPercent ?? 0).toFixed(1)}%`} detail="live process usage" />
       <UsageCard icon={<HardDrive size={17} />} label="Storage" value={formatBytes(metrics?.storage.bytes ?? 0)} detail={metrics?.storage.rootPath ?? "-"} />
@@ -391,7 +393,7 @@ function LaravelRuntimePanel({ project, deployment }: { project: string; deploym
           </button>
         </div>
       </div>
-      <div className="grid gap-3 p-4 lg:grid-cols-4">
+      <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3 p-4">
         <RuntimeMini label="Pool" value={data?.poolName ?? "Loading..."} detail={`${data?.processCount ?? 0} PHP-FPM processes`} />
         <RuntimeMini label="Socket" value={data?.socketExists ? "Active" : "Missing"} detail={data?.socketPath ?? "-"} danger={Boolean(data && !data.socketExists)} />
         <RuntimeMini label="Nginx socket" value={data?.nginx.activeSocket ? "Matched" : "Mismatch"} detail={data?.nginx.expectedUpstream ?? "-"} danger={Boolean(data && !data.nginx.activeSocket)} />

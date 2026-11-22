@@ -777,13 +777,14 @@ export function DeploymentsClient({
   ] satisfies Array<{ key: typeof activeTab; label: string }>;
 
   return (
-    <section className="flex h-[calc(100vh-81px)] flex-col overflow-hidden bg-slate-50">
-      <div className="flex items-center justify-end border-b border-panel-line bg-white px-6 py-3">
+    <section className="flex min-h-[calc(100vh-81px)] lg:h-[calc(100vh-81px)] flex-col overflow-hidden bg-slate-50">
+      <div className="flex items-center justify-between border-b border-panel-line bg-white px-4 sm:px-6 py-3">
+        <div className="text-sm font-semibold text-panel-ink">Deployments</div>
         <button className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-4 text-sm font-semibold text-white" onClick={() => setCreateOpen(true)} type="button"><Plus size={16} />Create Project</button>
       </div>
 
-      <div className="flex min-h-0 flex-1 gap-6 p-6">
-        <aside className="flex w-[420px] min-h-0 flex-col rounded-md border border-panel-line bg-white">
+      <div className="flex min-h-0 flex-1 gap-4 sm:gap-6 p-3 sm:p-4 lg:p-6">
+        <aside className={`w-full lg:w-[360px] xl:w-[420px] min-h-0 flex-col rounded-md border border-panel-line bg-white ${selected ? "hidden lg:flex" : "flex"}`}>
           <div className="border-b border-panel-line p-4">
             {notice ? <ResultNotice message={notice} ok={okNotice(notice)} /> : null}
             <form className="relative mt-3" onSubmit={submitSearch}>
@@ -808,24 +809,31 @@ export function DeploymentsClient({
           </div>
         </aside>
 
-        <main className="min-w-0 flex-1 overflow-hidden rounded-md border border-panel-line bg-white">
+        <main className={`min-w-0 flex-1 overflow-hidden rounded-md border border-panel-line bg-white ${selected ? "flex flex-col" : "hidden lg:flex"}`}>
           {selected ? (
             <div className="flex h-full flex-col">
-              <div className="border-b border-panel-line p-5">
-                <div className="flex items-start justify-between gap-4">
+              <div className="border-b border-panel-line p-4 sm:p-5">
+                <button
+                  className="mb-3 inline-flex items-center gap-1.5 text-xs font-semibold text-panel-accent hover:underline lg:hidden"
+                  onClick={() => setSelectedId(null)}
+                  type="button"
+                >
+                  ← Back to projects list
+                </button>
+                <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
                   <div className="min-w-0">
-                    <div className="flex items-center gap-3">
-                      <h2 className="truncate text-xl font-semibold text-panel-ink">{selected.name}</h2>
+                    <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+                      <h2 className="truncate text-lg sm:text-xl font-semibold text-panel-ink">{selected.name}</h2>
                       {statusBadge(selected.status)}
                       {healthBadge(selected.healthStatus)}
                     </div>
-                    <div className="mt-2 flex flex-wrap items-center gap-3 text-sm text-panel-muted">
+                    <div className="mt-2 flex flex-wrap items-center gap-2 sm:gap-3 text-xs sm:text-sm text-panel-muted">
                       <span>{selected.framework}</span>
                       <span>:{selected.port}</span>
-                      <span className="truncate">{selected.rootPath}</span>
+                      <span className="truncate max-w-xs">{selected.rootPath}</span>
                     </div>
                   </div>
-                  <div className="flex flex-wrap justify-end gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     {(["deploy", "start", "stop", "restart"] as const).map((name) => (
                       <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium hover:bg-slate-50 disabled:opacity-50" disabled={action.isPending} key={name} onClick={() => startDeploymentAction(selected, name)} type="button">
                         {name === "deploy" ? <Play size={15} /> : name === "stop" ? <Square size={15} /> : actionIcon(name)}{name}
@@ -847,12 +855,12 @@ export function DeploymentsClient({
                     <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-medium hover:bg-slate-50" onClick={openEdit} type="button"><Pencil size={15} />Edit</button>
                   </div>
                 </div>
-                <div className="mt-5 flex gap-1">
-                  {tabs.map((tab) => <button className={`h-9 rounded-md px-3 text-sm font-medium ${activeTab === tab.key ? "bg-slate-900 text-white" : "text-panel-muted hover:bg-slate-50 hover:text-panel-ink"}`} key={tab.key} onClick={() => setActiveTab(tab.key)} type="button">{tab.label}</button>)}
+                <div className="mt-5 flex gap-1 overflow-x-auto pb-1 scrollbar-none whitespace-nowrap">
+                  {tabs.map((tab) => <button className={`h-9 shrink-0 rounded-md px-3 text-sm font-medium ${activeTab === tab.key ? "bg-slate-900 text-white" : "text-panel-muted hover:bg-slate-50 hover:text-panel-ink"}`} key={tab.key} onClick={() => setActiveTab(tab.key)} type="button">{tab.label}</button>)}
                 </div>
               </div>
 
-              <div className="min-h-0 flex-1 overflow-auto p-5">
+              <div className="min-h-0 flex-1 overflow-auto p-4 sm:p-5">
                 {activeTab === "overview" ? <OverviewPanel apiBase={apiBase} deployment={selected} /> : null}
                 {activeTab === "domains" ? <DomainsPanel deployment={selected} domains={domainOptions(domains.data?.items ?? [])} domainsToAdd={domainsToAdd} setDomainsToAdd={setDomainsToAdd} addDomain={() => addDomain.mutate()} addingDomain={addDomain.isPending} setPrimary={(binding) => setPrimaryDomain.mutate(binding)} removeDomain={(binding) => removeDomain.mutate(binding)} /> : null}
                 {activeTab === "history" ? <HistoryPanel deployment={selected} releases={releases.data ?? selected.releases ?? []} loading={releases.isLoading} onRefresh={() => releases.refetch()} onJump={(release) => rollbackRelease.mutate({ deployment: selected, releaseId: release.id })} jumping={rollbackRelease.isPending} /> : null}

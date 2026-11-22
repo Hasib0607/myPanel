@@ -171,8 +171,8 @@ export function FirewallClient() {
   const liveCommands = overview.data?.status.liveCommandsEnabled ?? false;
 
   return (
-    <section className="space-y-6 p-8">
-      <div className="grid grid-cols-4 gap-4">
+    <section className="space-y-6 p-4 sm:p-6 lg:p-8">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
         <div className="rounded-md border border-panel-line bg-white p-4">
           <div className="text-xs text-panel-muted">Saved Rules</div>
           <div className="mt-1 text-2xl font-semibold">{overview.data?.localRules.length ?? 0}</div>
@@ -195,9 +195,9 @@ export function FirewallClient() {
         <div className="rounded-md border border-panel-line bg-white px-4 py-3 text-sm text-slate-700">{lastResult}</div>
       ) : null}
 
-      <div className="grid grid-cols-[1fr_360px] gap-6">
+      <div className="grid grid-cols-1 xl:grid-cols-[1fr_360px] gap-6">
         <div className="space-y-6">
-          <div className="rounded-md border border-panel-line bg-white">
+          <div className="rounded-md border border-panel-line bg-white overflow-hidden">
             <div className="flex items-center justify-between border-b border-panel-line px-4 py-3">
               <div className="text-sm font-semibold">Saved Firewall Rules</div>
               <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50" onClick={() => overview.refetch()} type="button">
@@ -205,6 +205,7 @@ export function FirewallClient() {
                 Refresh
               </button>
             </div>
+            <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-left text-xs uppercase text-panel-muted">
                 <tr>
@@ -233,9 +234,10 @@ export function FirewallClient() {
                 ))}
               </tbody>
             </table>
+            </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="rounded-md border border-panel-line bg-white p-4">
               <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
                 <Shield size={16} />

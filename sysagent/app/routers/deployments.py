@@ -1730,6 +1730,15 @@ def supervisor_start(body: ProcessRequest, start_command: list[str]) -> dict:
     }
 
 
+def matching_legacy_pm2_process(processes: list[dict], name: str, port: int, root_path: str) -> dict | None:
+    for candidate in processes:
+        if (candidate.get("name") == name
+                and _pm2_process_port(candidate) == str(port)
+                and _cwd_belongs_to_deployment(candidate.get("pm2_env", {}).get("pm_cwd"), root_path)):
+            return candidate
+    return None
+
+
 def pm2_start(body: ProcessRequest, start_command: list[str]) -> dict:
     cwd = deployment_cwd(body.rootPath)
     try:
@@ -1741,6 +1750,26 @@ def pm2_start(body: ProcessRequest, start_command: list[str]) -> dict:
         ensure = _ensure_laravel_env(body.rootPath, body.port, body.env)
         if ensure.get("returncode") != 0:
             return ensure
+
+    # Older installs used a second PM2 daemon under /root/.pm2. A process with the
+    # same deployment name and port survives reboot there and blocks the panel's
+    # new process even though the panel PM2 preflight reports the port reusable.
+    legacy_env = {"PM2_HOME": "/root/.pm2"}
+    legacy_process = None
+    if Path("/root/.pm2/pm2.pid").exists():
+        legacy_list = guarded_command_with_env(body.rootPath, ["pm2", "jlist"], cwd=cwd, env=legacy_env)
+        if legacy_list.get("returncode") == 0:
+            try:
+                legacy_process = matching_legacy_pm2_process(
+                    json.loads(legacy_list.get("stdout") or "[]"), body.name, body.port, body.rootPath
+                )
+            except (TypeError, ValueError):
+                pass
+    legacy_was_online = legacy_process is not None and legacy_process.get("pm2_env", {}).get("status") == "online"
+    if legacy_was_online:
+        legacy_stop = guarded_command_with_env(body.rootPath, ["pm2", "stop", body.name], cwd=cwd, env=legacy_env)
+        if legacy_stop.get("returncode") != 0:
+            return legacy_stop
 
     reset_runtime_logs(log_dir)
     delete = guarded_command(body.rootPath, ["pm2", "delete", body.name], cwd=cwd)
@@ -1773,6 +1802,12 @@ def pm2_start(body: ProcessRequest, start_command: list[str]) -> dict:
     # Runtime PORT must stay panel-owned so Nginx points at the process that actually starts.
     process_env = constrained_runtime_env({**scrub_node_host_runtime_env(body.env or {}, body.framework), **pm2_env(body.port)}, effective_resource_limits(body.resourceLimits))
     start = guarded_command_with_env(body.rootPath, command, cwd=cwd, env=process_env)
+    if legacy_was_online and start.get("returncode") != 0:
+        guarded_command_with_env(body.rootPath, ["pm2", "restart", body.name], cwd=cwd, env=legacy_env)
+    elif legacy_process is not None and start.get("returncode") == 0:
+        legacy_delete = guarded_command_with_env(body.rootPath, ["pm2", "delete", body.name], cwd=cwd, env=legacy_env)
+        if legacy_delete.get("returncode") == 0:
+            guarded_command_with_env(body.rootPath, ["pm2", "save"], cwd=cwd, env=legacy_env)
     save = guarded_command(body.rootPath, ["pm2", "save"], cwd=cwd) if start.get("returncode") == 0 else {
         "dryRun": start.get("dryRun", False),
         "command": ["pm2", "save"],
@@ -2971,7 +3006,7 @@ def _pm2_process_mismatch(body: HealthRequest) -> str | None:
     if body.rootPath:
         expected = str(Path(body.rootPath).resolve())
         actual_raw = pm2_env.get("pm_cwd") or (pm2_env.get("env") or {}).get("PWD")
-        if actual_raw and str(Path(str(actual_raw)).resolve()) != expected:
+        if actual_raw and not _cwd_belongs_to_deployment(str(actual_raw), expected):
             return f"PM2 process '{body.processName}' cwd is {actual_raw}, expected {expected}."
 
     return None

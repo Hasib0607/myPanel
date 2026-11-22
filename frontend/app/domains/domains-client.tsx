@@ -693,25 +693,27 @@ export function DomainsClient({
           </div>
         }
       />
-      <section className="p-6 xl:p-8">
-        <form className="mb-4 flex gap-3" onSubmit={submitSearch}>
-          <div className="relative">
+      <section className="p-4 sm:p-6 lg:p-8">
+        <form className="mb-4 flex flex-col sm:flex-row gap-3" onSubmit={submitSearch}>
+          <div className="relative flex-1 sm:flex-initial">
             <Search className="absolute left-3 top-3 text-panel-muted" size={16} />
             <input
-              className="h-10 w-80 rounded-md border border-panel-line pl-9 pr-3 text-sm"
+              className="h-10 w-full sm:w-80 rounded-md border border-panel-line pl-9 pr-3 text-sm"
               onChange={(event) => setDraftSearch(event.target.value)}
               placeholder="Search 2,000+ domains"
               value={draftSearch}
             />
           </div>
-          <button className="h-10 rounded-md border border-panel-line bg-white px-3 text-sm font-semibold hover:bg-slate-50" type="submit">
-            Search
-          </button>
-          {search ? (
-            <button className="h-10 rounded-md border border-panel-line bg-white px-3 text-sm hover:bg-slate-50" onClick={() => { setPage(1); setSearch(""); setDraftSearch(""); }} type="button">
-              Clear
+          <div className="flex items-center gap-2">
+            <button className="h-10 rounded-md border border-panel-line bg-white px-4 text-sm font-semibold hover:bg-slate-50" type="submit">
+              Search
             </button>
-          ) : null}
+            {search ? (
+              <button className="h-10 rounded-md border border-panel-line bg-white px-4 text-sm hover:bg-slate-50" onClick={() => { setPage(1); setSearch(""); setDraftSearch(""); }} type="button">
+                Clear
+              </button>
+            ) : null}
+          </div>
         </form>
 
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3 text-sm">
@@ -813,6 +815,7 @@ export function DomainsClient({
               <span className="text-panel-muted">{domains.data ? `${domains.data.total} total` : "Loading..."}</span>
             </div>
           </div>
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs uppercase text-panel-muted">
               <tr>
@@ -1003,6 +1006,7 @@ export function DomainsClient({
               ) : null}
             </tbody>
           </table>
+          </div>
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-panel-line px-4 py-3 text-sm">
             <span className="text-panel-muted">
               {domains.data ? `Showing ${pageStart}-${pageEnd} of ${totalDomains}` : "Loading domains..."}

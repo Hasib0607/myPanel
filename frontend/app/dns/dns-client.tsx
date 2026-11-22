@@ -170,19 +170,19 @@ export function DnsZonePageContent({
   }
 
   return (
-    <section className="space-y-8 p-8">
+    <section className="space-y-6 sm:space-y-8 p-4 sm:p-6 lg:p-8">
         <div>
-          <h1 className="text-4xl font-light text-slate-800">Zone Editor</h1>
+          <h1 className="text-2xl sm:text-4xl font-light text-slate-800">Zone Editor</h1>
           <div className="mt-1 text-sm text-slate-600">Domains</div>
-          <p className="mt-8 max-w-5xl text-base text-slate-700">
+          <p className="mt-4 sm:mt-8 max-w-5xl text-sm sm:text-base text-slate-700">
             DNS converts domain names into computer-readable IP addresses. Use this feature to manage DNS zones. For more information, read the{" "}
             <a className="text-blue-500 underline" href="https://docs.cpanel.net/cpanel/domains/zone-editor/" rel="noreferrer" target="_blank">documentation</a>.
           </p>
         </div>
 
         <div>
-          <h2 className="text-3xl font-semibold text-slate-800">Domains</h2>
-          <div className="mt-5 flex flex-wrap items-start justify-between gap-4">
+          <h2 className="text-xl sm:text-3xl font-semibold text-slate-800">Domains</h2>
+          <div className="mt-5 flex flex-col sm:flex-row sm:items-start justify-between gap-4">
             <form className="flex w-full max-w-xl" onSubmit={submitSearch}>
               <input
                 className="h-11 min-w-0 flex-1 border border-blue-400 px-4 text-base outline-none ring-1 ring-blue-100 focus:ring-2 focus:ring-blue-200"
@@ -293,7 +293,7 @@ export function DnsZonePageContent({
           </form>
         ) : null}
 
-        <div className="overflow-hidden border-t-2 border-slate-700">
+        <div className="overflow-x-auto border-t-2 border-slate-700">
           <table className="w-full border-collapse text-left text-base">
             <thead>
               <tr className="border-b-2 border-slate-700 bg-white text-slate-700">

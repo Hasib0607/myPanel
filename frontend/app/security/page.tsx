@@ -7,9 +7,9 @@ export default function SecurityPage() {
   return (
     <AppShell>
       <PageHeader title="Security" description="SSH login monitoring, Fail2Ban status, root login posture, and certificate alerts." />
-      <section className="space-y-6 p-8">
+      <section className="space-y-6 p-4 sm:p-6 lg:p-8">
         <TwoFactorPanel />
-        <div className="grid grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
           <StatCard label="Failed SSH 24h" value="0" />
           <StatCard label="Active Bans" value="0" />
           <StatCard label="Open Ports" value="0" />

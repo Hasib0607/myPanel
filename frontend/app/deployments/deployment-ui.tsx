@@ -91,7 +91,7 @@ export function ProjectTabs({ project, active }: { project: string; active: "ove
     { key: "settings", label: "Settings", href: `/deployments/${project}/settings` }
   ] as const;
   return (
-    <div className="flex items-center gap-1 border-b border-panel-line bg-white px-8">
+    <div className="flex items-center gap-1 border-b border-panel-line bg-white px-4 sm:px-6 lg:px-8 overflow-x-auto scrollbar-none whitespace-nowrap">
       {tabs.map((tab) => (
         <Link
           className={`border-b-2 px-3 py-3 text-sm font-medium ${active === tab.key ? "border-panel-accent text-panel-ink" : "border-transparent text-panel-muted hover:text-panel-ink"}`}
@@ -108,7 +108,7 @@ export function ProjectTabs({ project, active }: { project: string; active: "ove
 export function DeploymentSummary({ deployment }: { deployment: Deployment }) {
   const latest = deployment.releases?.[0];
   return (
-    <div className="grid grid-cols-4 gap-3">
+    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
       <Metric icon={<Activity size={16} />} label="Status" value={statusBadge(deployment.status)} />
       <Metric icon={<HeartPulse size={16} />} label="Health" value={healthBadge(deployment.healthStatus)} />
       <Metric icon={<GitBranch size={16} />} label="Branch" value={deployment.branch} />
@@ -153,10 +153,12 @@ export function LogLine({ log }: { log: DeploymentLog }) {
   const hasError = log.step === "FAILED" || /fail|error/i.test(log.message);
   const metadata = logMetadataPreview(log.metadata);
   return (
-    <div className="grid grid-cols-[110px_150px_1fr] gap-3 border-b border-slate-800 px-4 py-2 font-mono text-xs">
-      <span className="text-slate-400 tabular-nums">{formatLogTime(log.createdAt)}</span>
-      <span className={hasError ? "text-red-300" : "text-cyan-300"}>{log.step}</span>
-      <span className="min-w-0 text-slate-100">
+    <div className="flex flex-col sm:grid sm:grid-cols-[110px_150px_1fr] gap-1 sm:gap-3 border-b border-slate-800 px-3 sm:px-4 py-2 font-mono text-xs">
+      <div className="flex items-center gap-2 sm:contents">
+        <span className="text-slate-400 tabular-nums">{formatLogTime(log.createdAt)}</span>
+        <span className={hasError ? "text-red-300" : "text-cyan-300"}>{log.step}</span>
+      </div>
+      <span className="min-w-0 text-slate-100 break-words">
         <span>{log.message}</span>
         {metadata ? <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-5 text-slate-400">{metadata}</pre> : null}
       </span>

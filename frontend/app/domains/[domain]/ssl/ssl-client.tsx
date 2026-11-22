@@ -181,8 +181,8 @@ export function SslClient({ domainId, subdomainId, domainApiBase = "/domains", s
   return (
     <>
       <PageHeader title={`${sslDomainName} SSL`} description="Certificate status, expiry, force HTTPS, and one-click renewal." />
-      <section className="p-8">
-        <div className="space-y-5 rounded-md border border-panel-line bg-white p-5">
+      <section className="p-4 sm:p-6 lg:p-8">
+        <div className="space-y-5 rounded-md border border-panel-line bg-white p-4 sm:p-5">
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-panel-line bg-slate-50 px-4 py-3">
             <div>
               <div className="text-xs font-semibold uppercase text-panel-muted">SSL domain</div>
@@ -235,7 +235,7 @@ export function SslClient({ domainId, subdomainId, domainApiBase = "/domains", s
             </div>
           ) : null}
 
-          <div className="grid grid-cols-3 gap-4 text-sm">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4 text-sm">
             <div className="rounded-md border border-panel-line p-4">
               <div className="flex items-center gap-2 text-panel-muted"><BadgeCheck size={16} /> Certificate</div>
               <div className="mt-2 text-lg font-semibold">{status?.sslEnabled ? "Enabled" : "Not issued"}</div>

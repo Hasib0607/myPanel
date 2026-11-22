@@ -147,8 +147,8 @@ export function MailClient({ domainId, composeFirst = false }: { domainId?: stri
   }
 
   return (
-    <section className="space-y-4 p-8">
-      <div className="grid grid-cols-4 gap-4">
+    <section className="space-y-4 p-4 sm:p-6 lg:p-8">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
         <div className="rounded-md border border-panel-line bg-white p-4">
           <div className="text-xs text-panel-muted">Accounts</div>
           <div className="mt-1 text-2xl font-semibold">{accounts.data?.length ?? 0}</div>
@@ -173,7 +173,7 @@ export function MailClient({ domainId, composeFirst = false }: { domainId?: stri
         </div>
       ) : null}
 
-      <div className="grid min-h-[620px] grid-cols-[260px_minmax(320px,0.9fr)_minmax(420px,1.4fr)] rounded-md border border-panel-line bg-white">
+      <div className="grid min-h-[620px] grid-cols-1 lg:grid-cols-[240px_1fr] xl:grid-cols-[260px_minmax(300px,0.9fr)_minmax(400px,1.4fr)] rounded-md border border-panel-line bg-white overflow-hidden">
         <aside className="border-r border-panel-line p-4">
           <label className="mb-2 block text-xs font-semibold uppercase text-panel-muted">Mailbox</label>
           <select
@@ -226,7 +226,7 @@ export function MailClient({ domainId, composeFirst = false }: { domainId?: stri
           </div>
         </aside>
 
-        <div className="border-r border-panel-line">
+        <div className={`border-r border-panel-line ${selectedMessage && !composeOpen ? "hidden xl:block" : "block"}`}>
           <form className="flex gap-2 border-b border-panel-line p-3" onSubmit={submitSearch}>
             <div className="relative min-w-0 flex-1">
               <Search className="absolute left-3 top-3 text-panel-muted" size={16} />
@@ -265,7 +265,7 @@ export function MailClient({ domainId, composeFirst = false }: { domainId?: stri
           </div>
         </div>
 
-        <main className="min-w-0 p-5">
+        <main className={`min-w-0 p-4 sm:p-5 ${!selectedMessage && !composeOpen ? "hidden xl:block" : "block"}`}>
           {composeOpen ? (
             <form className="space-y-4" onSubmit={submitCompose}>
               <div className="flex items-center justify-between">
@@ -289,7 +289,10 @@ export function MailClient({ domainId, composeFirst = false }: { domainId?: stri
             </form>
           ) : selectedMessage ? (
             <article>
-              <div className="mb-4 flex items-start justify-between gap-4 border-b border-panel-line pb-4">
+              <button className="mb-3 inline-flex items-center gap-1.5 text-xs font-semibold text-panel-accent hover:underline xl:hidden" onClick={() => setSelectedMessageId("")} type="button">
+                ← Back to message list
+              </button>
+              <div className="mb-4 flex flex-col sm:flex-row sm:items-start justify-between gap-4 border-b border-panel-line pb-4">
                 <div className="min-w-0">
                   <h2 className="truncate text-xl font-semibold">{selectedMessage.subject}</h2>
                   <div className="mt-2 text-sm text-panel-muted">From {selectedMessage.fromAddress}</div>

@@ -15,7 +15,7 @@ T = TypeVar("T")
 
 MANAGED_CONFIG_PREFIXES = ("domain-", "deployment-")
 PROTECTED_CONFIG_NAMES = {"default", "vps-panel", "panel", "vps_panel"}
-STRICTLY_PROTECTED_CONFIG_NAMES = {"vps-panel", "panel", "vps_panel"}
+STRICTLY_PROTECTED_CONFIG_NAMES = {"00-vps-panel", "vps-panel", "panel", "vps_panel"}
 ROUTE_OWNERSHIP_HEADER = "X-VPS-Panel-Route"
 SERVER_NAMES_HASH_CONFIG = Path("/etc/nginx/conf.d/00-vps-panel-server-names-hash.conf")
 SERVER_NAMES_HASH_CONFIG_TEXT = (

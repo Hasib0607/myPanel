@@ -45,8 +45,8 @@ export function DomainOverviewClient({ domainId }: { domainId: string }) {
   return (
     <>
       <PageHeader title={data?.name ?? "Domain"} description="Domain health, SSL status, linked deployment, DNS, and mail summary." />
-      <section className="space-y-6 p-8">
-        <div className="grid grid-cols-4 gap-4">
+      <section className="space-y-6 p-4 sm:p-6 lg:p-8">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
           <StatCard label="DNS Records" value={data?.dnsRecords.length ?? "..."} />
           <StatCard label="Subdomains" value={data?.subdomains.length ?? "..."} />
           <StatCard label="Mailboxes" value={data?.mailAccounts.length ?? "..."} />
@@ -54,7 +54,7 @@ export function DomainOverviewClient({ domainId }: { domainId: string }) {
         </div>
 
         {sslHosts.length ? (
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {sslHosts.map((host) => {
               const covered = Boolean(host.sslEnabled ?? host.covered);
               const pendingText = host.dnsStatus === "PENDING" || host.dnsStatus === "MISMATCH"
@@ -75,7 +75,7 @@ export function DomainOverviewClient({ domainId }: { domainId: string }) {
           </div>
         ) : null}
 
-        <div className="grid grid-cols-[1fr_360px] gap-6">
+        <div className="grid grid-cols-1 xl:grid-cols-[1fr_360px] gap-6">
           <div className="rounded-md border border-panel-line bg-white p-4">
             <div className="mb-4 text-sm font-semibold">Health Checks</div>
             <div className="space-y-3">

@@ -394,6 +394,7 @@ export function FileManagerClient({
   const [repoPickerOpen, setRepoPickerOpen] = useState(false);
   const [repoSearch, setRepoSearch] = useState("");
   const [largestFilesOpen, setLargestFilesOpen] = useState(false);
+  const [treeOpen, setTreeOpen] = useState(false);
   const promptResolverRef = useRef<((value: string | null) => void) | null>(null);
   const confirmResolverRef = useRef<((value: boolean) => void) | null>(null);
   const autoPullTimerRef = useRef<number | null>(null);
@@ -925,8 +926,8 @@ export function FileManagerClient({
   const selectedZipPaths = useMemo(() => (list.data?.items ?? []).filter((item) => selectedPaths.has(item.path) && isZipEntry(item)).map((item) => item.path), [list.data?.items, selectedPaths]);
 
   return (
-    <section className={`grid overflow-hidden ${embedded ? "h-[720px] grid-cols-[260px_minmax(0,1fr)] p-0" : "h-[calc(100vh-64px)] grid-cols-[300px_minmax(0,1fr)] p-6 lg:h-screen xl:p-8"}`}>
-      <aside className="min-h-0 rounded-l-md border border-panel-line bg-white">
+    <section className={`grid overflow-hidden ${embedded ? "h-[720px] grid-cols-1 md:grid-cols-[240px_minmax(0,1fr)] p-0" : "h-[calc(100vh-64px)] grid-cols-1 md:grid-cols-[260px_minmax(0,1fr)] xl:grid-cols-[300px_minmax(0,1fr)] p-3 sm:p-4 md:p-6 lg:h-screen xl:p-8"}`}>
+      <aside className={`min-h-0 rounded-md md:rounded-l-md md:rounded-r-none border border-panel-line bg-white ${treeOpen ? "block mb-4 md:mb-0" : "hidden md:block"}`}>
         <div className="border-b border-panel-line p-4">
           <div className="truncate text-sm font-semibold">{selectedRoot ? selectedRoot.label : "Web roots"}</div>
           <div className="mt-1 text-xs text-panel-muted">{overview.data ? `${formatBytes(overview.data.textReadLimit)} editor limit` : "Loading..."}</div>
@@ -939,7 +940,10 @@ export function FileManagerClient({
             <div className="mb-1" key={root.id}>
               <button
                 className={`flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-slate-100 ${selectedDomainId === root.id && currentPath === root.path ? "bg-slate-100 font-semibold" : ""}`}
-                onClick={() => selectDomain(root.id)}
+                onClick={() => {
+                  selectDomain(root.id);
+                  setTreeOpen(false);
+                }}
                 type="button"
               >
                 <Folder size={15} />
@@ -955,9 +959,18 @@ export function FileManagerClient({
         </div>
       </aside>
 
-      <main className="min-w-0 min-h-0 rounded-r-md border-y border-r border-panel-line bg-white flex flex-col">
+      <main className="min-w-0 min-h-0 rounded-md md:rounded-r-md md:rounded-l-none border border-panel-line md:border-y md:border-r md:border-l-0 bg-white flex flex-col">
         <div className="space-y-3 border-b border-panel-line p-4">
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              aria-label="Toggle folders panel"
+              className={`flex h-9 items-center gap-1.5 rounded-md border px-2.5 text-xs font-semibold md:hidden ${treeOpen ? "border-panel-accent bg-panel-accent text-white" : "border-panel-line bg-white hover:bg-slate-50 text-panel-ink"}`}
+              onClick={() => setTreeOpen((current) => !current)}
+              type="button"
+            >
+              <Folder size={14} />
+              <span>{treeOpen ? "Hide roots" : "Show roots"}</span>
+            </button>
             {!fixedRoot ? (
               <select
                 className="h-9 min-w-64 rounded-md border border-panel-line px-2 text-sm"
@@ -1126,9 +1139,9 @@ export function FileManagerClient({
             {selectedCount > 0 ? <span className="rounded-md bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">{selectedCount} selected</span> : null}
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <form className="relative" onSubmit={submitSearch}>
+            <form className="relative flex-1 sm:flex-initial" onSubmit={submitSearch}>
               <Search className="absolute left-3 top-2.5 text-panel-muted" size={15} />
-              <input className="h-9 w-72 rounded-md border border-panel-line pl-9 pr-3 text-sm" onChange={(event) => setDraftSearch(event.target.value)} placeholder="Search current folder" value={draftSearch} />
+              <input className="h-9 w-full sm:w-72 rounded-md border border-panel-line pl-9 pr-3 text-sm" onChange={(event) => setDraftSearch(event.target.value)} placeholder="Search current folder" value={draftSearch} />
             </form>
             <select className="h-9 rounded-md border border-panel-line px-2 text-sm" onChange={(event) => setSort(event.target.value as "name" | "size" | "modifiedAt")} value={sort}>
               <option value="name">Name</option>

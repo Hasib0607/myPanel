@@ -189,7 +189,7 @@ export function DeploymentEnvClient({ project }: { project: string }) {
   return (
     <>
       <ProjectTabs active="env" project={project} />
-      <section className="p-8">
+      <section className="p-4 sm:p-6 lg:p-8">
         <div className="flex flex-wrap items-center justify-end gap-3">
           <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50" onClick={() => env.refetch()} type="button">
             <RefreshCw size={15} />
@@ -213,8 +213,8 @@ export function DeploymentEnvClient({ project }: { project: string }) {
         {notice ? <div className="mt-4"><ResultNotice message={notice} ok={!/could|error|failed/i.test(notice)} /></div> : null}
 
         {listOpen ? (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-6">
-            <div className="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-md border border-panel-line bg-white shadow-xl">
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-3 sm:p-6">
+            <div className="flex max-h-[90vh] sm:max-h-[85vh] w-full max-w-3xl flex-col rounded-xl border border-panel-line bg-white shadow-xl">
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-panel-line p-4">
                 <div className="flex items-center gap-2 text-sm font-semibold"><List size={17} />Environment variables</div>
                 <div className="flex flex-wrap items-center gap-3">
@@ -259,38 +259,42 @@ export function DeploymentEnvClient({ project }: { project: string }) {
                 ) : null}
                 <div className="overflow-hidden rounded-md border border-panel-line">
                   {envItems.map((item) => (
-                    <div className={`flex items-start gap-3 border-b border-panel-line p-3 last:border-b-0 ${selectedKeys.has(item.key) ? "bg-emerald-50/50" : ""}`} key={item.key}>
-                      <div className="pt-1">
-                        <input
-                          aria-label={`Select ${item.key}`}
-                          checked={selectedKeys.has(item.key)}
-                          className="h-4 w-4 rounded border-panel-line"
-                          onChange={(event) => toggleKey(item.key, event.target.checked)}
-                          type="checkbox"
-                        />
+                    <div className={`flex flex-col sm:flex-row sm:items-start gap-3 border-b border-panel-line p-3 last:border-b-0 ${selectedKeys.has(item.key) ? "bg-emerald-50/50" : ""}`} key={item.key}>
+                      <div className="flex items-start gap-3 flex-1 min-w-0">
+                        <div className="pt-1">
+                          <input
+                            aria-label={`Select ${item.key}`}
+                            checked={selectedKeys.has(item.key)}
+                            className="h-4 w-4 rounded border-panel-line"
+                            onChange={(event) => toggleKey(item.key, event.target.checked)}
+                            type="checkbox"
+                          />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="font-mono text-sm font-semibold break-all">{item.key}</div>
+                          <input
+                            className="mt-2 h-9 w-full rounded-md border border-panel-line px-3 font-mono text-xs text-panel-ink"
+                            onChange={(event) => setDraftValues((current) => ({ ...current, [item.key]: event.target.value }))}
+                            placeholder={item.masked ? item.secretRef ?? "[secret]" : "value"}
+                            type={item.masked && revealedValues[item.key] === undefined ? "password" : "text"}
+                            value={draftValues[item.key] ?? revealedValues[item.key] ?? item.value ?? ""}
+                          />
+                        </div>
                       </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="font-mono text-sm font-semibold">{item.key}</div>
-                        <input
-                          className="mt-2 h-9 w-full rounded-md border border-panel-line px-3 font-mono text-xs text-panel-ink"
-                          onChange={(event) => setDraftValues((current) => ({ ...current, [item.key]: event.target.value }))}
-                          placeholder={item.masked ? item.secretRef ?? "[secret]" : "value"}
-                          type={item.masked && revealedValues[item.key] === undefined ? "password" : "text"}
-                          value={draftValues[item.key] ?? revealedValues[item.key] ?? item.value ?? ""}
-                        />
+                      <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
+                        <button className="inline-flex h-8 items-center gap-1 rounded-md border border-panel-line px-2 text-xs hover:bg-slate-50 disabled:opacity-50" disabled={reveal.variables === item.key} onClick={() => reveal.mutate(item.key)} type="button">
+                          <Eye size={13} />
+                          {reveal.variables === item.key ? "..." : "View"}
+                        </button>
+                        <button className="inline-flex h-8 items-center gap-1 rounded-md border border-panel-line px-2 text-xs hover:bg-slate-50 disabled:opacity-50" disabled={saveLine.variables?.item.key === item.key} onClick={() => saveLine.mutate({ item, nextValue: draftValues[item.key] ?? revealedValues[item.key] ?? item.value ?? "" })} type="button">
+                          <Save size={13} />
+                          Save
+                        </button>
+                        <button className="inline-flex h-8 items-center gap-1 rounded-md border border-panel-line px-2 text-xs text-panel-danger hover:bg-red-50" onClick={() => remove.mutate(item.key)} type="button">
+                          <Trash2 size={13} />
+                          Delete
+                        </button>
                       </div>
-                      <button className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md border border-panel-line px-2 text-xs hover:bg-slate-50 disabled:opacity-50" disabled={reveal.variables === item.key} onClick={() => reveal.mutate(item.key)} type="button">
-                        <Eye size={13} />
-                        {reveal.variables === item.key ? "..." : "View"}
-                      </button>
-                      <button className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md border border-panel-line px-2 text-xs hover:bg-slate-50 disabled:opacity-50" disabled={saveLine.variables?.item.key === item.key} onClick={() => saveLine.mutate({ item, nextValue: draftValues[item.key] ?? revealedValues[item.key] ?? item.value ?? "" })} type="button">
-                        <Save size={13} />
-                        Save
-                      </button>
-                      <button className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md border border-panel-line px-2 text-xs text-panel-danger hover:bg-red-50" onClick={() => remove.mutate(item.key)} type="button">
-                        <Trash2 size={13} />
-                        Delete
-                      </button>
                     </div>
                   ))}
                   {envItems.length === 0 ? <div className="p-8 text-center text-sm text-panel-muted">No environment variables.</div> : null}
@@ -304,8 +308,8 @@ export function DeploymentEnvClient({ project }: { project: string }) {
         ) : null}
 
         {addOpen ? (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-6">
-            <div className="flex max-h-[85vh] w-full max-w-lg flex-col rounded-md border border-panel-line bg-white shadow-xl">
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-3 sm:p-6">
+            <div className="flex max-h-[90vh] sm:max-h-[85vh] w-full max-w-lg flex-col rounded-xl border border-panel-line bg-white shadow-xl">
               <div className="flex items-center justify-between border-b border-panel-line p-4">
                 <div className="flex items-center gap-2 text-sm font-semibold"><KeyRound size={17} />Env add</div>
                 <button className="flex h-8 w-8 items-center justify-center rounded-md border border-panel-line" onClick={() => setAddOpen(false)} type="button"><X size={16} /></button>

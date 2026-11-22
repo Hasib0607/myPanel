@@ -60,7 +60,7 @@ export function GitConnectionSettings({ apiBase, scopeLabel }: { apiBase: string
   const scopes = connection.data?.scopes ?? [];
 
   return (
-    <section className="space-y-5 p-6">
+    <section className="space-y-5 p-4 sm:p-6 lg:p-8">
       <div className="rounded-md border border-panel-line bg-white">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-panel-line px-4 py-3">
           <div className="flex items-center gap-3">

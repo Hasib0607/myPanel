@@ -380,8 +380,15 @@ export async function runPanelBackup(input: unknown, request?: any, onProgress?:
     await onProgress?.({ phase: "ARCHIVE_CREATED", percent: 55, message: `Archive created${formatBytes(result.sizeBytes) ? ` (${formatBytes(result.sizeBytes)})` : ""}.`, result });
     if (settings.remoteProvider === "GOOGLE_DRIVE" && settings.remoteTarget) {
       const googleDrive = await googleDriveConfig(settings);
+      if (settings.retentionKeepLast === 1) {
+        await onProgress?.({ phase: "VERIFYING_ARCHIVE", percent: 55, message: "Verifying the new local archive before replacing the only Drive backup." });
+        const verification = await sysagent.verifyBackup(result.archivePath);
+        if (!verification.ok) {
+          throw Object.assign(new Error("Local backup checksum verification failed; the existing Drive backup was left untouched."), { result });
+        }
+      }
       await onProgress?.({ phase: "PRUNING_REMOTE", percent: 56, message: "Pruning old Drive backups before upload to free space." });
-      const preUploadPrune = await sysagent.pruneRemoteBackups({ remoteTarget: settings.remoteTarget, keepLast: Math.max(1, settings.retentionKeepLast - 1), googleDrive });
+      const preUploadPrune = await sysagent.pruneRemoteBackups({ remoteTarget: settings.remoteTarget, keepLast: settings.retentionKeepLast - 1, googleDrive });
       const preUploadPruneError = backupCommandError("Google Drive pre-upload pruning", preUploadPrune);
       if (preUploadPruneError) {
         throw Object.assign(new Error(preUploadPruneError), { result: { ...result, remotePrune: preUploadPrune } });
@@ -464,8 +471,15 @@ export async function pushLocalBackupToDrive(input: { id?: string; path?: string
   }
 
   const googleDrive = await googleDriveConfig(settings);
+  if (settings.retentionKeepLast === 1) {
+    await onProgress?.({ phase: "VERIFYING_ARCHIVE", percent: 5, message: "Verifying the local archive before replacing the only Drive backup." });
+    const verification = await sysagent.verifyBackup(archivePath);
+    if (!verification.ok) {
+      throw new Error("Local backup checksum verification failed; the existing Drive backup was left untouched.");
+    }
+  }
   await onProgress?.({ phase: "PRUNING_REMOTE", percent: 10, message: "Pruning old Drive backups before upload to free space." });
-  const preUploadPrune = await sysagent.pruneRemoteBackups({ remoteTarget: settings.remoteTarget, keepLast: Math.max(1, settings.retentionKeepLast - 1), googleDrive });
+  const preUploadPrune = await sysagent.pruneRemoteBackups({ remoteTarget: settings.remoteTarget, keepLast: settings.retentionKeepLast - 1, googleDrive });
   const preUploadPruneError = backupCommandError("Google Drive pre-upload pruning", preUploadPrune);
   if (preUploadPruneError) {
     throw new Error(preUploadPruneError);

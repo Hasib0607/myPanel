@@ -61,8 +61,9 @@ export function SubdomainsClient({ domainId }: { domainId: string }) {
           </form>
         }
       />
-      <section className="p-8">
-        <div className="rounded-md border border-panel-line bg-white">
+      <section className="p-4 sm:p-6 lg:p-8">
+        <div className="rounded-md border border-panel-line bg-white overflow-hidden">
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs uppercase text-panel-muted">
               <tr><th className="px-4 py-3">Name</th><th className="px-4 py-3">Target</th><th className="px-4 py-3">SSL</th><th className="px-4 py-3">Actions</th></tr>
@@ -93,6 +94,7 @@ export function SubdomainsClient({ domainId }: { domainId: string }) {
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       </section>
       <ConfirmModal

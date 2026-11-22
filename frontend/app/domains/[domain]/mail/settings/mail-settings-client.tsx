@@ -246,7 +246,7 @@ export function MailSettingsClient({ domainId }: { domainId: string }) {
   const protocolText = smtp.data ? [...smtp.data.protocols.map((item) => `${item.protocol}: ${item.host}:${item.port} (${item.security})`), `${typeof window === "undefined" ? "" : window.location.origin}/webmail/login`, "Username: full mailbox address", "Password: mailbox password"].join("\n") : "";
 
   return (
-    <section className="space-y-6 p-8">
+    <section className="space-y-6 p-4 sm:p-6 lg:p-8">
       {notice ? <div className="rounded-md border border-panel-line bg-white p-3 text-sm text-slate-700">{notice}</div> : null}
 
       <div className="rounded-md border border-panel-line bg-white">
@@ -260,7 +260,7 @@ export function MailSettingsClient({ domainId }: { domainId: string }) {
         </div>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-3">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <SetupCard
           action={server.data?.stack.commands && Object.values(server.data.stack.commands).every(Boolean) ? "Installed" : "Install stack"}
           busy={installStack.isPending}
@@ -297,7 +297,7 @@ export function MailSettingsClient({ domainId }: { domainId: string }) {
         <div className="grid gap-3 p-4 md:grid-cols-2 xl:grid-cols-4">{(smtp.data?.protocols ?? []).map((protocol) => <div className="rounded-md border border-panel-line p-3" key={`${protocol.protocol}-${protocol.port}`}><div className="font-semibold">{protocol.protocol}</div><div className="mt-2 font-mono text-xs">{protocol.host}:{protocol.port}</div><div className="mt-1 text-xs text-panel-muted">{protocol.security}</div></div>)}<div className="rounded-md border border-panel-line p-3"><div className="font-semibold">Webmail</div><div className="mt-2 font-mono text-xs">/webmail/login</div><div className="mt-1 text-xs text-panel-muted">Full email address + mailbox password</div></div></div>
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-[1fr_1fr]">
+      <div className="grid gap-6 grid-cols-1 xl:grid-cols-2">
         <div className="rounded-md border border-panel-line bg-white">
           <div className="flex items-center justify-between gap-3 border-b border-panel-line px-4 py-3">
             <div>
@@ -436,7 +436,7 @@ export function MailSettingsClient({ domainId }: { domainId: string }) {
         </div>
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-[1fr_1fr]">
+      <div className="grid gap-6 grid-cols-1 xl:grid-cols-2">
         <div className="rounded-md border border-panel-line bg-white">
           <div className="border-b border-panel-line px-4 py-3">
             <div className="flex items-center gap-2 text-sm font-semibold"><Activity size={16} /> Live Mail Health</div>

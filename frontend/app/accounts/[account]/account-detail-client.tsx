@@ -102,13 +102,13 @@ export function AccountDetailClient({ accountId }: { accountId: string }) {
   const data = account.data;
 
   return (
-    <section className="space-y-6 p-8">
-      <div className="flex items-start justify-between gap-4">
+    <section className="space-y-6 p-4 sm:p-6 lg:p-8">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold">{data?.username ?? "Account"}</h1>
+          <h1 className="text-xl sm:text-2xl font-semibold">{data?.username ?? "Account"}</h1>
           <p className="mt-1 text-sm text-panel-muted">{data?.email ?? "No email"} · {data?.homeRoot ?? ""}</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Link className="flex h-10 items-center gap-2 rounded-md border border-panel-line px-3 text-sm hover:bg-slate-50" href={`/accounts/${accountId}/terminal`}>
             <SquareTerminal size={15} />
             Terminal
@@ -121,18 +121,18 @@ export function AccountDetailClient({ accountId }: { accountId: string }) {
       </div>
       {notice ? <div className="rounded-md border border-panel-line bg-white p-3 text-sm text-slate-700">{notice}</div> : null}
 
-      <div className="grid grid-cols-[360px_1fr] gap-6">
+      <div className="grid grid-cols-1 xl:grid-cols-[360px_1fr] gap-6">
         <div className="space-y-6">
           <div className="rounded-md border border-panel-line bg-white">
             <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Package Limits</div>
-            <div className="grid grid-cols-2 gap-3 p-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-4">
               {Object.entries(limits).map(([key, value]) => (
                 <label className="space-y-1 text-xs font-medium text-panel-muted" key={key}>
                   <span>{key.replace("Limit", "").replace("Mb", " MB")}</span>
                   <input className="h-10 w-full rounded-md border border-panel-line px-3 text-sm text-panel-ink" onChange={(event) => setLimits({ ...limits, [key]: event.target.value.replace(/\D/g, "") })} value={value} />
                 </label>
               ))}
-              <button className="col-span-2 flex h-10 items-center justify-center gap-2 rounded-md bg-panel-accent text-sm font-semibold text-white" onClick={() => updateLimits.mutate()} type="button">
+              <button className="col-span-full flex h-10 items-center justify-center gap-2 rounded-md bg-panel-accent text-sm font-semibold text-white" onClick={() => updateLimits.mutate()} type="button">
                 <Save size={15} />
                 Save Limits
               </button>
@@ -176,7 +176,7 @@ export function AccountDetailClient({ accountId }: { accountId: string }) {
 
         <div className="rounded-md border border-panel-line bg-white">
           <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Usage</div>
-          <div className="grid grid-cols-4 gap-3 p-4">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 p-4">
             <Metric label="Domains" value={data?.usage.domains} limit={data?.domainLimit} />
             <Metric label="Mailboxes" value={data?.usage.mailAccounts} limit={data?.mailboxLimit} />
             <Metric label="Deployments" value={data?.usage.deployments} limit={data?.deploymentLimit} />
@@ -185,7 +185,7 @@ export function AccountDetailClient({ accountId }: { accountId: string }) {
         </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 sm:gap-6">
         <ResourcePanel title="Domains" items={data?.domains.map((item) => ({ id: item.id, label: item.name, detail: item.status })) ?? []} onUnassign={(id) => unassign.mutate({ resourceType: "domain", resourceId: id })} />
         <ResourcePanel title="Deployments" items={data?.deployments.map((item) => ({ id: item.id, label: item.name, detail: item.slug })) ?? []} onUnassign={(id) => unassign.mutate({ resourceType: "deployment", resourceId: id })} />
         <ResourcePanel title="Mailboxes" items={data?.mailAccounts.map((item) => ({ id: item.id, label: item.username, detail: item.domainId })) ?? []} onUnassign={(id) => unassign.mutate({ resourceType: "mailAccount", resourceId: id })} />
@@ -193,7 +193,7 @@ export function AccountDetailClient({ accountId }: { accountId: string }) {
 
       <div className="rounded-md border border-panel-line bg-white">
         <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Assign Existing Resource</div>
-        <div className="grid grid-cols-3 gap-4 p-4">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 p-4">
           <AssignableList title="Domains" items={assignable.data?.domains.map((item) => ({ id: item.id, label: item.name })) ?? []} onAssign={(id) => assign.mutate({ resourceType: "domain", resourceId: id })} />
           <AssignableList title="Deployments" items={assignable.data?.deployments.map((item) => ({ id: item.id, label: item.name })) ?? []} onAssign={(id) => assign.mutate({ resourceType: "deployment", resourceId: id })} />
           <AssignableList title="Mailboxes" items={assignable.data?.mailAccounts.map((item) => ({ id: item.id, label: `${item.username}@${item.domain?.name ?? ""}` })) ?? []} onAssign={(id) => assign.mutate({ resourceType: "mailAccount", resourceId: id })} />

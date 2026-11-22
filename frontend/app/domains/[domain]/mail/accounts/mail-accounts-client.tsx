@@ -122,20 +122,20 @@ export function MailAccountsClient({ domainId }: { domainId: string }) {
           </form>
         }
       />
-      <section className="p-8">
+      <section className="p-4 sm:p-6 lg:p-8">
         {notice ? <div className="mb-4 rounded-md border border-panel-line bg-white p-3 text-sm text-slate-700">{notice}</div> : null}
         <div className="mb-6 rounded-md border border-panel-line bg-white p-4">
-          <div className="mb-4 flex items-center justify-between">
+          <div className="mb-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
               <div className="text-sm font-semibold">Mail Authentication</div>
               <div className="text-sm text-panel-muted">SPF, DKIM, DMARC, and PTR posture for this domain.</div>
             </div>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <button className="rounded-md border border-panel-line px-3 py-2 text-sm font-semibold hover:bg-slate-50" onClick={() => setupDkim.mutate()} type="button">Setup DKIM</button>
               <button className="rounded-md border border-panel-line px-3 py-2 text-sm font-semibold hover:bg-slate-50" onClick={() => reloadMail.mutate()} type="button">Reload Mail</button>
             </div>
           </div>
-          <div className="grid grid-cols-5 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
             {(authStatus.data?.checks ?? []).map((check) => (
               <div key={check.key} className="rounded-md border border-panel-line p-3 text-sm">
                 <div className="flex items-center gap-2 font-medium">

@@ -46,21 +46,21 @@ export function DeploymentHistoryClient({ project }: { project: string }) {
   return (
     <>
       <ProjectTabs active="history" project={project} />
-      <section className="space-y-4 p-8">
-        <div className="flex items-center justify-between rounded-md border border-panel-line bg-white p-4">
+      <section className="space-y-4 p-4 sm:p-6 lg:p-8">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-md border border-panel-line bg-white p-4">
           <div>
             <div className="flex items-center gap-2 text-sm font-semibold"><History size={16} />Deploy History</div>
             <div className="mt-1 text-xs text-panel-muted">Project wise releases for {detail.data?.name ?? project}. Jump queues rollback to an older successful deploy.</div>
           </div>
-          <button className="flex h-9 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-semibold hover:bg-slate-50" onClick={() => releases.refetch()} type="button">
+          <button className="flex h-9 items-center justify-center gap-2 rounded-md border border-panel-line px-3 text-sm font-semibold hover:bg-slate-50 self-start sm:self-auto" onClick={() => releases.refetch()} type="button">
             <RefreshCw size={15} />
             Refresh
           </button>
         </div>
         {notice ? <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">{notice}</div> : null}
 
-        <div className="overflow-hidden rounded-md border border-panel-line bg-white">
-          <table className="w-full text-sm">
+        <div className="overflow-x-auto rounded-md border border-panel-line bg-white">
+          <table className="w-full min-w-[640px] text-sm">
             <thead className="bg-slate-50 text-left text-xs text-panel-muted">
               <tr>
                 <th className="px-4 py-3">Release</th>

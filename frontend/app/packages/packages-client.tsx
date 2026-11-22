@@ -57,13 +57,13 @@ export function PackagesClient() {
   });
 
   return (
-    <section className="grid grid-cols-[360px_1fr] gap-6 p-8">
+    <section className="grid grid-cols-1 xl:grid-cols-[360px_1fr] gap-6 p-4 sm:p-6 lg:p-8">
       <div className="rounded-md border border-panel-line bg-white">
         <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Create Package</div>
         <div className="space-y-3 p-4">
           <Input label="Name" value={draft.name} onChange={(name) => setDraft({ ...draft, name })} />
           <Input label="Description" value={draft.description} onChange={(description) => setDraft({ ...draft, description })} />
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <Input label="Disk MB" value={draft.diskLimitMb} onChange={(diskLimitMb) => setDraft({ ...draft, diskLimitMb: digitsOnly(diskLimitMb) })} />
             <Input label="Domains" value={draft.domainLimit} onChange={(domainLimit) => setDraft({ ...draft, domainLimit: digitsOnly(domainLimit) })} />
             <Input label="Mailboxes" value={draft.mailboxLimit} onChange={(mailboxLimit) => setDraft({ ...draft, mailboxLimit: digitsOnly(mailboxLimit) })} />

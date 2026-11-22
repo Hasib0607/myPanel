@@ -135,7 +135,7 @@ export function SettingsClient() {
   const deviceRegistrationDisabled = !trustedDevice.currentPassword || registerDeviceLogin.isPending || Boolean(biometricUnavailable);
 
   return (
-    <section className="space-y-5 p-6">
+    <section className="space-y-5 p-4 sm:p-6 lg:p-8">
       <div className="grid gap-5 xl:grid-cols-[420px_1fr]">
         <div className="space-y-5">
           <div className="rounded-md border border-panel-line bg-white">

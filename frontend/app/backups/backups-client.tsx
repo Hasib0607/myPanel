@@ -297,10 +297,10 @@ export function BackupsClient() {
   };
 
   return (
-    <section className="space-y-6 p-8">
-      <header className="flex items-start justify-between gap-4">
+    <section className="space-y-6 p-4 sm:p-6 lg:p-8">
+      <header className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-semibold tracking-normal text-panel-ink">Backups</h1>
+          <h1 className="text-2xl sm:text-3xl font-semibold tracking-normal text-panel-ink">Backups</h1>
           <p className="mt-1 text-sm text-panel-muted">Full myPanel archive with code, env, databases, accounts, domains, DNS, mail, SSL, and storage.</p>
         </div>
         <button className="rounded-md border border-panel-line p-2 hover:bg-white" onClick={() => refresh()} type="button" title="Refresh">
@@ -308,7 +308,7 @@ export function BackupsClient() {
         </button>
       </header>
 
-      <div className="grid grid-cols-[360px_1fr] gap-6">
+      <div className="grid grid-cols-1 xl:grid-cols-[360px_1fr] gap-6">
         <div className="rounded-md border border-panel-line bg-white">
           <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Create Backup</div>
           <div className="space-y-3 p-4">
@@ -355,7 +355,7 @@ export function BackupsClient() {
         <div className="space-y-6">
           <div className="rounded-md border border-panel-line bg-white">
             <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Schedule, Retention, Drive</div>
-            <div className="grid grid-cols-2 gap-3 p-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-4">
               <label className="flex items-center gap-2 text-sm">
                 <input checked={settings.scheduleEnabled} onChange={(event) => setSettings({ ...settings, scheduleEnabled: event.target.checked })} type="checkbox" />
                 Scheduled
@@ -447,7 +447,7 @@ export function BackupsClient() {
             <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Backup History</div>
             <div className="divide-y divide-panel-line">
               {(backups.data?.records ?? []).map((item) => (
-                <div className="grid grid-cols-[1fr_auto] gap-4 px-4 py-3" key={item.id}>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 px-4 py-3" key={item.id}>
                   <div className="min-w-0">
                     <div className="font-semibold">{item.label} <span className={statusClass(item.status)}>{item.status}</span></div>
                     <div className="mt-1 truncate text-xs text-panel-muted">{backupRecordPath(item) ?? "No archive path yet"}</div>
@@ -461,7 +461,7 @@ export function BackupsClient() {
                       </div>
                     ) : null}
                   </div>
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap gap-2">
                     {item.archivePath ? <>
                       <button className="rounded-md border border-emerald-200 p-2 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50" disabled={pushDrive.isPending} onClick={() => pushDrive.mutate({ id: item.id })} type="button" title="Push to Drive"><UploadCloud size={15} /></button>
                       <a className="rounded-md border border-panel-line p-2 hover:bg-slate-50" href={`/api/v1/backups/download?path=${encodeURIComponent(item.archivePath)}`} title="Download"><Download size={15} /></a>

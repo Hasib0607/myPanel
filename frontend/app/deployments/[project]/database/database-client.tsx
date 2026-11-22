@@ -27,16 +27,16 @@ export function DeploymentDatabaseClient({ project }: { project: string }) {
   return (
     <>
       <ProjectTabs active="database" project={project} />
-      <section className="space-y-6 p-8">
+      <section className="space-y-6 p-4 sm:p-6 lg:p-8">
         {notice ? <ResultNotice message={notice} ok={!/attention|failed|error/i.test(notice)} /> : null}
-        <div className="grid grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
           <Metric icon={<Database size={16} />} label="Engine" value={deployment?.dbType ?? "None"} />
           <Metric icon={<ServerCog size={16} />} label="Database" value={deployment?.dbName ?? "Not provisioned"} />
           <Metric icon={<KeyRound size={16} />} label="User" value={deployment?.dbUser ?? "Not provisioned"} />
           <Metric icon={<CheckCircle2 size={16} />} label="Secret" value={deployment?.dbPasswordSecretRef ?? "No secret ref"} />
         </div>
 
-        <div className="grid grid-cols-[minmax(0,1fr)_360px] gap-6">
+        <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_360px] gap-6">
           <main className="rounded-md border border-panel-line bg-white">
             <div className="border-b border-panel-line p-4 text-sm font-semibold">Connection Material</div>
             <div className="space-y-4 p-4">

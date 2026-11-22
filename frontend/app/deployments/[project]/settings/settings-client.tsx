@@ -547,11 +547,11 @@ export function DeploymentSettingsClient({
   return (
     <>
       <ProjectTabs active="settings" project={project} />
-      <form className="space-y-6 p-8" onSubmit={submit}>
+      <form className="space-y-6 p-4 sm:p-6 lg:p-8" onSubmit={submit}>
         {notice ? <ResultNotice message={notice} ok={!/could|error|failed/i.test(notice)} /> : null}
 
         <Section icon={<Settings2 size={16} />} title="Project">
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             <TextInput label="Name" onChange={(value) => setField("name", value)} required value={form.name} />
             <TextInput label="Slug" onChange={(value) => setField("slug", value.toLowerCase())} required value={form.slug} />
             <SelectInput label="Domain" labels={domainLabels} onChange={(value) => setField("domainId", value)} options={["", ...(domains.data?.items ?? []).map((domain) => domain.id)]} value={form.domainId} />
@@ -559,7 +559,7 @@ export function DeploymentSettingsClient({
         </Section>
 
         <Section icon={<ShieldCheck size={16} />} title="Priority And Resource Limits">
-          <div className="grid grid-cols-4 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             <SelectInput
               label="Priority tier"
               labels={{ P1: "P1 Critical", P2: "P2 Normal", P3: "P3 Low" }}
@@ -588,7 +588,7 @@ export function DeploymentSettingsClient({
         </Section>
 
         <Section icon={<GitBranch size={16} />} title="Source Connection">
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             <SelectInput label="Provider" onChange={(value) => setField("sourceProvider", value as DeploymentSourceProvider)} options={sourceProviders} value={form.sourceProvider} />
             <TextInput label="Git URL" onChange={(value) => setField("gitUrl", value)} value={form.gitUrl} />
             <TextInput label="Repository URL" onChange={(value) => setField("repoUrl", value)} value={form.repoUrl} />
@@ -613,7 +613,7 @@ export function DeploymentSettingsClient({
                 Copy
               </button>
             </div>
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <ReadOnlyValue label="Event" value={webhook.data?.event ?? "push"} />
               <ReadOnlyValue label="Branch" value={webhook.data?.branch ?? form.branch} />
               <ReadOnlyValue label="Secret" value={webhook.data?.secretConfigured ? "Configured" : "Not configured"} />
@@ -621,13 +621,13 @@ export function DeploymentSettingsClient({
             <div className="rounded-md border border-panel-line bg-slate-50 p-3 text-xs text-panel-muted">
               Add this URL in GitHub repository settings under Webhooks. Content type must be application/json, event should be push, and the secret must match the generated value below.
             </div>
-            <div className="flex items-center justify-between gap-3 rounded-md border border-panel-line p-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-md border border-panel-line p-3">
               <div>
                 <div className="text-sm font-semibold">Webhook signing secret</div>
                 <div className="mt-1 text-xs text-panel-muted">Generating a secret also enables auto deploy for this project.</div>
               </div>
               <button
-                className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-4 text-sm font-semibold text-white disabled:opacity-60"
+                className="flex h-10 items-center justify-center gap-2 rounded-md bg-panel-accent px-4 text-sm font-semibold text-white disabled:opacity-60"
                 disabled={generateWebhookSecret.isPending}
                 onClick={() => generateWebhookSecret.mutate()}
                 type="button"
@@ -660,13 +660,13 @@ export function DeploymentSettingsClient({
             <div className="rounded-md border border-panel-line bg-slate-50 p-3 text-xs text-panel-muted">
               This token can add domains only to this project. New domains are bound to this project, DNS/vhost is published immediately, and SSL auto-retry is queued when enabled.
             </div>
-            <div className="flex items-center justify-between gap-3 rounded-md border border-panel-line p-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-md border border-panel-line p-3">
               <div>
                 <div className="text-sm font-semibold">Scoped domain token</div>
                 <div className="mt-1 text-xs text-panel-muted">Use it from your admin app to connect account project domains without redeploying.</div>
               </div>
               <button
-                className="flex h-10 items-center gap-2 rounded-md bg-panel-accent px-4 text-sm font-semibold text-white disabled:opacity-60"
+                className="flex h-10 items-center justify-center gap-2 rounded-md bg-panel-accent px-4 text-sm font-semibold text-white disabled:opacity-60"
                 disabled={generateProjectDomainToken.isPending}
                 onClick={() => generateProjectDomainToken.mutate()}
                 type="button"
@@ -701,7 +701,7 @@ export function DeploymentSettingsClient({
         </Section>
 
         <Section icon={<ServerCog size={16} />} title="Runtime And Commands">
-          <div className="grid grid-cols-4 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             <SelectInput label="Framework" onChange={(value) => setField("framework", value as DeploymentFramework)} options={frameworks} value={form.framework} />
             <SelectInput label="Runtime" labels={{ "": "Unset" }} onChange={(value) => setField("runtime", value)} options={runtimes} value={form.runtime} />
             <SelectInput label="Package manager" labels={{ "": "Unset" }} onChange={(value) => setField("packageManager", value)} options={packageManagers} value={form.packageManager} />
@@ -715,7 +715,7 @@ export function DeploymentSettingsClient({
 
         {detail.data?.framework === "LARAVEL" ? (
           <Section icon={<Workflow size={16} />} title="Laravel Queue Workers">
-            <div className="grid grid-cols-4 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
               <ToggleInput checked={form.workersEnabled} label="Enable workers" onChange={(value) => setField("workersEnabled", value)} />
               <ToggleInput checked={form.workersAutoscale} label="Guardian autoscale" onChange={(value) => setField("workersAutoscale", value)} />
               <ReadOnlyValue label="Running now" value={String(workers.data?.status?.runningWorkers ?? workers.data?.status?.status?.running ?? workers.data?.config.currentWorkers ?? 0)} />
@@ -761,77 +761,81 @@ export function DeploymentSettingsClient({
         ) : null}
 
         <Section icon={<Clock3 size={16} />} title="Project Cron Jobs">
-          <div className="grid grid-cols-[1fr_2fr_repeat(5,76px)_96px_auto] gap-2">
-            <TextInput label="Name" onChange={(name) => setCronDraft({ ...cronDraft, name })} value={cronDraft.name} />
-            <TextInput label="Command" onChange={(command) => setCronDraft({ ...cronDraft, command })} value={cronDraft.command} />
-            <TextInput label="Minute" onChange={(minute) => setCronDraft({ ...cronDraft, minute })} value={cronDraft.minute} />
-            <TextInput label="Hour" onChange={(hour) => setCronDraft({ ...cronDraft, hour })} value={cronDraft.hour} />
-            <TextInput label="Day" onChange={(dayOfMonth) => setCronDraft({ ...cronDraft, dayOfMonth })} value={cronDraft.dayOfMonth} />
-            <TextInput label="Month" onChange={(month) => setCronDraft({ ...cronDraft, month })} value={cronDraft.month} />
-            <TextInput label="Weekday" onChange={(dayOfWeek) => setCronDraft({ ...cronDraft, dayOfWeek })} value={cronDraft.dayOfWeek} />
-            <ToggleInput checked={cronDraft.enabled} label="On" onChange={(enabled) => setCronDraft({ ...cronDraft, enabled })} />
-            <div className="flex items-end">
-              <button
-                className="flex h-10 items-center justify-center gap-2 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white disabled:opacity-60"
-                disabled={createCronJob.isPending || !cronDraft.name.trim() || !cronDraft.command.trim()}
-                onClick={() => createCronJob.mutate()}
-                type="button"
-                title="Add cron job"
-              >
-                <Plus size={15} />
-                Add
-              </button>
-            </div>
-          </div>
-          <div className="mt-4 divide-y divide-panel-line rounded-md border border-panel-line">
-            {(cronJobs.data?.items ?? []).map((item) => {
-              const edit = cronEdits[item.id] ?? cronJobToDraft(item);
-              return (
-                <div className="grid grid-cols-[1fr_2fr_repeat(5,76px)_96px_auto_auto] gap-2 p-3" key={item.id}>
-                  <TextInput label="Name" onChange={(name) => setCronEdit(item.id, "name", name)} value={edit.name} />
-                  <TextInput label="Command" onChange={(command) => setCronEdit(item.id, "command", command)} value={edit.command} />
-                  <TextInput label="Minute" onChange={(minute) => setCronEdit(item.id, "minute", minute)} value={edit.minute} />
-                  <TextInput label="Hour" onChange={(hour) => setCronEdit(item.id, "hour", hour)} value={edit.hour} />
-                  <TextInput label="Day" onChange={(dayOfMonth) => setCronEdit(item.id, "dayOfMonth", dayOfMonth)} value={edit.dayOfMonth} />
-                  <TextInput label="Month" onChange={(month) => setCronEdit(item.id, "month", month)} value={edit.month} />
-                  <TextInput label="Weekday" onChange={(dayOfWeek) => setCronEdit(item.id, "dayOfWeek", dayOfWeek)} value={edit.dayOfWeek} />
-                  <ToggleInput checked={edit.enabled} label="On" onChange={(enabled) => {
-                    const next = { ...edit, enabled };
-                    setCronEdits((current) => ({ ...current, [item.id]: next }));
-                    updateCronJob.mutate({ id: item.id, value: next });
-                  }} />
-                  <div className="flex items-end">
-                    <button
-                      className="flex h-10 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-semibold hover:bg-slate-50 disabled:opacity-60"
-                      disabled={updateCronJob.isPending || !edit.name.trim() || !edit.command.trim()}
-                      onClick={() => updateCronJob.mutate({ id: item.id, value: edit })}
-                      type="button"
-                    >
-                      <Save size={15} />
-                      Save
-                    </button>
-                  </div>
-                  <div className="flex items-end">
-                    <button
-                      className="flex h-10 items-center gap-2 rounded-md border border-red-200 px-3 text-sm font-semibold text-panel-danger hover:bg-red-50 disabled:opacity-60"
-                      disabled={deleteCronJob.isPending}
-                      onClick={() => deleteCronJob.mutate(item.id)}
-                      type="button"
-                      title="Delete cron job"
-                    >
-                      <Trash2 size={15} />
-                    </button>
-                  </div>
-                  {item.lastAppliedAt ? <div className="col-span-10 text-xs text-panel-muted">Applied {new Date(item.lastAppliedAt).toLocaleString()}</div> : null}
+          <div className="overflow-x-auto">
+            <div className="min-w-[760px]">
+              <div className="grid grid-cols-[1fr_2fr_repeat(5,76px)_96px_auto] gap-2">
+                <TextInput label="Name" onChange={(name) => setCronDraft({ ...cronDraft, name })} value={cronDraft.name} />
+                <TextInput label="Command" onChange={(command) => setCronDraft({ ...cronDraft, command })} value={cronDraft.command} />
+                <TextInput label="Minute" onChange={(minute) => setCronDraft({ ...cronDraft, minute })} value={cronDraft.minute} />
+                <TextInput label="Hour" onChange={(hour) => setCronDraft({ ...cronDraft, hour })} value={cronDraft.hour} />
+                <TextInput label="Day" onChange={(dayOfMonth) => setCronDraft({ ...cronDraft, dayOfMonth })} value={cronDraft.dayOfMonth} />
+                <TextInput label="Month" onChange={(month) => setCronDraft({ ...cronDraft, month })} value={cronDraft.month} />
+                <TextInput label="Weekday" onChange={(dayOfWeek) => setCronDraft({ ...cronDraft, dayOfWeek })} value={cronDraft.dayOfWeek} />
+                <ToggleInput checked={cronDraft.enabled} label="On" onChange={(enabled) => setCronDraft({ ...cronDraft, enabled })} />
+                <div className="flex items-end">
+                  <button
+                    className="flex h-10 items-center justify-center gap-2 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white disabled:opacity-60"
+                    disabled={createCronJob.isPending || !cronDraft.name.trim() || !cronDraft.command.trim()}
+                    onClick={() => createCronJob.mutate()}
+                    type="button"
+                    title="Add cron job"
+                  >
+                    <Plus size={15} />
+                    Add
+                  </button>
                 </div>
-              );
-            })}
-            {!cronJobs.isLoading && !(cronJobs.data?.items ?? []).length ? <div className="p-4 text-sm text-panel-muted">No cron jobs.</div> : null}
+              </div>
+              <div className="mt-4 divide-y divide-panel-line rounded-md border border-panel-line">
+                {(cronJobs.data?.items ?? []).map((item) => {
+                  const edit = cronEdits[item.id] ?? cronJobToDraft(item);
+                  return (
+                    <div className="grid grid-cols-[1fr_2fr_repeat(5,76px)_96px_auto_auto] gap-2 p-3" key={item.id}>
+                      <TextInput label="Name" onChange={(name) => setCronEdit(item.id, "name", name)} value={edit.name} />
+                      <TextInput label="Command" onChange={(command) => setCronEdit(item.id, "command", command)} value={edit.command} />
+                      <TextInput label="Minute" onChange={(minute) => setCronEdit(item.id, "minute", minute)} value={edit.minute} />
+                      <TextInput label="Hour" onChange={(hour) => setCronEdit(item.id, "hour", hour)} value={edit.hour} />
+                      <TextInput label="Day" onChange={(dayOfMonth) => setCronEdit(item.id, "dayOfMonth", dayOfMonth)} value={edit.dayOfMonth} />
+                      <TextInput label="Month" onChange={(month) => setCronEdit(item.id, "month", month)} value={edit.month} />
+                      <TextInput label="Weekday" onChange={(dayOfWeek) => setCronEdit(item.id, "dayOfWeek", dayOfWeek)} value={edit.dayOfWeek} />
+                      <ToggleInput checked={edit.enabled} label="On" onChange={(enabled) => {
+                        const next = { ...edit, enabled };
+                        setCronEdits((current) => ({ ...current, [item.id]: next }));
+                        updateCronJob.mutate({ id: item.id, value: next });
+                      }} />
+                      <div className="flex items-end">
+                        <button
+                          className="flex h-10 items-center gap-2 rounded-md border border-panel-line px-3 text-sm font-semibold hover:bg-slate-50 disabled:opacity-60"
+                          disabled={updateCronJob.isPending || !edit.name.trim() || !edit.command.trim()}
+                          onClick={() => updateCronJob.mutate({ id: item.id, value: edit })}
+                          type="button"
+                        >
+                          <Save size={15} />
+                          Save
+                        </button>
+                      </div>
+                      <div className="flex items-end">
+                        <button
+                          className="flex h-10 items-center gap-2 rounded-md border border-red-200 px-3 text-sm font-semibold text-panel-danger hover:bg-red-50 disabled:opacity-60"
+                          disabled={deleteCronJob.isPending}
+                          onClick={() => deleteCronJob.mutate(item.id)}
+                          type="button"
+                          title="Delete cron job"
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      </div>
+                      {item.lastAppliedAt ? <div className="col-span-10 text-xs text-panel-muted">Applied {new Date(item.lastAppliedAt).toLocaleString()}</div> : null}
+                    </div>
+                  );
+                })}
+                {!cronJobs.isLoading && !(cronJobs.data?.items ?? []).length ? <div className="p-4 text-sm text-panel-muted">No cron jobs.</div> : null}
+              </div>
+            </div>
           </div>
         </Section>
 
         <Section icon={<Globe2 size={16} />} title="Paths And Network">
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             <TextInput label="Root directory" onChange={(value) => setField("rootDirectory", value)} required value={form.rootDirectory} />
             <TextInput label="Root path" onChange={(value) => setField("rootPath", value)} required value={form.rootPath} />
             <TextInput label="Port (auto)" onChange={(value) => setField("port", value.replace(/\D/g, ""))} readOnly required value={form.port} />
@@ -846,7 +850,7 @@ export function DeploymentSettingsClient({
         </Section>
 
         <Section icon={<Database size={16} />} title="Database Metadata">
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <SelectInput label="Database type" labels={{ "": "None" }} onChange={(value) => setField("dbType", value)} options={dbTypes} value={form.dbType} />
             <TextInput label="Database name" onChange={(value) => setField("dbName", value)} value={form.dbName} />
             <TextInput label="Database user" onChange={(value) => setField("dbUser", value)} value={form.dbUser} />
@@ -861,12 +865,12 @@ export function DeploymentSettingsClient({
         </div>
       </form>
 
-      <section className="px-8 pb-8">
+      <section className="px-4 pb-8 sm:px-6 lg:px-8">
         <div className="rounded-md border border-red-200 bg-white p-4">
           <div className="flex items-center gap-2 text-sm font-semibold text-panel-danger"><Trash2 size={16} />Delete Project</div>
-          <div className="mt-3 grid grid-cols-[1fr_auto] gap-3">
-            <input className="h-10 rounded-md border border-panel-line px-3 text-sm" onChange={(event) => setDeleteText(event.target.value)} placeholder={`Type ${detail.data?.slug ?? "project slug"} to confirm`} value={deleteText} />
-            <button className="flex h-10 items-center gap-2 rounded-md border border-red-200 px-4 text-sm font-semibold text-panel-danger hover:bg-red-50 disabled:opacity-50" disabled={!deleteMatches || remove.isPending} onClick={() => remove.mutate()} type="button">
+          <div className="mt-3 flex flex-col sm:flex-row gap-3">
+            <input className="h-10 flex-1 rounded-md border border-panel-line px-3 text-sm" onChange={(event) => setDeleteText(event.target.value)} placeholder={`Type ${detail.data?.slug ?? "project slug"} to confirm`} value={deleteText} />
+            <button className="flex h-10 items-center justify-center gap-2 rounded-md border border-red-200 px-4 text-sm font-semibold text-panel-danger hover:bg-red-50 disabled:opacity-50" disabled={!deleteMatches || remove.isPending} onClick={() => remove.mutate()} type="button">
               <Trash2 size={15} />
               Delete
             </button>

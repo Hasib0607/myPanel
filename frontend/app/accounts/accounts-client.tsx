@@ -140,7 +140,7 @@ export function AccountsClient() {
   });
 
   return (
-    <section className="grid gap-6 p-6 xl:grid-cols-[360px_1fr] xl:p-8">
+    <section className="grid gap-6 p-4 sm:p-6 xl:grid-cols-[360px_1fr] xl:p-8">
       <div className="rounded-md border border-panel-line bg-white shadow-sm">
         <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Create Account</div>
         <div className="space-y-3 p-4">
@@ -175,7 +175,7 @@ export function AccountsClient() {
               {(packages.data?.items ?? []).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>
           </label>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <Input label="Disk GB" value={draft.diskLimitGb} onChange={(diskLimitGb) => setDraft({ ...draft, diskLimitGb: decimalNumber(diskLimitGb) })} />
             <Input label="Domains" value={draft.domainLimit} onChange={(domainLimit) => setDraft({ ...draft, domainLimit: digitsOnly(domainLimit) })} />
             <Input label="Mailboxes" value={draft.mailboxLimit} onChange={(mailboxLimit) => setDraft({ ...draft, mailboxLimit: digitsOnly(mailboxLimit) })} />
@@ -192,10 +192,10 @@ export function AccountsClient() {
       </div>
 
       <div className="overflow-hidden rounded-md border border-panel-line bg-white shadow-sm">
-        <div className="flex items-center justify-between border-b border-panel-line px-4 py-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-panel-line px-4 py-3">
           <div className="text-sm font-semibold">Hosting Accounts</div>
-          <div className="flex items-center gap-2">
-            <input className="h-9 rounded-md border border-panel-line px-3 text-sm" onChange={(event) => setSearch(event.target.value)} placeholder="Search" value={search} />
+          <div className="flex flex-wrap items-center gap-2">
+            <input className="h-9 w-full sm:w-auto rounded-md border border-panel-line px-3 text-sm" onChange={(event) => setSearch(event.target.value)} placeholder="Search" value={search} />
             <select className="h-9 rounded-md border border-panel-line px-2 text-sm" onChange={(event) => setStatus(event.target.value)} value={status}>
               <option value="">All</option>
               <option value="ACTIVE">Active</option>
@@ -208,6 +208,7 @@ export function AccountsClient() {
         </div>
         <div>
           {notice ? <div className="border-b border-panel-line bg-slate-50 px-4 py-3 text-sm text-slate-700">{notice}</div> : null}
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs text-panel-muted">
               <tr>
@@ -277,6 +278,7 @@ export function AccountsClient() {
               ))}
             </tbody>
           </table>
+          </div>
           {accounts.isLoading ? <div className="p-8 text-sm text-panel-muted">Loading accounts...</div> : null}
           {!accounts.isLoading && !(accounts.data?.items ?? []).length ? <div className="p-8 text-sm text-panel-muted">No accounts created yet.</div> : null}
         </div>

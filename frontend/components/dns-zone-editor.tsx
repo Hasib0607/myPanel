@@ -159,7 +159,7 @@ export function DnsZoneEditor({ api, domainId, initialType = "ALL" }: { api?: Dn
   }
 
   return (
-    <section className="grid grid-cols-[minmax(0,1fr)_440px] gap-6 p-8">
+    <section className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_400px] gap-6 p-4 sm:p-6 lg:p-8">
       <div className="space-y-4">
         <div className="flex flex-wrap gap-2">
           {recordTabs.map((type) => (
@@ -178,7 +178,7 @@ export function DnsZoneEditor({ api, domainId, initialType = "ALL" }: { api?: Dn
           ))}
         </div>
 
-        <form className="grid grid-cols-[110px_1fr_2fr_110px_110px_100px] gap-2 rounded-md border border-panel-line bg-white p-3" onSubmit={submit}>
+        <form className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-[110px_1fr_2fr_110px_110px_100px] gap-2 rounded-md border border-panel-line bg-white p-3" onSubmit={submit}>
           <select className="h-10 rounded-md border border-panel-line px-2 text-sm" onChange={(event) => setDraft((current) => ({ ...current, type: event.target.value as DnsRecordType }))} value={draft.type}>
             {recordTypes.map((type) => <option key={type}>{type}</option>)}
           </select>
@@ -186,7 +186,7 @@ export function DnsZoneEditor({ api, domainId, initialType = "ALL" }: { api?: Dn
           <input className="h-10 rounded-md border border-panel-line px-3 text-sm" onChange={(event) => setDraft((current) => ({ ...current, value: event.target.value }))} placeholder="Record value" value={draft.value} />
           <input className="h-10 rounded-md border border-panel-line px-3 text-sm" min={60} onChange={(event) => setDraft((current) => ({ ...current, ttl: Number(event.target.value) }))} type="number" value={draft.ttl} />
           <input className="h-10 rounded-md border border-panel-line px-3 text-sm" onChange={(event) => setDraft((current) => ({ ...current, priority: event.target.value }))} placeholder="Priority" value={draft.priority} />
-          <button className="flex h-10 items-center justify-center gap-2 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white" disabled={!draft.value || create.isPending} type="submit">
+          <button className="flex h-10 items-center justify-center gap-2 rounded-md bg-panel-accent px-3 text-sm font-semibold text-white col-span-full sm:col-span-1" disabled={!draft.value || create.isPending} type="submit">
             <Plus size={16} />
             Add
           </button>
@@ -194,8 +194,9 @@ export function DnsZoneEditor({ api, domainId, initialType = "ALL" }: { api?: Dn
 
         {error ? <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-panel-danger">{error}</div> : null}
 
-        <div className="rounded-md border border-panel-line bg-white">
+        <div className="rounded-md border border-panel-line bg-white overflow-hidden">
           <div className="border-b border-panel-line px-4 py-3 text-sm font-semibold">Records</div>
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs uppercase text-panel-muted">
               <tr>
@@ -239,6 +240,7 @@ export function DnsZoneEditor({ api, domainId, initialType = "ALL" }: { api?: Dn
               })}
             </tbody>
           </table>
+          </div>
         </div>
       </div>
 

@@ -356,9 +356,11 @@ server {
             root = Path(tmp)
             stale = root / "vps-panel-acme-rettrovibes.shop.conf"
             protected = root / "vps-panel.conf"
+            protected_listener = root / "00-vps-panel.conf"
             own = root / "domain-rettrovibes.shop.conf"
             stale.write_text("server { listen 80; server_name rettrovibes.shop www.rettrovibes.shop; }\n", encoding="utf-8")
             protected.write_text("server { listen 80; server_name rettrovibes.shop; }\n", encoding="utf-8")
+            protected_listener.write_text("server { listen 8453 ssl; server_name rettrovibes.shop; }\n", encoding="utf-8")
             own.write_text("server { listen 80; server_name rettrovibes.shop www.rettrovibes.shop; }\n", encoding="utf-8")
 
             removed = remove_conflicting_configs("domain-rettrovibes.shop", "rettrovibes.shop www.rettrovibes.shop", tmp)
@@ -366,6 +368,7 @@ server {
             self.assertEqual(removed, ["vps-panel-acme-rettrovibes.shop.conf"])
             self.assertFalse(stale.exists())
             self.assertTrue(protected.exists())
+            self.assertTrue(protected_listener.exists())
             self.assertTrue(own.exists())
 
     def test_parent_wildcard_does_not_claim_apex_domain(self) -> None:

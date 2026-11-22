@@ -360,14 +360,15 @@ export async function runDomainHostSync(options: SyncOptions = {}) {
       const cert = certCandidates.find((row) =>
         Boolean(row?.exists && row.expiry && certificateNamesCoverHost(fqdn, row.names ?? []))
       ) ?? null;
-      const fileMatches = Boolean(cert?.exists && cert.expiry && certificateNamesCoverHost(fqdn, cert.names ?? []));
+      const certIsCurrent = Boolean(cert?.expiry && certificateIsUnexpired(cert.expiry));
+      const fileMatches = Boolean(cert?.exists && certIsCurrent && certificateNamesCoverHost(fqdn, cert.names ?? []));
       const servedFailures = fileMatches ? await servedHostFailures([fqdn]) : [];
       const matches = fileMatches && servedFailures.length === 0;
       const host = await refreshSubdomainHostSsl(subdomain, matches ? cert : null);
       if (matches) {
         updated.push({ type: "subdomain", domain: fqdn, hosts: [host] });
       } else {
-        const reason = !cert?.exists ? "certificate missing" : !fileMatches ? "certificate SAN mismatch" : "served certificate mismatch";
+        const reason = !cert?.exists ? "certificate missing" : !certIsCurrent ? "certificate expired" : !fileMatches ? "certificate SAN mismatch" : "served certificate mismatch";
         const dnsReady = hostDnsReady(fqdn, dnsResult ? [dnsResult] : null, includeDns);
         if (queueRepair && reason === "served certificate mismatch" && dnsReady && cert?.certificate && cert.privateKey) {
           const routeRepair = await repairSubdomainRouteWithExistingCertificate(subdomain, {
